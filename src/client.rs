@@ -1,0 +1,1124 @@
+//! High-level client for the PerpCity perpetual futures protocol.
+//!
+//! [`PerpClient`] wires together the transport layer, HFT infrastructure,
+//! and contract bindings into a single ergonomic API. It is the primary
+//! entry point for interacting with PerpCity on Base L2.
+//!
+//! # Architecture
+//!
+//! ```text
+//! ┌─────────────────────────────────────────┐
+//! │              PerpClient                  │
+//! │  • open_taker / open_maker / close      │
+//! │  • get_perp_config / get_position       │
+//! │  • ensure_approval / get_usdc_balance    │
+//! ├─────────────┬───────────────────────────┤
+//! │ TxPipeline  │  StateCache               │
+//! │ (nonce+gas) │  (fees, bounds, prices)   │
+//! ├─────────────┴───────────────────────────┤
+//! │  Alloy Provider + EthereumWallet        │
+//! │  (signing, gas filling, chain ID)       │
+//! ├─────────────────────────────────────────┤
+//! │         HftTransport                    │
+//! │  (multi-endpoint, circuit breaker)      │
+//! └─────────────────────────────────────────┘
+//! ```
+//!
+//! # Example
+//!
+//! ```rust,no_run
+//! use perpcity_rust_sdk::{PerpClient, Deployments, HftTransport, TransportConfig};
+//! use alloy::primitives::{address, Address, B256};
+//! use alloy::signers::local::PrivateKeySigner;
+//!
+//! # async fn example() -> perpcity_rust_sdk::Result<()> {
+//! let transport = HftTransport::new(
+//!     TransportConfig::builder()
+//!         .endpoint("https://mainnet.base.org")
+//!         .build()?
+//! )?;
+//!
+//! let signer: PrivateKeySigner = "your_private_key_hex".parse().unwrap();
+//!
+//! let deployments = Deployments {
+//!     perp_manager: address!("0000000000000000000000000000000000000001"),
+//!     usdc: address!("C1a5D4E99BB224713dd179eA9CA2Fa6600706210"),
+//!     fees_module: None,
+//!     margin_ratios_module: None,
+//!     lockup_period_module: None,
+//!     sqrt_price_impact_limit_module: None,
+//! };
+//!
+//! let client = PerpClient::new(transport, signer, deployments, 8453)?;
+//! # Ok(())
+//! # }
+//! ```
+
+use std::sync::Mutex;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use alloy::network::{Ethereum, EthereumWallet, TransactionBuilder};
+use alloy::primitives::{Address, Bytes, B256, I256, U256};
+use alloy::providers::{Provider, RootProvider};
+use alloy::rpc::client::RpcClient;
+use alloy::rpc::types::TransactionRequest;
+use alloy::signers::local::PrivateKeySigner;
+use alloy::transports::BoxTransport;
+
+use crate::constants::SCALE_1E6;
+use crate::contracts::{IERC20, IFees, IMarginRatios, PerpManager};
+use crate::convert::{
+    leverage_to_margin_ratio, margin_ratio_to_leverage, scale_from_6dec, scale_to_6dec,
+};
+use crate::errors::{PerpCityError, Result};
+use crate::hft::gas::{GasCache, GasLimits, Urgency};
+use crate::hft::pipeline::{PipelineConfig, TxPipeline, TxRequest};
+use crate::hft::state_cache::{CachedBounds, CachedFees, StateCache, StateCacheConfig};
+use crate::math::tick::{align_tick_down, align_tick_up, price_to_tick};
+use crate::transport::provider::HftTransport;
+use crate::types::{
+    Bounds, CloseParams, CloseResult, Deployments, Fees, LiveDetails, OpenInterest,
+    OpenMakerParams, OpenTakerParams, PerpData,
+};
+
+// ── Constants ────────────────────────────────────────────────────────
+
+/// Base L2 chain ID.
+const BASE_CHAIN_ID: u64 = 8453;
+
+/// Default gas cache TTL: 2 seconds (2 Base L2 blocks).
+const DEFAULT_GAS_TTL_MS: u64 = 2_000;
+
+/// Default priority fee: 1 gwei.
+const DEFAULT_PRIORITY_FEE: u64 = 1_000_000_000;
+
+/// Default receipt polling timeout.
+const RECEIPT_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Maximum USDC approval amount (2^256 - 1).
+const MAX_APPROVAL: U256 = U256::MAX;
+
+/// SCALE_1E6 as f64, used for converting on-chain fixed-point values.
+const SCALE_F64: f64 = SCALE_1E6 as f64;
+
+// ── From impls for cache↔client type bridging ────────────────────────
+
+impl From<CachedFees> for Fees {
+    fn from(c: CachedFees) -> Self {
+        Self {
+            creator_fee: c.creator_fee,
+            insurance_fee: c.insurance_fee,
+            lp_fee: c.lp_fee,
+            liquidation_fee: c.liquidation_fee,
+        }
+    }
+}
+
+impl From<Fees> for CachedFees {
+    fn from(f: Fees) -> Self {
+        Self {
+            creator_fee: f.creator_fee,
+            insurance_fee: f.insurance_fee,
+            lp_fee: f.lp_fee,
+            liquidation_fee: f.liquidation_fee,
+        }
+    }
+}
+
+impl From<CachedBounds> for Bounds {
+    fn from(c: CachedBounds) -> Self {
+        Self {
+            min_margin: c.min_margin,
+            min_taker_leverage: c.min_taker_leverage,
+            max_taker_leverage: c.max_taker_leverage,
+            liquidation_taker_ratio: c.liquidation_taker_ratio,
+        }
+    }
+}
+
+impl From<Bounds> for CachedBounds {
+    fn from(b: Bounds) -> Self {
+        Self {
+            min_margin: b.min_margin,
+            min_taker_leverage: b.min_taker_leverage,
+            max_taker_leverage: b.max_taker_leverage,
+            liquidation_taker_ratio: b.liquidation_taker_ratio,
+        }
+    }
+}
+
+// ── PerpClient ───────────────────────────────────────────────────────
+
+/// High-level client for the PerpCity protocol.
+///
+/// Combines transport, signing, transaction pipeline, state caching, and
+/// contract bindings into one ergonomic API. All write operations go
+/// through the [`TxPipeline`] for zero-RPC-on-hot-path nonce/gas resolution.
+/// Read operations use the [`StateCache`] to avoid redundant RPC calls.
+pub struct PerpClient {
+    /// Alloy provider wired to HftTransport (multi-endpoint, health-aware).
+    provider: RootProvider<Ethereum>,
+    /// The underlying transport (kept for health diagnostics).
+    transport: HftTransport,
+    /// Wallet for signing transactions.
+    wallet: EthereumWallet,
+    /// The signer's address.
+    address: Address,
+    /// Deployed contract addresses.
+    deployments: Deployments,
+    /// Chain ID for transaction building.
+    chain_id: u64,
+    /// Transaction pipeline (nonce + gas). Mutex for interior mutability.
+    pipeline: Mutex<TxPipeline>,
+    /// Gas fee cache, updated from block headers.
+    gas_cache: Mutex<GasCache>,
+    /// Multi-layer state cache for on-chain reads.
+    state_cache: Mutex<StateCache>,
+}
+
+impl std::fmt::Debug for PerpClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PerpClient")
+            .field("address", &self.address)
+            .field("chain_id", &self.chain_id)
+            .field("deployments", &self.deployments)
+            .finish_non_exhaustive()
+    }
+}
+
+impl PerpClient {
+    /// Create a new PerpClient.
+    ///
+    /// - `transport`: Multi-endpoint RPC transport (from [`crate::TransportConfig`])
+    /// - `signer`: Private key for signing transactions
+    /// - `deployments`: Contract addresses for this PerpCity instance
+    /// - `chain_id`: Chain ID (8453 for Base mainnet, 84532 for Base Sepolia)
+    ///
+    /// This does NOT make any network calls. Call [`Self::refresh_gas`] and
+    /// [`Self::sync_nonce`] before submitting transactions.
+    pub fn new(
+        transport: HftTransport,
+        signer: PrivateKeySigner,
+        deployments: Deployments,
+        chain_id: u64,
+    ) -> Result<Self> {
+        let address = signer.address();
+        let wallet = EthereumWallet::from(signer);
+
+        let boxed = BoxTransport::new(transport.clone());
+        let rpc_client = RpcClient::new(boxed, true);
+        let provider = RootProvider::<Ethereum>::new(rpc_client);
+
+        Ok(Self {
+            provider,
+            transport,
+            wallet,
+            address,
+            deployments,
+            chain_id,
+            // Pipeline starts at nonce 0; call sync_nonce() before first tx
+            pipeline: Mutex::new(TxPipeline::new(0, PipelineConfig::default())),
+            gas_cache: Mutex::new(GasCache::new(DEFAULT_GAS_TTL_MS, DEFAULT_PRIORITY_FEE)),
+            state_cache: Mutex::new(StateCache::new(StateCacheConfig::default())),
+        })
+    }
+
+    /// Create a client pre-configured for Base mainnet.
+    pub fn new_base_mainnet(
+        transport: HftTransport,
+        signer: PrivateKeySigner,
+        deployments: Deployments,
+    ) -> Result<Self> {
+        Self::new(transport, signer, deployments, BASE_CHAIN_ID)
+    }
+
+    // ── Initialization ───────────────────────────────────────────────
+
+    /// Sync the nonce manager with the on-chain transaction count.
+    ///
+    /// Must be called before the first transaction. After this, the
+    /// pipeline manages nonces locally (zero RPC per transaction).
+    pub async fn sync_nonce(&self) -> Result<()> {
+        let count = self.provider.get_transaction_count(self.address).await?;
+        let mut pipeline = self.pipeline.lock().unwrap();
+        *pipeline = TxPipeline::new(count, PipelineConfig::default());
+        Ok(())
+    }
+
+    /// Refresh the gas cache from the latest block header.
+    ///
+    /// Should be called periodically (every 1-2 seconds on Base L2) or
+    /// from a `newHeads` subscription callback.
+    pub async fn refresh_gas(&self) -> Result<()> {
+        let block_num = self.provider.get_block_number().await?;
+        let header = self
+            .provider
+            .get_block_by_number(block_num.into())
+            .await?
+            .ok_or_else(|| PerpCityError::GasPriceUnavailable {
+                reason: format!("block {block_num} not found"),
+            })?;
+
+        let base_fee = header
+            .header
+            .base_fee_per_gas
+            .ok_or_else(|| PerpCityError::GasPriceUnavailable {
+                reason: "block has no base fee (pre-EIP-1559?)".into(),
+            })?;
+
+        let now = now_ms();
+        let mut gas_cache = self.gas_cache.lock().unwrap();
+        gas_cache.update(base_fee, now);
+        Ok(())
+    }
+
+    // ── Write operations ─────────────────────────────────────────────
+
+    /// Open a taker (long/short) position.
+    ///
+    /// Returns the minted position NFT token ID on success.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PerpCityError::TxReverted`] if the transaction reverts,
+    /// or [`PerpCityError::EventNotFound`] if the `PositionOpened` event
+    /// is missing from the receipt.
+    pub async fn open_taker(
+        &self,
+        perp_id: B256,
+        params: &OpenTakerParams,
+        urgency: Urgency,
+    ) -> Result<U256> {
+        let margin_scaled = scale_to_6dec(params.margin)?;
+        if margin_scaled <= 0 {
+            return Err(PerpCityError::InvalidMargin {
+                reason: format!("margin must be positive, got {}", params.margin),
+            });
+        }
+        let margin_ratio = leverage_to_margin_ratio(params.leverage)?;
+
+        let wire_params = PerpManager::OpenTakerPositionParams {
+            holder: self.address,
+            isLong: params.is_long,
+            margin: margin_scaled as u128,
+            marginRatio: u32_to_u24(margin_ratio),
+            unspecifiedAmountLimit: params.unspecified_amount_limit,
+        };
+
+        let contract = PerpManager::new(self.deployments.perp_manager, &self.provider);
+        let calldata = contract
+            .openTakerPos(perp_id, wire_params)
+            .calldata()
+            .clone();
+
+        let receipt = self
+            .send_tx(
+                self.deployments.perp_manager,
+                calldata,
+                GasLimits::OPEN_TAKER,
+                urgency,
+            )
+            .await?;
+
+        // Parse PositionOpened event to get posId
+        for log in receipt.inner.logs() {
+            if let Ok(event) = log.log_decode::<PerpManager::PositionOpened>() {
+                return Ok(event.inner.data.posId);
+            }
+        }
+        Err(PerpCityError::EventNotFound {
+            event_name: "PositionOpened".into(),
+        })
+    }
+
+    /// Open a maker (LP) position within a price range.
+    ///
+    /// Converts `price_lower`/`price_upper` to aligned ticks internally.
+    /// Returns the minted position NFT token ID.
+    pub async fn open_maker(
+        &self,
+        perp_id: B256,
+        params: &OpenMakerParams,
+        urgency: Urgency,
+    ) -> Result<U256> {
+        let margin_scaled = scale_to_6dec(params.margin)?;
+        if margin_scaled <= 0 {
+            return Err(PerpCityError::InvalidMargin {
+                reason: format!("margin must be positive, got {}", params.margin),
+            });
+        }
+
+        let tick_lower = align_tick_down(
+            price_to_tick(params.price_lower)?,
+            crate::constants::TICK_SPACING,
+        );
+        let tick_upper = align_tick_up(
+            price_to_tick(params.price_upper)?,
+            crate::constants::TICK_SPACING,
+        );
+
+        if tick_lower >= tick_upper {
+            return Err(PerpCityError::InvalidTickRange {
+                lower: tick_lower,
+                upper: tick_upper,
+            });
+        }
+
+        // Liquidity must fit in u120 on-chain
+        let liquidity: u128 = params.liquidity;
+        let max_u120: u128 = (1u128 << 120) - 1;
+        if liquidity > max_u120 {
+            return Err(PerpCityError::Overflow {
+                context: format!("liquidity {} exceeds uint120 max", liquidity),
+            });
+        }
+
+        let wire_params = PerpManager::OpenMakerPositionParams {
+            holder: self.address,
+            margin: margin_scaled as u128,
+            liquidity: alloy::primitives::Uint::<120, 2>::from(liquidity),
+            tickLower: i32_to_i24(tick_lower),
+            tickUpper: i32_to_i24(tick_upper),
+            maxAmt0In: params.max_amt0_in,
+            maxAmt1In: params.max_amt1_in,
+        };
+
+        let contract = PerpManager::new(self.deployments.perp_manager, &self.provider);
+        let calldata = contract
+            .openMakerPos(perp_id, wire_params)
+            .calldata()
+            .clone();
+
+        let receipt = self
+            .send_tx(
+                self.deployments.perp_manager,
+                calldata,
+                GasLimits::OPEN_MAKER,
+                urgency,
+            )
+            .await?;
+
+        for log in receipt.inner.logs() {
+            if let Ok(event) = log.log_decode::<PerpManager::PositionOpened>() {
+                return Ok(event.inner.data.posId);
+            }
+        }
+        Err(PerpCityError::EventNotFound {
+            event_name: "PositionOpened".into(),
+        })
+    }
+
+    /// Close a position (taker or maker).
+    ///
+    /// Returns a [`CloseResult`] with the transaction hash and optional
+    /// remaining position ID (for partial closes).
+    pub async fn close_position(
+        &self,
+        pos_id: U256,
+        params: &CloseParams,
+        urgency: Urgency,
+    ) -> Result<CloseResult> {
+        let wire_params = PerpManager::ClosePositionParams {
+            posId: pos_id,
+            minAmt0Out: params.min_amt0_out,
+            minAmt1Out: params.min_amt1_out,
+            maxAmt1In: params.max_amt1_in,
+        };
+
+        let contract = PerpManager::new(self.deployments.perp_manager, &self.provider);
+        let calldata = contract.closePosition(wire_params).calldata().clone();
+
+        let receipt = self
+            .send_tx(
+                self.deployments.perp_manager,
+                calldata,
+                GasLimits::CLOSE_POSITION,
+                urgency,
+            )
+            .await?;
+
+        let tx_hash = receipt.transaction_hash;
+
+        // Parse PositionClosed to check for partial close
+        for log in receipt.inner.logs() {
+            if let Ok(event) = log.log_decode::<PerpManager::PositionClosed>() {
+                let was_partial = event.inner.data.wasPartialClose;
+                return Ok(CloseResult {
+                    tx_hash,
+                    remaining_position_id: if was_partial { Some(pos_id) } else { None },
+                });
+            }
+        }
+        Err(PerpCityError::EventNotFound {
+            event_name: "PositionClosed".into(),
+        })
+    }
+
+    /// Adjust the notional exposure of a taker position.
+    ///
+    /// - `usd_delta > 0`: increase notional (add exposure)
+    /// - `usd_delta < 0`: decrease notional (reduce exposure)
+    pub async fn adjust_notional(
+        &self,
+        pos_id: U256,
+        usd_delta: f64,
+        perp_limit: u128,
+        urgency: Urgency,
+    ) -> Result<B256> {
+        let usd_delta_scaled = scale_to_6dec(usd_delta)?;
+
+        let wire_params = PerpManager::AdjustNotionalParams {
+            posId: pos_id,
+            usdDelta: I256::try_from(usd_delta_scaled).map_err(|_| PerpCityError::Overflow {
+                context: format!("usd_delta {} overflows I256", usd_delta_scaled),
+            })?,
+            perpLimit: perp_limit,
+        };
+
+        let contract = PerpManager::new(self.deployments.perp_manager, &self.provider);
+        let calldata = contract.adjustNotional(wire_params).calldata().clone();
+
+        let receipt = self
+            .send_tx(
+                self.deployments.perp_manager,
+                calldata,
+                GasLimits::ADJUST_NOTIONAL,
+                urgency,
+            )
+            .await?;
+
+        Ok(receipt.transaction_hash)
+    }
+
+    /// Add or remove margin from a position.
+    ///
+    /// - `margin_delta > 0`: deposit more margin
+    /// - `margin_delta < 0`: withdraw margin
+    pub async fn adjust_margin(
+        &self,
+        pos_id: U256,
+        margin_delta: f64,
+        urgency: Urgency,
+    ) -> Result<B256> {
+        let delta_scaled = scale_to_6dec(margin_delta)?;
+
+        let wire_params = PerpManager::AdjustMarginParams {
+            posId: pos_id,
+            marginDelta: I256::try_from(delta_scaled).map_err(|_| PerpCityError::Overflow {
+                context: format!("margin_delta {} overflows I256", delta_scaled),
+            })?,
+        };
+
+        let contract = PerpManager::new(self.deployments.perp_manager, &self.provider);
+        let calldata = contract.adjustMargin(wire_params).calldata().clone();
+
+        let receipt = self
+            .send_tx(
+                self.deployments.perp_manager,
+                calldata,
+                GasLimits::ADJUST_MARGIN,
+                urgency,
+            )
+            .await?;
+
+        Ok(receipt.transaction_hash)
+    }
+
+    /// Ensure USDC is approved for the PerpManager to spend.
+    ///
+    /// Checks current allowance and only sends an `approve` transaction
+    /// if the allowance is below `min_amount`. Approves for `U256::MAX`
+    /// (infinite approval) to avoid repeated approve calls.
+    pub async fn ensure_approval(&self, min_amount: U256) -> Result<Option<B256>> {
+        let usdc = IERC20::new(self.deployments.usdc, &self.provider);
+        let allowance: U256 = usdc
+            .allowance(self.address, self.deployments.perp_manager)
+            .call()
+            .await?;
+
+        if allowance >= min_amount {
+            return Ok(None);
+        }
+
+        let calldata = usdc
+            .approve(self.deployments.perp_manager, MAX_APPROVAL)
+            .calldata()
+            .clone();
+
+        let receipt = self
+            .send_tx(
+                self.deployments.usdc,
+                calldata,
+                GasLimits::APPROVE,
+                Urgency::Normal,
+            )
+            .await?;
+
+        Ok(Some(receipt.transaction_hash))
+    }
+
+    // ── Read operations ──────────────────────────────────────────────
+
+    /// Get the full perp configuration, fees, and bounds for a market.
+    ///
+    /// Uses the [`StateCache`] for fees and bounds (60s TTL). The perp
+    /// config itself is always fetched fresh (it's cheap and rarely changes).
+    pub async fn get_perp_config(&self, perp_id: B256) -> Result<PerpData> {
+        let contract = PerpManager::new(self.deployments.perp_manager, &self.provider);
+
+        // Fetch perp config — sol!(rpc) returns the struct directly
+        let config: PerpManager::PerpConfig = contract.cfgs(perp_id).call().await?;
+        let beacon = config.beacon;
+
+        // Fetch mark price via TWAP (short window = ~current price)
+        let sqrt_price_x96: U256 = contract
+            .timeWeightedAvgSqrtPriceX96(perp_id, 1)
+            .call()
+            .await?;
+        let mark = crate::convert::sqrt_price_x96_to_price(sqrt_price_x96)?;
+
+        let now_ts = now_secs();
+        let fees_addr: [u8; 20] = config.fees.into();
+
+        // Try cache for fees
+        let fees = {
+            let cache = self.state_cache.lock().unwrap();
+            cache.get_fees(&fees_addr, now_ts).cloned()
+        };
+
+        let fees = match fees {
+            Some(cached) => Fees::from(cached),
+            None => {
+                let fees = self.fetch_fees(&config).await?;
+                let mut cache = self.state_cache.lock().unwrap();
+                cache.put_fees(fees_addr, CachedFees::from(fees), now_ts);
+                fees
+            }
+        };
+
+        // Try cache for bounds
+        let ratios_addr: [u8; 20] = config.marginRatios.into();
+        let bounds = {
+            let cache = self.state_cache.lock().unwrap();
+            cache.get_bounds(&ratios_addr, now_ts).cloned()
+        };
+
+        let bounds = match bounds {
+            Some(cached) => Bounds::from(cached),
+            None => {
+                let bounds = self.fetch_bounds(&config).await?;
+                let mut cache = self.state_cache.lock().unwrap();
+                cache.put_bounds(ratios_addr, CachedBounds::from(bounds), now_ts);
+                bounds
+            }
+        };
+
+        Ok(PerpData {
+            id: perp_id,
+            tick_spacing: i24_to_i32(config.key.tickSpacing),
+            mark,
+            beacon,
+            bounds,
+            fees,
+        })
+    }
+
+    /// Get perp data: beacon, tick spacing, and current mark price.
+    ///
+    /// Lighter-weight than [`Self::get_perp_config`] — skips fees/bounds lookups.
+    pub async fn get_perp_data(&self, perp_id: B256) -> Result<(Address, i32, f64)> {
+        let contract = PerpManager::new(self.deployments.perp_manager, &self.provider);
+        let config: PerpManager::PerpConfig = contract.cfgs(perp_id).call().await?;
+
+        let sqrt_price_x96: U256 = contract
+            .timeWeightedAvgSqrtPriceX96(perp_id, 1)
+            .call()
+            .await?;
+        let mark = crate::convert::sqrt_price_x96_to_price(sqrt_price_x96)?;
+
+        Ok((config.beacon, i24_to_i32(config.key.tickSpacing), mark))
+    }
+
+    /// Get an on-chain position by its NFT token ID.
+    ///
+    /// Returns the raw contract position struct. Use [`crate::math::position`]
+    /// functions to compute derived values (entry price, PnL, etc.).
+    pub async fn get_position(&self, pos_id: U256) -> Result<PerpManager::Position> {
+        let contract = PerpManager::new(self.deployments.perp_manager, &self.provider);
+        let pos: PerpManager::Position = contract.positions(pos_id).call().await?;
+
+        // Check if position exists (empty perpId = uninitialized)
+        if pos.perpId == B256::ZERO {
+            return Err(PerpCityError::PositionNotFound { pos_id });
+        }
+
+        Ok(pos)
+    }
+
+    /// Get the current mark price for a perp (TWAP with 1-second lookback).
+    ///
+    /// Uses the fast cache layer (2s TTL).
+    pub async fn get_mark_price(&self, perp_id: B256) -> Result<f64> {
+        let now_ts = now_secs();
+        let perp_bytes: [u8; 32] = perp_id.into();
+
+        // Check cache
+        {
+            let cache = self.state_cache.lock().unwrap();
+            if let Some(price) = cache.get_mark_price(&perp_bytes, now_ts) {
+                return Ok(price);
+            }
+        }
+
+        // Fetch from chain
+        let contract = PerpManager::new(self.deployments.perp_manager, &self.provider);
+        let sqrt_price_x96: U256 = contract
+            .timeWeightedAvgSqrtPriceX96(perp_id, 1)
+            .call()
+            .await?;
+        let price = crate::convert::sqrt_price_x96_to_price(sqrt_price_x96)?;
+
+        // Update cache
+        {
+            let mut cache = self.state_cache.lock().unwrap();
+            cache.put_mark_price(perp_bytes, price, now_ts);
+        }
+
+        Ok(price)
+    }
+
+    /// Simulate closing a position to get live PnL, funding, and liquidation status.
+    ///
+    /// This is a read-only call (no transaction sent).
+    pub async fn get_live_details(&self, pos_id: U256) -> Result<LiveDetails> {
+        let contract = PerpManager::new(self.deployments.perp_manager, &self.provider);
+        let result = contract.quoteClosePosition(pos_id).call().await?;
+
+        // Check for unexpected revert reason
+        if !result.unexpectedReason.is_empty() {
+            return Err(PerpCityError::TxReverted {
+                reason: format!(
+                    "quoteClosePosition reverted: 0x{}",
+                    alloy::primitives::hex::encode(&result.unexpectedReason)
+                ),
+            });
+        }
+
+        let scale = SCALE_F64;
+        Ok(LiveDetails {
+            pnl: i128_from_i256(result.pnl) as f64 / scale,
+            funding_payment: i128_from_i256(result.funding) as f64 / scale,
+            effective_margin: i128_from_i256(result.netMargin) as f64 / scale,
+            is_liquidatable: result.wasLiquidated,
+        })
+    }
+
+    /// Get taker open interest for a perp market.
+    pub async fn get_open_interest(&self, perp_id: B256) -> Result<OpenInterest> {
+        let contract = PerpManager::new(self.deployments.perp_manager, &self.provider);
+        let result = contract.takerOpenInterest(perp_id).call().await?;
+
+        let scale = SCALE_F64;
+        Ok(OpenInterest {
+            long_oi: result.longOI as f64 / scale,
+            short_oi: result.shortOI as f64 / scale,
+        })
+    }
+
+    /// Get the funding rate per second for a perp, converted to a daily rate.
+    ///
+    /// Uses the fast cache layer (2s TTL).
+    pub async fn get_funding_rate(&self, perp_id: B256) -> Result<f64> {
+        let now_ts = now_secs();
+        let perp_bytes: [u8; 32] = perp_id.into();
+
+        // Check cache
+        {
+            let cache = self.state_cache.lock().unwrap();
+            if let Some(rate) = cache.get_funding_rate(&perp_bytes, now_ts) {
+                return Ok(rate);
+            }
+        }
+
+        let contract = PerpManager::new(self.deployments.perp_manager, &self.provider);
+        let funding_x96: I256 = contract
+            .fundingPerSecondX96(perp_id)
+            .call()
+            .await?;
+
+        // Convert from X96 fixed-point to human-readable daily rate
+        // rate_per_sec = funding_x96 / 2^96
+        // daily_rate = rate_per_sec * 86400
+        let funding_i128 = i128_from_i256(funding_x96);
+        let q96_f64 = 2.0_f64.powi(96);
+        let rate_per_sec = funding_i128 as f64 / q96_f64;
+        let daily_rate = rate_per_sec * crate::constants::INTERVAL as f64;
+
+        // Update cache
+        {
+            let mut cache = self.state_cache.lock().unwrap();
+            cache.put_funding_rate(perp_bytes, daily_rate, now_ts);
+        }
+
+        Ok(daily_rate)
+    }
+
+    /// Get the USDC balance of the signer's address.
+    ///
+    /// Uses the fast cache layer (2s TTL).
+    pub async fn get_usdc_balance(&self) -> Result<f64> {
+        let now_ts = now_secs();
+
+        // Check cache
+        {
+            let cache = self.state_cache.lock().unwrap();
+            if let Some(bal) = cache.get_usdc_balance(now_ts) {
+                return Ok(bal);
+            }
+        }
+
+        let usdc = IERC20::new(self.deployments.usdc, &self.provider);
+        let raw: U256 = usdc.balanceOf(self.address).call().await?;
+        let raw_i128 = i128::try_from(raw).map_err(|_| PerpCityError::Overflow {
+            context: format!("USDC balance {} exceeds i128::MAX", raw),
+        })?;
+        let balance = scale_from_6dec(raw_i128);
+
+        // Update cache
+        {
+            let mut cache = self.state_cache.lock().unwrap();
+            cache.put_usdc_balance(balance, now_ts);
+        }
+
+        Ok(balance)
+    }
+
+    // ── Accessors ────────────────────────────────────────────────────
+
+    /// The signer's Ethereum address.
+    pub fn address(&self) -> Address {
+        self.address
+    }
+
+    /// The deployed contract addresses.
+    pub fn deployments(&self) -> &Deployments {
+        &self.deployments
+    }
+
+    /// The underlying Alloy provider (for advanced queries).
+    pub fn provider(&self) -> &RootProvider<Ethereum> {
+        &self.provider
+    }
+
+    /// The underlying HFT transport (for health diagnostics).
+    pub fn transport(&self) -> &HftTransport {
+        &self.transport
+    }
+
+    /// Invalidate the fast cache layer (prices, funding, balance).
+    ///
+    /// Call on new-block events to ensure fresh data.
+    pub fn invalidate_fast_cache(&self) {
+        let mut cache = self.state_cache.lock().unwrap();
+        cache.invalidate_fast_layer();
+    }
+
+    /// Invalidate all cached state.
+    pub fn invalidate_all_cache(&self) {
+        let mut cache = self.state_cache.lock().unwrap();
+        cache.invalidate_all();
+    }
+
+    /// Confirm a transaction as mined. Removes from in-flight tracking.
+    pub fn confirm_tx(&self, tx_hash: &[u8; 32]) {
+        let mut pipeline = self.pipeline.lock().unwrap();
+        pipeline.confirm(tx_hash);
+    }
+
+    /// Mark a transaction as failed. Releases the nonce if possible.
+    pub fn fail_tx(&self, tx_hash: &[u8; 32]) {
+        let mut pipeline = self.pipeline.lock().unwrap();
+        pipeline.fail(tx_hash);
+    }
+
+    /// Number of currently in-flight (unconfirmed) transactions.
+    pub fn in_flight_count(&self) -> usize {
+        let pipeline = self.pipeline.lock().unwrap();
+        pipeline.in_flight_count()
+    }
+
+    // ── Internal helpers ─────────────────────────────────────────────
+
+    /// Prepare, sign, send, and wait for a transaction receipt.
+    async fn send_tx(
+        &self,
+        to: Address,
+        calldata: Bytes,
+        gas_limit: u64,
+        urgency: Urgency,
+    ) -> Result<alloy::rpc::types::TransactionReceipt> {
+        let now = now_ms();
+
+        // Prepare via pipeline (zero RPC)
+        let prepared = {
+            let pipeline = self.pipeline.lock().unwrap();
+            let gas_cache = self.gas_cache.lock().unwrap();
+            pipeline.prepare(
+                TxRequest {
+                    to: to.into_array(),
+                    calldata: calldata.to_vec(),
+                    value: 0,
+                    gas_limit,
+                    urgency,
+                },
+                &gas_cache,
+                now,
+            )?
+        };
+
+        // Build EIP-1559 transaction
+        let tx = TransactionRequest::default()
+            .with_to(to)
+            .with_input(calldata)
+            .with_nonce(prepared.nonce)
+            .with_gas_limit(prepared.gas_limit)
+            .with_max_fee_per_gas(prepared.gas_fees.max_fee_per_gas as u128)
+            .with_max_priority_fee_per_gas(prepared.gas_fees.max_priority_fee_per_gas as u128)
+            .with_chain_id(self.chain_id);
+
+        // Sign and send
+        let tx_envelope = tx.build(&self.wallet).await.map_err(|e| {
+            PerpCityError::TxReverted {
+                reason: format!("failed to sign transaction: {e}"),
+            }
+        })?;
+
+        let pending = self.provider.send_tx_envelope(tx_envelope).await?;
+        let tx_hash_b256 = *pending.tx_hash();
+        let tx_hash_bytes: [u8; 32] = tx_hash_b256.into();
+
+        // Record in pipeline
+        {
+            let mut pipeline = self.pipeline.lock().unwrap();
+            pipeline.record_submission(tx_hash_bytes, prepared, now);
+        }
+
+        // Wait for receipt
+        let receipt = tokio::time::timeout(RECEIPT_TIMEOUT, pending.get_receipt())
+            .await
+            .map_err(|_| PerpCityError::TxReverted {
+                reason: format!("receipt timeout after {}s", RECEIPT_TIMEOUT.as_secs()),
+            })?
+            .map_err(|e| PerpCityError::TxReverted {
+                reason: format!("failed to get receipt: {e}"),
+            })?;
+
+        // Confirm in pipeline
+        {
+            let mut pipeline = self.pipeline.lock().unwrap();
+            pipeline.confirm(&tx_hash_bytes);
+        }
+
+        // Check if reverted
+        if !receipt.status() {
+            return Err(PerpCityError::TxReverted {
+                reason: format!("transaction {} reverted", tx_hash_b256),
+            });
+        }
+
+        Ok(receipt)
+    }
+
+    /// Fetch fees from the IFees module contract.
+    async fn fetch_fees(&self, config: &PerpManager::PerpConfig) -> Result<Fees> {
+        if config.fees == Address::ZERO {
+            return Err(PerpCityError::ModuleNotRegistered {
+                module: "IFees".into(),
+            });
+        }
+
+        let fees_contract = IFees::new(config.fees, &self.provider);
+
+        let fee_result = fees_contract.fees(config.clone()).call().await?;
+        let c_fee = u24_to_u32(fee_result.cFee);
+        let ins_fee = u24_to_u32(fee_result.insFee);
+        let lp_fee = u24_to_u32(fee_result.lpFee);
+
+        let liq_result = fees_contract.liquidationFee(config.clone()).call().await?;
+        let liq_fee = u24_to_u32(liq_result);
+
+        let scale = SCALE_F64;
+        Ok(Fees {
+            creator_fee: c_fee as f64 / scale,
+            insurance_fee: ins_fee as f64 / scale,
+            lp_fee: lp_fee as f64 / scale,
+            liquidation_fee: liq_fee as f64 / scale,
+        })
+    }
+
+    /// Fetch margin ratio bounds from the IMarginRatios module contract.
+    async fn fetch_bounds(&self, config: &PerpManager::PerpConfig) -> Result<Bounds> {
+        if config.marginRatios == Address::ZERO {
+            return Err(PerpCityError::ModuleNotRegistered {
+                module: "IMarginRatios".into(),
+            });
+        }
+
+        let ratios_contract = IMarginRatios::new(config.marginRatios, &self.provider);
+
+        let ratios: IMarginRatios::MarginRatios = ratios_contract
+            .marginRatios(config.clone(), false) // isMaker = false for taker bounds
+            .call()
+            .await?;
+
+        let scale = SCALE_F64;
+        Ok(Bounds {
+            min_margin: scale_from_6dec(crate::constants::MIN_OPENING_MARGIN as i128),
+            min_taker_leverage: margin_ratio_to_leverage(u24_to_u32(ratios.max))?,
+            max_taker_leverage: margin_ratio_to_leverage(u24_to_u32(ratios.min))?,
+            liquidation_taker_ratio: u24_to_u32(ratios.liq) as f64 / scale,
+        })
+    }
+}
+
+// ── Type conversion helpers for Alloy fixed-size types ───────────────
+
+/// Convert a u32 margin ratio to Alloy's uint24 type.
+#[inline]
+fn u32_to_u24(v: u32) -> alloy::primitives::Uint<24, 1> {
+    alloy::primitives::Uint::<24, 1>::from(v & 0xFF_FFFF)
+}
+
+/// Convert Alloy's uint24 to a u32.
+#[inline]
+fn u24_to_u32(v: alloy::primitives::Uint<24, 1>) -> u32 {
+    v.to::<u32>()
+}
+
+/// Convert an i32 tick to Alloy's int24 type.
+#[inline]
+fn i32_to_i24(v: i32) -> alloy::primitives::Signed<24, 1> {
+    alloy::primitives::Signed::<24, 1>::try_from(v as i64).unwrap_or(
+        if v < 0 {
+            alloy::primitives::Signed::<24, 1>::MIN
+        } else {
+            alloy::primitives::Signed::<24, 1>::MAX
+        },
+    )
+}
+
+/// Convert Alloy's int24 to an i32.
+#[inline]
+fn i24_to_i32(v: alloy::primitives::Signed<24, 1>) -> i32 {
+    // int24 always fits in i32
+    v.as_i32()
+}
+
+// ── Utility functions ────────────────────────────────────────────────
+
+/// Get current time in milliseconds.
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
+/// Get current time in seconds (for state cache).
+fn now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+/// Convert an I256 to i128 (clamping to i128::MIN/MAX on overflow).
+#[inline]
+fn i128_from_i256(v: I256) -> i128 {
+    i128::try_from(v).unwrap_or_else(|_| {
+        if v.is_negative() {
+            i128::MIN
+        } else {
+            i128::MAX
+        }
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── i128_from_i256 tests ─────────────────────────────────────────
+
+    #[test]
+    fn i128_from_i256_small_values() {
+        assert_eq!(i128_from_i256(I256::ZERO), 0);
+        assert_eq!(i128_from_i256(I256::try_from(42i64).unwrap()), 42);
+        assert_eq!(i128_from_i256(I256::try_from(-100i64).unwrap()), -100);
+    }
+
+    #[test]
+    fn i128_from_i256_boundary_values() {
+        let max_i128 = I256::try_from(i128::MAX).unwrap();
+        assert_eq!(i128_from_i256(max_i128), i128::MAX);
+
+        let min_i128 = I256::try_from(i128::MIN).unwrap();
+        assert_eq!(i128_from_i256(min_i128), i128::MIN);
+    }
+
+    #[test]
+    fn i128_from_i256_overflow_clamps() {
+        assert_eq!(i128_from_i256(I256::MAX), i128::MAX);
+        assert_eq!(i128_from_i256(I256::MIN), i128::MIN);
+    }
+
+    #[test]
+    fn i128_from_i256_just_beyond_i128() {
+        let beyond = I256::try_from(i128::MAX).unwrap() + I256::try_from(1i64).unwrap();
+        assert_eq!(i128_from_i256(beyond), i128::MAX);
+
+        let below = I256::try_from(i128::MIN).unwrap() - I256::try_from(1i64).unwrap();
+        assert_eq!(i128_from_i256(below), i128::MIN);
+    }
+
+    // ── Type conversion helpers ──────────────────────────────────────
+
+    #[test]
+    fn u24_roundtrip() {
+        for v in [0u32, 1, 100_000, 0xFF_FFFF] {
+            let u24 = u32_to_u24(v);
+            assert_eq!(u24_to_u32(u24), v);
+        }
+    }
+
+    #[test]
+    fn u24_truncates_overflow() {
+        // Values > 0xFFFFFF get masked
+        let u24 = u32_to_u24(0x1FF_FFFF);
+        assert_eq!(u24_to_u32(u24), 0xFF_FFFF);
+    }
+
+    #[test]
+    fn i24_roundtrip() {
+        for v in [0i32, 1, -1, 30, -30, 69_090, -69_090] {
+            let i24 = i32_to_i24(v);
+            assert_eq!(i24_to_i32(i24), v);
+        }
+    }
+
+    // ── Funding rate integration test ───────────────────────────────
+
+    #[test]
+    fn funding_rate_x96_conversion() {
+        let q96 = 2.0_f64.powi(96);
+        let rate_per_sec = 0.0001;
+        let x96_value = (rate_per_sec * q96) as i128;
+        let i256_val = I256::try_from(x96_value).unwrap();
+
+        let recovered = i128_from_i256(i256_val) as f64 / q96;
+        let daily = recovered * 86400.0;
+
+        assert!((recovered - rate_per_sec).abs() < 1e-10);
+        assert!((daily - 8.64).abs() < 0.001);
+    }
+}

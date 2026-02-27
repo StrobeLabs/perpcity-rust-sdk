@@ -1,0 +1,23 @@
+# Build artifacts
+/target
+Cargo.lock
+
+# Environment / secrets
+.env
+.env.*
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Project-specific
+NOTES.md
+orchestrate.py
+race.sh
