@@ -4,26 +4,6 @@
 //! and contract bindings into a single ergonomic API. It is the primary
 //! entry point for interacting with PerpCity on Base L2.
 //!
-//! # Architecture
-//!
-//! ```text
-//! ┌─────────────────────────────────────────┐
-//! │              PerpClient                  │
-//! │  • open_taker / open_maker / close      │
-//! │  • get_perp_config / get_position       │
-//! │  • ensure_approval / get_usdc_balance    │
-//! ├─────────────┬───────────────────────────┤
-//! │ TxPipeline  │  StateCache               │
-//! │ (nonce+gas) │  (fees, bounds, prices)   │
-//! ├─────────────┴───────────────────────────┤
-//! │  Alloy Provider + EthereumWallet        │
-//! │  (signing, gas filling, chain ID)       │
-//! ├─────────────────────────────────────────┤
-//! │         HftTransport                    │
-//! │  (multi-endpoint, circuit breaker)      │
-//! └─────────────────────────────────────────┘
-//! ```
-//!
 //! # Example
 //!
 //! ```rust,no_run
