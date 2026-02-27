@@ -66,7 +66,7 @@ All examples load configuration from `.env` automatically via `dotenvy`.
 |---------|-----|-------------|
 | **quickstart** | `cargo run --example quickstart` | Open a 2x long, close it. ~20 lines of setup. |
 | **open_position** | `cargo run --example open_position` | Full taker lifecycle: market data, open, monitor PnL/funding/liquidation, close. |
-| **market_maker** | `cargo run --example market_maker` | LP position: calculate tick range around mark, estimate liquidity, open maker position. *Note: makers are currently subject to a 7-day lockup.* |
+| **market_maker** | `cargo run --example market_maker` | LP position: calculate tick range around mark, estimate liquidity, open maker position. *Note: makers are currently subject to a 7-day lockup, so this example shouldn't run.* |
 | **hft_bot** | `cargo run --example hft_bot` | Full trading loop: multi-endpoint transport, momentum strategy, position manager with SL/TP/trailing stop, latency stats. |
 
 ## API Overview
