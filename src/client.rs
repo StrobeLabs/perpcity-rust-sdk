@@ -69,8 +69,11 @@ const BASE_CHAIN_ID: u64 = 8453;
 /// Default gas cache TTL: 2 seconds (2 Base L2 blocks).
 const DEFAULT_GAS_TTL_MS: u64 = 2_000;
 
-/// Default priority fee: 1 gwei.
-const DEFAULT_PRIORITY_FEE: u64 = 1_000_000_000;
+/// Default priority fee: 0.01 gwei.
+///
+/// Base L2 uses a single sequencer, so priority fees are near-meaningless.
+/// 10 Mwei is sufficient for reliable inclusion while keeping gas escrow low.
+const DEFAULT_PRIORITY_FEE: u64 = 10_000_000;
 
 /// Default receipt polling timeout.
 const RECEIPT_TIMEOUT: Duration = Duration::from_secs(30);
