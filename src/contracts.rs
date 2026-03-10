@@ -183,7 +183,14 @@ sol! {
             uint256 longOI,
             uint256 shortOI,
             uint256 posId,
-            int256 newPerpDelta
+            int256 newPerpDelta,
+            // Settlement details
+            int256 swapPerpDelta,
+            int256 swapUsdDelta,
+            int256 funding,
+            uint256 utilizationFee,
+            uint256 adl,
+            uint256 tradingFees
         );
 
         event MarginAdjusted(

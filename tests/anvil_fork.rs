@@ -11,7 +11,7 @@
 use std::process::{Child, Command};
 use std::time::Duration;
 
-use alloy::primitives::{address, Address, B256, U256};
+use alloy::primitives::{Address, B256, U256, address};
 use alloy::signers::local::PrivateKeySigner;
 
 use perpcity_sdk::{
@@ -200,9 +200,13 @@ async fn open_and_close_taker_on_fork() {
     let address = signer.address();
     println!("Test wallet: {address:?}");
 
-    let transport =
-        HftTransport::new(TransportConfig::builder().endpoint(&anvil.url).build().unwrap())
-            .unwrap();
+    let transport = HftTransport::new(
+        TransportConfig::builder()
+            .endpoint(&anvil.url)
+            .build()
+            .unwrap(),
+    )
+    .unwrap();
 
     let deployments = Deployments {
         perp_manager: PERP_MANAGER,
@@ -231,7 +235,10 @@ async fn open_and_close_taker_on_fork() {
     // 5. Check USDC balance
     let balance = client.get_usdc_balance().await.unwrap();
     println!("USDC balance: {balance}");
-    assert!(balance >= 100.0, "expected at least 100 USDC, got {balance}");
+    assert!(
+        balance >= 100.0,
+        "expected at least 100 USDC, got {balance}"
+    );
 
     // 6. Approve USDC
     let perp_id: B256 = PERP_ID.parse().unwrap();
@@ -314,10 +321,7 @@ async fn open_and_close_taker_on_fork() {
     client.invalidate_fast_cache();
     let final_balance = client.get_usdc_balance().await.unwrap();
     println!("\nFinal USDC balance: {final_balance}");
-    assert!(
-        final_balance > 990.0,
-        "lost too much USDC: {final_balance}"
-    );
+    assert!(final_balance > 990.0, "lost too much USDC: {final_balance}");
 
     println!("\n=== Test passed! ===");
 }
