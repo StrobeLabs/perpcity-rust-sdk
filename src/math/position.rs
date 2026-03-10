@@ -67,7 +67,7 @@ fn i256_to_f64_slow(x: I256) -> f64 {
 /// # Examples
 ///
 /// ```
-/// # use perpcity_rust_sdk::math::position::entry_price;
+/// # use perpcity_sdk::math::position::entry_price;
 /// # use alloy::primitives::I256;
 /// // 1 ETH at $1500: perp_delta = 1e6, usd_delta = -1500e6
 /// let price = entry_price(
@@ -96,7 +96,7 @@ pub fn entry_price(entry_perp_delta: I256, entry_usd_delta: I256) -> f64 {
 /// # Examples
 ///
 /// ```
-/// # use perpcity_rust_sdk::math::position::position_size;
+/// # use perpcity_sdk::math::position::position_size;
 /// # use alloy::primitives::I256;
 /// let size = position_size(I256::try_from(2_500_000i64).unwrap());
 /// assert!((size - 2.5).abs() < 1e-6);
@@ -115,7 +115,7 @@ pub fn position_size(entry_perp_delta: I256) -> f64 {
 /// # Examples
 ///
 /// ```
-/// # use perpcity_rust_sdk::math::position::position_value;
+/// # use perpcity_sdk::math::position::position_value;
 /// # use alloy::primitives::I256;
 /// let val = position_value(I256::try_from(1_000_000i64).unwrap(), 1600.0);
 /// assert!((val - 1600.0).abs() < 0.001);
@@ -137,7 +137,7 @@ pub fn position_value(entry_perp_delta: I256, mark_price: f64) -> f64 {
 /// # Examples
 ///
 /// ```
-/// # use perpcity_rust_sdk::math::position::leverage;
+/// # use perpcity_sdk::math::position::leverage;
 /// let lev = leverage(1000.0, 100.0);
 /// assert!((lev - 10.0).abs() < 0.001);
 /// ```
@@ -174,7 +174,7 @@ pub fn leverage(position_value: f64, effective_margin: f64) -> f64 {
 /// # Examples
 ///
 /// ```
-/// # use perpcity_rust_sdk::math::position::liquidation_price;
+/// # use perpcity_sdk::math::position::liquidation_price;
 /// # use alloy::primitives::I256;
 /// // Long 1 ETH at $1500, $100 margin, 2.5% liq ratio
 /// let liq = liquidation_price(
@@ -409,7 +409,10 @@ mod tests {
 
     #[test]
     fn liquidation_price_zero_size() {
-        assert_eq!(liquidation_price(I256::ZERO, I256::ZERO, 100.0, 25_000, true), None);
+        assert_eq!(
+            liquidation_price(I256::ZERO, I256::ZERO, 100.0, 25_000, true),
+            None
+        );
     }
 
     #[test]

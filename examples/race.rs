@@ -15,10 +15,10 @@
 use std::env;
 use std::time::Instant;
 
-use alloy::primitives::{address, Address, B256, U256};
+use alloy::primitives::{Address, B256, U256, address};
 use alloy::signers::local::PrivateKeySigner;
 
-use perpcity_rust_sdk::*;
+use perpcity_sdk::*;
 
 const USDC: Address = address!("C1a5D4E99BB224713dd179eA9CA2Fa6600706210");
 
@@ -31,8 +31,7 @@ async fn main() -> Result<()> {
     let rpc_url = env_or("RPC_URL", "http://localhost:8545");
     let iterations: usize = env_or("RACE_ITERATIONS", "10").parse().unwrap();
 
-    let private_key = env::var("PERPCITY_PRIVATE_KEY")
-        .expect("set PERPCITY_PRIVATE_KEY");
+    let private_key = env::var("PERPCITY_PRIVATE_KEY").expect("set PERPCITY_PRIVATE_KEY");
     let manager: Address = env::var("PERPCITY_MANAGER")
         .expect("set PERPCITY_MANAGER")
         .parse()
@@ -47,11 +46,7 @@ async fn main() -> Result<()> {
 
     // ── Phase: init ──────────────────────────────────────────────────
     let t = Instant::now();
-    let transport = HftTransport::new(
-        TransportConfig::builder()
-            .endpoint(&rpc_url)
-            .build()?,
-    )?;
+    let transport = HftTransport::new(TransportConfig::builder().endpoint(&rpc_url).build()?)?;
     let signer: PrivateKeySigner = private_key.parse().unwrap();
     let deployments = Deployments {
         perp_manager: manager,
@@ -131,7 +126,9 @@ async fn main() -> Result<()> {
     }
 
     if reverts > 0 {
-        eprintln!("  note: {reverts}/{iterations} trades reverted (timing still valid — full round-trip measured)");
+        eprintln!(
+            "  note: {reverts}/{iterations} trades reverted (timing still valid — full round-trip measured)"
+        );
     }
 
     let total_ms = ms(race_start);
@@ -174,8 +171,14 @@ async fn main() -> Result<()> {
     println!("    \"warm_p95_ms\": {warm_p95:.2}");
     println!("  }},");
 
-    println!("  \"all_trades_ms\": [{}]",
-        trade_times_ms.iter().map(|t| format!("{t:.2}")).collect::<Vec<_>>().join(", "));
+    println!(
+        "  \"all_trades_ms\": [{}]",
+        trade_times_ms
+            .iter()
+            .map(|t| format!("{t:.2}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
     println!("}}");
 
     Ok(())

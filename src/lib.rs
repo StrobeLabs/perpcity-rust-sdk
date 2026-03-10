@@ -19,7 +19,7 @@
 //! ## Quick start
 //!
 //! ```rust,no_run
-//! use perpcity_rust_sdk::{
+//! use perpcity_sdk::{
 //!     PerpClient, HftTransport, TransportConfig, Urgency,
 //!     Deployments, OpenTakerParams, OpenMakerParams,
 //!     PerpCityError, Result,

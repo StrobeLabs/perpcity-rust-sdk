@@ -34,13 +34,13 @@ use std::collections::HashMap;
 use std::env;
 use std::time::{Duration, Instant};
 
-use alloy::primitives::{address, Address, B256, U256};
+use alloy::primitives::{Address, B256, U256, address};
 use alloy::signers::local::PrivateKeySigner;
 
-use perpcity_rust_sdk::hft::latency::LatencyTracker;
-use perpcity_rust_sdk::hft::position_manager::{ManagedPosition, PositionManager, TriggerType};
-use perpcity_rust_sdk::transport::config::Strategy;
-use perpcity_rust_sdk::{
+use perpcity_sdk::hft::latency::LatencyTracker;
+use perpcity_sdk::hft::position_manager::{ManagedPosition, PositionManager, TriggerType};
+use perpcity_sdk::transport::config::Strategy;
+use perpcity_sdk::{
     Deployments, HftTransport, OpenTakerParams, PerpClient, TransportConfig, Urgency,
 };
 
@@ -102,8 +102,7 @@ fn momentum_signal(prices: &[f64]) -> Option<bool> {
         return None; // need at least 5 samples
     }
     let recent_avg: f64 = prices[prices.len() - 3..].iter().sum::<f64>() / 3.0;
-    let older_avg: f64 = prices[..prices.len() - 3].iter().sum::<f64>()
-        / (prices.len() - 3) as f64;
+    let older_avg: f64 = prices[..prices.len() - 3].iter().sum::<f64>() / (prices.len() - 3) as f64;
 
     let pct_change = (recent_avg - older_avg) / older_avg;
     if pct_change > 0.001 {
@@ -116,7 +115,7 @@ fn momentum_signal(prices: &[f64]) -> Option<bool> {
 }
 
 #[tokio::main]
-async fn main() -> perpcity_rust_sdk::Result<()> {
+async fn main() -> perpcity_sdk::Result<()> {
     dotenvy::dotenv().ok();
     let perp_id = load_perp_id();
 
@@ -161,7 +160,7 @@ async fn main() -> perpcity_rust_sdk::Result<()> {
     // ── 3. Initialize HFT infrastructure ────────────────────────────
     let mut pos_manager = PositionManager::new();
     let mut latency_tracker = LatencyTracker::new();
-    let mut trigger_buf: Vec<perpcity_rust_sdk::hft::position_manager::TriggerAction> =
+    let mut trigger_buf: Vec<perpcity_sdk::hft::position_manager::TriggerAction> =
         Vec::with_capacity(16);
     let mut price_history: Vec<f64> = Vec::with_capacity(MAX_BLOCKS as usize);
     let mut next_position_id_counter: u64 = 0;
@@ -169,7 +168,10 @@ async fn main() -> perpcity_rust_sdk::Result<()> {
     // Pre-fetch market config (cached for 60s in the slow layer)
     let perp_config = client.get_perp_config(perp_id).await?;
     println!("\n=== Market Config ===");
-    println!("  Max leverage: {:.0}x", perp_config.bounds.max_taker_leverage);
+    println!(
+        "  Max leverage: {:.0}x",
+        perp_config.bounds.max_taker_leverage
+    );
     println!("  Min margin:   {:.2} USDC", perp_config.bounds.min_margin);
     println!("  LP fee:       {:.4}%", perp_config.fees.lp_fee * 100.0);
 
@@ -233,66 +235,66 @@ async fn main() -> perpcity_rust_sdk::Result<()> {
         }
 
         // 4f. Strategy: open a new position if we have a signal and no positions
-        if pos_manager.count() == 0 {
-            if let Some(is_long) = momentum_signal(&price_history) {
-                let direction = if is_long { "LONG" } else { "SHORT" };
+        if pos_manager.count() == 0
+            && let Some(is_long) = momentum_signal(&price_history)
+        {
+            let direction = if is_long { "LONG" } else { "SHORT" };
 
-                // Calculate stop-loss and take-profit levels
-                let (stop_loss, take_profit) = if is_long {
-                    (mark * (1.0 - STOP_LOSS_PCT), mark * (1.0 + TAKE_PROFIT_PCT))
-                } else {
-                    (mark * (1.0 + STOP_LOSS_PCT), mark * (1.0 - TAKE_PROFIT_PCT))
-                };
+            // Calculate stop-loss and take-profit levels
+            let (stop_loss, take_profit) = if is_long {
+                (mark * (1.0 - STOP_LOSS_PCT), mark * (1.0 + TAKE_PROFIT_PCT))
+            } else {
+                (mark * (1.0 + STOP_LOSS_PCT), mark * (1.0 - TAKE_PROFIT_PCT))
+            };
 
-                println!(
-                    "  [block {block}] Signal: {direction} at {mark:.6} | SL={stop_loss:.6} TP={take_profit:.6}"
-                );
+            println!(
+                "  [block {block}] Signal: {direction} at {mark:.6} | SL={stop_loss:.6} TP={take_profit:.6}"
+            );
 
-                // Open position on-chain
-                let tx_start = Instant::now();
-                match client
-                    .open_taker(
-                        perp_id,
-                        &OpenTakerParams {
-                            is_long,
-                            margin: TRADE_MARGIN,
-                            leverage: TRADE_LEVERAGE,
-                            unspecified_amount_limit: 0,
-                        },
-                        Urgency::High,
-                    )
-                    .await
-                {
-                    Ok(on_chain_pos_id) => {
-                        let tx_latency = tx_start.elapsed();
-                        latency_tracker.record(tx_latency.as_nanos() as u64);
+            // Open position on-chain
+            let tx_start = Instant::now();
+            match client
+                .open_taker(
+                    perp_id,
+                    &OpenTakerParams {
+                        is_long,
+                        margin: TRADE_MARGIN,
+                        leverage: TRADE_LEVERAGE,
+                        unspecified_amount_limit: 0,
+                    },
+                    Urgency::High,
+                )
+                .await
+            {
+                Ok(on_chain_pos_id) => {
+                    let tx_latency = tx_start.elapsed();
+                    latency_tracker.record(tx_latency.as_nanos() as u64);
 
-                        // We use the on-chain U256 position ID. For the position
-                        // manager (which uses u64 keys), extract the low 64 bits.
-                        let pos_id_u64: u64 = on_chain_pos_id.to::<u64>();
-                        next_position_id_counter = pos_id_u64;
+                    // We use the on-chain U256 position ID. For the position
+                    // manager (which uses u64 keys), extract the low 64 bits.
+                    let pos_id_u64: u64 = on_chain_pos_id.to::<u64>();
+                    next_position_id_counter = pos_id_u64;
 
-                        println!(
-                            "  [block {block}] Opened {direction} position #{pos_id_u64} \
+                    println!(
+                        "  [block {block}] Opened {direction} position #{pos_id_u64} \
                              (tx: {tx_latency:.0?})"
-                        );
+                    );
 
-                        // Track in position manager for automated triggers
-                        pos_manager.track(ManagedPosition {
-                            perp_id: perp_bytes,
-                            position_id: pos_id_u64,
-                            is_long,
-                            entry_price: mark,
-                            margin: TRADE_MARGIN,
-                            stop_loss: Some(stop_loss),
-                            take_profit: Some(take_profit),
-                            trailing_stop_pct: Some(TRAILING_STOP_PCT),
-                            trailing_stop_anchor: None,
-                        });
-                    }
-                    Err(e) => {
-                        eprintln!("  [block {block}] Failed to open position: {e}");
-                    }
+                    // Track in position manager for automated triggers
+                    pos_manager.track(ManagedPosition {
+                        perp_id: perp_bytes,
+                        position_id: pos_id_u64,
+                        is_long,
+                        entry_price: mark,
+                        margin: TRADE_MARGIN,
+                        stop_loss: Some(stop_loss),
+                        take_profit: Some(take_profit),
+                        trailing_stop_pct: Some(TRAILING_STOP_PCT),
+                        trailing_stop_anchor: None,
+                    });
+                }
+                Err(e) => {
+                    eprintln!("  [block {block}] Failed to open position: {e}");
                 }
             }
         }

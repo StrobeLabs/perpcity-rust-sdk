@@ -6,7 +6,7 @@
 //! # Example
 //!
 //! ```
-//! use perpcity_rust_sdk::hft::latency::LatencyTracker;
+//! use perpcity_sdk::hft::latency::LatencyTracker;
 //!
 //! let mut tracker = LatencyTracker::new();
 //! for ns in [100_000, 200_000, 150_000, 300_000, 250_000] {

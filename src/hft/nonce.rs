@@ -7,7 +7,7 @@
 //! # Example
 //!
 //! ```
-//! use perpcity_rust_sdk::hft::nonce::NonceManager;
+//! use perpcity_sdk::hft::nonce::NonceManager;
 //!
 //! let mgr = NonceManager::new(42);
 //! let n1 = mgr.acquire();
@@ -17,8 +17,8 @@
 //! ```
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// A transaction that has been submitted but not yet confirmed on-chain.
 #[derive(Debug, Clone, Copy)]

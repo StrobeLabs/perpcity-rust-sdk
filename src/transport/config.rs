@@ -6,7 +6,7 @@
 //! # Example
 //!
 //! ```
-//! use perpcity_rust_sdk::transport::config::{TransportConfig, Strategy};
+//! use perpcity_sdk::transport::config::{TransportConfig, Strategy};
 //! use std::time::Duration;
 //!
 //! let config = TransportConfig::builder()
@@ -250,5 +250,4 @@ mod tests {
             .build();
         assert!(result.is_err());
     }
-
 }
