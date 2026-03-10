@@ -235,68 +235,69 @@ async fn main() -> perpcity_rust_sdk::Result<()> {
         }
 
         // 4f. Strategy: open a new position if we have a signal and no positions
-        if pos_manager.count() == 0 && let Some(is_long) = momentum_signal(&price_history) {
-                let direction = if is_long { "LONG" } else { "SHORT" };
+        if pos_manager.count() == 0
+            && let Some(is_long) = momentum_signal(&price_history)
+        {
+            let direction = if is_long { "LONG" } else { "SHORT" };
 
-                // Calculate stop-loss and take-profit levels
-                let (stop_loss, take_profit) = if is_long {
-                    (mark * (1.0 - STOP_LOSS_PCT), mark * (1.0 + TAKE_PROFIT_PCT))
-                } else {
-                    (mark * (1.0 + STOP_LOSS_PCT), mark * (1.0 - TAKE_PROFIT_PCT))
-                };
+            // Calculate stop-loss and take-profit levels
+            let (stop_loss, take_profit) = if is_long {
+                (mark * (1.0 - STOP_LOSS_PCT), mark * (1.0 + TAKE_PROFIT_PCT))
+            } else {
+                (mark * (1.0 + STOP_LOSS_PCT), mark * (1.0 - TAKE_PROFIT_PCT))
+            };
 
-                println!(
-                    "  [block {block}] Signal: {direction} at {mark:.6} | SL={stop_loss:.6} TP={take_profit:.6}"
-                );
+            println!(
+                "  [block {block}] Signal: {direction} at {mark:.6} | SL={stop_loss:.6} TP={take_profit:.6}"
+            );
 
-                // Open position on-chain
-                let tx_start = Instant::now();
-                match client
-                    .open_taker(
-                        perp_id,
-                        &OpenTakerParams {
-                            is_long,
-                            margin: TRADE_MARGIN,
-                            leverage: TRADE_LEVERAGE,
-                            unspecified_amount_limit: 0,
-                        },
-                        Urgency::High,
-                    )
-                    .await
-                {
-                    Ok(on_chain_pos_id) => {
-                        let tx_latency = tx_start.elapsed();
-                        latency_tracker.record(tx_latency.as_nanos() as u64);
+            // Open position on-chain
+            let tx_start = Instant::now();
+            match client
+                .open_taker(
+                    perp_id,
+                    &OpenTakerParams {
+                        is_long,
+                        margin: TRADE_MARGIN,
+                        leverage: TRADE_LEVERAGE,
+                        unspecified_amount_limit: 0,
+                    },
+                    Urgency::High,
+                )
+                .await
+            {
+                Ok(on_chain_pos_id) => {
+                    let tx_latency = tx_start.elapsed();
+                    latency_tracker.record(tx_latency.as_nanos() as u64);
 
-                        // We use the on-chain U256 position ID. For the position
-                        // manager (which uses u64 keys), extract the low 64 bits.
-                        let pos_id_u64: u64 = on_chain_pos_id.to::<u64>();
-                        next_position_id_counter = pos_id_u64;
+                    // We use the on-chain U256 position ID. For the position
+                    // manager (which uses u64 keys), extract the low 64 bits.
+                    let pos_id_u64: u64 = on_chain_pos_id.to::<u64>();
+                    next_position_id_counter = pos_id_u64;
 
-                        println!(
-                            "  [block {block}] Opened {direction} position #{pos_id_u64} \
+                    println!(
+                        "  [block {block}] Opened {direction} position #{pos_id_u64} \
                              (tx: {tx_latency:.0?})"
-                        );
+                    );
 
-                        // Track in position manager for automated triggers
-                        pos_manager.track(ManagedPosition {
-                            perp_id: perp_bytes,
-                            position_id: pos_id_u64,
-                            is_long,
-                            entry_price: mark,
-                            margin: TRADE_MARGIN,
-                            stop_loss: Some(stop_loss),
-                            take_profit: Some(take_profit),
-                            trailing_stop_pct: Some(TRAILING_STOP_PCT),
-                            trailing_stop_anchor: None,
-                        });
-                    }
-                    Err(e) => {
-                        eprintln!("  [block {block}] Failed to open position: {e}");
-                    }
+                    // Track in position manager for automated triggers
+                    pos_manager.track(ManagedPosition {
+                        perp_id: perp_bytes,
+                        position_id: pos_id_u64,
+                        is_long,
+                        entry_price: mark,
+                        margin: TRADE_MARGIN,
+                        stop_loss: Some(stop_loss),
+                        take_profit: Some(take_profit),
+                        trailing_stop_pct: Some(TRAILING_STOP_PCT),
+                        trailing_stop_anchor: None,
+                    });
+                }
+                Err(e) => {
+                    eprintln!("  [block {block}] Failed to open position: {e}");
                 }
             }
-
+        }
 
         // 4g. Print block summary
         let loop_time = loop_start.elapsed();
