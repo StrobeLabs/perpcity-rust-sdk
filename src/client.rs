@@ -791,6 +791,11 @@ impl PerpClient {
         &self.provider
     }
 
+    /// The signing wallet (for building signed transactions outside the SDK).
+    pub fn wallet(&self) -> &EthereumWallet {
+        &self.wallet
+    }
+
     /// The underlying HFT transport (for health diagnostics).
     pub fn transport(&self) -> &HftTransport {
         &self.transport
