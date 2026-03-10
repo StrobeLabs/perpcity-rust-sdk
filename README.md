@@ -22,8 +22,8 @@ cd perpcity-rust-sdk
 
 ```env
 PERPCITY_PRIVATE_KEY=your_hex_private_key
-PERPCITY_MANAGER=0x826e1ddEab1f9586e336F2beb7621Edb8FB6138D
-PERPCITY_PERP_ID=0x...
+PERPCITY_MANAGER=0x...   # PerpManager contract address
+PERPCITY_PERP_ID=0x...   # bytes32 perp market ID
 ```
 
 2. Fund your wallet on Base Sepolia — you need a small amount of ETH for gas and some USDC for margin. The testnet USDC has a public `mint` function:
@@ -189,8 +189,10 @@ All math functions are pure, `O(1)`, and ported faithfully from PerpCity's Solid
 The `Deployments` struct holds contract addresses. For Base Sepolia:
 
 ```rust
+let manager: Address = std::env::var("PERPCITY_MANAGER")?.parse()?;
+
 let deployments = Deployments {
-    perp_manager: "0x826e1ddEab1f9586e336F2beb7621Edb8FB6138D".parse().unwrap(),
+    perp_manager: manager,
     usdc: address!("C1a5D4E99BB224713dd179eA9CA2Fa6600706210"),
     fees_module: None,
     margin_ratios_module: None,
