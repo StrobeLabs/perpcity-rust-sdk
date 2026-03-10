@@ -183,7 +183,14 @@ sol! {
             uint256 longOI,
             uint256 shortOI,
             uint256 posId,
-            int256 newPerpDelta
+            int256 newPerpDelta,
+            // Settlement details
+            int256 swapPerpDelta,
+            int256 swapUsdDelta,
+            int256 funding,
+            uint256 utilizationFee,
+            uint256 adl,
+            uint256 tradingFees
         );
 
         event MarginAdjusted(
@@ -201,10 +208,17 @@ sol! {
             bool wasMaker,
             bool wasLiquidated,
             bool wasPartialClose,
-            int256 perpDelta,
-            int256 usdDelta,
+            int256 exitPerpDelta,
+            int256 exitUsdDelta,
             int24 tickLower,
-            int24 tickUpper
+            int24 tickUpper,
+            // Settlement details
+            int256 netUsdDelta,
+            int256 funding,
+            uint256 utilizationFee,
+            uint256 adl,
+            uint256 liquidationFee,
+            int256 netMargin
         );
 
         event FeesModuleRegistered(address feesModule);

@@ -25,6 +25,7 @@ url = "2"
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
 dotenvy = "0.15"
+reqwest = { version = "0.12", features = ["json"] }
 tokio = { version = "1", features = ["full", "test-util"] }
 
 [[example]]
