@@ -18,7 +18,7 @@ use std::time::Instant;
 use alloy::primitives::{Address, B256, U256, address};
 use alloy::signers::local::PrivateKeySigner;
 
-use perpcity_rust_sdk::*;
+use perpcity_sdk::*;
 
 const USDC: Address = address!("C1a5D4E99BB224713dd179eA9CA2Fa6600706210");
 

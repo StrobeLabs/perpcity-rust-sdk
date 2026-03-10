@@ -13,9 +13,9 @@
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use std::time::Duration;
 
-use perpcity_rust_sdk::transport::config::{CircuitBreakerConfig, Strategy, TransportConfig};
-use perpcity_rust_sdk::transport::health::{CircuitState, EndpointHealth};
-use perpcity_rust_sdk::transport::provider::HftTransport;
+use perpcity_sdk::transport::config::{CircuitBreakerConfig, Strategy, TransportConfig};
+use perpcity_sdk::transport::health::{CircuitState, EndpointHealth};
+use perpcity_sdk::transport::provider::HftTransport;
 
 // ---------------------------------------------------------------------------
 // Helper: build a transport with N endpoints
@@ -269,7 +269,7 @@ fn bench_time(c: &mut Criterion) {
 // ---------------------------------------------------------------------------
 
 fn bench_struct_sizes(c: &mut Criterion) {
-    use perpcity_rust_sdk::transport::health::EndpointStatus;
+    use perpcity_sdk::transport::health::EndpointStatus;
 
     let mut group = c.benchmark_group("transport_struct_sizes");
 

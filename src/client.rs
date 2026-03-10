@@ -7,11 +7,11 @@
 //! # Example
 //!
 //! ```rust,no_run
-//! use perpcity_rust_sdk::{PerpClient, Deployments, HftTransport, TransportConfig};
+//! use perpcity_sdk::{PerpClient, Deployments, HftTransport, TransportConfig};
 //! use alloy::primitives::{address, Address, B256};
 //! use alloy::signers::local::PrivateKeySigner;
 //!
-//! # async fn example() -> perpcity_rust_sdk::Result<()> {
+//! # async fn example() -> perpcity_sdk::Result<()> {
 //! let transport = HftTransport::new(
 //!     TransportConfig::builder()
 //!         .endpoint("https://mainnet.base.org")

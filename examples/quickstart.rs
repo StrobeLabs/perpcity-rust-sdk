@@ -11,7 +11,7 @@
 
 use alloy::primitives::{Address, B256, U256, address};
 use alloy::signers::local::PrivateKeySigner;
-use perpcity_rust_sdk::*;
+use perpcity_sdk::*;
 use std::env;
 
 fn env_or(key: &str, default: &str) -> String {

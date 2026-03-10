@@ -34,8 +34,8 @@ const INV_LN_1_0001: f64 = 10000.499991668185;
 /// # Examples
 ///
 /// ```
-/// # use perpcity_rust_sdk::math::tick::get_sqrt_ratio_at_tick;
-/// # use perpcity_rust_sdk::constants::Q96;
+/// # use perpcity_sdk::math::tick::get_sqrt_ratio_at_tick;
+/// # use perpcity_sdk::constants::Q96;
 /// let sqrt_price = get_sqrt_ratio_at_tick(0).unwrap();
 /// assert_eq!(sqrt_price, Q96); // tick 0 → sqrtPrice = 1.0
 /// ```
@@ -150,7 +150,7 @@ fn mul_shift_128(a: u128, b: u128) -> u128 {
 /// # Examples
 ///
 /// ```
-/// # use perpcity_rust_sdk::math::tick::tick_to_price;
+/// # use perpcity_sdk::math::tick::tick_to_price;
 /// let price = tick_to_price(0).unwrap();
 /// assert!((price - 1.0).abs() < 1e-10);
 /// ```
@@ -179,7 +179,7 @@ pub fn tick_to_price(tick: i32) -> Result<f64> {
 /// # Examples
 ///
 /// ```
-/// # use perpcity_rust_sdk::math::tick::price_to_tick;
+/// # use perpcity_sdk::math::tick::price_to_tick;
 /// let tick = price_to_tick(1.0).unwrap();
 /// assert_eq!(tick, 0);
 /// ```
@@ -213,7 +213,7 @@ pub fn price_to_tick(price: f64) -> Result<i32> {
 /// # Examples
 ///
 /// ```
-/// # use perpcity_rust_sdk::math::tick::align_tick_down;
+/// # use perpcity_sdk::math::tick::align_tick_down;
 /// assert_eq!(align_tick_down(35, 30), 30);
 /// assert_eq!(align_tick_down(-1, 30), -30);
 /// assert_eq!(align_tick_down(60, 30), 60);
@@ -230,7 +230,7 @@ pub fn align_tick_down(tick: i32, spacing: i32) -> i32 {
 /// # Examples
 ///
 /// ```
-/// # use perpcity_rust_sdk::math::tick::align_tick_up;
+/// # use perpcity_sdk::math::tick::align_tick_up;
 /// assert_eq!(align_tick_up(1, 30), 30);
 /// assert_eq!(align_tick_up(-35, 30), -30);
 /// assert_eq!(align_tick_up(60, 30), 60);

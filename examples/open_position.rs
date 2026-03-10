@@ -26,7 +26,7 @@ use std::env;
 use alloy::primitives::{Address, B256, U256, address};
 use alloy::signers::local::PrivateKeySigner;
 
-use perpcity_rust_sdk::{
+use perpcity_sdk::{
     CloseParams, Deployments, HftTransport, OpenTakerParams, PerpClient, TransportConfig, Urgency,
 };
 
@@ -69,7 +69,7 @@ fn load_perp_id() -> B256 {
 }
 
 #[tokio::main]
-async fn main() -> perpcity_rust_sdk::Result<()> {
+async fn main() -> perpcity_sdk::Result<()> {
     // ── 1. Transport ────────────────────────────────────────────────
     dotenvy::dotenv().ok();
     let rpc_url = env::var("RPC_URL").unwrap_or_else(|_| "https://sepolia.base.org".into());
@@ -148,8 +148,8 @@ async fn main() -> perpcity_rust_sdk::Result<()> {
 
     // Use math helpers for derived values
     let entry_price =
-        perpcity_rust_sdk::math::position::entry_price(pos.entryPerpDelta, pos.entryUsdDelta);
-    let size = perpcity_rust_sdk::math::position::position_size(pos.entryPerpDelta);
+        perpcity_sdk::math::position::entry_price(pos.entryPerpDelta, pos.entryUsdDelta);
+    let size = perpcity_sdk::math::position::position_size(pos.entryPerpDelta);
     println!("  Entry price: {entry_price:.6}");
     println!("  Size:        {size:.6}");
 

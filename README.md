@@ -58,7 +58,7 @@ All examples load configuration from `.env` automatically via `dotenvy`.
 ### Client Setup
 
 ```rust
-use perpcity_rust_sdk::*;
+use perpcity_sdk::*;
 
 // 1. Transport — single or multi-endpoint
 let transport = HftTransport::new(
@@ -161,9 +161,9 @@ pos_manager.track(ManagedPosition {
 ### Math Utilities
 
 ```rust
-use perpcity_rust_sdk::math::tick::{price_to_tick, tick_to_price, align_tick_down};
-use perpcity_rust_sdk::math::position::{entry_price, liquidation_price};
-use perpcity_rust_sdk::math::liquidity::estimate_liquidity;
+use perpcity_sdk::math::tick::{price_to_tick, tick_to_price, align_tick_down};
+use perpcity_sdk::math::position::{entry_price, liquidation_price};
+use perpcity_sdk::math::liquidity::estimate_liquidity;
 
 let tick = price_to_tick(50.0)?;
 let price = tick_to_price(tick)?;

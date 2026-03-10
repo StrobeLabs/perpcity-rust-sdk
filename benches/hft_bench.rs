@@ -8,12 +8,12 @@
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use std::collections::HashMap;
 
-use perpcity_rust_sdk::hft::gas::{GasCache, GasLimits, Urgency};
-use perpcity_rust_sdk::hft::latency::LatencyTracker;
-use perpcity_rust_sdk::hft::nonce::NonceManager;
-use perpcity_rust_sdk::hft::pipeline::{PipelineConfig, TxPipeline, TxRequest};
-use perpcity_rust_sdk::hft::position_manager::{ManagedPosition, PositionManager};
-use perpcity_rust_sdk::hft::state_cache::{CachedFees, StateCache, StateCacheConfig};
+use perpcity_sdk::hft::gas::{GasCache, GasLimits, Urgency};
+use perpcity_sdk::hft::latency::LatencyTracker;
+use perpcity_sdk::hft::nonce::NonceManager;
+use perpcity_sdk::hft::pipeline::{PipelineConfig, TxPipeline, TxRequest};
+use perpcity_sdk::hft::position_manager::{ManagedPosition, PositionManager};
+use perpcity_sdk::hft::state_cache::{CachedFees, StateCache, StateCacheConfig};
 
 // ---------------------------------------------------------------------------
 // Nonce benchmarks
@@ -470,9 +470,9 @@ fn bench_trading_tick(c: &mut Criterion) {
 // ---------------------------------------------------------------------------
 
 fn bench_struct_sizes(c: &mut Criterion) {
-    use perpcity_rust_sdk::hft::gas::GasFees;
-    use perpcity_rust_sdk::hft::latency::LatencyStats;
-    use perpcity_rust_sdk::hft::nonce::PendingTx;
+    use perpcity_sdk::hft::gas::GasFees;
+    use perpcity_sdk::hft::latency::LatencyStats;
+    use perpcity_sdk::hft::nonce::PendingTx;
 
     let mut group = c.benchmark_group("struct_sizes");
 

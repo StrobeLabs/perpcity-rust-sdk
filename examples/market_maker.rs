@@ -32,9 +32,9 @@ use std::time::Duration;
 use alloy::primitives::{Address, B256, U256, address};
 use alloy::signers::local::PrivateKeySigner;
 
-use perpcity_rust_sdk::math::liquidity::estimate_liquidity;
-use perpcity_rust_sdk::math::tick::{align_tick_down, align_tick_up, price_to_tick};
-use perpcity_rust_sdk::{
+use perpcity_sdk::math::liquidity::estimate_liquidity;
+use perpcity_sdk::math::tick::{align_tick_down, align_tick_up, price_to_tick};
+use perpcity_sdk::{
     CloseParams, Deployments, HftTransport, OpenMakerParams, PerpClient, TransportConfig, Urgency,
 };
 
@@ -79,10 +79,10 @@ fn load_perp_id() -> B256 {
 }
 
 #[tokio::main]
-async fn main() -> perpcity_rust_sdk::Result<()> {
+async fn main() -> perpcity_sdk::Result<()> {
     dotenvy::dotenv().ok();
     let rpc_url = env::var("RPC_URL").unwrap_or_else(|_| "https://sepolia.base.org".into());
-    let tick_spacing = perpcity_rust_sdk::constants::TICK_SPACING;
+    let tick_spacing = perpcity_sdk::constants::TICK_SPACING;
 
     // ── Setup client ────────────────────────────────────────────────
     let transport = HftTransport::new(TransportConfig::builder().endpoint(&rpc_url).build()?)?;

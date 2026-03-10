@@ -20,8 +20,8 @@
 //! # Example
 //!
 //! ```rust,no_run
-//! use perpcity_rust_sdk::transport::config::TransportConfig;
-//! use perpcity_rust_sdk::transport::provider::HftTransport;
+//! use perpcity_sdk::transport::config::TransportConfig;
+//! use perpcity_sdk::transport::provider::HftTransport;
 //! use alloy::providers::RootProvider;
 //! use alloy::transports::BoxTransport;
 //! use alloy::network::Ethereum;

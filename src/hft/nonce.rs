@@ -7,7 +7,7 @@
 //! # Example
 //!
 //! ```
-//! use perpcity_rust_sdk::hft::nonce::NonceManager;
+//! use perpcity_sdk::hft::nonce::NonceManager;
 //!
 //! let mgr = NonceManager::new(42);
 //! let n1 = mgr.acquire();

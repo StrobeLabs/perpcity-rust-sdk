@@ -13,7 +13,7 @@
 //! # Example
 //!
 //! ```
-//! use perpcity_rust_sdk::hft::state_cache::{StateCache, StateCacheConfig, CachedFees};
+//! use perpcity_sdk::hft::state_cache::{StateCache, StateCacheConfig, CachedFees};
 //!
 //! let mut cache = StateCache::new(StateCacheConfig::default());
 //! let addr = [0xAA; 20];

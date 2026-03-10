@@ -46,7 +46,7 @@ const MAX_SAFE_F64_INT: u64 = 1_u64 << 53; // 9_007_199_254_740_992
 /// # Examples
 ///
 /// ```
-/// # use perpcity_rust_sdk::convert::scale_to_6dec;
+/// # use perpcity_sdk::convert::scale_to_6dec;
 /// assert_eq!(scale_to_6dec(1.5).unwrap(), 1_500_000);
 /// assert_eq!(scale_to_6dec(-2.5).unwrap(), -2_500_000);
 /// ```
@@ -74,7 +74,7 @@ pub fn scale_to_6dec(amount: f64) -> Result<i128> {
 /// # Examples
 ///
 /// ```
-/// # use perpcity_rust_sdk::convert::scale_from_6dec;
+/// # use perpcity_sdk::convert::scale_from_6dec;
 /// assert_eq!(scale_from_6dec(1_500_000), 1.5);
 /// assert_eq!(scale_from_6dec(-2_000_000), -2.0);
 /// ```
@@ -100,7 +100,7 @@ pub fn scale_from_6dec(value: i128) -> f64 {
 /// # Examples
 ///
 /// ```
-/// # use perpcity_rust_sdk::convert::leverage_to_margin_ratio;
+/// # use perpcity_sdk::convert::leverage_to_margin_ratio;
 /// assert_eq!(leverage_to_margin_ratio(10.0).unwrap(), 100_000);
 /// assert_eq!(leverage_to_margin_ratio(1.0).unwrap(), 1_000_000);
 /// assert_eq!(leverage_to_margin_ratio(100.0).unwrap(), 10_000);
@@ -131,7 +131,7 @@ pub fn leverage_to_margin_ratio(leverage: f64) -> Result<u32> {
 /// # Examples
 ///
 /// ```
-/// # use perpcity_rust_sdk::convert::margin_ratio_to_leverage;
+/// # use perpcity_sdk::convert::margin_ratio_to_leverage;
 /// let lev = margin_ratio_to_leverage(100_000).unwrap();
 /// assert!((lev - 10.0).abs() < 0.0001);
 /// ```
@@ -163,8 +163,8 @@ pub fn margin_ratio_to_leverage(margin_ratio: u32) -> Result<f64> {
 /// # Examples
 ///
 /// ```
-/// # use perpcity_rust_sdk::convert::price_to_sqrt_price_x96;
-/// # use perpcity_rust_sdk::constants::Q96;
+/// # use perpcity_sdk::convert::price_to_sqrt_price_x96;
+/// # use perpcity_sdk::constants::Q96;
 /// # use alloy::primitives::U256;
 /// let result = price_to_sqrt_price_x96(1.0).unwrap();
 /// // For price=1.0, sqrtPriceX96 ≈ Q96
@@ -213,8 +213,8 @@ pub fn price_to_sqrt_price_x96(price: f64) -> Result<U256> {
 /// # Examples
 ///
 /// ```
-/// # use perpcity_rust_sdk::convert::sqrt_price_x96_to_price;
-/// # use perpcity_rust_sdk::constants::Q96;
+/// # use perpcity_sdk::convert::sqrt_price_x96_to_price;
+/// # use perpcity_sdk::constants::Q96;
 /// let price = sqrt_price_x96_to_price(Q96).unwrap();
 /// assert!((price - 1.0).abs() < 0.000001);
 /// ```

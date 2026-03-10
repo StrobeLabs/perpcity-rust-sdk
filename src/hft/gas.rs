@@ -7,7 +7,7 @@
 //! # Example
 //!
 //! ```
-//! use perpcity_rust_sdk::hft::gas::{GasCache, Urgency, GasLimits};
+//! use perpcity_sdk::hft::gas::{GasCache, Urgency, GasLimits};
 //!
 //! let mut cache = GasCache::new(2_000, 1_000_000_000);
 //! cache.update(50_000_000, 1000); // base_fee from block header, at t=1000ms

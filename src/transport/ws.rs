@@ -14,7 +14,7 @@
 //! # Example
 //!
 //! ```rust,no_run
-//! use perpcity_rust_sdk::transport::ws::{WsManager, ReconnectConfig};
+//! use perpcity_sdk::transport::ws::{WsManager, ReconnectConfig};
 //!
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! let manager = WsManager::connect(

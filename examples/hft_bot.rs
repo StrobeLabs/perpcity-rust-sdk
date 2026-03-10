@@ -37,10 +37,10 @@ use std::time::{Duration, Instant};
 use alloy::primitives::{Address, B256, U256, address};
 use alloy::signers::local::PrivateKeySigner;
 
-use perpcity_rust_sdk::hft::latency::LatencyTracker;
-use perpcity_rust_sdk::hft::position_manager::{ManagedPosition, PositionManager, TriggerType};
-use perpcity_rust_sdk::transport::config::Strategy;
-use perpcity_rust_sdk::{
+use perpcity_sdk::hft::latency::LatencyTracker;
+use perpcity_sdk::hft::position_manager::{ManagedPosition, PositionManager, TriggerType};
+use perpcity_sdk::transport::config::Strategy;
+use perpcity_sdk::{
     Deployments, HftTransport, OpenTakerParams, PerpClient, TransportConfig, Urgency,
 };
 
@@ -115,7 +115,7 @@ fn momentum_signal(prices: &[f64]) -> Option<bool> {
 }
 
 #[tokio::main]
-async fn main() -> perpcity_rust_sdk::Result<()> {
+async fn main() -> perpcity_sdk::Result<()> {
     dotenvy::dotenv().ok();
     let perp_id = load_perp_id();
 
@@ -160,7 +160,7 @@ async fn main() -> perpcity_rust_sdk::Result<()> {
     // ── 3. Initialize HFT infrastructure ────────────────────────────
     let mut pos_manager = PositionManager::new();
     let mut latency_tracker = LatencyTracker::new();
-    let mut trigger_buf: Vec<perpcity_rust_sdk::hft::position_manager::TriggerAction> =
+    let mut trigger_buf: Vec<perpcity_sdk::hft::position_manager::TriggerAction> =
         Vec::with_capacity(16);
     let mut price_history: Vec<f64> = Vec::with_capacity(MAX_BLOCKS as usize);
     let mut next_position_id_counter: u64 = 0;

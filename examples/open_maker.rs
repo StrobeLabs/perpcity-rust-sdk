@@ -22,9 +22,9 @@
 
 use alloy::primitives::{Address, B256, U256, address};
 use alloy::signers::local::PrivateKeySigner;
-use perpcity_rust_sdk::math::liquidity::estimate_liquidity;
-use perpcity_rust_sdk::math::tick::{align_tick_down, align_tick_up, price_to_tick};
-use perpcity_rust_sdk::*;
+use perpcity_sdk::math::liquidity::estimate_liquidity;
+use perpcity_sdk::math::tick::{align_tick_down, align_tick_up, price_to_tick};
+use perpcity_sdk::*;
 use std::env;
 
 fn env_or(key: &str, default: &str) -> String {

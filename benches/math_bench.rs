@@ -6,8 +6,8 @@
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
 
 use alloy::primitives::I256;
-use perpcity_rust_sdk::math::position::{entry_price, liquidation_price};
-use perpcity_rust_sdk::math::tick::{get_sqrt_ratio_at_tick, price_to_tick, tick_to_price};
+use perpcity_sdk::math::position::{entry_price, liquidation_price};
+use perpcity_sdk::math::tick::{get_sqrt_ratio_at_tick, price_to_tick, tick_to_price};
 
 // ---------------------------------------------------------------------------
 // Tick math benchmarks

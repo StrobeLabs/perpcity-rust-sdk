@@ -15,7 +15,7 @@
 //! # Example
 //!
 //! ```
-//! use perpcity_rust_sdk::hft::position_manager::{ManagedPosition, PositionManager};
+//! use perpcity_sdk::hft::position_manager::{ManagedPosition, PositionManager};
 //! use std::collections::HashMap;
 //!
 //! let mut mgr = PositionManager::new();
@@ -246,7 +246,7 @@ impl PositionManager {
     /// Call with a reusable `Vec` to avoid heap allocation on the hot path:
     ///
     /// ```
-    /// # use perpcity_rust_sdk::hft::position_manager::{PositionManager, TriggerAction};
+    /// # use perpcity_sdk::hft::position_manager::{PositionManager, TriggerAction};
     /// # use std::collections::HashMap;
     /// let mut mgr = PositionManager::new();
     /// let mut buf: Vec<TriggerAction> = Vec::with_capacity(16);
