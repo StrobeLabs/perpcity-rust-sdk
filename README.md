@@ -2,6 +2,13 @@
 
 Rust SDK for the [PerpCity](https://perp.city) perpetual futures protocol on Base L2. Built for high-frequency trading with lock-free nonce management, multi-endpoint transport with circuit breakers, and a 2-tier state cache.
 
+## Installation
+
+```toml
+[dependencies]
+perpcity-sdk = "0.1"
+```
+
 ## Quickstart
 
 **Prerequisites:** Rust 1.85+, a Base Sepolia RPC (the public endpoint works fine).
@@ -9,7 +16,7 @@ Rust SDK for the [PerpCity](https://perp.city) perpetual futures protocol on Bas
 1. Clone and create a `.env` file:
 
 ```bash
-git clone https://github.com/strobe-collective/perpcity-rust-sdk.git
+git clone https://github.com/StrobeLabs/perpcity-rust-sdk.git
 cd perpcity-rust-sdk
 ```
 
@@ -33,29 +40,6 @@ cast send 0xC1a5D4E99BB224713dd179eA9CA2Fa6600706210 \
 
 ```bash
 cargo run --release --example quickstart
-```
-
-## Architecture
-
-```
-┌─────────────────────────────────────────┐
-│          PerpClient (high-level)        │
-│   open_taker / open_maker / close       │
-│   get_perp_config / get_live_details    │
-├─────────────────────────────────────────┤
-│  TxPipeline    StateCache    GasCache   │
-│  (nonce+gas)   (2-tier TTL)  (EIP-1559) │
-├─────────────────────────────────────────┤
-│  RootProvider<Ethereum>  (Alloy)        │
-├─────────────────────────────────────────┤
-│          HftTransport                   │
-│  • Latency-based endpoint selection     │
-│  • Per-endpoint circuit breakers        │
-│  • Hedged reads (fan-out, take fastest) │
-│  • Read/write request classification    │
-└──────────────┬──────────────────────────┘
-               ↓
-       RPC endpoints (HTTP)
 ```
 
 ## Examples

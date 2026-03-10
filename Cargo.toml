@@ -1,9 +1,16 @@
 [package]
-name = "perpcity-rust-sdk"
+name = "perpcity-sdk"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.85"
 description = "Rust SDK for the PerpCity perpetual futures protocol on Base L2"
 license = "MIT"
+readme = "README.md"
+repository = "https://github.com/StrobeLabs/perpcity-rust-sdk"
+documentation = "https://docs.rs/perpcity-sdk"
+homepage = "https://docs.perp.city"
+keywords = ["perpetuals", "defi", "trading", "ethereum", "uniswap"]
+categories = ["api-bindings", "cryptography::cryptocurrencies", "finance"]
 
 [dependencies]
 alloy = { version = "1", features = ["full", "sol-types", "json-rpc", "rpc-client"] }
