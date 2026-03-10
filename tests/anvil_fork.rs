@@ -191,6 +191,7 @@ async fn deal_usdc(anvil_url: &str, who: Address, amount: U256) {
 // ── The test ──────────────────────────────────────────────────────────
 
 #[tokio::test]
+#[ignore] // Requires `anvil` — run with: cargo test --test anvil_fork -- --ignored --nocapture
 async fn open_and_close_taker_on_fork() {
     // 1. Start Anvil forking Base Sepolia
     let anvil = AnvilInstance::fork_base_sepolia().await;
