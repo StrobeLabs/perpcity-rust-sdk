@@ -23,7 +23,7 @@
 
 use std::env;
 
-use alloy::primitives::{address, Address, B256, U256};
+use alloy::primitives::{Address, B256, U256, address};
 use alloy::signers::local::PrivateKeySigner;
 
 use perpcity_rust_sdk::{
@@ -74,11 +74,7 @@ async fn main() -> perpcity_rust_sdk::Result<()> {
     dotenvy::dotenv().ok();
     let rpc_url = env::var("RPC_URL").unwrap_or_else(|_| "https://sepolia.base.org".into());
 
-    let transport = HftTransport::new(
-        TransportConfig::builder()
-            .endpoint(&rpc_url)
-            .build()?,
-    )?;
+    let transport = HftTransport::new(TransportConfig::builder().endpoint(&rpc_url).build()?)?;
 
     // ── 2. Client ───────────────────────────────────────────────────
     let signer = load_signer();
@@ -106,9 +102,15 @@ async fn main() -> perpcity_rust_sdk::Result<()> {
     println!("\n=== Market: {} ===", perp_id);
     println!("  Mark price:      {:.6}", perp_data.mark);
     println!("  Tick spacing:    {}", perp_data.tick_spacing);
-    println!("  Max leverage:    {:.0}x", perp_data.bounds.max_taker_leverage);
+    println!(
+        "  Max leverage:    {:.0}x",
+        perp_data.bounds.max_taker_leverage
+    );
     println!("  Min margin:      {:.2} USDC", perp_data.bounds.min_margin);
-    println!("  Creator fee:     {:.4}%", perp_data.fees.creator_fee * 100.0);
+    println!(
+        "  Creator fee:     {:.4}%",
+        perp_data.fees.creator_fee * 100.0
+    );
     println!("  LP fee:          {:.4}%", perp_data.fees.lp_fee * 100.0);
 
     let funding = client.get_funding_rate(perp_id).await?;
@@ -145,10 +147,8 @@ async fn main() -> perpcity_rust_sdk::Result<()> {
     println!("  USD delta:   {}", pos.entryUsdDelta);
 
     // Use math helpers for derived values
-    let entry_price = perpcity_rust_sdk::math::position::entry_price(
-        pos.entryPerpDelta,
-        pos.entryUsdDelta,
-    );
+    let entry_price =
+        perpcity_rust_sdk::math::position::entry_price(pos.entryPerpDelta, pos.entryUsdDelta);
     let size = perpcity_rust_sdk::math::position::position_size(pos.entryPerpDelta);
     println!("  Entry price: {entry_price:.6}");
     println!("  Size:        {size:.6}");

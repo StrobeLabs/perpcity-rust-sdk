@@ -20,7 +20,7 @@
 //! cargo run --example open_maker
 //! ```
 
-use alloy::primitives::{address, Address, B256, U256};
+use alloy::primitives::{Address, B256, U256, address};
 use alloy::signers::local::PrivateKeySigner;
 use perpcity_rust_sdk::math::liquidity::estimate_liquidity;
 use perpcity_rust_sdk::math::tick::{align_tick_down, align_tick_up, price_to_tick};
@@ -37,11 +37,7 @@ async fn main() -> Result<()> {
     let rpc_url = env_or("RPC_URL", "https://sepolia.base.org");
 
     // -- Connect --
-    let transport = HftTransport::new(
-        TransportConfig::builder()
-            .endpoint(&rpc_url)
-            .build()?,
-    )?;
+    let transport = HftTransport::new(TransportConfig::builder().endpoint(&rpc_url).build()?)?;
 
     let signer: PrivateKeySigner = env::var("PERPCITY_PRIVATE_KEY")
         .expect("set PERPCITY_PRIVATE_KEY")
@@ -91,7 +87,9 @@ async fn main() -> Result<()> {
     let margin_scaled = (margin * 1_000_000.0) as u128;
     let liquidity_u256 = estimate_liquidity(tick_lower, tick_upper, margin_scaled)?;
     let max_u120: u128 = (1u128 << 120) - 1;
-    let liquidity: u128 = u128::try_from(liquidity_u256).unwrap_or(max_u120).min(max_u120);
+    let liquidity: u128 = u128::try_from(liquidity_u256)
+        .unwrap_or(max_u120)
+        .min(max_u120);
     println!("liquidity: {liquidity}");
 
     // -- Open maker position --

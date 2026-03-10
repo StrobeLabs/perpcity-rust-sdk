@@ -17,8 +17,8 @@
 //! ```
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// A transaction that has been submitted but not yet confirmed on-chain.
 #[derive(Debug, Clone, Copy)]

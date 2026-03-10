@@ -9,12 +9,10 @@
 //! 3. Hedged fan-out (task spawn overhead per hedged request)
 //! 4. Struct sizes (cache-line analysis)
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use std::time::Duration;
 
-use perpcity_rust_sdk::transport::config::{
-    CircuitBreakerConfig, Strategy, TransportConfig,
-};
+use perpcity_rust_sdk::transport::config::{CircuitBreakerConfig, Strategy, TransportConfig};
 use perpcity_rust_sdk::transport::health::{CircuitState, EndpointHealth};
 use perpcity_rust_sdk::transport::provider::HftTransport;
 
@@ -291,10 +289,7 @@ fn bench_struct_sizes(c: &mut Criterion) {
                 "EndpointStatus exceeds cache line: {status_size}"
             );
             // CircuitState should be tiny
-            assert!(
-                state_size <= 16,
-                "CircuitState too large: {state_size}"
-            );
+            assert!(state_size <= 16, "CircuitState too large: {state_size}");
 
             black_box((health_size, status_size, state_size))
         })

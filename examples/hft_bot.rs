@@ -34,7 +34,7 @@ use std::collections::HashMap;
 use std::env;
 use std::time::{Duration, Instant};
 
-use alloy::primitives::{address, Address, B256, U256};
+use alloy::primitives::{Address, B256, U256, address};
 use alloy::signers::local::PrivateKeySigner;
 
 use perpcity_rust_sdk::hft::latency::LatencyTracker;
@@ -102,8 +102,7 @@ fn momentum_signal(prices: &[f64]) -> Option<bool> {
         return None; // need at least 5 samples
     }
     let recent_avg: f64 = prices[prices.len() - 3..].iter().sum::<f64>() / 3.0;
-    let older_avg: f64 = prices[..prices.len() - 3].iter().sum::<f64>()
-        / (prices.len() - 3) as f64;
+    let older_avg: f64 = prices[..prices.len() - 3].iter().sum::<f64>() / (prices.len() - 3) as f64;
 
     let pct_change = (recent_avg - older_avg) / older_avg;
     if pct_change > 0.001 {
@@ -169,7 +168,10 @@ async fn main() -> perpcity_rust_sdk::Result<()> {
     // Pre-fetch market config (cached for 60s in the slow layer)
     let perp_config = client.get_perp_config(perp_id).await?;
     println!("\n=== Market Config ===");
-    println!("  Max leverage: {:.0}x", perp_config.bounds.max_taker_leverage);
+    println!(
+        "  Max leverage: {:.0}x",
+        perp_config.bounds.max_taker_leverage
+    );
     println!("  Min margin:   {:.2} USDC", perp_config.bounds.min_margin);
     println!("  LP fee:       {:.4}%", perp_config.fees.lp_fee * 100.0);
 

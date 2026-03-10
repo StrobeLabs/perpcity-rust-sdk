@@ -134,8 +134,11 @@ impl EndpointHealth {
         if self.total_requests == 0 {
             self.avg_latency_ns = latency_ns;
         } else {
-            self.avg_latency_ns =
-                self.avg_latency_ns.saturating_mul(4).saturating_add(latency_ns) / 5;
+            self.avg_latency_ns = self
+                .avg_latency_ns
+                .saturating_mul(4)
+                .saturating_add(latency_ns)
+                / 5;
         }
         self.total_requests += 1;
         self.consecutive_failures = 0;
@@ -254,7 +257,12 @@ mod tests {
 
         // After 30 seconds, should transition to HalfOpen
         assert!(h.is_callable(33_000));
-        assert!(matches!(h.state(), CircuitState::HalfOpen { probes_in_flight: 1 }));
+        assert!(matches!(
+            h.state(),
+            CircuitState::HalfOpen {
+                probes_in_flight: 1
+            }
+        ));
     }
 
     #[test]

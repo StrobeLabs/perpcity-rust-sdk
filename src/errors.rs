@@ -11,7 +11,6 @@ use thiserror::Error;
 #[non_exhaustive]
 pub enum PerpCityError {
     // ── Validation errors ────────────────────────────────────────────
-
     /// Price must be positive and within protocol bounds.
     #[error("invalid price: {reason}")]
     InvalidPrice { reason: String },
@@ -37,13 +36,11 @@ pub enum PerpCityError {
     InvalidConfig { reason: String },
 
     // ── Arithmetic errors ────────────────────────────────────────────
-
     /// An arithmetic operation overflowed.
     #[error("arithmetic overflow: {context}")]
     Overflow { context: String },
 
     // ── Transaction / on-chain errors ────────────────────────────────
-
     /// A sent transaction reverted on-chain.
     #[error("transaction reverted: {reason}")]
     TxReverted { reason: String },
@@ -61,7 +58,6 @@ pub enum PerpCityError {
     TooManyInFlight { count: usize, max: usize },
 
     // ── Contract / protocol errors ───────────────────────────────────
-
     /// The perp does not exist on-chain.
     #[error("perp does not exist: {perp_id}")]
     PerpNotFound { perp_id: U256 },
@@ -75,7 +71,6 @@ pub enum PerpCityError {
     ModuleNotRegistered { module: String },
 
     // ── Transparent library error conversions ────────────────────────
-
     /// Alloy contract call or ABI error.
     #[error(transparent)]
     AlloyContract(#[from] alloy::contract::Error),

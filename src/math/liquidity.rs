@@ -95,9 +95,7 @@ pub fn liquidity_for_target_ratio(
     }
     if target_margin_ratio <= 0.0 || target_margin_ratio >= 1.0 {
         return Err(PerpCityError::InvalidLeverage {
-            reason: format!(
-                "target_margin_ratio must be in (0, 1), got {target_margin_ratio}"
-            ),
+            reason: format!("target_margin_ratio must be in (0, 1), got {target_margin_ratio}"),
         });
     }
     if margin_scaled == 0 {
@@ -231,9 +229,7 @@ mod tests {
     fn target_ratio_basic() {
         let liq = liquidity_for_target_ratio(
             1_000_000, // 1 USDC
-            -1000,
-            1000,
-            Q96, // current price = 1.0 (at tick 0)
+            -1000, 1000, Q96, // current price = 1.0 (at tick 0)
             0.1, // 10% margin ratio
         )
         .unwrap();

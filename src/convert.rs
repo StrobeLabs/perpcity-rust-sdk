@@ -58,9 +58,7 @@ pub fn scale_to_6dec(amount: f64) -> Result<i128> {
     }
     if amount.abs() > MAX_SAFE_F64_INT as f64 {
         return Err(PerpCityError::Overflow {
-            context: format!(
-                "amount {amount} exceeds safe f64 integer range (2^53)"
-            ),
+            context: format!("amount {amount} exceeds safe f64 integer range (2^53)"),
         });
     }
     Ok((amount * F64_1E6).floor() as i128)
@@ -116,9 +114,7 @@ pub fn leverage_to_margin_ratio(leverage: f64) -> Result<u32> {
     let ratio = (F64_1E6 / leverage).round();
     if ratio < 1.0 || ratio > u32::MAX as f64 {
         return Err(PerpCityError::InvalidLeverage {
-            reason: format!(
-                "leverage {leverage} produces out-of-range margin ratio {ratio}"
-            ),
+            reason: format!("leverage {leverage} produces out-of-range margin ratio {ratio}"),
         });
     }
     Ok(ratio as u32)
@@ -192,9 +188,7 @@ pub fn price_to_sqrt_price_x96(price: f64) -> Result<U256> {
 
     if scaled > MAX_SAFE_F64_INT as f64 {
         return Err(PerpCityError::InvalidPrice {
-            reason: format!(
-                "scaled sqrt(price) {scaled} exceeds safe f64 integer range"
-            ),
+            reason: format!("scaled sqrt(price) {scaled} exceeds safe f64 integer range"),
         });
     }
 
@@ -231,11 +225,12 @@ pub fn sqrt_price_x96_to_price(sqrt_price_x96: U256) -> Result<f64> {
         });
     }
 
-    let squared = sqrt_price_x96
-        .checked_mul(sqrt_price_x96)
-        .ok_or_else(|| PerpCityError::Overflow {
-            context: "sqrtPriceX96² overflows U256".into(),
-        })?;
+    let squared =
+        sqrt_price_x96
+            .checked_mul(sqrt_price_x96)
+            .ok_or_else(|| PerpCityError::Overflow {
+                context: "sqrtPriceX96² overflows U256".into(),
+            })?;
 
     let price_x96 = squared / Q96;
 

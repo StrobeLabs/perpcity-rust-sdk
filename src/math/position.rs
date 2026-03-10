@@ -409,7 +409,10 @@ mod tests {
 
     #[test]
     fn liquidation_price_zero_size() {
-        assert_eq!(liquidation_price(I256::ZERO, I256::ZERO, 100.0, 25_000, true), None);
+        assert_eq!(
+            liquidation_price(I256::ZERO, I256::ZERO, 100.0, 25_000, true),
+            None
+        );
     }
 
     #[test]

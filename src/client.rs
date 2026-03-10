@@ -38,7 +38,7 @@ use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use alloy::network::{Ethereum, EthereumWallet, TransactionBuilder};
-use alloy::primitives::{Address, Bytes, B256, I256, U256};
+use alloy::primitives::{Address, B256, Bytes, I256, U256};
 use alloy::providers::{Provider, RootProvider};
 use alloy::rpc::client::RpcClient;
 use alloy::rpc::types::TransactionRequest;
@@ -242,12 +242,13 @@ impl PerpClient {
                 reason: format!("block {block_num} not found"),
             })?;
 
-        let base_fee = header
-            .header
-            .base_fee_per_gas
-            .ok_or_else(|| PerpCityError::GasPriceUnavailable {
-                reason: "block has no base fee (pre-EIP-1559?)".into(),
-            })?;
+        let base_fee =
+            header
+                .header
+                .base_fee_per_gas
+                .ok_or_else(|| PerpCityError::GasPriceUnavailable {
+                    reason: "block has no base fee (pre-EIP-1559?)".into(),
+                })?;
 
         let now = now_ms();
         let mut gas_cache = self.gas_cache.lock().unwrap();
@@ -724,10 +725,7 @@ impl PerpClient {
         }
 
         let contract = PerpManager::new(self.deployments.perp_manager, &self.provider);
-        let funding_x96: I256 = contract
-            .fundingPerSecondX96(perp_id)
-            .call()
-            .await?;
+        let funding_x96: I256 = contract.fundingPerSecondX96(perp_id).call().await?;
 
         // Convert from X96 fixed-point to human-readable daily rate
         // rate_per_sec = funding_x96 / 2^96
@@ -870,11 +868,12 @@ impl PerpClient {
             .with_chain_id(self.chain_id);
 
         // Sign and send
-        let tx_envelope = tx.build(&self.wallet).await.map_err(|e| {
-            PerpCityError::TxReverted {
+        let tx_envelope = tx
+            .build(&self.wallet)
+            .await
+            .map_err(|e| PerpCityError::TxReverted {
                 reason: format!("failed to sign transaction: {e}"),
-            }
-        })?;
+            })?;
 
         let pending = self.provider.send_tx_envelope(tx_envelope).await?;
         let tx_hash_b256 = *pending.tx_hash();
@@ -981,13 +980,11 @@ fn u24_to_u32(v: alloy::primitives::Uint<24, 1>) -> u32 {
 /// Convert an i32 tick to Alloy's int24 type.
 #[inline]
 fn i32_to_i24(v: i32) -> alloy::primitives::Signed<24, 1> {
-    alloy::primitives::Signed::<24, 1>::try_from(v as i64).unwrap_or(
-        if v < 0 {
-            alloy::primitives::Signed::<24, 1>::MIN
-        } else {
-            alloy::primitives::Signed::<24, 1>::MAX
-        },
-    )
+    alloy::primitives::Signed::<24, 1>::try_from(v as i64).unwrap_or(if v < 0 {
+        alloy::primitives::Signed::<24, 1>::MIN
+    } else {
+        alloy::primitives::Signed::<24, 1>::MAX
+    })
 }
 
 /// Convert Alloy's int24 to an i32.

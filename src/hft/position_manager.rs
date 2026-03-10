@@ -234,10 +234,7 @@ impl PositionManager {
     /// Each position is only evaluated against the price for its own `perp_id`.
     /// Positions whose `perp_id` is not in the prices map are skipped.
     /// Returns at most one [`TriggerAction`] per position.
-    pub fn check_triggers(
-        &mut self,
-        prices: &HashMap<[u8; 32], f64>,
-    ) -> Vec<TriggerAction> {
+    pub fn check_triggers(&mut self, prices: &HashMap<[u8; 32], f64>) -> Vec<TriggerAction> {
         let mut actions = Vec::new();
         self.check_triggers_into(prices, &mut actions);
         actions
@@ -428,18 +425,12 @@ mod tests {
         // Price rises to 110 → anchor set to 110
         let t = mgr.check_triggers(&long_prices(110.0));
         assert!(t.is_empty());
-        assert_eq!(
-            mgr.get(1).unwrap().trailing_stop_anchor,
-            Some(110.0)
-        );
+        assert_eq!(mgr.get(1).unwrap().trailing_stop_anchor, Some(110.0));
 
         // Price rises to 120 → anchor updates to 120
         let t = mgr.check_triggers(&long_prices(120.0));
         assert!(t.is_empty());
-        assert_eq!(
-            mgr.get(1).unwrap().trailing_stop_anchor,
-            Some(120.0)
-        );
+        assert_eq!(mgr.get(1).unwrap().trailing_stop_anchor, Some(120.0));
 
         // Price drops to 115 → trailing stop = 120 * 0.95 = 114
         // 115 > 114 → no trigger
@@ -464,10 +455,7 @@ mod tests {
         // Price drops to 90 → anchor set to 90
         let t = mgr.check_triggers(&short_prices(90.0));
         assert!(t.is_empty());
-        assert_eq!(
-            mgr.get(1).unwrap().trailing_stop_anchor,
-            Some(90.0)
-        );
+        assert_eq!(mgr.get(1).unwrap().trailing_stop_anchor, Some(90.0));
 
         // Price drops to 80 → anchor updates to 80
         let t = mgr.check_triggers(&short_prices(80.0));
@@ -571,16 +559,10 @@ mod tests {
 
         mgr.check_triggers(&long_prices(110.0)); // anchor → 110
         mgr.check_triggers(&long_prices(105.0)); // anchor stays 110 (not 105)
-        assert_eq!(
-            mgr.get(1).unwrap().trailing_stop_anchor,
-            Some(110.0)
-        );
+        assert_eq!(mgr.get(1).unwrap().trailing_stop_anchor, Some(110.0));
 
         mgr.check_triggers(&long_prices(115.0)); // anchor → 115
-        assert_eq!(
-            mgr.get(1).unwrap().trailing_stop_anchor,
-            Some(115.0)
-        );
+        assert_eq!(mgr.get(1).unwrap().trailing_stop_anchor, Some(115.0));
     }
 
     #[test]
@@ -592,5 +574,4 @@ mod tests {
         mgr.check_triggers(&long_prices(200.0));
         assert_eq!(mgr.get(1).unwrap().trailing_stop_anchor, None);
     }
-
 }

@@ -6,8 +6,8 @@
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
 
 use alloy::primitives::I256;
-use perpcity_rust_sdk::math::tick::{get_sqrt_ratio_at_tick, price_to_tick, tick_to_price};
 use perpcity_rust_sdk::math::position::{entry_price, liquidation_price};
+use perpcity_rust_sdk::math::tick::{get_sqrt_ratio_at_tick, price_to_tick, tick_to_price};
 
 // ---------------------------------------------------------------------------
 // Tick math benchmarks
@@ -47,13 +47,9 @@ fn bench_get_sqrt_ratio_at_tick(c: &mut Criterion) {
 fn bench_tick_to_price(c: &mut Criterion) {
     let mut group = c.benchmark_group("tick_to_price");
 
-    group.bench_function("tick_0", |b| {
-        b.iter(|| tick_to_price(black_box(0)))
-    });
+    group.bench_function("tick_0", |b| b.iter(|| tick_to_price(black_box(0))));
 
-    group.bench_function("tick_1000", |b| {
-        b.iter(|| tick_to_price(black_box(1000)))
-    });
+    group.bench_function("tick_1000", |b| b.iter(|| tick_to_price(black_box(1000))));
 
     group.bench_function("tick_neg1000", |b| {
         b.iter(|| tick_to_price(black_box(-1000)))
@@ -69,9 +65,7 @@ fn bench_tick_to_price(c: &mut Criterion) {
 fn bench_price_to_tick(c: &mut Criterion) {
     let mut group = c.benchmark_group("price_to_tick");
 
-    group.bench_function("price_1.0", |b| {
-        b.iter(|| price_to_tick(black_box(1.0)))
-    });
+    group.bench_function("price_1.0", |b| b.iter(|| price_to_tick(black_box(1.0))));
 
     // Typical ETH/USD-ish price
     group.bench_function("price_1500.0", |b| {

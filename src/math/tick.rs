@@ -4,7 +4,7 @@
 //! The `get_sqrt_ratio_at_tick` implementation is an exact port of the
 //! Solidity `TickMath.getSqrtRatioAtTick` bit-shift lookup table.
 
-use alloy::primitives::{uint, U256};
+use alloy::primitives::{U256, uint};
 
 use crate::errors::{PerpCityError, Result};
 
@@ -336,10 +336,7 @@ mod tests {
         let mut prev = get_sqrt_ratio_at_tick(-1000).unwrap();
         for t in (-999..=1000).step_by(100) {
             let curr = get_sqrt_ratio_at_tick(t).unwrap();
-            assert!(
-                curr > prev,
-                "not monotonic at tick {t}: {curr} <= {prev}"
-            );
+            assert!(curr > prev, "not monotonic at tick {t}: {curr} <= {prev}");
             prev = curr;
         }
     }

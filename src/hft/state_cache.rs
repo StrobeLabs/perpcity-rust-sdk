@@ -426,7 +426,7 @@ mod tests {
             value: 42,
             expires_at: 100,
         };
-        assert!(cv.is_valid(99));  // 1 second before
+        assert!(cv.is_valid(99)); // 1 second before
         assert!(!cv.is_valid(100)); // exactly at expiry
         assert!(!cv.is_valid(101)); // after expiry
     }

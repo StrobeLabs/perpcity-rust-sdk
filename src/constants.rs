@@ -3,7 +3,7 @@
 //! All values are exact mirrors of the on-chain constants. Scaling factors
 //! use the same names as the Solidity source to eliminate any ambiguity.
 
-use alloy::primitives::{address, uint, Address, U256};
+use alloy::primitives::{Address, U256, address, uint};
 
 /// Uniswap V4 PoolManager on Base L2.
 pub const POOL_MANAGER: Address = address!("05E73354cFDd6745C338b50BcFDfA3Aa6fA03408");
@@ -54,8 +54,7 @@ pub const MIN_TICK: i32 = -69_090;
 pub const MAX_TICK: i32 = 69_090;
 
 /// Total supply of the internal accounting token: type(uint120).max.
-pub const ACCOUNTING_TOKEN_SUPPLY: U256 =
-    U256::from_limbs([u64::MAX, u64::MAX >> 8, 0, 0]); // 2^120 - 1
+pub const ACCOUNTING_TOKEN_SUPPLY: U256 = U256::from_limbs([u64::MAX, u64::MAX >> 8, 0, 0]); // 2^120 - 1
 
 /// Maximum protocol fee: 5% scaled by 1e6 (50_000).
 pub const MAX_PROTOCOL_FEE: u32 = 50_000;

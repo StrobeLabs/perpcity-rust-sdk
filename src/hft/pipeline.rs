@@ -163,12 +163,7 @@ impl TxPipeline {
     /// Record a successfully submitted transaction for in-flight tracking.
     ///
     /// Call after the signed transaction has been sent to the mempool.
-    pub fn record_submission(
-        &mut self,
-        tx_hash: [u8; 32],
-        prepared: PreparedTx,
-        now_ms: u64,
-    ) {
+    pub fn record_submission(&mut self, tx_hash: [u8; 32], prepared: PreparedTx, now_ms: u64) {
         self.nonce_mgr.track(prepared.nonce, tx_hash, now_ms);
         self.in_flight.insert(
             tx_hash,
@@ -420,10 +415,7 @@ mod tests {
         let p = pipe.prepare(req, &gc, 0).unwrap();
 
         // Critical: 4*base + 5*tip
-        assert_eq!(
-            p.gas_fees.max_fee_per_gas,
-            4 * BASE_FEE + 5 * TIP
-        );
+        assert_eq!(p.gas_fees.max_fee_per_gas, 4 * BASE_FEE + 5 * TIP);
     }
 
     #[test]

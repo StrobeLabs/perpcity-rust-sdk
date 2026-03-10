@@ -83,7 +83,6 @@ struct ManagedEndpoint {
     // ── Lock-free mirrors (eventually consistent with Mutex state) ──
     // Updated after every health mutation. Reads never take locks.
     // Follows the evmap pattern: reads are lock-free, writes sync atomics.
-
     /// Atomic mirror of `EndpointHealth::avg_latency_ns`.
     /// Read by `select_latency_based` without locking.
     atomic_latency_ns: AtomicU64,
@@ -262,10 +261,7 @@ fn is_write_method(req: &RequestPacket) -> bool {
 }
 
 fn is_write_method_name(method: &str) -> bool {
-    matches!(
-        method,
-        "eth_sendRawTransaction" | "eth_sendTransaction"
-    )
+    matches!(method, "eth_sendRawTransaction" | "eth_sendTransaction")
 }
 
 // ── Endpoint selection ──────────────────────────────────────────────
@@ -449,9 +445,7 @@ impl TransportInner {
         let timeout = self.config.request_timeout;
 
         // Handle hedged reads
-        if !is_write
-            && let Strategy::Hedged { fan_out } = self.strategy
-        {
+        if !is_write && let Strategy::Hedged { fan_out } = self.strategy {
             return self.hedged_request(req, fan_out, timeout).await;
         }
 
@@ -495,9 +489,7 @@ impl TransportInner {
             }
         }
 
-        Err(last_err.unwrap_or_else(|| {
-            TransportError::local_usage_str("no endpoints available")
-        }))
+        Err(last_err.unwrap_or_else(|| TransportError::local_usage_str("no endpoints available")))
     }
 
     /// Fan out a read request to multiple endpoints, return the fastest success.
@@ -589,9 +581,8 @@ impl TransportInner {
             }
         }
 
-        Err(last_err.unwrap_or_else(|| {
-            TransportError::local_usage_str("all hedged requests failed")
-        }))
+        Err(last_err
+            .unwrap_or_else(|| TransportError::local_usage_str("all hedged requests failed")))
     }
 }
 
@@ -817,12 +808,18 @@ mod tests {
         let ep = &inner.endpoints[0];
 
         // Initial state: Closed
-        assert_eq!(ep.atomic_state.load(Ordering::Relaxed) & TAG_MASK, TAG_CLOSED);
+        assert_eq!(
+            ep.atomic_state.load(Ordering::Relaxed) & TAG_MASK,
+            TAG_CLOSED
+        );
         assert_eq!(ep.atomic_latency_ns.load(Ordering::Relaxed), 0);
 
         // After success: still Closed, latency updated
         ep.record_success(5_000_000);
-        assert_eq!(ep.atomic_state.load(Ordering::Relaxed) & TAG_MASK, TAG_CLOSED);
+        assert_eq!(
+            ep.atomic_state.load(Ordering::Relaxed) & TAG_MASK,
+            TAG_CLOSED
+        );
         assert_eq!(ep.atomic_latency_ns.load(Ordering::Relaxed), 5_000_000);
 
         // After 3 failures: state is Open

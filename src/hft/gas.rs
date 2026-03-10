@@ -30,7 +30,7 @@ impl GasLimits {
     /// Open a maker position (range order).
     pub const OPEN_MAKER: u64 = 800_000;
     /// Close any position.
-    pub const CLOSE_POSITION: u64 = 400_000;
+    pub const CLOSE_POSITION: u64 = 600_000;
     /// Adjust position notional (add/remove exposure).
     pub const ADJUST_NOTIONAL: u64 = 350_000;
     /// Adjust position margin (add/remove collateral).
@@ -94,7 +94,9 @@ impl GasCache {
             base_fee,
             max_priority_fee_per_gas: self.default_priority_fee,
             // Store the "Normal" urgency as the default cached value
-            max_fee_per_gas: 2u64.saturating_mul(base_fee).saturating_add(self.default_priority_fee),
+            max_fee_per_gas: 2u64
+                .saturating_mul(base_fee)
+                .saturating_add(self.default_priority_fee),
             updated_at_ms: now_ms,
         });
     }
@@ -132,11 +134,13 @@ impl GasCache {
             Urgency::Low => (bf.saturating_add(pf), pf),
             Urgency::Normal => (2u64.saturating_mul(bf).saturating_add(pf), pf),
             Urgency::High => (
-                3u64.saturating_mul(bf).saturating_add(2u64.saturating_mul(pf)),
+                3u64.saturating_mul(bf)
+                    .saturating_add(2u64.saturating_mul(pf)),
                 2u64.saturating_mul(pf),
             ),
             Urgency::Critical => (
-                4u64.saturating_mul(bf).saturating_add(5u64.saturating_mul(pf)),
+                4u64.saturating_mul(bf)
+                    .saturating_add(5u64.saturating_mul(pf)),
                 5u64.saturating_mul(pf),
             ),
         };
@@ -257,7 +261,12 @@ mod tests {
     #[test]
     fn preserves_timestamp_across_urgency() {
         let c = cache_with_fees(42);
-        for urgency in [Urgency::Low, Urgency::Normal, Urgency::High, Urgency::Critical] {
+        for urgency in [
+            Urgency::Low,
+            Urgency::Normal,
+            Urgency::High,
+            Urgency::Critical,
+        ] {
             let f = c.fees_for(urgency, 42).unwrap();
             assert_eq!(f.updated_at_ms, 42);
         }

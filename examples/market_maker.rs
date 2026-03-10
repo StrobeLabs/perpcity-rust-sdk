@@ -1,7 +1,7 @@
 //! Maker (LP) position with tick range on PerpCity.
-//! 
-//! ** note that we can't actuall execute this strategy at the moment 
-//! because makers are subject to a 7-day lockup. 
+//!
+//! ** note that we can't actuall execute this strategy at the moment
+//! because makers are subject to a 7-day lockup.
 //!
 //! Demonstrates the maker flow:
 //! 1. Query the current mark price and market config
@@ -29,14 +29,14 @@
 use std::env;
 use std::time::Duration;
 
-use alloy::primitives::{address, Address, B256, U256};
+use alloy::primitives::{Address, B256, U256, address};
 use alloy::signers::local::PrivateKeySigner;
 
+use perpcity_rust_sdk::math::liquidity::estimate_liquidity;
+use perpcity_rust_sdk::math::tick::{align_tick_down, align_tick_up, price_to_tick};
 use perpcity_rust_sdk::{
     CloseParams, Deployments, HftTransport, OpenMakerParams, PerpClient, TransportConfig, Urgency,
 };
-use perpcity_rust_sdk::math::liquidity::estimate_liquidity;
-use perpcity_rust_sdk::math::tick::{align_tick_down, align_tick_up, price_to_tick};
 
 /// Base Sepolia USDC address.
 const USDC: Address = address!("C1a5D4E99BB224713dd179eA9CA2Fa6600706210");
@@ -85,11 +85,7 @@ async fn main() -> perpcity_rust_sdk::Result<()> {
     let tick_spacing = perpcity_rust_sdk::constants::TICK_SPACING;
 
     // ── Setup client ────────────────────────────────────────────────
-    let transport = HftTransport::new(
-        TransportConfig::builder()
-            .endpoint(&rpc_url)
-            .build()?,
-    )?;
+    let transport = HftTransport::new(TransportConfig::builder().endpoint(&rpc_url).build()?)?;
 
     let client = PerpClient::new(transport, load_signer(), load_deployments(), 84532)?;
     let perp_id = load_perp_id();
@@ -130,8 +126,12 @@ async fn main() -> perpcity_rust_sdk::Result<()> {
 
     println!("\n=== Range Calculation ===");
     println!("  Range width:  ±{:.1}%", RANGE_WIDTH_PCT * 100.0);
-    println!("  Price lower:  {price_lower:.6}  →  tick {tick_lower} (aligned from {raw_tick_lower})");
-    println!("  Price upper:  {price_upper:.6}  →  tick {tick_upper} (aligned from {raw_tick_upper})");
+    println!(
+        "  Price lower:  {price_lower:.6}  →  tick {tick_lower} (aligned from {raw_tick_lower})"
+    );
+    println!(
+        "  Price upper:  {price_upper:.6}  →  tick {tick_upper} (aligned from {raw_tick_upper})"
+    );
 
     // ── Estimate liquidity ──────────────────────────────────────────
     //
@@ -141,7 +141,9 @@ async fn main() -> perpcity_rust_sdk::Result<()> {
 
     // The on-chain liquidity field is uint120, so cap at max u120.
     let max_u120: u128 = (1u128 << 120) - 1;
-    let liquidity: u128 = u128::try_from(liquidity_u256).unwrap_or(max_u120).min(max_u120);
+    let liquidity: u128 = u128::try_from(liquidity_u256)
+        .unwrap_or(max_u120)
+        .min(max_u120);
 
     println!("\n=== Liquidity Estimate ===");
     println!("  Margin:       {MARGIN_USDC:.2} USDC ({margin_scaled} scaled)");

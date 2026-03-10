@@ -4,8 +4,8 @@
 //! executes on every order: nonce acquisition, gas fee lookup, state cache
 //! reads, latency recording, and the full pipeline prepare() call.
 
-use std::collections::HashMap;
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
+use std::collections::HashMap;
 
 use perpcity_rust_sdk::hft::gas::{GasCache, GasLimits, Urgency};
 use perpcity_rust_sdk::hft::latency::LatencyTracker;
@@ -179,9 +179,7 @@ fn bench_state_cache(c: &mut Criterion) {
     group.bench_function("put_mark_price", |b| {
         let mut cache = StateCache::new(StateCacheConfig::default());
         let perp = [0xAA; 32];
-        b.iter(|| {
-            cache.put_mark_price(black_box(perp), black_box(42000.0), black_box(1000))
-        })
+        b.iter(|| cache.put_mark_price(black_box(perp), black_box(42000.0), black_box(1000)))
     });
 
     // State cache with many entries (realistic warm cache)
@@ -488,10 +486,22 @@ fn bench_struct_sizes(c: &mut Criterion) {
             let managed_position_size = std::mem::size_of::<ManagedPosition>();
 
             // Assert reasonable sizes (catches accidental field additions)
-            assert!(pending_tx_size <= 64, "PendingTx exceeds cache line: {pending_tx_size}");
-            assert!(gas_fees_size <= 64, "GasFees exceeds cache line: {gas_fees_size}");
-            assert!(latency_stats_size <= 64, "LatencyStats exceeds cache line: {latency_stats_size}");
-            assert!(cached_fees_size <= 64, "CachedFees exceeds cache line: {cached_fees_size}");
+            assert!(
+                pending_tx_size <= 64,
+                "PendingTx exceeds cache line: {pending_tx_size}"
+            );
+            assert!(
+                gas_fees_size <= 64,
+                "GasFees exceeds cache line: {gas_fees_size}"
+            );
+            assert!(
+                latency_stats_size <= 64,
+                "LatencyStats exceeds cache line: {latency_stats_size}"
+            );
+            assert!(
+                cached_fees_size <= 64,
+                "CachedFees exceeds cache line: {cached_fees_size}"
+            );
 
             black_box((
                 pending_tx_size,

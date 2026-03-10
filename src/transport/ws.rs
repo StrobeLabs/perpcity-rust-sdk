@@ -88,10 +88,7 @@ impl WsManager {
     ///
     /// Establishes the initial connection. If this fails, the error is returned
     /// immediately (no retry on initial connect — the caller should handle it).
-    pub async fn connect(
-        url: impl Into<String>,
-        config: ReconnectConfig,
-    ) -> crate::Result<Self> {
+    pub async fn connect(url: impl Into<String>, config: ReconnectConfig) -> crate::Result<Self> {
         let url = url.into();
         let ws_connect = alloy::providers::WsConnect::new(&url);
         // Build RPC client directly (no fillers — we manage nonce/gas ourselves)
@@ -112,9 +109,7 @@ impl WsManager {
     /// Returns a channel receiver that yields blocks as they arrive.
     /// If the WebSocket disconnects, the sender is dropped and the receiver
     /// will return `None`.
-    pub async fn subscribe_blocks(
-        &self,
-    ) -> crate::Result<mpsc::Receiver<Header>> {
+    pub async fn subscribe_blocks(&self) -> crate::Result<mpsc::Receiver<Header>> {
         let (tx, rx) = mpsc::channel(64);
         let provider = Arc::clone(&self.provider);
 
@@ -137,10 +132,7 @@ impl WsManager {
     /// Subscribe to contract event logs matching a filter.
     ///
     /// Returns a channel receiver that yields log entries.
-    pub async fn subscribe_logs(
-        &self,
-        filter: Filter,
-    ) -> crate::Result<mpsc::Receiver<Log>> {
+    pub async fn subscribe_logs(&self, filter: Filter) -> crate::Result<mpsc::Receiver<Log>> {
         let (tx, rx) = mpsc::channel(256);
         let provider = Arc::clone(&self.provider);
 
