@@ -273,6 +273,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::assertions_on_constants)]
     fn gas_limits_are_reasonable() {
         // Ensure limits are in a sane range (not accidentally 0 or astronomical)
         assert!(GasLimits::APPROVE > 20_000 && GasLimits::APPROVE < 200_000);

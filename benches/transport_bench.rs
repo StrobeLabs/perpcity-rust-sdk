@@ -1,3 +1,4 @@
+#![allow(clippy::assertions_on_constants)]
 //! Criterion benchmarks for transport layer hot paths.
 //!
 //! These benchmarks measure the critical-path operations that occur on every

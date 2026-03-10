@@ -235,8 +235,7 @@ async fn main() -> perpcity_rust_sdk::Result<()> {
         }
 
         // 4f. Strategy: open a new position if we have a signal and no positions
-        if pos_manager.count() == 0 {
-            if let Some(is_long) = momentum_signal(&price_history) {
+        if pos_manager.count() == 0 && let Some(is_long) = momentum_signal(&price_history) {
                 let direction = if is_long { "LONG" } else { "SHORT" };
 
                 // Calculate stop-loss and take-profit levels
@@ -297,7 +296,7 @@ async fn main() -> perpcity_rust_sdk::Result<()> {
                     }
                 }
             }
-        }
+
 
         // 4g. Print block summary
         let loop_time = loop_start.elapsed();
