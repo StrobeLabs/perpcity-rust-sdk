@@ -158,3 +158,36 @@ pub struct CloseResult {
     /// `None` means the position was fully closed.
     pub remaining_position_id: Option<U256>,
 }
+
+/// Result of a swap simulation via `quoteSwap`.
+///
+/// All values are human-readable (USDC as f64, perp delta as f64).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SwapQuote {
+    /// Perp token delta (positive = received, negative = spent).
+    pub perp_delta: f64,
+    /// USD delta (positive = received, negative = spent).
+    pub usd_delta: f64,
+}
+
+/// Result of simulating a taker position open via `quoteOpenTakerPosition`.
+///
+/// All values are human-readable.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct OpenTakerQuote {
+    /// Perp token delta (positive = long exposure, negative = short).
+    pub perp_delta: f64,
+    /// USD delta (positive = received, negative = spent).
+    pub usd_delta: f64,
+}
+
+/// Result of simulating a maker position open via `quoteOpenMakerPosition`.
+///
+/// All values are human-readable.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct OpenMakerQuote {
+    /// Perp token delta.
+    pub perp_delta: f64,
+    /// USD delta.
+    pub usd_delta: f64,
+}

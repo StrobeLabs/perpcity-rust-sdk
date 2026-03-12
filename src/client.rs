@@ -58,7 +58,7 @@ use crate::math::tick::{align_tick_down, align_tick_up, price_to_tick};
 use crate::transport::provider::HftTransport;
 use crate::types::{
     Bounds, CloseParams, CloseResult, Deployments, Fees, LiveDetails, OpenInterest,
-    OpenMakerParams, OpenTakerParams, PerpData,
+    OpenMakerParams, OpenMakerQuote, OpenTakerParams, OpenTakerQuote, PerpData, SwapQuote,
 };
 
 // ── Constants ────────────────────────────────────────────────────────
@@ -706,6 +706,153 @@ impl PerpClient {
         Ok(OpenInterest {
             long_oi: result.longOI as f64 / scale,
             short_oi: result.shortOI as f64 / scale,
+        })
+    }
+
+    /// Simulate opening a taker position without sending a transaction.
+    ///
+    /// Returns the perp and USD deltas that would result from the trade.
+    /// Useful for estimating price impact before committing capital.
+    pub async fn quote_open_taker(
+        &self,
+        perp_id: B256,
+        params: &OpenTakerParams,
+    ) -> Result<OpenTakerQuote> {
+        let margin_scaled = scale_to_6dec(params.margin)?;
+        if margin_scaled <= 0 {
+            return Err(PerpCityError::InvalidMargin {
+                reason: format!("margin must be positive, got {}", params.margin),
+            });
+        }
+        let margin_ratio = leverage_to_margin_ratio(params.leverage)?;
+
+        let wire_params = PerpManager::OpenTakerPositionParams {
+            holder: self.address,
+            isLong: params.is_long,
+            margin: margin_scaled as u128,
+            marginRatio: u32_to_u24(margin_ratio),
+            unspecifiedAmountLimit: params.unspecified_amount_limit,
+        };
+
+        let contract = PerpManager::new(self.deployments.perp_manager, &self.provider);
+        let result = contract
+            .quoteOpenTakerPosition(perp_id, wire_params)
+            .call()
+            .await?;
+
+        if !result.unexpectedReason.is_empty() {
+            return Err(PerpCityError::TxReverted {
+                reason: format!(
+                    "quoteOpenTakerPosition reverted: 0x{}",
+                    alloy::primitives::hex::encode(&result.unexpectedReason)
+                ),
+            });
+        }
+
+        let scale = SCALE_F64;
+        Ok(OpenTakerQuote {
+            perp_delta: i128_from_i256(result.perpDelta) as f64 / scale,
+            usd_delta: i128_from_i256(result.usdDelta) as f64 / scale,
+        })
+    }
+
+    /// Simulate opening a maker (LP) position without sending a transaction.
+    ///
+    /// Returns the perp and USD deltas that would result from the position.
+    pub async fn quote_open_maker(
+        &self,
+        perp_id: B256,
+        params: &OpenMakerParams,
+    ) -> Result<OpenMakerQuote> {
+        let margin_scaled = scale_to_6dec(params.margin)?;
+        if margin_scaled <= 0 {
+            return Err(PerpCityError::InvalidMargin {
+                reason: format!("margin must be positive, got {}", params.margin),
+            });
+        }
+
+        let tick_lower = align_tick_down(
+            price_to_tick(params.price_lower)?,
+            crate::constants::TICK_SPACING,
+        );
+        let tick_upper = align_tick_up(
+            price_to_tick(params.price_upper)?,
+            crate::constants::TICK_SPACING,
+        );
+
+        let wire_params = PerpManager::OpenMakerPositionParams {
+            holder: self.address,
+            margin: margin_scaled as u128,
+            tickLower: i32_to_i24(tick_lower),
+            tickUpper: i32_to_i24(tick_upper),
+            liquidity: alloy::primitives::Uint::<120, 2>::from(params.liquidity),
+            maxAmt0In: params.max_amt0_in,
+            maxAmt1In: params.max_amt1_in,
+        };
+
+        let contract = PerpManager::new(self.deployments.perp_manager, &self.provider);
+        let result = contract
+            .quoteOpenMakerPosition(perp_id, wire_params)
+            .call()
+            .await?;
+
+        if !result.unexpectedReason.is_empty() {
+            return Err(PerpCityError::TxReverted {
+                reason: format!(
+                    "quoteOpenMakerPosition reverted: 0x{}",
+                    alloy::primitives::hex::encode(&result.unexpectedReason)
+                ),
+            });
+        }
+
+        let scale = SCALE_F64;
+        Ok(OpenMakerQuote {
+            perp_delta: i128_from_i256(result.perpDelta) as f64 / scale,
+            usd_delta: i128_from_i256(result.usdDelta) as f64 / scale,
+        })
+    }
+
+    /// Simulate a raw swap in a perp's Uniswap V4 pool without executing.
+    ///
+    /// This is the lowest-level quote — it simulates a single pool swap and
+    /// returns the resulting token deltas. Use this to estimate price impact
+    /// for a given trade size.
+    ///
+    /// # Arguments
+    ///
+    /// * `perp_id` — The perp market to quote against.
+    /// * `zero_for_one` — Swap direction: `true` sells token0 for token1.
+    /// * `is_exact_in` — `true` if `amount` is the exact input; `false` for exact output.
+    /// * `amount` — The swap amount (scaled to 6 decimals).
+    /// * `sqrt_price_limit_x96` — Price limit in sqrtPriceX96 format. Use `0` for no limit.
+    pub async fn quote_swap(
+        &self,
+        perp_id: B256,
+        zero_for_one: bool,
+        is_exact_in: bool,
+        amount: U256,
+        sqrt_price_limit_x96: U256,
+    ) -> Result<SwapQuote> {
+        let contract = PerpManager::new(self.deployments.perp_manager, &self.provider);
+        let sqrt_limit = alloy::primitives::Uint::<160, 3>::from(sqrt_price_limit_x96);
+        let result = contract
+            .quoteSwap(perp_id, zero_for_one, is_exact_in, amount, sqrt_limit)
+            .call()
+            .await?;
+
+        if !result.unexpectedReason.is_empty() {
+            return Err(PerpCityError::TxReverted {
+                reason: format!(
+                    "quoteSwap reverted: 0x{}",
+                    alloy::primitives::hex::encode(&result.unexpectedReason)
+                ),
+            });
+        }
+
+        let scale = SCALE_F64;
+        Ok(SwapQuote {
+            perp_delta: i128_from_i256(result.perpDelta) as f64 / scale,
+            usd_delta: i128_from_i256(result.usdDelta) as f64 / scale,
         })
     }
 
