@@ -396,6 +396,7 @@ sol! {
 
     /// Beacon interface — emits `IndexUpdated` when the oracle index changes.
     /// Each perp has its own beacon (from `PerpConfig.beacon`).
+    #[sol(rpc)]
     interface IBeacon {
         event IndexUpdated(uint256 index);
 

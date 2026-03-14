@@ -46,7 +46,7 @@ use alloy::signers::local::PrivateKeySigner;
 use alloy::transports::BoxTransport;
 
 use crate::constants::SCALE_1E6;
-use crate::contracts::{IERC20, IFees, IMarginRatios, PerpManager};
+use crate::contracts::{IBeacon, IERC20, IFees, IMarginRatios, PerpManager};
 use crate::convert::{
     leverage_to_margin_ratio, margin_ratio_to_leverage, scale_from_6dec, scale_to_6dec,
 };
@@ -639,6 +639,35 @@ impl PerpClient {
         Ok(pos)
     }
 
+    /// Get all position IDs owned by an address.
+    ///
+    /// Iterates through all minted position NFTs (1..nextPosId) and returns
+    /// those owned by `owner`. Burned or non-existent tokens are skipped.
+    ///
+    /// **Note:** This is O(n) in total positions ever minted. For high-throughput
+    /// use cases, prefer the bot API's position endpoints instead.
+    pub async fn get_positions_by_owner(&self, owner: Address) -> Result<Vec<U256>> {
+        let contract = PerpManager::new(self.deployments.perp_manager, &self.provider);
+        let next_pos_id: U256 = contract.nextPosId().call().await?;
+
+        let total: u64 = next_pos_id.try_into().unwrap_or(u64::MAX);
+        if total <= 1 {
+            return Ok(vec![]);
+        }
+
+        let mut owned = Vec::new();
+        for id in 1..total {
+            let pos_id = U256::from(id);
+            // ownerOf reverts for burned/non-existent tokens — skip those
+            match contract.ownerOf(pos_id).call().await {
+                Ok(addr) if addr == owner => owned.push(pos_id),
+                _ => {}
+            }
+        }
+
+        Ok(owned)
+    }
+
     /// Get the current mark price for a perp (TWAP with 1-second lookback).
     ///
     /// Uses the fast cache layer (2s TTL).
@@ -669,6 +698,20 @@ impl PerpClient {
         }
 
         Ok(price)
+    }
+
+    /// Get the oracle index price for a perp from its beacon contract.
+    ///
+    /// Reads the beacon address from the perp config, then calls
+    /// `IBeacon.index()` which returns a raw X96 fixed-point value.
+    pub async fn get_index_price(&self, perp_id: B256) -> Result<f64> {
+        let contract = PerpManager::new(self.deployments.perp_manager, &self.provider);
+        let config: PerpManager::PerpConfig = contract.cfgs(perp_id).call().await?;
+
+        let beacon = IBeacon::new(config.beacon, &self.provider);
+        let index_x96: U256 = beacon.index().call().await?;
+
+        crate::convert::price_x96_to_f64(index_x96)
     }
 
     /// Simulate closing a position to get live PnL, funding, and liquidation status.
