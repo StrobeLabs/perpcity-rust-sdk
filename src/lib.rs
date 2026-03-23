@@ -12,6 +12,7 @@
 //! | [`convert`] | Conversions between client f64 values and on-chain representations |
 //! | [`errors`] | SDK-wide error types using `thiserror` |
 //! | [`events`] | Event decoding: raw logs → typed `MarketEvent` values |
+//! | [`feed`] | Live market event feed over WebSocket |
 //! | [`hft`] | HFT infrastructure: nonce, gas, pipeline, state cache, latency, positions |
 //! | [`math`] | Pure math: tick ↔ price, liquidity estimation, position calculations |
 //! | [`transport`] | Multi-endpoint RPC transport with health-aware routing |
@@ -37,6 +38,7 @@ pub mod contracts;
 pub mod convert;
 pub mod errors;
 pub mod events;
+pub mod feed;
 pub mod hft;
 pub mod math;
 pub mod transport;
@@ -50,6 +52,9 @@ pub use contracts::{IBeacon, IERC20, IFees, IMarginRatios, PerpManager, PoolKey,
 
 #[doc(inline)]
 pub use events::{MarketEvent, decode_log};
+
+#[doc(inline)]
+pub use feed::MarketFeed;
 
 #[doc(inline)]
 pub use errors::{PerpCityError, Result};
