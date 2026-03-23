@@ -14,7 +14,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `events` module — `MarketEvent` enum and `decode_log()` for decoding raw on-chain logs into typed events (`PositionOpened`, `NotionalAdjusted`, `PositionClosed`, `IndexUpdated`)
+- `feed` module — `MarketFeed` for live WebSocket event streaming with per-perp filtering
+- `IBeacon` contract interface (`IndexUpdated` event + `index()` view function)
+- `price_x96_to_f64()` — base Q96 fixed-point decoder for beacon index prices
+- `Q96_PRECISION` constant — proven 0.000001 absolute error bound for Q96 decode
 - End-to-end Anvil fork integration test (`tests/anvil_fork.rs`) — full taker lifecycle on forked Base Sepolia
+- Live WebSocket integration test (`tests/ws_feed.rs`) — MarketFeed against Base Sepolia
 
 ## [0.1.0] - 2025-03-09
 
