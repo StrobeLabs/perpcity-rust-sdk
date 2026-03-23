@@ -311,10 +311,7 @@ mod tests {
         let log = RpcLog {
             inner: alloy::primitives::Log {
                 address: Address::ZERO,
-                data: LogData::new_unchecked(
-                    vec![B256::repeat_byte(0xFF)],
-                    vec![].into(),
-                ),
+                data: LogData::new_unchecked(vec![B256::repeat_byte(0xFF)], vec![].into()),
             },
             block_hash: None,
             block_number: None,
