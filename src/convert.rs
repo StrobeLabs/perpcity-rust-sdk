@@ -167,10 +167,10 @@ pub fn margin_ratio_to_leverage(margin_ratio: u32) -> Result<f64> {
 ///
 /// ```
 /// # use perpcity_sdk::convert::price_x96_to_f64;
-/// # use perpcity_sdk::constants::Q96;
+/// # use perpcity_sdk::constants::{Q96, Q96_PRECISION};
 /// // Q96 encodes price = 1.0
 /// let price = price_x96_to_f64(Q96).unwrap();
-/// assert!((price - 1.0).abs() < 0.000001);
+/// assert!((price - 1.0).abs() < Q96_PRECISION);
 /// ```
 pub fn price_x96_to_f64(value: U256) -> Result<f64> {
     if value.is_zero() {
@@ -259,9 +259,9 @@ pub fn price_to_sqrt_price_x96(price: f64) -> Result<U256> {
 ///
 /// ```
 /// # use perpcity_sdk::convert::sqrt_price_x96_to_price;
-/// # use perpcity_sdk::constants::Q96;
+/// # use perpcity_sdk::constants::{Q96, Q96_PRECISION};
 /// let price = sqrt_price_x96_to_price(Q96).unwrap();
-/// assert!((price - 1.0).abs() < 0.000001);
+/// assert!((price - 1.0).abs() < Q96_PRECISION);
 /// ```
 pub fn sqrt_price_x96_to_price(sqrt_price_x96: U256) -> Result<f64> {
     if sqrt_price_x96.is_zero() {
