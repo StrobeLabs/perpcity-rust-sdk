@@ -167,10 +167,10 @@ pub fn margin_ratio_to_leverage(margin_ratio: u32) -> Result<f64> {
 ///
 /// ```
 /// # use perpcity_sdk::convert::price_x96_to_f64;
-/// # use perpcity_sdk::constants::Q96;
+/// # use perpcity_sdk::constants::{Q96, Q96_PRECISION};
 /// // Q96 encodes price = 1.0
 /// let price = price_x96_to_f64(Q96).unwrap();
-/// assert!((price - 1.0).abs() < 0.000001);
+/// assert!((price - 1.0).abs() < Q96_PRECISION);
 /// ```
 pub fn price_x96_to_f64(value: U256) -> Result<f64> {
     if value.is_zero() {
@@ -259,9 +259,9 @@ pub fn price_to_sqrt_price_x96(price: f64) -> Result<U256> {
 ///
 /// ```
 /// # use perpcity_sdk::convert::sqrt_price_x96_to_price;
-/// # use perpcity_sdk::constants::Q96;
+/// # use perpcity_sdk::constants::{Q96, Q96_PRECISION};
 /// let price = sqrt_price_x96_to_price(Q96).unwrap();
-/// assert!((price - 1.0).abs() < 0.000001);
+/// assert!((price - 1.0).abs() < Q96_PRECISION);
 /// ```
 pub fn sqrt_price_x96_to_price(sqrt_price_x96: U256) -> Result<f64> {
     if sqrt_price_x96.is_zero() {
@@ -286,7 +286,7 @@ pub fn sqrt_price_x96_to_price(sqrt_price_x96: U256) -> Result<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::constants::{MAX_SQRT_PRICE_X96, MIN_SQRT_PRICE_X96};
+    use crate::constants::{MAX_SQRT_PRICE_X96, MIN_SQRT_PRICE_X96, Q96_PRECISION};
 
     // ── scale_to_6dec ──────────────────────────────────────────────
 
@@ -494,7 +494,7 @@ mod tests {
     fn price_x96_q96_gives_1() {
         let price = price_x96_to_f64(Q96).unwrap();
         assert!(
-            (price - 1.0).abs() < 0.000001,
+            (price - 1.0).abs() < Q96_PRECISION,
             "Q96 gave price={price}, expected ≈1.0"
         );
     }
@@ -503,7 +503,7 @@ mod tests {
     fn price_x96_half_q96_gives_0_5() {
         let price = price_x96_to_f64(Q96 / U256::from(2u64)).unwrap();
         assert!(
-            (price - 0.5).abs() < 0.001,
+            (price - 0.5).abs() < Q96_PRECISION,
             "Q96/2 gave price={price}, expected ≈0.5"
         );
     }
@@ -517,7 +517,7 @@ mod tests {
     fn price_x96_100_q96_gives_100() {
         let price = price_x96_to_f64(Q96 * U256::from(100u64)).unwrap();
         assert!(
-            (price - 100.0).abs() < 0.01,
+            (price - 100.0).abs() < Q96_PRECISION,
             "100*Q96 gave price={price}, expected ≈100.0"
         );
     }
@@ -605,7 +605,7 @@ mod tests {
     fn sqrt_price_x96_q96_gives_price_1() {
         let price = sqrt_price_x96_to_price(Q96).unwrap();
         assert!(
-            (price - 1.0).abs() < 0.000001,
+            (price - 1.0).abs() < Q96_PRECISION,
             "sqrtPriceX96=Q96 gave price={price}, expected ≈1.0"
         );
     }
@@ -614,7 +614,7 @@ mod tests {
     fn sqrt_price_x96_2q96_gives_price_4() {
         let price = sqrt_price_x96_to_price(Q96 * U256::from(2u64)).unwrap();
         assert!(
-            (price - 4.0).abs() < 0.001,
+            (price - 4.0).abs() < Q96_PRECISION,
             "sqrtPriceX96=2*Q96 gave price={price}, expected ≈4.0"
         );
     }
@@ -629,7 +629,7 @@ mod tests {
         // MIN_SQRT_PRICE_X96 corresponds to price ≈ 0.001
         let price = sqrt_price_x96_to_price(MIN_SQRT_PRICE_X96).unwrap();
         assert!(
-            (price - 0.001).abs() < 0.0005,
+            (price - 0.001).abs() < Q96_PRECISION,
             "MIN_SQRT_PRICE_X96 gave price={price}, expected ≈0.001"
         );
     }
@@ -639,7 +639,7 @@ mod tests {
         // MAX_SQRT_PRICE_X96 corresponds to price ≈ 1000
         let price = sqrt_price_x96_to_price(MAX_SQRT_PRICE_X96).unwrap();
         assert!(
-            (price - 1000.0).abs() < 0.5,
+            (price - 1000.0).abs() < Q96_PRECISION,
             "MAX_SQRT_PRICE_X96 gave price={price}, expected ≈1000"
         );
     }

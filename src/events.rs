@@ -184,7 +184,7 @@ mod tests {
     use alloy::primitives::{Address, LogData, Signed, U256};
     use alloy::rpc::types::Log as RpcLog;
 
-    use crate::constants::Q96;
+    use crate::constants::{Q96, Q96_PRECISION};
 
     /// Build a synthetic RPC Log from an event that implements SolEvent.
     fn make_log<E: SolEvent>(event: &E, address: Address) -> RpcLog {
@@ -232,7 +232,7 @@ mod tests {
                 ..
             } => {
                 assert_eq!(pid, perp_id);
-                assert!((mark_price - 1.0).abs() < 0.001);
+                assert!((mark_price - 1.0).abs() < Q96_PRECISION);
                 assert_eq!(pos_id, U256::from(42u64));
                 assert!(!is_maker);
             }
@@ -251,7 +251,7 @@ mod tests {
 
         match decoded {
             MarketEvent::IndexUpdated { index } => {
-                assert!((index - 100.0).abs() < 0.01);
+                assert!((index - 100.0).abs() < Q96_PRECISION);
             }
             _ => panic!("expected IndexUpdated"),
         }
@@ -295,11 +295,11 @@ mod tests {
                 ..
             } => {
                 assert_eq!(pid, perp_id);
-                assert!((mark_price - 100.0).abs() < 0.5);
+                assert!((mark_price - 100.0).abs() < Q96_PRECISION);
                 assert_eq!(pos_id, U256::from(7u64));
                 assert!(was_liquidated);
-                assert!((net_margin - 45.0).abs() < 0.01);
-                assert!((funding - (-1.0)).abs() < 0.01);
+                assert!((net_margin - 45.0).abs() < Q96_PRECISION);
+                assert!((funding - (-1.0)).abs() < Q96_PRECISION);
             }
             _ => panic!("expected PositionClosed"),
         }
