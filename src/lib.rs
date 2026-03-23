@@ -11,6 +11,7 @@
 //! | [`contracts`] | ABI bindings via Alloy `sol!` — structs, events, errors, functions |
 //! | [`convert`] | Conversions between client f64 values and on-chain representations |
 //! | [`errors`] | SDK-wide error types using `thiserror` |
+//! | [`events`] | Event decoding: raw logs → typed `MarketEvent` values |
 //! | [`hft`] | HFT infrastructure: nonce, gas, pipeline, state cache, latency, positions |
 //! | [`math`] | Pure math: tick ↔ price, liquidity estimation, position calculations |
 //! | [`transport`] | Multi-endpoint RPC transport with health-aware routing |
