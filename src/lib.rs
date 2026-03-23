@@ -35,6 +35,7 @@ pub mod constants;
 pub mod contracts;
 pub mod convert;
 pub mod errors;
+pub mod events;
 pub mod hft;
 pub mod math;
 pub mod transport;
@@ -44,7 +45,10 @@ pub mod types;
 pub use client::PerpClient;
 
 #[doc(inline)]
-pub use contracts::{IERC20, IFees, IMarginRatios, PerpManager, PoolKey, SwapConfig};
+pub use contracts::{IBeacon, IERC20, IFees, IMarginRatios, PerpManager, PoolKey, SwapConfig};
+
+#[doc(inline)]
+pub use events::{MarketEvent, decode_log};
 
 #[doc(inline)]
 pub use errors::{PerpCityError, Result};
