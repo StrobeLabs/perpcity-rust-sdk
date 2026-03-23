@@ -391,6 +391,18 @@ sol! {
     }
 
     // ═══════════════════════════════════════════════════════════════════
+    //  Beacon — oracle index contract
+    // ═══════════════════════════════════════════════════════════════════
+
+    /// Beacon interface — emits `IndexUpdated` when the oracle index changes.
+    /// Each perp has its own beacon (from `PerpConfig.beacon`).
+    interface IBeacon {
+        event IndexUpdated(uint256 index);
+
+        function index() external view returns (uint256);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
     //  ERC20 (USDC) — minimal interface for approve + balanceOf
     // ═══════════════════════════════════════════════════════════════════
 
