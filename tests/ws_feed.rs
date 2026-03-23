@@ -50,9 +50,14 @@ async fn subscribe_and_receive_event() {
             println!("Received event:");
             match &event {
                 MarketEvent::PositionOpened {
-                    mark_price, pos_id, is_maker, ..
+                    mark_price,
+                    pos_id,
+                    is_maker,
+                    ..
                 } => {
-                    println!("  PositionOpened — mark: {mark_price}, pos_id: {pos_id}, maker: {is_maker}");
+                    println!(
+                        "  PositionOpened — mark: {mark_price}, pos_id: {pos_id}, maker: {is_maker}"
+                    );
                 }
                 MarketEvent::NotionalAdjusted {
                     mark_price, pos_id, ..
@@ -60,9 +65,14 @@ async fn subscribe_and_receive_event() {
                     println!("  NotionalAdjusted — mark: {mark_price}, pos_id: {pos_id}");
                 }
                 MarketEvent::PositionClosed {
-                    mark_price, pos_id, was_liquidated, ..
+                    mark_price,
+                    pos_id,
+                    was_liquidated,
+                    ..
                 } => {
-                    println!("  PositionClosed — mark: {mark_price}, pos_id: {pos_id}, liquidated: {was_liquidated}");
+                    println!(
+                        "  PositionClosed — mark: {mark_price}, pos_id: {pos_id}, liquidated: {was_liquidated}"
+                    );
                 }
                 MarketEvent::IndexUpdated { index } => {
                     println!("  IndexUpdated — index: {index}");
