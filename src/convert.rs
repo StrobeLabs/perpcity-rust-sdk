@@ -146,6 +146,51 @@ pub fn margin_ratio_to_leverage(margin_ratio: u32) -> Result<f64> {
     Ok(F64_1E6 / margin_ratio as f64)
 }
 
+// ── Q96 fixed-point ↔ f64 ─────────────────────────────────────────────
+
+/// Convert a Q96 fixed-point value to f64.
+///
+/// This is the base decoder for all Q96-encoded values. The input is
+/// already a price (or index), not a sqrt price.
+///
+/// Formula: `price = value × 1e6 / 2^96 / 1e6`
+///
+/// Used for beacon index values (`IndexUpdated.index`) and as the
+/// building block for [`sqrt_price_x96_to_price`].
+///
+/// # Errors
+///
+/// Returns [`PerpCityError::InvalidPrice`] if `value` is zero, or
+/// [`PerpCityError::Overflow`] if the result exceeds safe f64 range.
+///
+/// # Examples
+///
+/// ```
+/// # use perpcity_sdk::convert::price_x96_to_f64;
+/// # use perpcity_sdk::constants::Q96;
+/// // Q96 encodes price = 1.0
+/// let price = price_x96_to_f64(Q96).unwrap();
+/// assert!((price - 1.0).abs() < 0.000001);
+/// ```
+pub fn price_x96_to_f64(value: U256) -> Result<f64> {
+    if value.is_zero() {
+        return Err(PerpCityError::InvalidPrice {
+            reason: "Q96 price value must be non-zero".into(),
+        });
+    }
+
+    let intermediate = (value * BIGINT_1E6) / Q96;
+
+    if intermediate > U256::from(MAX_SAFE_F64_INT) {
+        return Err(PerpCityError::Overflow {
+            context: "Q96 price exceeds safe f64 integer range after scaling".into(),
+        });
+    }
+
+    let int_val = intermediate.as_limbs()[0];
+    Ok(int_val as f64 / F64_1E6)
+}
+
 // ── Price ↔ sqrtPriceX96 ──────────────────────────────────────────────
 
 /// Convert a human-readable price to `sqrtPriceX96` (Uniswap V4 format).
@@ -199,10 +244,10 @@ pub fn price_to_sqrt_price_x96(price: f64) -> Result<U256> {
 
 /// Convert a `sqrtPriceX96` value back to a human-readable price.
 ///
-/// Formula:
-/// 1. `price_x96 = sqrtPriceX96² / 2^96`
-/// 2. `intermediate = price_x96 × 1e6 / 2^96`
-/// 3. `price = intermediate / 1e6`
+/// Squares the input to get a Q96 price, then delegates to
+/// [`price_x96_to_f64`].
+///
+/// Formula: `price = sqrtPriceX96² / 2^96` → [`price_x96_to_f64`]
 ///
 /// # Errors
 ///
@@ -233,19 +278,7 @@ pub fn sqrt_price_x96_to_price(sqrt_price_x96: U256) -> Result<f64> {
             })?;
 
     let price_x96 = squared / Q96;
-
-    // scaleFromX96: (value × 1e6 / Q96) → integer, then ÷ 1e6
-    let intermediate = (price_x96 * BIGINT_1E6) / Q96;
-
-    if intermediate > U256::from(MAX_SAFE_F64_INT) {
-        return Err(PerpCityError::Overflow {
-            context: "price exceeds safe f64 integer range after scaling".into(),
-        });
-    }
-
-    // Safe: we verified intermediate ≤ MAX_SAFE_F64_INT < u64::MAX.
-    let int_val = intermediate.as_limbs()[0];
-    Ok(int_val as f64 / F64_1E6)
+    price_x96_to_f64(price_x96)
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────
@@ -453,6 +486,40 @@ mod tests {
                 "roundtrip failed for {lev}x: ratio={ratio}, recovered={recovered}"
             );
         }
+    }
+
+    // ── price_x96_to_f64 ──────────────────────────────────────────────
+
+    #[test]
+    fn price_x96_q96_gives_1() {
+        let price = price_x96_to_f64(Q96).unwrap();
+        assert!(
+            (price - 1.0).abs() < 0.000001,
+            "Q96 gave price={price}, expected ≈1.0"
+        );
+    }
+
+    #[test]
+    fn price_x96_half_q96_gives_0_5() {
+        let price = price_x96_to_f64(Q96 / U256::from(2u64)).unwrap();
+        assert!(
+            (price - 0.5).abs() < 0.001,
+            "Q96/2 gave price={price}, expected ≈0.5"
+        );
+    }
+
+    #[test]
+    fn price_x96_zero_rejected() {
+        assert!(price_x96_to_f64(U256::ZERO).is_err());
+    }
+
+    #[test]
+    fn price_x96_100_q96_gives_100() {
+        let price = price_x96_to_f64(Q96 * U256::from(100u64)).unwrap();
+        assert!(
+            (price - 100.0).abs() < 0.01,
+            "100*Q96 gave price={price}, expected ≈100.0"
+        );
     }
 
     // ── price_to_sqrt_price_x96 ────────────────────────────────────
