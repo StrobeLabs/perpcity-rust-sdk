@@ -34,7 +34,7 @@ impl GasLimits {
     /// Adjust position notional (add/remove exposure).
     pub const ADJUST_NOTIONAL: u64 = 500_000;
     /// Adjust position margin (add/remove collateral).
-    pub const ADJUST_MARGIN: u64 = 250_000;
+    pub const ADJUST_MARGIN: u64 = 500_000;
 }
 
 /// Transaction urgency level, controlling EIP-1559 fee scaling.
