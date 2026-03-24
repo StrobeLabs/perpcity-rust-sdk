@@ -32,7 +32,7 @@ impl GasLimits {
     /// Close any position.
     pub const CLOSE_POSITION: u64 = 600_000;
     /// Adjust position notional (add/remove exposure).
-    pub const ADJUST_NOTIONAL: u64 = 350_000;
+    pub const ADJUST_NOTIONAL: u64 = 500_000;
     /// Adjust position margin (add/remove collateral).
     pub const ADJUST_MARGIN: u64 = 250_000;
 }
