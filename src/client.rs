@@ -650,7 +650,11 @@ impl PerpClient {
         let contract = PerpManager::new(self.deployments.perp_manager, &self.provider);
         let next_pos_id: U256 = contract.nextPosId().call().await?;
 
-        let total: u64 = next_pos_id.try_into().unwrap_or(u64::MAX);
+        let total: u64 = next_pos_id
+            .try_into()
+            .map_err(|_| PerpCityError::Overflow {
+                context: "nextPosId exceeds u64".into(),
+            })?;
         if total <= 1 {
             return Ok(vec![]);
         }
@@ -658,10 +662,14 @@ impl PerpClient {
         let mut owned = Vec::new();
         for id in 1..total {
             let pos_id = U256::from(id);
-            // ownerOf reverts for burned/non-existent tokens — skip those
+            // ownerOf reverts for burned/non-existent tokens — those
+            // surface as contract errors, which we skip. Other transport
+            // errors propagate so network failures aren't silently ignored.
             match contract.ownerOf(pos_id).call().await {
                 Ok(addr) if addr == owner => owned.push(pos_id),
-                _ => {}
+                Ok(_) => {}
+                Err(e @ alloy::contract::Error::TransportError(_)) => return Err(e.into()),
+                Err(_) => {} // burned or non-existent token
             }
         }
 
@@ -700,16 +708,19 @@ impl PerpClient {
         Ok(price)
     }
 
-    /// Get the oracle index price for a perp from its beacon contract.
+    /// Get the oracle index price from a beacon contract.
     ///
-    /// Reads the beacon address from the perp config, then calls
-    /// `IBeacon.index()` which returns a raw X96 fixed-point value.
-    pub async fn get_index_price(&self, perp_id: B256) -> Result<f64> {
-        let contract = PerpManager::new(self.deployments.perp_manager, &self.provider);
-        let config: PerpManager::PerpConfig = contract.cfgs(perp_id).call().await?;
+    /// The beacon address is available from `PerpData.beacon` (returned by
+    /// [`get_perp_config`](Self::get_perp_config)).
+    pub async fn get_index_price(&self, beacon: Address) -> Result<f64> {
+        let contract = IBeacon::new(beacon, &self.provider);
+        let index_x96: U256 = contract.index().call().await?;
 
-        let beacon = IBeacon::new(config.beacon, &self.provider);
-        let index_x96: U256 = beacon.index().call().await?;
+        if index_x96.is_zero() {
+            return Err(PerpCityError::InvalidPrice {
+                reason: "beacon returned zero index".into(),
+            });
+        }
 
         crate::convert::price_x96_to_f64(index_x96)
     }
