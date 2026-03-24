@@ -14,6 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `PerpClient::get_index_price(beacon)` — read oracle index price from a beacon contract (single RPC call)
+- `PerpClient::get_positions_by_owner(owner)` — scan position NFTs and return IDs owned by a given address
 - `events` module — `MarketEvent` enum and `decode_log()` for decoding raw on-chain logs into typed events (`PositionOpened`, `NotionalAdjusted`, `PositionClosed`, `IndexUpdated`)
 - `feed` module — `MarketFeed` for live WebSocket event streaming with per-perp filtering
 - `IBeacon` contract interface (`IndexUpdated` event + `index()` view function)
