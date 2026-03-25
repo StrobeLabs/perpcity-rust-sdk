@@ -431,16 +431,27 @@ impl TransportInner {
         candidates[..count.min(n)].iter().map(|&(i, _)| i).collect()
     }
 
-    /// Route a request through the best endpoint, with retry for reads.
+    /// Route a request through the best endpoint, with retry.
+    ///
+    /// Reads retry on any transport or RPC error. Writes only retry when the
+    /// RPC node rejects the transaction before mempool inclusion (e.g. `-32003
+    /// insufficient funds` from a stale read replica). A rejected tx never
+    /// lands on-chain, so resending the same signed bytes is idempotent.
     async fn route_request(
         self: &Arc<Self>,
         req: RequestPacket,
     ) -> Result<ResponsePacket, TransportError> {
         let is_write = is_write_method(&req);
-        let max_attempts = if is_write {
-            1
+        let (max_attempts, base_delay) = if is_write {
+            (
+                1 + self.config.write_retry.max_retries,
+                self.config.write_retry.base_delay,
+            )
         } else {
-            1 + self.config.retry.max_retries
+            (
+                1 + self.config.read_retry.max_retries,
+                self.config.read_retry.base_delay,
+            )
         };
         let timeout = self.config.request_timeout;
 
@@ -468,9 +479,20 @@ impl TransportInner {
 
             match result {
                 Ok(Ok(response)) => {
-                    let latency_ns = start.elapsed().as_nanos() as u64;
-                    self.endpoints[idx].record_success(latency_ns);
-                    return Ok(response);
+                    // For writes, check if the response is a pre-mempool rejection
+                    // that is safe to retry (tx was never accepted).
+                    if is_write
+                        && attempt + 1 < max_attempts
+                        && self.config.write_retry.is_retriable(&response)
+                    {
+                        self.endpoints[idx].record_failure(now_ms);
+                        // Pre-mempool rejection (e.g. stale replica -32003).
+                        // Fall through to backoff + retry.
+                    } else {
+                        let latency_ns = start.elapsed().as_nanos() as u64;
+                        self.endpoints[idx].record_success(latency_ns);
+                        return Ok(response);
+                    }
                 }
                 Ok(Err(e)) => {
                     self.endpoints[idx].record_failure(now_ms);
@@ -484,7 +506,7 @@ impl TransportInner {
 
             // Backoff between retries (exponential: base * 2^attempt)
             if attempt + 1 < max_attempts {
-                let delay = self.config.retry.base_delay * 2u32.saturating_pow(attempt);
+                let delay = base_delay * 2u32.saturating_pow(attempt);
                 tokio::time::sleep(delay).await;
             }
         }

@@ -24,6 +24,8 @@
 
 use std::time::Duration;
 
+use alloy::rpc::json_rpc::ResponsePacket;
+
 use crate::errors::PerpCityError;
 
 /// Endpoint selection strategy for routing RPC requests.
@@ -60,21 +62,59 @@ impl Default for CircuitBreakerConfig {
     }
 }
 
-/// Retry configuration for read operations. Writes are never retried.
+/// Retry configuration for read operations (any transport or RPC error).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct RetryConfig {
+pub struct ReadRetryConfig {
     /// Maximum number of retry attempts (0 = no retries, just the initial try).
     pub max_retries: u32,
     /// Base delay between retries. Scaled by 2^attempt for exponential backoff.
     pub base_delay: Duration,
 }
 
-impl Default for RetryConfig {
+impl Default for ReadRetryConfig {
     fn default() -> Self {
         Self {
             max_retries: 2,
             base_delay: Duration::from_millis(100),
         }
+    }
+}
+
+/// Retry configuration for write operations.
+///
+/// Writes are only retried when the RPC node *rejects* the transaction before
+/// mempool inclusion (e.g. `-32003 insufficient funds` from a stale read
+/// replica). A rejected tx never lands on-chain, so resending the same signed
+/// bytes is safe and idempotent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WriteRetryConfig {
+    /// Maximum number of retry attempts (0 = no retries, just the initial try).
+    pub max_retries: u32,
+    /// Base delay between retries. Scaled by 2^attempt for exponential backoff.
+    pub base_delay: Duration,
+}
+
+impl Default for WriteRetryConfig {
+    fn default() -> Self {
+        Self {
+            max_retries: 3,
+            base_delay: Duration::from_millis(250),
+        }
+    }
+}
+
+impl WriteRetryConfig {
+    /// Check if a JSON-RPC response is a pre-mempool rejection safe to retry.
+    ///
+    /// These errors mean the RPC node refused the transaction before it entered
+    /// the mempool — the tx never landed on-chain, so resending the same signed
+    /// bytes is idempotent.
+    ///
+    /// Known retriable rejection codes:
+    /// - `-32003`: "insufficient funds" — stale read replica sees outdated
+    ///   balance during `eth_sendRawTransaction` validation.
+    pub fn is_retriable(&self, response: &ResponsePacket) -> bool {
+        matches!(response.first_error_code(), Some(-32003))
     }
 }
 
@@ -92,7 +132,9 @@ pub struct TransportConfig {
     /// Circuit breaker settings (applied per endpoint).
     pub circuit_breaker: CircuitBreakerConfig,
     /// Retry settings for read operations.
-    pub retry: RetryConfig,
+    pub read_retry: ReadRetryConfig,
+    /// Retry settings for write operations (pre-mempool rejections only).
+    pub write_retry: WriteRetryConfig,
 }
 
 impl TransportConfig {
@@ -110,7 +152,8 @@ pub struct TransportConfigBuilder {
     request_timeout: Duration,
     strategy: Strategy,
     circuit_breaker: CircuitBreakerConfig,
-    retry: RetryConfig,
+    read_retry: ReadRetryConfig,
+    write_retry: WriteRetryConfig,
 }
 
 impl Default for TransportConfigBuilder {
@@ -121,7 +164,8 @@ impl Default for TransportConfigBuilder {
             request_timeout: Duration::from_secs(5),
             strategy: Strategy::default(),
             circuit_breaker: CircuitBreakerConfig::default(),
-            retry: RetryConfig::default(),
+            read_retry: ReadRetryConfig::default(),
+            write_retry: WriteRetryConfig::default(),
         }
     }
 }
@@ -158,8 +202,14 @@ impl TransportConfigBuilder {
     }
 
     /// Set the retry configuration for read operations.
-    pub fn retry(mut self, config: RetryConfig) -> Self {
-        self.retry = config;
+    pub fn read_retry(mut self, config: ReadRetryConfig) -> Self {
+        self.read_retry = config;
+        self
+    }
+
+    /// Set the retry configuration for write operations.
+    pub fn write_retry(mut self, config: WriteRetryConfig) -> Self {
+        self.write_retry = config;
         self
     }
 
@@ -185,7 +235,8 @@ impl TransportConfigBuilder {
             request_timeout: self.request_timeout,
             strategy: self.strategy,
             circuit_breaker: self.circuit_breaker,
-            retry: self.retry,
+            read_retry: self.read_retry,
+            write_retry: self.write_retry,
         })
     }
 }
@@ -205,7 +256,8 @@ mod tests {
         assert_eq!(config.request_timeout, Duration::from_secs(5));
         assert_eq!(config.strategy, Strategy::LatencyBased);
         assert_eq!(config.circuit_breaker.failure_threshold, 3);
-        assert_eq!(config.retry.max_retries, 2);
+        assert_eq!(config.read_retry.max_retries, 2);
+        assert_eq!(config.write_retry.max_retries, 3);
     }
 
     #[test]
@@ -221,9 +273,13 @@ mod tests {
                 recovery_timeout: Duration::from_secs(60),
                 half_open_max_requests: 2,
             })
-            .retry(RetryConfig {
+            .read_retry(ReadRetryConfig {
                 max_retries: 5,
                 base_delay: Duration::from_millis(50),
+            })
+            .write_retry(WriteRetryConfig {
+                max_retries: 1,
+                base_delay: Duration::from_millis(500),
             })
             .build()
             .unwrap();
@@ -233,7 +289,8 @@ mod tests {
         assert_eq!(config.request_timeout, Duration::from_millis(500));
         assert!(matches!(config.strategy, Strategy::Hedged { fan_out: 3 }));
         assert_eq!(config.circuit_breaker.failure_threshold, 5);
-        assert_eq!(config.retry.max_retries, 5);
+        assert_eq!(config.read_retry.max_retries, 5);
+        assert_eq!(config.write_retry.max_retries, 1);
     }
 
     #[test]
