@@ -1036,11 +1036,54 @@ impl PerpClient {
 
     // ── Internal helpers ─────────────────────────────────────────────
 
+    // ── Transfer helpers ─────────────────────────────────────────────
+
+    /// Transfer ETH to an address. Uses the transaction pipeline for
+    /// correct nonce management.
+    pub async fn transfer_eth(
+        &self,
+        to: Address,
+        amount_wei: u128,
+        urgency: Urgency,
+    ) -> Result<B256> {
+        let receipt = self
+            .send_tx_with_value(to, Bytes::new(), amount_wei, 21_000, urgency)
+            .await?;
+        Ok(receipt.transaction_hash)
+    }
+
+    /// Transfer USDC to an address. `amount` is in human units (e.g. 100.0 = 100 USDC).
+    /// Uses the transaction pipeline for correct nonce management.
+    pub async fn transfer_usdc(&self, to: Address, amount: f64, urgency: Urgency) -> Result<B256> {
+        let usdc = IERC20::new(self.deployments.usdc, &self.provider);
+        let scaled = U256::from(scale_to_6dec(amount)? as u128);
+        let calldata = usdc.transfer(to, scaled).calldata().clone();
+        let receipt = self
+            .send_tx(self.deployments.usdc, calldata, GasLimits::APPROVE, urgency)
+            .await?;
+        Ok(receipt.transaction_hash)
+    }
+
+    // ── Internal helpers ─────────────────────────────────────────────
+
     /// Prepare, sign, send, and wait for a transaction receipt.
     async fn send_tx(
         &self,
         to: Address,
         calldata: Bytes,
+        gas_limit: u64,
+        urgency: Urgency,
+    ) -> Result<alloy::rpc::types::TransactionReceipt> {
+        self.send_tx_with_value(to, calldata, 0, gas_limit, urgency)
+            .await
+    }
+
+    /// Like `send_tx` but with an explicit ETH value to attach.
+    async fn send_tx_with_value(
+        &self,
+        to: Address,
+        calldata: Bytes,
+        value: u128,
         gas_limit: u64,
         urgency: Urgency,
     ) -> Result<alloy::rpc::types::TransactionReceipt> {
@@ -1054,7 +1097,7 @@ impl PerpClient {
                 TxRequest {
                     to: to.into_array(),
                     calldata: calldata.to_vec(),
-                    value: 0,
+                    value,
                     gas_limit,
                     urgency,
                 },
@@ -1067,6 +1110,7 @@ impl PerpClient {
         let tx = TransactionRequest::default()
             .with_to(to)
             .with_input(calldata)
+            .with_value(U256::from(prepared.request.value))
             .with_nonce(prepared.nonce)
             .with_gas_limit(prepared.gas_limit)
             .with_max_fee_per_gas(prepared.gas_fees.max_fee_per_gas as u128)
