@@ -17,7 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - `RetryConfig` split into `ReadRetryConfig` and `WriteRetryConfig` with separate defaults and builder methods (`read_retry()`, `write_retry()`)
-- Writes now retry on pre-mempool RPC rejections (e.g. `-32003 insufficient funds` from stale read replicas); defaults: 3 retries, 250ms exponential backoff
+- Writes now retry on any pre-mempool RPC rejection (any error response to `eth_sendRawTransaction` means the tx never entered the mempool, so resending is safe); defaults: 3 retries, 500ms exponential backoff
 - `WriteRetryConfig::is_retriable()` centralizes the retriable error code policy
 - `TransportConfig` fields renamed: `retry` → `read_retry`, added `write_retry`
 - `PerpClient::open_taker()` and `open_maker()` now return `OpenResult` (pos_id + entry deltas from the `PositionOpened` event) instead of bare `U256`, eliminating the need for a follow-up RPC read after opening a position

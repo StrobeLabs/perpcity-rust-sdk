@@ -98,7 +98,7 @@ impl Default for WriteRetryConfig {
     fn default() -> Self {
         Self {
             max_retries: 3,
-            base_delay: Duration::from_millis(250),
+            base_delay: Duration::from_millis(500),
         }
     }
 }
@@ -106,15 +106,16 @@ impl Default for WriteRetryConfig {
 impl WriteRetryConfig {
     /// Check if a JSON-RPC response is a pre-mempool rejection safe to retry.
     ///
-    /// These errors mean the RPC node refused the transaction before it entered
-    /// the mempool — the tx never landed on-chain, so resending the same signed
-    /// bytes is idempotent.
+    /// Any error response to `eth_sendRawTransaction` means the RPC node
+    /// rejected the transaction before mempool inclusion — the signed bytes
+    /// never landed on-chain, so resending them is always safe and idempotent.
     ///
-    /// Known retriable rejection codes:
-    /// - `-32003`: "insufficient funds" — stale read replica sees outdated
-    ///   balance during `eth_sendRawTransaction` validation.
+    /// Rather than maintaining a fragile allow-list of specific error codes
+    /// (e.g. `-32003`, `-32000` for "insufficient funds"), we retry on any
+    /// error. The worst case for genuinely invalid transactions is a bounded
+    /// delay (~1.75s) as retries exhaust harmlessly.
     pub fn is_retriable(&self, response: &ResponsePacket) -> bool {
-        matches!(response.first_error_code(), Some(-32003))
+        response.first_error_code().is_some()
     }
 }
 
