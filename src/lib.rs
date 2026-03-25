@@ -67,7 +67,7 @@ pub use transport::{config::TransportConfig, provider::HftTransport};
 
 #[doc(inline)]
 pub use types::{
-    AdjustResult, Bounds, CloseParams, CloseResult, Deployments, Fees, LiveDetails, OpenInterest,
-    OpenMakerParams, OpenMakerQuote, OpenResult, OpenTakerParams, OpenTakerQuote, PerpData,
-    SwapQuote,
+    AdjustMarginParams, AdjustMarginResult, AdjustNotionalParams, AdjustNotionalResult, Bounds,
+    CloseParams, CloseResult, Deployments, Fees, LiveDetails, OpenInterest, OpenMakerParams,
+    OpenMakerQuote, OpenResult, OpenTakerParams, OpenTakerQuote, PerpData, SwapQuote,
 };
