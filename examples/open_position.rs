@@ -135,7 +135,10 @@ async fn main() -> perpcity_sdk::Result<()> {
         unspecified_amount_limit: 0, // no slippage limit for this example
     };
 
-    let position_id = client.open_taker(perp_id, &params, Urgency::Normal).await?;
+    let position_id = client
+        .open_taker(perp_id, &params, Urgency::Normal)
+        .await?
+        .pos_id;
     println!("Position opened! NFT ID: {position_id}");
 
     // ── 7. Monitor position ─────────────────────────────────────────

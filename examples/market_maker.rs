@@ -161,7 +161,10 @@ async fn main() -> perpcity_sdk::Result<()> {
         max_amt1_in: u128::MAX, // no slippage limit on token1
     };
 
-    let position_id = client.open_maker(perp_id, &params, Urgency::Normal).await?;
+    let position_id = client
+        .open_maker(perp_id, &params, Urgency::Normal)
+        .await?
+        .pos_id;
     println!("Maker position opened! NFT ID: {position_id}");
 
     // ── Monitor position ────────────────────────────────────────────

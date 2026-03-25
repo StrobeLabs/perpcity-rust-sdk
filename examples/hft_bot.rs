@@ -266,13 +266,13 @@ async fn main() -> perpcity_sdk::Result<()> {
                 )
                 .await
             {
-                Ok(on_chain_pos_id) => {
+                Ok(open_result) => {
                     let tx_latency = tx_start.elapsed();
                     latency_tracker.record(tx_latency.as_nanos() as u64);
 
                     // We use the on-chain U256 position ID. For the position
                     // manager (which uses u64 keys), extract the low 64 bits.
-                    let pos_id_u64: u64 = on_chain_pos_id.to::<u64>();
+                    let pos_id_u64: u64 = open_result.pos_id.to::<u64>();
                     next_position_id_counter = pos_id_u64;
 
                     println!(

@@ -149,6 +149,22 @@ pub struct CloseParams {
     pub max_amt1_in: u128,
 }
 
+/// Result of opening a position (taker or maker).
+///
+/// Contains the entry deltas parsed from the `PositionOpened` event so
+/// callers can construct position tracking data without a follow-up RPC read.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct OpenResult {
+    /// Minted position NFT token ID.
+    pub pos_id: U256,
+    /// Whether this is a maker position.
+    pub is_maker: bool,
+    /// Perp token delta (signed). Positive = long, negative = short.
+    pub perp_delta: f64,
+    /// USD delta (signed).
+    pub usd_delta: f64,
+}
+
 /// Result of closing a position.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CloseResult {
