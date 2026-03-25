@@ -1264,6 +1264,8 @@ fn parse_open_result(receipt: &alloy::rpc::types::TransactionReceipt) -> Result<
                 is_maker: data.isMaker,
                 perp_delta: scale_from_6dec(perp_delta),
                 usd_delta: scale_from_6dec(usd_delta),
+                tick_lower: i24_to_i32(data.tickLower),
+                tick_upper: i24_to_i32(data.tickUpper),
             });
         }
     }

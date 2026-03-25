@@ -180,6 +180,10 @@ pub struct OpenResult {
     pub perp_delta: f64,
     /// USD delta (signed).
     pub usd_delta: f64,
+    /// Lower tick of the position's price range.
+    pub tick_lower: i32,
+    /// Upper tick of the position's price range.
+    pub tick_upper: i32,
 }
 
 /// Result of adjusting a position's notional size.
