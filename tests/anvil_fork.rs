@@ -15,7 +15,8 @@ use alloy::primitives::{Address, B256, U256, address};
 use alloy::signers::local::PrivateKeySigner;
 
 use perpcity_sdk::{
-    CloseParams, Deployments, HftTransport, OpenTakerParams, PerpClient, TransportConfig, Urgency,
+    AdjustMarginParams, AdjustNotionalParams, CloseParams, Deployments, HftTransport,
+    OpenTakerParams, PerpClient, TransportConfig, Urgency,
 };
 
 // ── Deployed addresses (Base Sepolia) ─────────────────────────────────
@@ -271,21 +272,47 @@ async fn open_and_close_taker_on_fork() {
         unspecified_amount_limit: 0,
     };
 
-    let pos_id = client
+    let open_result = client
         .open_taker(perp_id, &params, Urgency::Normal)
         .await
-        .unwrap()
-        .pos_id;
+        .unwrap();
+    let pos_id = open_result.pos_id;
     println!("Position opened! ID: {pos_id}");
+    println!("  is_maker: {}", open_result.is_maker);
+    println!("  perp_delta: {}", open_result.perp_delta);
+    println!("  usd_delta: {}", open_result.usd_delta);
+    println!("  tick_lower: {}", open_result.tick_lower);
+    println!("  tick_upper: {}", open_result.tick_upper);
 
-    // 9. Read position on-chain
+    // Verify OpenResult fields
+    assert!(!open_result.is_maker, "taker should not be maker");
+    assert!(
+        open_result.perp_delta > 0.0,
+        "long should have positive perp delta"
+    );
+    assert!(
+        open_result.usd_delta < 0.0,
+        "long should have negative usd delta (paid USDC)"
+    );
+
+    // 9. Read position on-chain and cross-check with OpenResult
     let pos = client.get_position(pos_id).await.unwrap();
-    println!("  Margin: {} (6-dec)", pos.margin);
-    println!("  Perp delta: {}", pos.entryPerpDelta);
-    println!("  USD delta: {}", pos.entryUsdDelta);
-
     let entry = perpcity_sdk::math::position::entry_price(pos.entryPerpDelta, pos.entryUsdDelta);
-    println!("  Entry price: {entry}");
+    let size = perpcity_sdk::math::position::position_size(pos.entryPerpDelta);
+    println!("  Entry price (on-chain): {entry}");
+    println!("  Size (on-chain): {size}");
+
+    // OpenResult deltas should match on-chain position
+    let receipt_entry = open_result.usd_delta.abs() / open_result.perp_delta.abs();
+    assert!(
+        (receipt_entry - entry).abs() < 0.0001,
+        "entry price mismatch: receipt={receipt_entry}, chain={entry}"
+    );
+    assert!(
+        (open_result.perp_delta - size).abs() < 0.0001,
+        "size mismatch: receipt={}, chain={size}",
+        open_result.perp_delta
+    );
 
     // 10. Get live details
     let live = client.get_live_details(pos_id).await.unwrap();
@@ -296,7 +323,69 @@ async fn open_and_close_taker_on_fork() {
         "fresh position should not be liquidatable"
     );
 
-    // 11. Close position
+    // 11. Adjust notional — reduce exposure by 5 USDC (positive usd_delta = receive USD, sell perp)
+    println!("\nAdjusting notional +5 USD (reducing long exposure)...");
+    client.refresh_gas().await.unwrap();
+
+    let adjust_result = client
+        .adjust_notional(
+            pos_id,
+            &AdjustNotionalParams {
+                usd_delta: 5.0,
+                perp_limit: u128::MAX,
+            },
+            Urgency::Normal,
+        )
+        .await
+        .unwrap();
+
+    println!("  new_perp_delta: {}", adjust_result.new_perp_delta);
+    println!("  swap_perp_delta: {}", adjust_result.swap_perp_delta);
+    println!("  swap_usd_delta: {}", adjust_result.swap_usd_delta);
+    println!("  funding: {}", adjust_result.funding);
+    println!("  utilization_fee: {}", adjust_result.utilization_fee);
+    println!("  adl: {}", adjust_result.adl);
+    println!("  trading_fees: {}", adjust_result.trading_fees);
+
+    // Verify AdjustNotionalResult fields
+    // Positive usd_delta on a long = sell perp for USD = reduce exposure
+    assert!(
+        adjust_result.swap_perp_delta < 0.0,
+        "reducing long notional should give negative perp delta"
+    );
+    assert!(
+        adjust_result.new_perp_delta < open_result.perp_delta,
+        "cumulative perp delta should decrease after reducing exposure"
+    );
+    assert!(
+        adjust_result.trading_fees >= 0.0,
+        "trading fees should be non-negative"
+    );
+    assert!(
+        adjust_result.utilization_fee >= 0.0,
+        "utilization fee should be non-negative"
+    );
+
+    // 12. Adjust margin — deposit 2 more USDC
+    println!("\nAdjusting margin +2 USDC...");
+    client.refresh_gas().await.unwrap();
+
+    let margin_result = client
+        .adjust_margin(
+            pos_id,
+            &AdjustMarginParams { margin_delta: 2.0 },
+            Urgency::Normal,
+        )
+        .await
+        .unwrap();
+
+    println!("  new_margin: {}", margin_result.new_margin);
+    assert!(
+        margin_result.new_margin > 0.0,
+        "new margin should be positive"
+    );
+
+    // 13. Close position
     println!("\nClosing position...");
     client.refresh_gas().await.unwrap();
 
@@ -314,16 +403,42 @@ async fn open_and_close_taker_on_fork() {
         .unwrap();
 
     println!("Position closed! tx: {}", close_result.tx_hash);
+    println!("  was_maker: {}", close_result.was_maker);
+    println!("  was_liquidated: {}", close_result.was_liquidated);
+    println!("  exit_perp_delta: {}", close_result.exit_perp_delta);
+    println!("  exit_usd_delta: {}", close_result.exit_usd_delta);
+    println!("  net_usd_delta: {}", close_result.net_usd_delta);
+    println!("  funding: {}", close_result.funding);
+    println!("  utilization_fee: {}", close_result.utilization_fee);
+    println!("  adl: {}", close_result.adl);
+    println!("  liquidation_fee: {}", close_result.liquidation_fee);
+    println!("  net_margin: {}", close_result.net_margin);
+
+    // Verify CloseResult fields
+    assert!(!close_result.was_maker, "taker should not be maker");
+    assert!(!close_result.was_liquidated, "should not be liquidated");
     assert!(
         close_result.remaining_position_id.is_none(),
         "expected full close"
     );
+    assert!(
+        close_result.exit_perp_delta != 0.0,
+        "exit perp delta should be non-zero"
+    );
+    assert!(
+        close_result.net_margin != 0.0,
+        "net margin should be non-zero"
+    );
+    assert!(
+        close_result.liquidation_fee == 0.0,
+        "no liquidation fee for normal close"
+    );
 
-    // 12. Check final balance
+    // 14. Check final balance
     client.invalidate_fast_cache();
     let final_balance = client.get_usdc_balance().await.unwrap();
     println!("\nFinal USDC balance: {final_balance}");
-    assert!(final_balance > 990.0, "lost too much USDC: {final_balance}");
+    assert!(final_balance > 980.0, "lost too much USDC: {final_balance}");
 
     println!("\n=== Test passed! ===");
 }

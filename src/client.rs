@@ -414,8 +414,8 @@ impl PerpClient {
 
     /// Adjust the notional exposure of a taker position.
     ///
-    /// - `usd_delta > 0`: increase notional (add exposure)
-    /// - `usd_delta < 0`: decrease notional (reduce exposure)
+    /// - `usd_delta > 0`: receive USD by selling perp tokens (reduce exposure)
+    /// - `usd_delta < 0`: spend USD to buy perp tokens (increase exposure)
     pub async fn adjust_notional(
         &self,
         pos_id: U256,
