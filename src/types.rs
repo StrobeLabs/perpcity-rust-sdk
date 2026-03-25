@@ -149,10 +149,27 @@ pub struct CloseParams {
     pub max_amt1_in: u128,
 }
 
+/// Client-facing parameters for adjusting a position's notional exposure.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AdjustNotionalParams {
+    /// USD delta: positive to increase notional, negative to decrease.
+    pub usd_delta: f64,
+    /// Maximum perp token amount for slippage protection. `u128::MAX` = no limit.
+    pub perp_limit: u128,
+}
+
+/// Client-facing parameters for adjusting a position's margin.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AdjustMarginParams {
+    /// Margin delta in USDC: positive to deposit, negative to withdraw.
+    pub margin_delta: f64,
+}
+
+// ── Result types ────────────────────────────────────────────────────
+
 /// Result of opening a position (taker or maker).
 ///
-/// Contains the entry deltas parsed from the `PositionOpened` event so
-/// callers can construct position tracking data without a follow-up RPC read.
+/// Parsed from the `PositionOpened` event in the transaction receipt.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct OpenResult {
     /// Minted position NFT token ID.
@@ -163,16 +180,72 @@ pub struct OpenResult {
     pub perp_delta: f64,
     /// USD delta (signed).
     pub usd_delta: f64,
+    /// Lower tick of the position's price range.
+    pub tick_lower: i32,
+    /// Upper tick of the position's price range.
+    pub tick_upper: i32,
+}
+
+/// Result of adjusting a position's notional size.
+///
+/// Parsed from the `NotionalAdjusted` event in the transaction receipt.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AdjustNotionalResult {
+    /// New cumulative perp delta after adjustment (signed).
+    pub new_perp_delta: f64,
+    /// Perp delta from this specific swap (signed).
+    pub swap_perp_delta: f64,
+    /// USD delta from this specific swap (signed).
+    pub swap_usd_delta: f64,
+    /// Funding settled during this adjustment.
+    pub funding: f64,
+    /// Utilization fee charged.
+    pub utilization_fee: f64,
+    /// Auto-deleveraging amount.
+    pub adl: f64,
+    /// Trading fees charged.
+    pub trading_fees: f64,
+}
+
+/// Result of adjusting a position's margin.
+///
+/// Parsed from the `MarginAdjusted` event in the transaction receipt.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AdjustMarginResult {
+    /// New margin after adjustment.
+    pub new_margin: f64,
 }
 
 /// Result of closing a position.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// Parsed from the `PositionClosed` event in the transaction receipt.
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CloseResult {
     /// Transaction hash.
     pub tx_hash: B256,
+    /// Whether this was a maker position.
+    pub was_maker: bool,
+    /// Whether the position was liquidated.
+    pub was_liquidated: bool,
     /// If the close was partial, the remaining position's NFT token ID.
     /// `None` means the position was fully closed.
     pub remaining_position_id: Option<U256>,
+    /// Perp delta at exit (signed).
+    pub exit_perp_delta: f64,
+    /// USD delta at exit (signed).
+    pub exit_usd_delta: f64,
+    /// Net USD delta after settlement.
+    pub net_usd_delta: f64,
+    /// Funding settled at close.
+    pub funding: f64,
+    /// Utilization fee charged.
+    pub utilization_fee: f64,
+    /// Auto-deleveraging amount.
+    pub adl: f64,
+    /// Liquidation fee (zero if not liquidated).
+    pub liquidation_fee: f64,
+    /// Net margin returned.
+    pub net_margin: f64,
 }
 
 /// Result of a swap simulation via `quoteSwap`.

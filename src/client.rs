@@ -57,9 +57,9 @@ use crate::hft::state_cache::{CachedBounds, CachedFees, StateCache, StateCacheCo
 use crate::math::tick::{align_tick_down, align_tick_up, price_to_tick};
 use crate::transport::provider::HftTransport;
 use crate::types::{
-    Bounds, CloseParams, CloseResult, Deployments, Fees, LiveDetails, OpenInterest,
-    OpenMakerParams, OpenMakerQuote, OpenResult, OpenTakerParams, OpenTakerQuote, PerpData,
-    SwapQuote,
+    AdjustMarginParams, AdjustMarginResult, AdjustNotionalParams, AdjustNotionalResult, Bounds,
+    CloseParams, CloseResult, Deployments, Fees, LiveDetails, OpenInterest, OpenMakerParams,
+    OpenMakerQuote, OpenResult, OpenTakerParams, OpenTakerQuote, PerpData, SwapQuote,
 };
 
 // ── Constants ────────────────────────────────────────────────────────
@@ -414,23 +414,22 @@ impl PerpClient {
 
     /// Adjust the notional exposure of a taker position.
     ///
-    /// - `usd_delta > 0`: increase notional (add exposure)
-    /// - `usd_delta < 0`: decrease notional (reduce exposure)
+    /// - `usd_delta > 0`: receive USD by selling perp tokens (reduce exposure)
+    /// - `usd_delta < 0`: spend USD to buy perp tokens (increase exposure)
     pub async fn adjust_notional(
         &self,
         pos_id: U256,
-        usd_delta: f64,
-        perp_limit: u128,
+        params: &AdjustNotionalParams,
         urgency: Urgency,
-    ) -> Result<B256> {
-        let usd_delta_scaled = scale_to_6dec(usd_delta)?;
+    ) -> Result<AdjustNotionalResult> {
+        let usd_delta_scaled = scale_to_6dec(params.usd_delta)?;
 
         let wire_params = PerpManager::AdjustNotionalParams {
             posId: pos_id,
             usdDelta: I256::try_from(usd_delta_scaled).map_err(|_| PerpCityError::Overflow {
                 context: format!("usd_delta {} overflows I256", usd_delta_scaled),
             })?,
-            perpLimit: perp_limit,
+            perpLimit: params.perp_limit,
         };
 
         let contract = PerpManager::new(self.deployments.perp_manager, &self.provider);
@@ -445,7 +444,7 @@ impl PerpClient {
             )
             .await?;
 
-        Ok(receipt.transaction_hash)
+        parse_adjust_result(&receipt)
     }
 
     /// Add or remove margin from a position.
@@ -455,10 +454,10 @@ impl PerpClient {
     pub async fn adjust_margin(
         &self,
         pos_id: U256,
-        margin_delta: f64,
+        params: &AdjustMarginParams,
         urgency: Urgency,
-    ) -> Result<B256> {
-        let delta_scaled = scale_to_6dec(margin_delta)?;
+    ) -> Result<AdjustMarginResult> {
+        let delta_scaled = scale_to_6dec(params.margin_delta)?;
 
         let wire_params = PerpManager::AdjustMarginParams {
             posId: pos_id,
@@ -479,7 +478,7 @@ impl PerpClient {
             )
             .await?;
 
-        Ok(receipt.transaction_hash)
+        parse_margin_result(&receipt)
     }
 
     /// Ensure USDC is approved for the PerpManager to spend.
@@ -1248,24 +1247,9 @@ fn i128_from_i256(v: I256) -> i128 {
     })
 }
 
-/// Parse a [`CloseResult`] from a transaction receipt's `PositionClosed` event.
-fn parse_close_result(
-    receipt: &alloy::rpc::types::TransactionReceipt,
-    pos_id: U256,
-) -> Result<CloseResult> {
-    let tx_hash = receipt.transaction_hash;
-    for log in receipt.inner.logs() {
-        if let Ok(event) = log.log_decode::<PerpManager::PositionClosed>() {
-            let was_partial = event.inner.data.wasPartialClose;
-            return Ok(CloseResult {
-                tx_hash,
-                remaining_position_id: if was_partial { Some(pos_id) } else { None },
-            });
-        }
-    }
-    Err(PerpCityError::EventNotFound {
-        event_name: "PositionClosed".into(),
-    })
+/// Scale an unsigned `U256` from 6-decimal on-chain representation to `f64`.
+fn u256_to_f64_6dec(v: U256) -> f64 {
+    v.to::<u128>() as f64 / 1_000_000.0
 }
 
 /// Parse an [`OpenResult`] from a transaction receipt's `PositionOpened` event.
@@ -1280,11 +1264,86 @@ fn parse_open_result(receipt: &alloy::rpc::types::TransactionReceipt) -> Result<
                 is_maker: data.isMaker,
                 perp_delta: scale_from_6dec(perp_delta),
                 usd_delta: scale_from_6dec(usd_delta),
+                tick_lower: i24_to_i32(data.tickLower),
+                tick_upper: i24_to_i32(data.tickUpper),
             });
         }
     }
     Err(PerpCityError::EventNotFound {
         event_name: "PositionOpened".into(),
+    })
+}
+
+/// Parse an [`AdjustNotionalResult`] from a transaction receipt's `NotionalAdjusted` event.
+fn parse_adjust_result(
+    receipt: &alloy::rpc::types::TransactionReceipt,
+) -> Result<AdjustNotionalResult> {
+    for log in receipt.inner.logs() {
+        if let Ok(event) = log.log_decode::<PerpManager::NotionalAdjusted>() {
+            let data = event.inner.data;
+            return Ok(AdjustNotionalResult {
+                new_perp_delta: scale_from_6dec(i128_from_i256(data.newPerpDelta)),
+                swap_perp_delta: scale_from_6dec(i128_from_i256(data.swapPerpDelta)),
+                swap_usd_delta: scale_from_6dec(i128_from_i256(data.swapUsdDelta)),
+                funding: scale_from_6dec(i128_from_i256(data.funding)),
+                utilization_fee: u256_to_f64_6dec(data.utilizationFee),
+                adl: u256_to_f64_6dec(data.adl),
+                trading_fees: u256_to_f64_6dec(data.tradingFees),
+            });
+        }
+    }
+    Err(PerpCityError::EventNotFound {
+        event_name: "NotionalAdjusted".into(),
+    })
+}
+
+/// Parse an [`AdjustMarginResult`] from a transaction receipt's `MarginAdjusted` event.
+fn parse_margin_result(
+    receipt: &alloy::rpc::types::TransactionReceipt,
+) -> Result<AdjustMarginResult> {
+    for log in receipt.inner.logs() {
+        if let Ok(event) = log.log_decode::<PerpManager::MarginAdjusted>() {
+            return Ok(AdjustMarginResult {
+                new_margin: u256_to_f64_6dec(event.inner.data.newMargin),
+            });
+        }
+    }
+    Err(PerpCityError::EventNotFound {
+        event_name: "MarginAdjusted".into(),
+    })
+}
+
+/// Parse a [`CloseResult`] from a transaction receipt's `PositionClosed` event.
+fn parse_close_result(
+    receipt: &alloy::rpc::types::TransactionReceipt,
+    pos_id: U256,
+) -> Result<CloseResult> {
+    let tx_hash = receipt.transaction_hash;
+    for log in receipt.inner.logs() {
+        if let Ok(event) = log.log_decode::<PerpManager::PositionClosed>() {
+            let data = event.inner.data;
+            return Ok(CloseResult {
+                tx_hash,
+                was_maker: data.wasMaker,
+                was_liquidated: data.wasLiquidated,
+                remaining_position_id: if data.wasPartialClose {
+                    Some(pos_id)
+                } else {
+                    None
+                },
+                exit_perp_delta: scale_from_6dec(i128_from_i256(data.exitPerpDelta)),
+                exit_usd_delta: scale_from_6dec(i128_from_i256(data.exitUsdDelta)),
+                net_usd_delta: scale_from_6dec(i128_from_i256(data.netUsdDelta)),
+                funding: scale_from_6dec(i128_from_i256(data.funding)),
+                utilization_fee: u256_to_f64_6dec(data.utilizationFee),
+                adl: u256_to_f64_6dec(data.adl),
+                liquidation_fee: u256_to_f64_6dec(data.liquidationFee),
+                net_margin: scale_from_6dec(i128_from_i256(data.netMargin)),
+            });
+        }
+    }
+    Err(PerpCityError::EventNotFound {
+        event_name: "PositionClosed".into(),
     })
 }
 
