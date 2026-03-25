@@ -111,7 +111,8 @@ async fn main() -> Result<()> {
         trade_times_ms.push(elapsed);
 
         match &result {
-            Ok(pos_id) => {
+            Ok(result) => {
+                let pos_id = result.pos_id;
                 if i == 0 {
                     eprintln!("  trade[0] (cold): {elapsed:.2}ms  pos_id={pos_id}");
                 }

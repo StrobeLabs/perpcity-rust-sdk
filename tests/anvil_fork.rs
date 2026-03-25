@@ -274,7 +274,8 @@ async fn open_and_close_taker_on_fork() {
     let pos_id = client
         .open_taker(perp_id, &params, Urgency::Normal)
         .await
-        .unwrap();
+        .unwrap()
+        .pos_id;
     println!("Position opened! ID: {pos_id}");
 
     // 9. Read position on-chain

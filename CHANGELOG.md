@@ -12,8 +12,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `PositionClosed` event ABI now matches deployed contract (added settlement detail fields: `netUsdDelta`, `funding`, `utilizationFee`, `adl`, `liquidationFee`, `netMargin`)
 - `NotionalAdjusted` event ABI now matches deployed contract (added settlement detail fields: `swapPerpDelta`, `swapUsdDelta`, `funding`, `utilizationFee`, `adl`, `tradingFees`)
 
+### Changed
+
+- `PerpClient::open_taker()` and `open_maker()` now return `OpenResult` (pos_id + entry deltas from the `PositionOpened` event) instead of bare `U256`, eliminating the need for a follow-up RPC read after opening a position
+- Extracted `parse_open_result()` and `parse_close_result()` receipt-parsing helpers
+
 ### Added
 
+- `PerpClient::transfer_eth(to, amount_wei, urgency)` — ETH transfer routed through the transaction pipeline for correct nonce management
+- `PerpClient::transfer_usdc(to, amount, urgency)` — USDC transfer routed through the transaction pipeline for correct nonce management
+- `OpenResult` type — contains `pos_id`, `is_maker`, `perp_delta`, `usd_delta`
+- `send_tx` now applies the `TxRequest.value` field to the `TransactionRequest` (was previously ignored)
 - `PerpClient::get_index_price(beacon)` — read oracle index price from a beacon contract (single RPC call)
 - `PerpClient::get_positions_by_owner(owner)` — scan position NFTs and return IDs owned by a given address
 - `events` module — `MarketEvent` enum and `decode_log()` for decoding raw on-chain logs into typed events (`PositionOpened`, `NotionalAdjusted`, `PositionClosed`, `IndexUpdated`)

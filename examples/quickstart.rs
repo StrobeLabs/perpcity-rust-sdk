@@ -73,7 +73,8 @@ async fn main() -> Result<()> {
             },
             Urgency::Normal,
         )
-        .await?;
+        .await?
+        .pos_id;
     println!("opened position {pos_id}");
 
     // -- Close it --

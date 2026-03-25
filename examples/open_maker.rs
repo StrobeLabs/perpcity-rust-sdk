@@ -106,7 +106,8 @@ async fn main() -> Result<()> {
             },
             Urgency::Normal,
         )
-        .await?;
+        .await?
+        .pos_id;
     println!("opened maker position {pos_id}");
     println!("note: this position is subject to a 7-day lockup before it can be closed");
 

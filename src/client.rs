@@ -58,7 +58,8 @@ use crate::math::tick::{align_tick_down, align_tick_up, price_to_tick};
 use crate::transport::provider::HftTransport;
 use crate::types::{
     Bounds, CloseParams, CloseResult, Deployments, Fees, LiveDetails, OpenInterest,
-    OpenMakerParams, OpenMakerQuote, OpenTakerParams, OpenTakerQuote, PerpData, SwapQuote,
+    OpenMakerParams, OpenMakerQuote, OpenResult, OpenTakerParams, OpenTakerQuote, PerpData,
+    SwapQuote,
 };
 
 // ── Constants ────────────────────────────────────────────────────────
@@ -260,7 +261,9 @@ impl PerpClient {
 
     /// Open a taker (long/short) position.
     ///
-    /// Returns the minted position NFT token ID on success.
+    /// Returns an [`OpenResult`] with the position ID and entry deltas
+    /// parsed from the `PositionOpened` event, so callers can construct
+    /// position tracking data without a follow-up RPC read.
     ///
     /// # Errors
     ///
@@ -272,7 +275,7 @@ impl PerpClient {
         perp_id: B256,
         params: &OpenTakerParams,
         urgency: Urgency,
-    ) -> Result<U256> {
+    ) -> Result<OpenResult> {
         let margin_scaled = scale_to_6dec(params.margin)?;
         if margin_scaled <= 0 {
             return Err(PerpCityError::InvalidMargin {
@@ -304,27 +307,19 @@ impl PerpClient {
             )
             .await?;
 
-        // Parse PositionOpened event to get posId
-        for log in receipt.inner.logs() {
-            if let Ok(event) = log.log_decode::<PerpManager::PositionOpened>() {
-                return Ok(event.inner.data.posId);
-            }
-        }
-        Err(PerpCityError::EventNotFound {
-            event_name: "PositionOpened".into(),
-        })
+        parse_open_result(&receipt)
     }
 
     /// Open a maker (LP) position within a price range.
     ///
     /// Converts `price_lower`/`price_upper` to aligned ticks internally.
-    /// Returns the minted position NFT token ID.
+    /// Returns an [`OpenResult`] with the position ID and entry deltas.
     pub async fn open_maker(
         &self,
         perp_id: B256,
         params: &OpenMakerParams,
         urgency: Urgency,
-    ) -> Result<U256> {
+    ) -> Result<OpenResult> {
         let margin_scaled = scale_to_6dec(params.margin)?;
         if margin_scaled <= 0 {
             return Err(PerpCityError::InvalidMargin {
@@ -382,14 +377,7 @@ impl PerpClient {
             )
             .await?;
 
-        for log in receipt.inner.logs() {
-            if let Ok(event) = log.log_decode::<PerpManager::PositionOpened>() {
-                return Ok(event.inner.data.posId);
-            }
-        }
-        Err(PerpCityError::EventNotFound {
-            event_name: "PositionOpened".into(),
-        })
+        parse_open_result(&receipt)
     }
 
     /// Close a position (taker or maker).
@@ -421,21 +409,7 @@ impl PerpClient {
             )
             .await?;
 
-        let tx_hash = receipt.transaction_hash;
-
-        // Parse PositionClosed to check for partial close
-        for log in receipt.inner.logs() {
-            if let Ok(event) = log.log_decode::<PerpManager::PositionClosed>() {
-                let was_partial = event.inner.data.wasPartialClose;
-                return Ok(CloseResult {
-                    tx_hash,
-                    remaining_position_id: if was_partial { Some(pos_id) } else { None },
-                });
-            }
-        }
-        Err(PerpCityError::EventNotFound {
-            event_name: "PositionClosed".into(),
-        })
+        parse_close_result(&receipt, pos_id)
     }
 
     /// Adjust the notional exposure of a taker position.
@@ -1271,6 +1245,46 @@ fn i128_from_i256(v: I256) -> i128 {
         } else {
             i128::MAX
         }
+    })
+}
+
+/// Parse a [`CloseResult`] from a transaction receipt's `PositionClosed` event.
+fn parse_close_result(
+    receipt: &alloy::rpc::types::TransactionReceipt,
+    pos_id: U256,
+) -> Result<CloseResult> {
+    let tx_hash = receipt.transaction_hash;
+    for log in receipt.inner.logs() {
+        if let Ok(event) = log.log_decode::<PerpManager::PositionClosed>() {
+            let was_partial = event.inner.data.wasPartialClose;
+            return Ok(CloseResult {
+                tx_hash,
+                remaining_position_id: if was_partial { Some(pos_id) } else { None },
+            });
+        }
+    }
+    Err(PerpCityError::EventNotFound {
+        event_name: "PositionClosed".into(),
+    })
+}
+
+/// Parse an [`OpenResult`] from a transaction receipt's `PositionOpened` event.
+fn parse_open_result(receipt: &alloy::rpc::types::TransactionReceipt) -> Result<OpenResult> {
+    for log in receipt.inner.logs() {
+        if let Ok(event) = log.log_decode::<PerpManager::PositionOpened>() {
+            let data = event.inner.data;
+            let perp_delta = i128_from_i256(data.perpDelta);
+            let usd_delta = i128_from_i256(data.usdDelta);
+            return Ok(OpenResult {
+                pos_id: data.posId,
+                is_maker: data.isMaker,
+                perp_delta: scale_from_6dec(perp_delta),
+                usd_delta: scale_from_6dec(usd_delta),
+            });
+        }
+    }
+    Err(PerpCityError::EventNotFound {
+        event_name: "PositionOpened".into(),
     })
 }
 
