@@ -504,17 +504,18 @@ impl TransportInner {
                     // For writes, check if the response is a pre-mempool rejection
                     // that is safe to retry (tx was never accepted).
                     if is_write && self.config.write_retry.is_retriable(&response) {
-                        self.endpoints[idx].record_failure(now_ms);
+                        // Stale-replica rejections are not evidence of an
+                        // unhealthy endpoint — don't touch the circuit breaker.
                         if attempt + 1 < max_attempts {
                             tracing::warn!(
                                 attempt = attempt + 1,
                                 max_attempts,
                                 endpoint = %self.endpoints[idx].url,
                                 error_code = response.first_error_code(),
-                                "write rejected (stale replica), retrying"
+                                "write rejected pre-mempool, retrying"
                             );
                         } else {
-                            tracing::error!(
+                            tracing::warn!(
                                 endpoint = %self.endpoints[idx].url,
                                 error_code = response.first_error_code(),
                                 "write rejected after all retries exhausted"
