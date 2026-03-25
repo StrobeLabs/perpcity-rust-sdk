@@ -96,23 +96,44 @@ impl ManagedEndpoint {
     #[inline]
     fn record_success(&self, latency_ns: u64) {
         let mut h = self.health.lock().unwrap();
+        let old_state = h.state();
         h.record_success(latency_ns);
+        let new_state = h.state();
         // Sync atomic mirrors (Relaxed is sufficient: no cross-field ordering needed,
         // eventual consistency is acceptable for endpoint selection heuristics)
         self.atomic_latency_ns
             .store(h.avg_latency_ns(), Ordering::Relaxed);
         self.atomic_state
-            .store(pack_state(h.state()), Ordering::Relaxed);
+            .store(pack_state(new_state), Ordering::Relaxed);
+        if old_state != new_state {
+            tracing::info!(
+                endpoint = %self.url,
+                from = ?old_state,
+                to = ?new_state,
+                "circuit breaker state changed"
+            );
+        }
     }
 
     /// Record a failed request. Updates Mutex state + atomic mirrors.
     #[inline]
     fn record_failure(&self, now_ms: u64) {
         let mut h = self.health.lock().unwrap();
+        let old_state = h.state();
         h.record_failure(now_ms);
+        let new_state = h.state();
         self.atomic_state
-            .store(pack_state(h.state()), Ordering::Relaxed);
+            .store(pack_state(new_state), Ordering::Relaxed);
         // Latency is not updated on failure (EMA stays the same).
+        if old_state != new_state {
+            tracing::warn!(
+                endpoint = %self.url,
+                from = ?old_state,
+                to = ?new_state,
+                consecutive_failures = h.status().consecutive_failures,
+                "circuit breaker state changed"
+            );
+        }
     }
 }
 
@@ -466,6 +487,7 @@ impl TransportInner {
 
         for attempt in 0..max_attempts {
             let Some(idx) = self.select_endpoint(now_ms) else {
+                tracing::error!("all RPC endpoints unavailable (circuits open)");
                 return Err(TransportError::local_usage_str(
                     "all RPC endpoints unavailable (circuits open)",
                 ));
@@ -481,13 +503,24 @@ impl TransportInner {
                 Ok(Ok(response)) => {
                     // For writes, check if the response is a pre-mempool rejection
                     // that is safe to retry (tx was never accepted).
-                    if is_write
-                        && attempt + 1 < max_attempts
-                        && self.config.write_retry.is_retriable(&response)
-                    {
+                    if is_write && self.config.write_retry.is_retriable(&response) {
                         self.endpoints[idx].record_failure(now_ms);
-                        // Pre-mempool rejection (e.g. stale replica -32003).
-                        // Fall through to backoff + retry.
+                        if attempt + 1 < max_attempts {
+                            tracing::warn!(
+                                attempt = attempt + 1,
+                                max_attempts,
+                                endpoint = %self.endpoints[idx].url,
+                                error_code = response.first_error_code(),
+                                "write rejected (stale replica), retrying"
+                            );
+                        } else {
+                            tracing::error!(
+                                endpoint = %self.endpoints[idx].url,
+                                error_code = response.first_error_code(),
+                                "write rejected after all retries exhausted"
+                            );
+                            return Ok(response);
+                        }
                     } else {
                         let latency_ns = start.elapsed().as_nanos() as u64;
                         self.endpoints[idx].record_success(latency_ns);
@@ -496,10 +529,25 @@ impl TransportInner {
                 }
                 Ok(Err(e)) => {
                     self.endpoints[idx].record_failure(now_ms);
+                    tracing::warn!(
+                        attempt = attempt + 1,
+                        max_attempts,
+                        endpoint = %self.endpoints[idx].url,
+                        error = %e,
+                        is_write,
+                        "transport error"
+                    );
                     last_err = Some(e);
                 }
                 Err(_timeout) => {
                     self.endpoints[idx].record_failure(now_ms);
+                    tracing::warn!(
+                        attempt = attempt + 1,
+                        max_attempts,
+                        endpoint = %self.endpoints[idx].url,
+                        is_write,
+                        "request timed out"
+                    );
                     last_err = Some(TransportError::local_usage_str("request timed out"));
                 }
             }
