@@ -57,7 +57,7 @@ use crate::hft::state_cache::{CachedBounds, CachedFees, StateCache, StateCacheCo
 use crate::math::tick::{align_tick_down, align_tick_up, price_to_tick};
 use crate::transport::provider::HftTransport;
 use crate::types::{
-    Bounds, CloseParams, CloseResult, Deployments, Fees, LiveDetails, OpenInterest,
+    AdjustResult, Bounds, CloseParams, CloseResult, Deployments, Fees, LiveDetails, OpenInterest,
     OpenMakerParams, OpenMakerQuote, OpenResult, OpenTakerParams, OpenTakerQuote, PerpData,
     SwapQuote,
 };
@@ -422,7 +422,7 @@ impl PerpClient {
         usd_delta: f64,
         perp_limit: u128,
         urgency: Urgency,
-    ) -> Result<B256> {
+    ) -> Result<AdjustResult> {
         let usd_delta_scaled = scale_to_6dec(usd_delta)?;
 
         let wire_params = PerpManager::AdjustNotionalParams {
@@ -445,7 +445,7 @@ impl PerpClient {
             )
             .await?;
 
-        Ok(receipt.transaction_hash)
+        parse_adjust_result(&receipt)
     }
 
     /// Add or remove margin from a position.
@@ -1285,6 +1285,26 @@ fn parse_open_result(receipt: &alloy::rpc::types::TransactionReceipt) -> Result<
     }
     Err(PerpCityError::EventNotFound {
         event_name: "PositionOpened".into(),
+    })
+}
+
+/// Parse an [`AdjustResult`] from a transaction receipt's `NotionalAdjusted` event.
+fn parse_adjust_result(receipt: &alloy::rpc::types::TransactionReceipt) -> Result<AdjustResult> {
+    for log in receipt.inner.logs() {
+        if let Ok(event) = log.log_decode::<PerpManager::NotionalAdjusted>() {
+            let data = event.inner.data;
+            let new_perp_delta = i128_from_i256(data.newPerpDelta);
+            let swap_perp_delta = i128_from_i256(data.swapPerpDelta);
+            let swap_usd_delta = i128_from_i256(data.swapUsdDelta);
+            return Ok(AdjustResult {
+                new_perp_delta: scale_from_6dec(new_perp_delta),
+                swap_perp_delta: scale_from_6dec(swap_perp_delta),
+                swap_usd_delta: scale_from_6dec(swap_usd_delta),
+            });
+        }
+    }
+    Err(PerpCityError::EventNotFound {
+        event_name: "NotionalAdjusted".into(),
     })
 }
 

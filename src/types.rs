@@ -165,6 +165,21 @@ pub struct OpenResult {
     pub usd_delta: f64,
 }
 
+/// Result of adjusting a position's notional size.
+///
+/// Contains the new cumulative deltas and swap details parsed from the
+/// `NotionalAdjusted` event, so callers can update position tracking data
+/// without a follow-up RPC read.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AdjustResult {
+    /// New cumulative perp delta after adjustment (signed).
+    pub new_perp_delta: f64,
+    /// Perp delta from this specific swap (signed).
+    pub swap_perp_delta: f64,
+    /// USD delta from this specific swap (signed).
+    pub swap_usd_delta: f64,
+}
+
 /// Result of closing a position.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CloseResult {
