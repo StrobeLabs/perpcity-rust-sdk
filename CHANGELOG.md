@@ -33,6 +33,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `PerpClient::set_base_fee(base_fee)` — inject a base fee from an external source (e.g. shared poller) without RPC calls
 - `PerpClient::base_fee()` — read the current cached base fee (ignores TTL), intended for poller distribution
 - `GasCache::base_fee()` — read the raw cached base fee
+- `PerpClient::set_gas_ttl(ttl_ms)` — override gas cache TTL for externally-managed clients
+- `GasCache::set_ttl(ttl_ms)` — override cache TTL
 - Transport tracing: circuit breaker state transitions, write retry attempts/exhaustion, transport errors and timeouts now emit structured `tracing` events with endpoint URLs
 - `tracing` crate added as a dependency (zero-cost when no subscriber is installed)
 - `PerpClient::transfer_eth(to, amount_wei, urgency)` — ETH transfer routed through the transaction pipeline for correct nonce management

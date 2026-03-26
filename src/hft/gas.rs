@@ -117,6 +117,15 @@ impl GasCache {
             .filter(|f| now_ms.saturating_sub(f.updated_at_ms) < self.ttl_ms)
     }
 
+    /// Override the cache TTL (milliseconds).
+    ///
+    /// Use this when gas is managed externally (e.g. a shared poller
+    /// distributing base fees via [`crate::PerpClient::set_base_fee`]). Set the
+    /// TTL to match the poller's cadence with some headroom.
+    pub fn set_ttl(&mut self, ttl_ms: u64) {
+        self.ttl_ms = ttl_ms;
+    }
+
     /// Return the current cached base fee (ignoring TTL).
     #[inline]
     pub fn base_fee(&self) -> Option<u64> {

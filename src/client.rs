@@ -274,6 +274,15 @@ impl PerpClient {
         self.gas_cache.lock().unwrap().base_fee()
     }
 
+    /// Override the gas cache TTL (milliseconds).
+    ///
+    /// When gas is managed externally via [`set_base_fee`](Self::set_base_fee),
+    /// the default 2s TTL may be too tight. Set this to match the poller's
+    /// cadence with headroom (e.g. `tick_secs * 2 * 1000`).
+    pub fn set_gas_ttl(&self, ttl_ms: u64) {
+        self.gas_cache.lock().unwrap().set_ttl(ttl_ms);
+    }
+
     // ── Write operations ─────────────────────────────────────────────
 
     /// Open a taker (long/short) position.
