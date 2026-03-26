@@ -266,7 +266,10 @@ impl PerpClient {
         self.gas_cache.lock().unwrap().update(base_fee, now);
     }
 
-    /// Return the current cached base fee, if any.
+    /// Return the current cached base fee, if any (ignores TTL).
+    ///
+    /// Intended for reading the base fee after `refresh_gas` in order to
+    /// distribute it to other clients via [`set_base_fee`](Self::set_base_fee).
     pub fn base_fee(&self) -> Option<u64> {
         self.gas_cache.lock().unwrap().base_fee()
     }
