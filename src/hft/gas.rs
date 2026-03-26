@@ -120,7 +120,7 @@ impl GasCache {
     /// Override the cache TTL (milliseconds).
     ///
     /// Use this when gas is managed externally (e.g. a shared poller
-    /// distributing base fees via [`PerpClient::set_base_fee`]). Set the
+    /// distributing base fees via [`crate::PerpClient::set_base_fee`]). Set the
     /// TTL to match the poller's cadence with some headroom.
     pub fn set_ttl(&mut self, ttl_ms: u64) {
         self.ttl_ms = ttl_ms;
