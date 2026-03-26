@@ -231,16 +231,17 @@ impl PerpClient {
 
     /// Refresh the gas cache from the latest block header.
     ///
-    /// Should be called periodically (every 1-2 seconds on Base L2) or
-    /// from a `newHeads` subscription callback.
+    /// Fetches the latest block directly in a single RPC call and extracts
+    /// the base fee for EIP-1559 fee computation. Should be called
+    /// periodically (every 1-2 seconds on Base L2) or from a `newHeads`
+    /// subscription callback.
     pub async fn refresh_gas(&self) -> Result<()> {
-        let block_num = self.provider.get_block_number().await?;
         let header = self
             .provider
-            .get_block_by_number(block_num.into())
+            .get_block_by_number(alloy::eips::BlockNumberOrTag::Latest)
             .await?
             .ok_or_else(|| PerpCityError::GasPriceUnavailable {
-                reason: format!("block {block_num} not found"),
+                reason: "latest block not found".into(),
             })?;
 
         let base_fee =
@@ -252,9 +253,22 @@ impl PerpClient {
                 })?;
 
         let now = now_ms();
-        let mut gas_cache = self.gas_cache.lock().unwrap();
-        gas_cache.update(base_fee, now);
+        self.gas_cache.lock().unwrap().update(base_fee, now);
         Ok(())
+    }
+
+    /// Inject a base fee from an external source (e.g. a shared poller).
+    ///
+    /// Updates the gas cache as if `refresh_gas` had been called, but without
+    /// any RPC calls. The cache TTL is reset to now.
+    pub fn set_base_fee(&self, base_fee: u64) {
+        let now = now_ms();
+        self.gas_cache.lock().unwrap().update(base_fee, now);
+    }
+
+    /// Return the current cached base fee, if any.
+    pub fn base_fee(&self) -> Option<u64> {
+        self.gas_cache.lock().unwrap().base_fee()
     }
 
     // ── Write operations ─────────────────────────────────────────────
