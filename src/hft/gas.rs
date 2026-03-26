@@ -117,6 +117,12 @@ impl GasCache {
             .filter(|f| now_ms.saturating_sub(f.updated_at_ms) < self.ttl_ms)
     }
 
+    /// Return the current cached base fee (ignoring TTL).
+    #[inline]
+    pub fn base_fee(&self) -> Option<u64> {
+        self.current.map(|f| f.base_fee)
+    }
+
     /// Compute fees scaled for the given [`Urgency`], or `None` if stale/empty.
     ///
     /// Fee formulas:
