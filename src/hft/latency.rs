@@ -19,6 +19,8 @@
 //! assert!(stats.p50_ns > 0);
 //! ```
 
+use serde::{Deserialize, Serialize};
+
 /// Maximum number of samples retained in the rolling window.
 ///
 /// Must be a power of 2 for the bitmask in [`LatencyTracker::record`].
@@ -32,7 +34,7 @@ const _: () = assert!(
 );
 
 /// Computed latency statistics.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LatencyStats {
     /// Total number of samples recorded (may exceed `MAX_SAMPLES`).
     pub count: u64,

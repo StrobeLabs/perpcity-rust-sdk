@@ -24,12 +24,13 @@
 use alloy::primitives::{B256, U256};
 use alloy::rpc::types::Log;
 use alloy::sol_types::SolEvent;
+use serde::{Deserialize, Serialize};
 
 use crate::contracts::{IBeacon, PerpManager};
 use crate::convert::{price_x96_to_f64, scale_from_6dec, sqrt_price_x96_to_price};
 
 /// A decoded market event with human-readable f64 values.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum MarketEvent {
     /// A position was opened.
     PositionOpened {
