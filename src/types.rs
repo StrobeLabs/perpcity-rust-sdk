@@ -5,8 +5,8 @@
 //! They are the public API surface — users construct these, and the SDK
 //! converts them to wire-format contract types internally.
 //!
-//! All types implement [`Serialize`](serde::Serialize) and
-//! [`Deserialize`](serde::Deserialize) for logging, dashboards, persistence,
+//! All types implement [`Serialize`] and
+//! [`Deserialize`] for logging, dashboards, persistence,
 //! and inter-process communication.
 
 use alloy::primitives::{Address, B256, U256};
