@@ -97,6 +97,8 @@ impl WsManager {
             .await?;
         let provider = RootProvider::new(rpc_client);
 
+        tracing::info!(url = %url, "WebSocket connected");
+
         Ok(Self {
             url,
             config,
@@ -112,18 +114,26 @@ impl WsManager {
     pub async fn subscribe_blocks(&self) -> crate::Result<mpsc::Receiver<Header>> {
         let (tx, rx) = mpsc::channel(64);
         let provider = Arc::clone(&self.provider);
+        let url = self.url.clone();
+
+        tracing::debug!(url = %self.url, "subscribing to blocks");
 
         tokio::spawn(async move {
             let sub = match provider.subscribe_blocks().await {
                 Ok(sub) => sub,
-                Err(_) => return,
+                Err(e) => {
+                    tracing::warn!(url = %url, error = %e, "block subscription failed");
+                    return;
+                }
             };
+            tracing::debug!(url = %url, "block subscription established");
             let mut stream = sub.into_stream();
             while let Some(block) = stream.next().await {
                 if tx.send(block).await.is_err() {
                     break; // receiver dropped
                 }
             }
+            tracing::debug!(url = %url, "block subscription ended");
         });
 
         Ok(rx)
@@ -135,18 +145,26 @@ impl WsManager {
     pub async fn subscribe_logs(&self, filter: Filter) -> crate::Result<mpsc::Receiver<Log>> {
         let (tx, rx) = mpsc::channel(256);
         let provider = Arc::clone(&self.provider);
+        let url = self.url.clone();
+
+        tracing::debug!(url = %self.url, "subscribing to logs");
 
         tokio::spawn(async move {
             let sub = match provider.subscribe_logs(&filter).await {
                 Ok(sub) => sub,
-                Err(_) => return,
+                Err(e) => {
+                    tracing::warn!(url = %url, error = %e, "log subscription failed");
+                    return;
+                }
             };
+            tracing::debug!(url = %url, "log subscription established");
             let mut stream = sub.into_stream();
             while let Some(log) = stream.next().await {
                 if tx.send(log).await.is_err() {
                     break;
                 }
             }
+            tracing::debug!(url = %url, "log subscription ended");
         });
 
         Ok(rx)
@@ -163,15 +181,20 @@ impl WsManager {
         loop {
             attempts += 1;
             if self.config.max_attempts > 0 && attempts > self.config.max_attempts {
+                tracing::warn!(url = %self.url, max_attempts = self.config.max_attempts, "reconnect attempts exhausted");
                 return None;
             }
 
+            tracing::info!(url = %self.url, attempt = attempts, delay_ms = delay.as_millis() as u64, "reconnecting");
             tokio::time::sleep(delay).await;
 
             match Self::connect(self.url.clone(), self.config).await {
-                Ok(new_manager) => return Some(new_manager),
-                Err(_) => {
-                    // Exponential backoff
+                Ok(new_manager) => {
+                    tracing::info!(url = %self.url, attempt = attempts, "reconnected");
+                    return Some(new_manager);
+                }
+                Err(e) => {
+                    tracing::warn!(url = %self.url, attempt = attempts, error = %e, "reconnect failed");
                     delay = (delay * self.config.backoff_multiplier).min(self.config.max_backoff);
                 }
             }

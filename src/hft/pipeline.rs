@@ -136,6 +136,7 @@ impl TxPipeline {
     ) -> Result<PreparedTx> {
         // Fail fast: check in-flight limit before acquiring nonce
         if self.in_flight.len() >= self.config.max_in_flight {
+            tracing::warn!(count = self.in_flight.len(), max = self.config.max_in_flight, "too many in-flight transactions");
             return Err(PerpCityError::TooManyInFlight {
                 count: self.in_flight.len(),
                 max: self.config.max_in_flight,
@@ -144,6 +145,7 @@ impl TxPipeline {
 
         // Resolve gas fees from cache
         let gas_fees = gas_cache.fees_for(request.urgency, now_ms).ok_or_else(|| {
+            tracing::warn!("gas cache stale or empty");
             PerpCityError::GasPriceUnavailable {
                 reason: "gas cache stale or empty".into(),
             }
@@ -151,6 +153,8 @@ impl TxPipeline {
 
         // Acquire nonce (lock-free atomic)
         let nonce = self.nonce_mgr.acquire();
+
+        tracing::trace!(nonce, ?request.urgency, in_flight = self.in_flight.len(), "tx prepared");
 
         Ok(PreparedTx {
             nonce,
@@ -164,6 +168,7 @@ impl TxPipeline {
     ///
     /// Call after the signed transaction has been sent to the mempool.
     pub fn record_submission(&mut self, tx_hash: [u8; 32], prepared: PreparedTx, now_ms: u64) {
+        tracing::debug!(nonce = prepared.nonce, "tx submission recorded");
         self.nonce_mgr.track(prepared.nonce, tx_hash, now_ms);
         self.in_flight.insert(
             tx_hash,
@@ -180,6 +185,7 @@ impl TxPipeline {
     /// Mark a transaction as confirmed (mined). Removes from tracking.
     pub fn confirm(&mut self, tx_hash: &[u8; 32]) {
         if let Some(tx) = self.in_flight.remove(tx_hash) {
+            tracing::debug!(nonce = tx.nonce, "tx confirmed in pipeline");
             self.nonce_mgr.confirm(tx.nonce);
         }
     }
@@ -187,6 +193,7 @@ impl TxPipeline {
     /// Mark a transaction as failed. Releases the nonce if possible.
     pub fn fail(&mut self, tx_hash: &[u8; 32]) {
         if let Some(tx) = self.in_flight.remove(tx_hash) {
+            tracing::debug!(nonce = tx.nonce, "tx failed in pipeline");
             self.nonce_mgr.release(tx.nonce);
         }
     }

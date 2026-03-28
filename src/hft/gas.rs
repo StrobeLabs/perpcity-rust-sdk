@@ -92,6 +92,7 @@ impl GasCache {
 
     /// Update the cache from a new block header's base fee.
     pub fn update(&mut self, base_fee: u64, now_ms: u64) {
+        tracing::debug!(base_fee, "gas cache updated");
         self.current = Some(GasFees {
             base_fee,
             max_priority_fee_per_gas: self.default_priority_fee,
