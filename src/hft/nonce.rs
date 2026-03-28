@@ -97,9 +97,12 @@ impl NonceManager {
     /// Also removes the nonce from pending tracking if present.
     pub fn release(&self, nonce: u64) -> bool {
         self.pending.lock().unwrap().remove(&nonce);
-        self.next
+        let rewound = self
+            .next
             .compare_exchange(nonce + 1, nonce, Ordering::Relaxed, Ordering::Relaxed)
-            .is_ok()
+            .is_ok();
+        tracing::debug!(nonce, rewound, "nonce released");
+        rewound
     }
 
     /// Reset to a known on-chain state. Clears all pending transactions.
@@ -107,8 +110,13 @@ impl NonceManager {
     /// Call this after detecting nonce desync (e.g. another wallet
     /// instance submitted transactions, or after a node failover).
     pub fn resync(&self, on_chain_nonce: u64) {
-        self.next.store(on_chain_nonce, Ordering::Relaxed);
+        let old = self.next.swap(on_chain_nonce, Ordering::Relaxed);
         self.pending.lock().unwrap().clear();
+        tracing::info!(
+            old_nonce = old,
+            new_nonce = on_chain_nonce,
+            "nonce resynced"
+        );
     }
 
     /// Number of pending (unconfirmed) transactions.

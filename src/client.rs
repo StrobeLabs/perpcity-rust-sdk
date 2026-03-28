@@ -226,6 +226,7 @@ impl PerpClient {
         let count = self.provider.get_transaction_count(self.address).await?;
         let mut pipeline = self.pipeline.lock().unwrap();
         *pipeline = TxPipeline::new(count, PipelineConfig::default());
+        tracing::info!(nonce = count, address = %self.address, "nonce synced");
         Ok(())
     }
 
@@ -254,6 +255,7 @@ impl PerpClient {
 
         let now = now_ms();
         self.gas_cache.lock().unwrap().update(base_fee, now);
+        tracing::debug!(base_fee, "gas cache refreshed");
         Ok(())
     }
 
@@ -264,6 +266,7 @@ impl PerpClient {
     pub fn set_base_fee(&self, base_fee: u64) {
         let now = now_ms();
         self.gas_cache.lock().unwrap().update(base_fee, now);
+        tracing::debug!(base_fee, "base fee injected");
     }
 
     /// Return the current cached base fee, if any (ignores TTL).
@@ -281,6 +284,7 @@ impl PerpClient {
     /// cadence with headroom (e.g. `tick_secs * 2 * 1000`).
     pub fn set_gas_ttl(&self, ttl_ms: u64) {
         self.gas_cache.lock().unwrap().set_ttl(ttl_ms);
+        tracing::debug!(ttl_ms, "gas cache TTL updated");
     }
 
     // ── Write operations ─────────────────────────────────────────────
@@ -324,6 +328,8 @@ impl PerpClient {
             .calldata()
             .clone();
 
+        tracing::info!(%perp_id, margin = params.margin, leverage = params.leverage, is_long = params.is_long, ?urgency, "opening taker position");
+
         let receipt = self
             .send_tx(
                 self.deployments.perp_manager,
@@ -333,7 +339,9 @@ impl PerpClient {
             )
             .await?;
 
-        parse_open_result(&receipt)
+        let result = parse_open_result(&receipt)?;
+        tracing::info!(%perp_id, pos_id = %result.pos_id, perp_delta = result.perp_delta, usd_delta = result.usd_delta, "taker position opened");
+        Ok(result)
     }
 
     /// Open a maker (LP) position within a price range.
@@ -388,6 +396,8 @@ impl PerpClient {
             maxAmt1In: params.max_amt1_in,
         };
 
+        tracing::info!(%perp_id, margin = params.margin, tick_lower, tick_upper, ?urgency, "opening maker position");
+
         let contract = PerpManager::new(self.deployments.perp_manager, &self.provider);
         let calldata = contract
             .openMakerPos(perp_id, wire_params)
@@ -403,7 +413,9 @@ impl PerpClient {
             )
             .await?;
 
-        parse_open_result(&receipt)
+        let result = parse_open_result(&receipt)?;
+        tracing::info!(%perp_id, pos_id = %result.pos_id, perp_delta = result.perp_delta, usd_delta = result.usd_delta, "maker position opened");
+        Ok(result)
     }
 
     /// Close a position (taker or maker).
@@ -423,6 +435,8 @@ impl PerpClient {
             maxAmt1In: params.max_amt1_in,
         };
 
+        tracing::info!(pos_id = %pos_id, ?urgency, "closing position");
+
         let contract = PerpManager::new(self.deployments.perp_manager, &self.provider);
         let calldata = contract.closePosition(wire_params).calldata().clone();
 
@@ -435,7 +449,9 @@ impl PerpClient {
             )
             .await?;
 
-        parse_close_result(&receipt, pos_id)
+        let result = parse_close_result(&receipt, pos_id)?;
+        tracing::info!(pos_id = %pos_id, was_liquidated = result.was_liquidated, net_margin = result.net_margin, "position closed");
+        Ok(result)
     }
 
     /// Adjust the notional exposure of a taker position.
@@ -458,6 +474,8 @@ impl PerpClient {
             perpLimit: params.perp_limit,
         };
 
+        tracing::info!(pos_id = %pos_id, usd_delta = params.usd_delta, ?urgency, "adjusting notional");
+
         let contract = PerpManager::new(self.deployments.perp_manager, &self.provider);
         let calldata = contract.adjustNotional(wire_params).calldata().clone();
 
@@ -470,7 +488,9 @@ impl PerpClient {
             )
             .await?;
 
-        parse_adjust_result(&receipt)
+        let result = parse_adjust_result(&receipt)?;
+        tracing::info!(pos_id = %pos_id, new_perp_delta = result.new_perp_delta, "notional adjusted");
+        Ok(result)
     }
 
     /// Add or remove margin from a position.
@@ -492,6 +512,8 @@ impl PerpClient {
             })?,
         };
 
+        tracing::info!(pos_id = %pos_id, margin_delta = params.margin_delta, ?urgency, "adjusting margin");
+
         let contract = PerpManager::new(self.deployments.perp_manager, &self.provider);
         let calldata = contract.adjustMargin(wire_params).calldata().clone();
 
@@ -504,7 +526,9 @@ impl PerpClient {
             )
             .await?;
 
-        parse_margin_result(&receipt)
+        let result = parse_margin_result(&receipt)?;
+        tracing::info!(pos_id = %pos_id, new_margin = result.new_margin, "margin adjusted");
+        Ok(result)
     }
 
     /// Ensure USDC is approved for the PerpManager to spend.
@@ -520,8 +544,11 @@ impl PerpClient {
             .await?;
 
         if allowance >= min_amount {
+            tracing::debug!(allowance = %allowance, "USDC approval sufficient");
             return Ok(None);
         }
+
+        tracing::info!(allowance = %allowance, min_amount = %min_amount, "approving USDC");
 
         let calldata = usdc
             .approve(self.deployments.perp_manager, MAX_APPROVAL)
@@ -537,6 +564,7 @@ impl PerpClient {
             )
             .await?;
 
+        tracing::info!(tx_hash = %receipt.transaction_hash, "USDC approved");
         Ok(Some(receipt.transaction_hash))
     }
 
@@ -686,6 +714,7 @@ impl PerpClient {
         {
             let cache = self.state_cache.lock().unwrap();
             if let Some(price) = cache.get_mark_price(&perp_bytes, now_ts) {
+                tracing::trace!(%perp_id, price, "mark price cache hit");
                 return Ok(price);
             }
         }
@@ -697,6 +726,8 @@ impl PerpClient {
             .call()
             .await?;
         let price = crate::convert::sqrt_price_x96_to_price(sqrt_price_x96)?;
+
+        tracing::debug!(%perp_id, price, "mark price fetched");
 
         // Update cache
         {
@@ -920,6 +951,7 @@ impl PerpClient {
         {
             let cache = self.state_cache.lock().unwrap();
             if let Some(rate) = cache.get_funding_rate(&perp_bytes, now_ts) {
+                tracing::trace!(%perp_id, rate, "funding rate cache hit");
                 return Ok(rate);
             }
         }
@@ -934,6 +966,8 @@ impl PerpClient {
         let q96_f64 = 2.0_f64.powi(96);
         let rate_per_sec = funding_i128 as f64 / q96_f64;
         let daily_rate = rate_per_sec * crate::constants::INTERVAL as f64;
+
+        tracing::debug!(%perp_id, daily_rate, "funding rate fetched");
 
         // Update cache
         {
@@ -954,6 +988,7 @@ impl PerpClient {
         {
             let cache = self.state_cache.lock().unwrap();
             if let Some(bal) = cache.get_usdc_balance(now_ts) {
+                tracing::trace!(balance = bal, "USDC balance cache hit");
                 return Ok(bal);
             }
         }
@@ -964,6 +999,8 @@ impl PerpClient {
             context: format!("USDC balance {} exceeds i128::MAX", raw),
         })?;
         let balance = scale_from_6dec(raw_i128);
+
+        tracing::debug!(balance, "USDC balance fetched");
 
         // Update cache
         {
@@ -1045,21 +1082,25 @@ impl PerpClient {
         amount_wei: u128,
         urgency: Urgency,
     ) -> Result<B256> {
+        tracing::info!(%to, amount_wei, ?urgency, "transferring ETH");
         let receipt = self
             .send_tx_with_value(to, Bytes::new(), amount_wei, 21_000, urgency)
             .await?;
+        tracing::info!(tx_hash = %receipt.transaction_hash, "ETH transferred");
         Ok(receipt.transaction_hash)
     }
 
     /// Transfer USDC to an address. `amount` is in human units (e.g. 100.0 = 100 USDC).
     /// Uses the transaction pipeline for correct nonce management.
     pub async fn transfer_usdc(&self, to: Address, amount: f64, urgency: Urgency) -> Result<B256> {
+        tracing::info!(%to, amount, ?urgency, "transferring USDC");
         let usdc = IERC20::new(self.deployments.usdc, &self.provider);
         let scaled = U256::from(scale_to_6dec(amount)? as u128);
         let calldata = usdc.transfer(to, scaled).calldata().clone();
         let receipt = self
             .send_tx(self.deployments.usdc, calldata, GasLimits::APPROVE, urgency)
             .await?;
+        tracing::info!(tx_hash = %receipt.transaction_hash, "USDC transferred");
         Ok(receipt.transaction_hash)
     }
 
@@ -1105,6 +1146,16 @@ impl PerpClient {
             )?
         };
 
+        tracing::debug!(
+            nonce = prepared.nonce,
+            gas_limit = prepared.gas_limit,
+            max_fee = prepared.gas_fees.max_fee_per_gas,
+            priority_fee = prepared.gas_fees.max_priority_fee_per_gas,
+            %to,
+            ?urgency,
+            "tx prepared"
+        );
+
         // Build EIP-1559 transaction
         let tx = TransactionRequest::default()
             .with_to(to)
@@ -1128,6 +1179,8 @@ impl PerpClient {
         let tx_hash_b256 = *pending.tx_hash();
         let tx_hash_bytes: [u8; 32] = tx_hash_b256.into();
 
+        tracing::info!(tx_hash = %tx_hash_b256, nonce = prepared.nonce, ?urgency, "tx broadcast");
+
         // Record in pipeline
         {
             let mut pipeline = self.pipeline.lock().unwrap();
@@ -1137,8 +1190,11 @@ impl PerpClient {
         // Wait for receipt
         let receipt = tokio::time::timeout(RECEIPT_TIMEOUT, pending.get_receipt())
             .await
-            .map_err(|_| PerpCityError::TxReverted {
-                reason: format!("receipt timeout after {}s", RECEIPT_TIMEOUT.as_secs()),
+            .map_err(|_| {
+                tracing::warn!(tx_hash = %tx_hash_b256, timeout_secs = RECEIPT_TIMEOUT.as_secs(), "receipt timeout");
+                PerpCityError::TxReverted {
+                    reason: format!("receipt timeout after {}s", RECEIPT_TIMEOUT.as_secs()),
+                }
             })?
             .map_err(|e| PerpCityError::TxReverted {
                 reason: format!("failed to get receipt: {e}"),
@@ -1152,10 +1208,18 @@ impl PerpClient {
 
         // Check if reverted
         if !receipt.status() {
+            tracing::warn!(tx_hash = %tx_hash_b256, "tx reverted");
             return Err(PerpCityError::TxReverted {
                 reason: format!("transaction {} reverted", tx_hash_b256),
             });
         }
+
+        tracing::info!(
+            tx_hash = %tx_hash_b256,
+            block = ?receipt.block_number,
+            gas_used = ?receipt.gas_used,
+            "tx confirmed"
+        );
 
         Ok(receipt)
     }
