@@ -16,6 +16,8 @@
 //! assert!(fees.max_fee_per_gas >= fees.max_priority_fee_per_gas);
 //! ```
 
+use serde::{Deserialize, Serialize};
+
 /// Pre-empirically derived gas limits for PerpCity operations.
 ///
 /// Each limit includes ~20% margin over observed mainnet usage.
@@ -38,7 +40,7 @@ impl GasLimits {
 }
 
 /// Transaction urgency level, controlling EIP-1559 fee scaling.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Urgency {
     /// `maxFee = baseFee + priorityFee`. Cost-optimized, may be slow.
     Low,
@@ -51,7 +53,7 @@ pub enum Urgency {
 }
 
 /// EIP-1559 gas fees ready to attach to a transaction.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GasFees {
     /// The block base fee this was computed from (wei).
     pub base_fee: u64,
