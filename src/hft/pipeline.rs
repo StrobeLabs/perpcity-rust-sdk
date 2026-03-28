@@ -136,7 +136,11 @@ impl TxPipeline {
     ) -> Result<PreparedTx> {
         // Fail fast: check in-flight limit before acquiring nonce
         if self.in_flight.len() >= self.config.max_in_flight {
-            tracing::warn!(count = self.in_flight.len(), max = self.config.max_in_flight, "too many in-flight transactions");
+            tracing::warn!(
+                count = self.in_flight.len(),
+                max = self.config.max_in_flight,
+                "too many in-flight transactions"
+            );
             return Err(PerpCityError::TooManyInFlight {
                 count: self.in_flight.len(),
                 max: self.config.max_in_flight,
