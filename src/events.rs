@@ -31,6 +31,7 @@ use crate::convert::{price_x96_to_f64, scale_from_6dec, sqrt_price_x96_to_price}
 
 /// A decoded market event with human-readable f64 values.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(missing_docs)]
 pub enum MarketEvent {
     /// A position was opened.
     PositionOpened {

@@ -30,7 +30,7 @@
 //! ```
 
 #![deny(unreachable_pub)]
-#![warn(missing_debug_implementations, rust_2018_idioms)]
+#![warn(missing_debug_implementations, missing_docs, rust_2018_idioms)]
 
 pub mod client;
 pub mod constants;

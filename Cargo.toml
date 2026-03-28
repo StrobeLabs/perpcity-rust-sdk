@@ -30,6 +30,9 @@ reqwest = { version = "0.12", features = ["json"] }
 tokio = { version = "1", features = ["full", "test-util"] }
 
 [[example]]
+name = "quickstart"
+
+[[example]]
 name = "open_position"
 
 [[example]]

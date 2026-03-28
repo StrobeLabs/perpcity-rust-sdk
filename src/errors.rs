@@ -3,12 +3,13 @@
 //! Follows the axiomtrade-rs pattern: a single top-level enum with
 //! domain-specific variants plus `#[from]` conversions for library errors.
 
-use alloy::primitives::U256;
+use alloy::primitives::{B256, U256};
 use thiserror::Error;
 
 /// Central error type for the PerpCity SDK.
 #[derive(Error, Debug)]
 #[non_exhaustive]
+#[allow(missing_docs)]
 pub enum PerpCityError {
     // ── Validation errors ────────────────────────────────────────────
     /// Price must be positive and within protocol bounds.
@@ -60,7 +61,7 @@ pub enum PerpCityError {
     // ── Contract / protocol errors ───────────────────────────────────
     /// The perp does not exist on-chain.
     #[error("perp does not exist: {perp_id}")]
-    PerpNotFound { perp_id: U256 },
+    PerpNotFound { perp_id: B256 },
 
     /// The position does not exist on-chain.
     #[error("position does not exist: id={pos_id}")]
