@@ -46,7 +46,10 @@ use alloy::signers::local::PrivateKeySigner;
 use alloy::transports::BoxTransport;
 
 use crate::constants::SCALE_1E6;
-use crate::contracts::{IBeacon, IERC20, IFees, IMarginRatios, PerpManager};
+use alloy::sol_types::{SolCall, SolValue};
+
+use crate::constants::MULTICALL3;
+use crate::contracts::{IBeacon, IERC20, IFees, IMarginRatios, IMulticall3, PerpManager};
 use crate::convert::{
     leverage_to_margin_ratio, margin_ratio_to_leverage, scale_from_6dec, scale_to_6dec,
 };
@@ -1015,6 +1018,109 @@ impl PerpClient {
         }
 
         Ok(balance)
+    }
+
+    // ── Batch reads (via Multicall3) ──────────────────────────────────
+
+    /// Get the USDC and ETH balances of an address in a single RPC call.
+    ///
+    /// Uses Multicall3 to bundle a `balanceOf` (USDC) and `getEthBalance`
+    /// (native ETH) into one `eth_call`. The RPC provider charges 1 CU
+    /// regardless of how many sub-calls the multicall executes.
+    ///
+    /// Returns `(usdc_balance, eth_balance)` where USDC is in human units
+    /// (e.g. `100.0` = 100 USDC) and ETH is in wei.
+    pub async fn get_balances(&self, address: Address) -> Result<(f64, U256)> {
+        let results = self.get_balances_batch(&[address]).await?;
+        Ok(results.into_iter().next().unwrap())
+    }
+
+    /// Get the USDC and ETH balances for multiple addresses in a single RPC call.
+    ///
+    /// Uses Multicall3 to bundle N × `balanceOf` + N × `getEthBalance` into
+    /// one `eth_call`. For 10 addresses, this is 1 CU instead of 20.
+    ///
+    /// Returns a `Vec<(usdc_balance, eth_balance)>` in the same order as
+    /// the input addresses.
+    pub async fn get_balances_batch(&self, addresses: &[Address]) -> Result<Vec<(f64, U256)>> {
+        if addresses.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let usdc_addr = self.deployments.usdc;
+        let n = addresses.len();
+
+        // Build sub-calls: N × USDC balanceOf + N × ETH getEthBalance
+        let mut calls = Vec::with_capacity(2 * n);
+
+        for &addr in addresses {
+            // USDC balanceOf(addr)
+            let calldata = IERC20::balanceOfCall { account: addr }.abi_encode();
+            calls.push(IMulticall3::Call3 {
+                target: usdc_addr,
+                allowFailure: false,
+                callData: calldata.into(),
+            });
+        }
+
+        for &addr in addresses {
+            // getEthBalance(addr) — Multicall3 built-in
+            let calldata = IMulticall3::getEthBalanceCall { addr }.abi_encode();
+            calls.push(IMulticall3::Call3 {
+                target: MULTICALL3,
+                allowFailure: false,
+                callData: calldata.into(),
+            });
+        }
+
+        let multicall = IMulticall3::new(MULTICALL3, &self.provider);
+        let results = multicall.aggregate3(calls).call().await?;
+
+        if results.len() != 2 * n {
+            return Err(PerpCityError::Overflow {
+                context: format!(
+                    "multicall returned {} results, expected {}",
+                    results.len(),
+                    2 * n
+                ),
+            });
+        }
+
+        let mut out = Vec::with_capacity(n);
+        for i in 0..n {
+            // Decode USDC balance (first N results)
+            let usdc_result = &results[i];
+            if !usdc_result.success {
+                return Err(PerpCityError::Overflow {
+                    context: format!("USDC balanceOf failed for address {}", addresses[i]),
+                });
+            }
+            let usdc_raw =
+                U256::abi_decode(&usdc_result.returnData).map_err(|e| PerpCityError::Overflow {
+                    context: format!("failed to decode USDC balance: {e}"),
+                })?;
+            let usdc_i128 = i128::try_from(usdc_raw).map_err(|_| PerpCityError::Overflow {
+                context: format!("USDC balance {} exceeds i128::MAX", usdc_raw),
+            })?;
+            let usdc = scale_from_6dec(usdc_i128);
+
+            // Decode ETH balance (last N results)
+            let eth_result = &results[n + i];
+            if !eth_result.success {
+                return Err(PerpCityError::Overflow {
+                    context: format!("getEthBalance failed for address {}", addresses[i]),
+                });
+            }
+            let eth =
+                U256::abi_decode(&eth_result.returnData).map_err(|e| PerpCityError::Overflow {
+                    context: format!("failed to decode ETH balance: {e}"),
+                })?;
+
+            out.push((usdc, eth));
+        }
+
+        tracing::debug!(count = n, "batch balances fetched via multicall");
+        Ok(out)
     }
 
     // ── Accessors ────────────────────────────────────────────────────

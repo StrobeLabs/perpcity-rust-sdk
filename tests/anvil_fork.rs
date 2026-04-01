@@ -442,3 +442,75 @@ async fn open_and_close_taker_on_fork() {
 
     println!("\n=== Test passed! ===");
 }
+
+#[tokio::test]
+#[ignore] // Requires `anvil` — run with: cargo test --test anvil_fork -- --ignored --nocapture
+async fn batch_balances_via_multicall() {
+    // 1. Start Anvil forking Base Sepolia
+    let anvil = AnvilInstance::fork_base_sepolia().await;
+
+    // 2. Setup client
+    let signer: PrivateKeySigner = ANVIL_KEY.parse().unwrap();
+    let address = signer.address();
+
+    let transport = HftTransport::new(
+        TransportConfig::builder()
+            .shared_endpoint(&anvil.url)
+            .build()
+            .unwrap(),
+    )
+    .unwrap();
+
+    let deployments = Deployments {
+        perp_manager: PERP_MANAGER,
+        usdc: USDC,
+        fees_module: None,
+        margin_ratios_module: None,
+        lockup_period_module: None,
+        sqrt_price_impact_limit_module: None,
+    };
+
+    let client = PerpClient::new(transport, signer, deployments, CHAIN_ID).unwrap();
+
+    // 3. Fund test wallet
+    deal_eth(&anvil.url, address).await;
+    deal_usdc(&anvil.url, address, U256::from(500_000_000u64)).await; // 500 USDC
+
+    // 4. Test get_balances (single address)
+    let (usdc, eth) = client.get_balances(address).await.unwrap();
+    println!("get_balances: USDC={usdc}, ETH={eth}");
+    assert!(usdc >= 500.0, "expected at least 500 USDC, got {usdc}");
+    assert!(eth > U256::ZERO, "expected non-zero ETH balance");
+
+    // Cross-check with individual methods
+    let usdc_individual = client.get_usdc_balance().await.unwrap();
+    assert!(
+        (usdc - usdc_individual).abs() < 0.01,
+        "multicall USDC ({usdc}) should match individual ({usdc_individual})"
+    );
+
+    // 5. Test get_balances_batch (multiple addresses)
+    // Create a second address with different balances
+    let addr2 = address!("0000000000000000000000000000000000000042");
+    deal_eth(&anvil.url, addr2).await;
+    deal_usdc(&anvil.url, addr2, U256::from(200_000_000u64)).await; // 200 USDC
+
+    let results = client.get_balances_batch(&[address, addr2]).await.unwrap();
+    assert_eq!(results.len(), 2);
+
+    let (usdc1, eth1) = results[0];
+    let (usdc2, eth2) = results[1];
+    println!("batch[0]: USDC={usdc1}, ETH={eth1}");
+    println!("batch[1]: USDC={usdc2}, ETH={eth2}");
+
+    assert!(usdc1 >= 500.0, "addr1 should have >= 500 USDC");
+    assert!(usdc2 >= 200.0, "addr2 should have >= 200 USDC");
+    assert!(eth1 > U256::ZERO, "addr1 should have ETH");
+    assert!(eth2 > U256::ZERO, "addr2 should have ETH");
+
+    // 6. Test empty batch
+    let empty = client.get_balances_batch(&[]).await.unwrap();
+    assert!(empty.is_empty());
+
+    println!("\n=== Batch balances test passed! ===");
+}
