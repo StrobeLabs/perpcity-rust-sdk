@@ -54,7 +54,7 @@ use crate::convert::{
     leverage_to_margin_ratio, margin_ratio_to_leverage, scale_from_6dec, scale_to_6dec,
 };
 use crate::errors::{PerpCityError, Result};
-use crate::hft::gas::{GasCache, GasEstimateCache, GasLimits, Urgency};
+use crate::hft::gas::{FeeCache, GasLimitCache, GasLimits, Urgency};
 use crate::hft::pipeline::{PipelineConfig, TxPipeline, TxRequest};
 use crate::hft::state_cache::{CachedBounds, CachedFees, StateCache, StateCacheConfig};
 use crate::math::tick::{align_tick_down, align_tick_up, price_to_tick};
@@ -165,9 +165,9 @@ pub struct PerpClient {
     /// Transaction pipeline (nonce + gas). Mutex for interior mutability.
     pipeline: Mutex<TxPipeline>,
     /// Gas fee cache, updated from block headers.
-    gas_cache: Mutex<GasCache>,
+    fee_cache: Mutex<FeeCache>,
     /// Cached gas estimates from `eth_estimateGas`, keyed by function selector.
-    gas_estimate_cache: Mutex<GasEstimateCache>,
+    gas_limit_cache: Mutex<GasLimitCache>,
     /// Multi-layer state cache for on-chain reads.
     state_cache: Mutex<StateCache>,
 }
@@ -214,8 +214,8 @@ impl PerpClient {
             chain_id,
             // Pipeline starts at nonce 0; call sync_nonce() before first tx
             pipeline: Mutex::new(TxPipeline::new(0, PipelineConfig::default())),
-            gas_cache: Mutex::new(GasCache::new(DEFAULT_GAS_TTL_MS, DEFAULT_PRIORITY_FEE)),
-            gas_estimate_cache: Mutex::new(GasEstimateCache::new()),
+            fee_cache: Mutex::new(FeeCache::new(DEFAULT_GAS_TTL_MS, DEFAULT_PRIORITY_FEE)),
+            gas_limit_cache: Mutex::new(GasLimitCache::new()),
             state_cache: Mutex::new(StateCache::new(StateCacheConfig::default())),
         })
     }
@@ -267,7 +267,7 @@ impl PerpClient {
                 })?;
 
         let now = now_ms();
-        self.gas_cache.lock().unwrap().update(base_fee, now);
+        self.fee_cache.lock().unwrap().update(base_fee, now);
         tracing::debug!(base_fee, "gas cache refreshed");
         Ok(())
     }
@@ -278,7 +278,7 @@ impl PerpClient {
     /// any RPC calls. The cache TTL is reset to now.
     pub fn set_base_fee(&self, base_fee: u64) {
         let now = now_ms();
-        self.gas_cache.lock().unwrap().update(base_fee, now);
+        self.fee_cache.lock().unwrap().update(base_fee, now);
         tracing::debug!(base_fee, "base fee injected");
     }
 
@@ -287,7 +287,7 @@ impl PerpClient {
     /// Intended for reading the base fee after `refresh_gas` in order to
     /// distribute it to other clients via [`set_base_fee`](Self::set_base_fee).
     pub fn base_fee(&self) -> Option<u64> {
-        self.gas_cache.lock().unwrap().base_fee()
+        self.fee_cache.lock().unwrap().base_fee()
     }
 
     /// Override the gas cache TTL (milliseconds).
@@ -296,7 +296,7 @@ impl PerpClient {
     /// the default 2s TTL may be too tight. Set this to match the poller's
     /// cadence with headroom (e.g. `tick_secs * 2 * 1000`).
     pub fn set_gas_ttl(&self, ttl_ms: u64) {
-        self.gas_cache.lock().unwrap().set_ttl(ttl_ms);
+        self.fee_cache.lock().unwrap().set_ttl(ttl_ms);
         tracing::debug!(ttl_ms, "gas cache TTL updated");
     }
 
@@ -1337,7 +1337,7 @@ impl PerpClient {
         // Prepare via pipeline (zero RPC)
         let prepared = {
             let pipeline = self.pipeline.lock().unwrap();
-            let gas_cache = self.gas_cache.lock().unwrap();
+            let fee_cache = self.fee_cache.lock().unwrap();
             pipeline.prepare(
                 TxRequest {
                     to: to.into_array(),
@@ -1346,7 +1346,7 @@ impl PerpClient {
                     gas_limit: resolved_gas_limit,
                     urgency,
                 },
-                &gas_cache,
+                &fee_cache,
                 now,
             )?
         };
@@ -1450,7 +1450,7 @@ impl PerpClient {
 
         // Check cache
         {
-            let cache = self.gas_estimate_cache.lock().unwrap();
+            let cache = self.gas_limit_cache.lock().unwrap();
             if let Some(limit) = cache.get(&selector, now) {
                 tracing::trace!(selector = %alloy::primitives::hex::encode(selector), limit, "gas estimate cache hit");
                 return Ok(limit);
@@ -1472,12 +1472,12 @@ impl PerpClient {
 
         // Cache with buffer
         {
-            let mut cache = self.gas_estimate_cache.lock().unwrap();
+            let mut cache = self.gas_limit_cache.lock().unwrap();
             cache.put(selector, raw_estimate, now);
         }
 
         let buffered = {
-            let cache = self.gas_estimate_cache.lock().unwrap();
+            let cache = self.gas_limit_cache.lock().unwrap();
             cache.get(&selector, now).unwrap()
         };
 

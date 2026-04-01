@@ -19,7 +19,7 @@
 use std::collections::HashMap;
 
 use crate::errors::{PerpCityError, Result};
-use crate::hft::gas::{GasCache, GasFees, Urgency};
+use crate::hft::gas::{FeeCache, GasFees, Urgency};
 use crate::hft::nonce::NonceManager;
 
 /// A transaction request before nonce/gas are resolved.
@@ -100,7 +100,7 @@ impl Default for PipelineConfig {
 
 /// Transaction pipeline: zero-RPC preparation via cached nonce + gas.
 ///
-/// Owns a [`NonceManager`] and borrows a [`GasCache`] to prepare
+/// Owns a [`NonceManager`] and borrows a [`FeeCache`] to prepare
 /// transactions without network calls on the hot path.
 #[derive(Debug)]
 pub struct TxPipeline {
@@ -131,7 +131,7 @@ impl TxPipeline {
     pub fn prepare(
         &self,
         request: TxRequest,
-        gas_cache: &GasCache,
+        fee_cache: &FeeCache,
         now_ms: u64,
     ) -> Result<PreparedTx> {
         // Fail fast: check in-flight limit before acquiring nonce
@@ -148,7 +148,7 @@ impl TxPipeline {
         }
 
         // Resolve gas fees from cache
-        let gas_fees = gas_cache.fees_for(request.urgency, now_ms).ok_or_else(|| {
+        let gas_fees = fee_cache.fees_for(request.urgency, now_ms).ok_or_else(|| {
             tracing::warn!("gas cache stale or empty");
             PerpCityError::GasPriceUnavailable {
                 reason: "gas cache stale or empty".into(),
@@ -249,8 +249,8 @@ mod tests {
     const BASE_FEE: u64 = 50_000_000;
     const TIP: u64 = 1_000_000_000;
 
-    fn test_gas_cache(now_ms: u64) -> GasCache {
-        let mut gc = GasCache::new(5000, TIP);
+    fn test_fee_cache(now_ms: u64) -> FeeCache {
+        let mut gc = FeeCache::new(5000, TIP);
         gc.update(BASE_FEE, now_ms);
         gc
     }
@@ -268,7 +268,7 @@ mod tests {
     #[test]
     fn prepare_assigns_nonce_and_gas() {
         let pipe = TxPipeline::new(10, PipelineConfig::default());
-        let gc = test_gas_cache(0);
+        let gc = test_fee_cache(0);
 
         let p1 = pipe.prepare(test_request(), &gc, 0).unwrap();
         assert_eq!(p1.nonce, 10);
@@ -282,7 +282,7 @@ mod tests {
     #[test]
     fn prepare_fails_on_stale_gas() {
         let pipe = TxPipeline::new(0, PipelineConfig::default());
-        let gc = test_gas_cache(0);
+        let gc = test_fee_cache(0);
         // Gas cache has 5000ms TTL, query at 6000ms
         let result = pipe.prepare(test_request(), &gc, 6000);
         assert!(matches!(
@@ -294,7 +294,7 @@ mod tests {
     #[test]
     fn prepare_fails_on_empty_gas() {
         let pipe = TxPipeline::new(0, PipelineConfig::default());
-        let gc = GasCache::new(5000, TIP); // never updated
+        let gc = FeeCache::new(5000, TIP); // never updated
         let result = pipe.prepare(test_request(), &gc, 0);
         assert!(matches!(
             result,
@@ -309,7 +309,7 @@ mod tests {
             stuck_timeout_ms: 30_000,
         };
         let mut pipe = TxPipeline::new(0, config);
-        let gc = test_gas_cache(0);
+        let gc = test_fee_cache(0);
 
         // Fill up 2 slots
         for i in 0..2u8 {
@@ -331,7 +331,7 @@ mod tests {
     #[test]
     fn confirm_removes_from_tracking() {
         let mut pipe = TxPipeline::new(0, PipelineConfig::default());
-        let gc = test_gas_cache(0);
+        let gc = test_fee_cache(0);
 
         let p = pipe.prepare(test_request(), &gc, 0).unwrap();
         let hash = [0xAA; 32];
@@ -345,7 +345,7 @@ mod tests {
     #[test]
     fn fail_removes_and_releases_nonce() {
         let mut pipe = TxPipeline::new(0, PipelineConfig::default());
-        let gc = test_gas_cache(0);
+        let gc = test_fee_cache(0);
 
         let p = pipe.prepare(test_request(), &gc, 0).unwrap();
         assert_eq!(p.nonce, 0);
@@ -365,14 +365,14 @@ mod tests {
             stuck_timeout_ms: 10_000,
         };
         let mut pipe = TxPipeline::new(0, config);
-        let gc = test_gas_cache(0);
+        let gc = test_fee_cache(0);
 
         // Submit at t=0
         let p1 = pipe.prepare(test_request(), &gc, 0).unwrap();
         pipe.record_submission([0x01; 32], p1, 0);
 
         // Submit at t=5000
-        let gc2 = test_gas_cache(5000);
+        let gc2 = test_fee_cache(5000);
         let p2 = pipe.prepare(test_request(), &gc2, 5000).unwrap();
         pipe.record_submission([0x02; 32], p2, 5000);
 
@@ -389,7 +389,7 @@ mod tests {
     #[test]
     fn prepare_bump_scales_fees() {
         let mut pipe = TxPipeline::new(0, PipelineConfig::default());
-        let gc = test_gas_cache(0);
+        let gc = test_fee_cache(0);
 
         let p = pipe.prepare(test_request(), &gc, 0).unwrap();
         let original_priority = p.gas_fees.max_priority_fee_per_gas;
@@ -419,7 +419,7 @@ mod tests {
     #[test]
     fn urgency_propagates_through_prepare() {
         let pipe = TxPipeline::new(0, PipelineConfig::default());
-        let gc = test_gas_cache(0);
+        let gc = test_fee_cache(0);
 
         let mut req = test_request();
         req.urgency = Urgency::Critical;
@@ -436,7 +436,7 @@ mod tests {
             stuck_timeout_ms: 30_000,
         };
         let mut pipe = TxPipeline::new(100, config);
-        let gc = test_gas_cache(0);
+        let gc = test_fee_cache(0);
 
         // Prepare → submit → confirm
         let p1 = pipe.prepare(test_request(), &gc, 0).unwrap();

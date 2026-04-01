@@ -8,7 +8,7 @@
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use std::collections::HashMap;
 
-use perpcity_sdk::hft::gas::{GasCache, GasLimits, Urgency};
+use perpcity_sdk::hft::gas::{FeeCache, GasLimits, Urgency};
 use perpcity_sdk::hft::latency::LatencyTracker;
 use perpcity_sdk::hft::nonce::NonceManager;
 use perpcity_sdk::hft::pipeline::{PipelineConfig, TxPipeline, TxRequest};
@@ -80,34 +80,34 @@ fn bench_gas(c: &mut Criterion) {
 
     // Hot path: fees_for() — O(1) saturating arithmetic
     group.bench_function("fees_for/normal", |b| {
-        let mut cache = GasCache::new(2000, 1_000_000_000);
+        let mut cache = FeeCache::new(2000, 1_000_000_000);
         cache.update(50_000_000, 1000);
         b.iter(|| cache.fees_for(black_box(Urgency::Normal), black_box(1500)))
     });
 
     group.bench_function("fees_for/critical", |b| {
-        let mut cache = GasCache::new(2000, 1_000_000_000);
+        let mut cache = FeeCache::new(2000, 1_000_000_000);
         cache.update(50_000_000, 1000);
         b.iter(|| cache.fees_for(black_box(Urgency::Critical), black_box(1500)))
     });
 
     // is_valid check — branch-on-option + subtraction + comparison
     group.bench_function("is_valid", |b| {
-        let mut cache = GasCache::new(2000, 1_000_000_000);
+        let mut cache = FeeCache::new(2000, 1_000_000_000);
         cache.update(50_000_000, 1000);
         b.iter(|| cache.is_valid(black_box(1500)))
     });
 
     // Stale cache — should return None fast
     group.bench_function("fees_for/stale", |b| {
-        let mut cache = GasCache::new(2000, 1_000_000_000);
+        let mut cache = FeeCache::new(2000, 1_000_000_000);
         cache.update(50_000_000, 0);
         b.iter(|| cache.fees_for(black_box(Urgency::Normal), black_box(5000)))
     });
 
     // Cold path: update
     group.bench_function("update", |b| {
-        let mut cache = GasCache::new(2000, 1_000_000_000);
+        let mut cache = FeeCache::new(2000, 1_000_000_000);
         b.iter(|| cache.update(black_box(50_000_000), black_box(1000)))
     });
 
@@ -272,7 +272,7 @@ fn bench_pipeline(c: &mut Criterion) {
     // This is the most critical benchmark: nonce acquire + gas lookup + in-flight check
     group.bench_function("prepare", |b| {
         let pipe = TxPipeline::new(0, PipelineConfig::default());
-        let mut gc = GasCache::new(5000, 1_000_000_000);
+        let mut gc = FeeCache::new(5000, 1_000_000_000);
         gc.update(50_000_000, 0);
         b.iter(|| {
             pipe.prepare(
@@ -292,7 +292,7 @@ fn bench_pipeline(c: &mut Criterion) {
     // prepare() with pre-allocated calldata (simulates zero-alloc hot path)
     group.bench_function("prepare/prealloc_calldata", |b| {
         let pipe = TxPipeline::new(0, PipelineConfig::default());
-        let mut gc = GasCache::new(5000, 1_000_000_000);
+        let mut gc = FeeCache::new(5000, 1_000_000_000);
         gc.update(50_000_000, 0);
         let calldata = vec![0x01, 0x02, 0x03, 0x04];
         b.iter(|| {
@@ -313,7 +313,7 @@ fn bench_pipeline(c: &mut Criterion) {
     // prepare() fail-fast on stale gas
     group.bench_function("prepare/stale_gas_reject", |b| {
         let pipe = TxPipeline::new(0, PipelineConfig::default());
-        let mut gc = GasCache::new(2000, 1_000_000_000);
+        let mut gc = FeeCache::new(2000, 1_000_000_000);
         gc.update(50_000_000, 0);
         b.iter(|| {
             let _ = pipe.prepare(
@@ -434,7 +434,7 @@ fn bench_trading_tick(c: &mut Criterion) {
     // Full hot-path simulation: state cache read + pipeline prepare + latency record
     group.bench_function("cache_read_prepare_record", |b| {
         let pipe = TxPipeline::new(0, PipelineConfig::default());
-        let mut gc = GasCache::new(5000, 1_000_000_000);
+        let mut gc = FeeCache::new(5000, 1_000_000_000);
         gc.update(50_000_000, 0);
         let mut state = StateCache::new(StateCacheConfig::default());
         let perp = [0xAA; 32];
