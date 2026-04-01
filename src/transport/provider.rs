@@ -523,10 +523,10 @@ impl Router {
             .map(|idx| (&self.shared, idx))
     }
 
-    /// Select the pool for hedged reads. Prefers the read pool if non-empty,
-    /// otherwise falls back to shared.
+    /// Select the pool for hedged reads. Prefers the read pool if it has
+    /// healthy endpoints, otherwise falls back to shared.
     fn read_pool(&self) -> &EndpointPool {
-        if !self.read.is_empty() {
+        if self.read.healthy_count() > 0 {
             &self.read
         } else {
             &self.shared
@@ -1009,6 +1009,28 @@ mod tests {
 
         // Read should fall back to shared
         let (pool, _idx) = router.select_for(false, now).unwrap();
+        assert_eq!(pool.endpoint_urls()[0], "https://shared.example.com");
+    }
+
+    #[test]
+    fn router_hedged_read_falls_back_to_shared() {
+        let config = TransportConfig::builder()
+            .shared_endpoint("https://shared.example.com")
+            .read_endpoint("https://read.example.com")
+            .strategy(Strategy::Hedged { fan_out: 2 })
+            .build()
+            .unwrap();
+        let transport = HftTransport::new(config).unwrap();
+        let router = &transport.router;
+
+        // Trip the read pool's circuit breaker
+        let now = now_ms();
+        router.read.record_failure(0, now);
+        router.read.record_failure(0, now);
+        router.read.record_failure(0, now);
+
+        // read_pool() should fall back to shared when read pool is unhealthy
+        let pool = router.read_pool();
         assert_eq!(pool.endpoint_urls()[0], "https://shared.example.com");
     }
 
