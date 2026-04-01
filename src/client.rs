@@ -62,7 +62,7 @@ use crate::transport::provider::HftTransport;
 use crate::types::{
     AdjustMarginParams, AdjustMarginResult, AdjustNotionalParams, AdjustNotionalResult, Bounds,
     CloseParams, CloseResult, Deployments, Fees, LiveDetails, OpenInterest, OpenMakerParams,
-    OpenMakerQuote, OpenResult, OpenTakerParams, OpenTakerQuote, PerpData, SwapQuote,
+    OpenMakerQuote, OpenResult, OpenTakerParams, OpenTakerQuote, PerpData, PerpSnapshot, SwapQuote,
 };
 
 // ── Constants ────────────────────────────────────────────────────────
@@ -87,6 +87,13 @@ const MAX_APPROVAL: U256 = U256::MAX;
 
 /// SCALE_1E6 as f64, used for converting on-chain fixed-point values.
 const SCALE_F64: f64 = SCALE_1E6 as f64;
+
+/// Convert a Q96 fixed-point funding-per-second value to a daily rate.
+fn funding_x96_to_daily(funding_x96: I256) -> f64 {
+    let funding_i128 = i128_from_i256(funding_x96);
+    let rate_per_sec = funding_i128 as f64 / 2.0_f64.powi(96);
+    rate_per_sec * crate::constants::INTERVAL as f64
+}
 
 // ── From impls for cache↔client type bridging ────────────────────────
 
@@ -597,41 +604,8 @@ impl PerpClient {
             .await?;
         let mark = crate::convert::sqrt_price_x96_to_price(sqrt_price_x96)?;
 
-        let now_ts = now_secs();
-        let fees_addr: [u8; 20] = config.fees.into();
-
-        // Try cache for fees
-        let fees = {
-            let cache = self.state_cache.lock().unwrap();
-            cache.get_fees(&fees_addr, now_ts).cloned()
-        };
-
-        let fees = match fees {
-            Some(cached) => Fees::from(cached),
-            None => {
-                let fees = self.fetch_fees(&config).await?;
-                let mut cache = self.state_cache.lock().unwrap();
-                cache.put_fees(fees_addr, CachedFees::from(fees), now_ts);
-                fees
-            }
-        };
-
-        // Try cache for bounds
-        let ratios_addr: [u8; 20] = config.marginRatios.into();
-        let bounds = {
-            let cache = self.state_cache.lock().unwrap();
-            cache.get_bounds(&ratios_addr, now_ts).cloned()
-        };
-
-        let bounds = match bounds {
-            Some(cached) => Bounds::from(cached),
-            None => {
-                let bounds = self.fetch_bounds(&config).await?;
-                let mut cache = self.state_cache.lock().unwrap();
-                cache.put_bounds(ratios_addr, CachedBounds::from(bounds), now_ts);
-                bounds
-            }
-        };
+        let fees = self.get_or_fetch_fees(&config).await?;
+        let bounds = self.get_or_fetch_bounds(&config).await?;
 
         Ok(PerpData {
             id: perp_id,
@@ -968,13 +942,7 @@ impl PerpClient {
         let contract = PerpManager::new(self.deployments.perp_manager, &self.provider);
         let funding_x96: I256 = contract.fundingPerSecondX96(perp_id).call().await?;
 
-        // Convert from X96 fixed-point to human-readable daily rate
-        // rate_per_sec = funding_x96 / 2^96
-        // daily_rate = rate_per_sec * 86400
-        let funding_i128 = i128_from_i256(funding_x96);
-        let q96_f64 = 2.0_f64.powi(96);
-        let rate_per_sec = funding_i128 as f64 / q96_f64;
-        let daily_rate = rate_per_sec * crate::constants::INTERVAL as f64;
+        let daily_rate = funding_x96_to_daily(funding_x96);
 
         tracing::debug!(%perp_id, daily_rate, "funding rate fetched");
 
@@ -1121,6 +1089,143 @@ impl PerpClient {
 
         tracing::debug!(count = n, "batch balances fetched via multicall");
         Ok(out)
+    }
+
+    /// Get perp config and live market data in two multicalls (2 CUs total).
+    ///
+    /// Phase 1 multicalls `cfgs` + `timeWeightedAvgSqrtPriceX96` +
+    /// `fundingPerSecondX96` + `takerOpenInterest` against PerpManager
+    /// (4 reads → 1 CU). Phase 2 calls `index()` on the beacon returned
+    /// by phase 1 (1 CU).
+    ///
+    /// Returns `(PerpData, PerpSnapshot)` — static config and live market
+    /// data. Replaces the typical startup sequence of 5+ individual RPCs.
+    pub async fn get_perp_snapshot(&self, perp_id: B256) -> Result<(PerpData, PerpSnapshot)> {
+        let pm = self.deployments.perp_manager;
+
+        // Phase 1: multicall cfgs + mark + funding + OI against PerpManager
+        let calls = vec![
+            IMulticall3::Call3 {
+                target: pm,
+                allowFailure: false,
+                callData: PerpManager::cfgsCall { perpId: perp_id }
+                    .abi_encode()
+                    .into(),
+            },
+            IMulticall3::Call3 {
+                target: pm,
+                allowFailure: false,
+                callData: PerpManager::timeWeightedAvgSqrtPriceX96Call {
+                    perpId: perp_id,
+                    lookbackWindow: 1,
+                }
+                .abi_encode()
+                .into(),
+            },
+            IMulticall3::Call3 {
+                target: pm,
+                allowFailure: false,
+                callData: PerpManager::fundingPerSecondX96Call { perpId: perp_id }
+                    .abi_encode()
+                    .into(),
+            },
+            IMulticall3::Call3 {
+                target: pm,
+                allowFailure: false,
+                callData: PerpManager::takerOpenInterestCall { perpId: perp_id }
+                    .abi_encode()
+                    .into(),
+            },
+        ];
+
+        let multicall = IMulticall3::new(MULTICALL3, &self.provider);
+        let results = multicall.aggregate3(calls).call().await?;
+
+        if results.len() != 4 {
+            return Err(PerpCityError::Overflow {
+                context: format!(
+                    "perp snapshot multicall returned {} results, expected 4",
+                    results.len()
+                ),
+            });
+        }
+
+        let call_names = [
+            "cfgs",
+            "timeWeightedAvgSqrtPriceX96",
+            "fundingPerSecondX96",
+            "takerOpenInterest",
+        ];
+        for (i, name) in call_names.iter().enumerate() {
+            if !results[i].success {
+                return Err(PerpCityError::Overflow {
+                    context: format!("perp snapshot multicall: {name} call failed"),
+                });
+            }
+        }
+
+        // Decode cfgs
+        let config = PerpManager::PerpConfig::abi_decode(&results[0].returnData).map_err(|e| {
+            PerpCityError::Overflow {
+                context: format!("failed to decode PerpConfig: {e}"),
+            }
+        })?;
+
+        if config.beacon == Address::ZERO {
+            return Err(PerpCityError::PerpNotFound { perp_id });
+        }
+
+        // Decode mark price
+        let sqrt_price_x96 =
+            U256::abi_decode(&results[1].returnData).map_err(|e| PerpCityError::Overflow {
+                context: format!("failed to decode mark price: {e}"),
+            })?;
+        let mark = crate::convert::sqrt_price_x96_to_price(sqrt_price_x96)?;
+
+        // Decode funding rate
+        let funding_x96 =
+            I256::abi_decode(&results[2].returnData).map_err(|e| PerpCityError::Overflow {
+                context: format!("failed to decode funding rate: {e}"),
+            })?;
+        let funding_rate_daily = funding_x96_to_daily(funding_x96);
+
+        // Decode OI — takerOpenInterest returns (uint128 longOI, uint128 shortOI)
+        let (long_oi, short_oi) =
+            <(u128, u128)>::abi_decode(&results[3].returnData).map_err(|e| {
+                PerpCityError::Overflow {
+                    context: format!("failed to decode open interest: {e}"),
+                }
+            })?;
+        let open_interest = OpenInterest {
+            long_oi: long_oi as f64 / SCALE_F64,
+            short_oi: short_oi as f64 / SCALE_F64,
+        };
+
+        // Phase 2: fetch index price from beacon (1 CU)
+        let index_price = self.get_index_price(config.beacon).await?;
+
+        // Build PerpData (fetch fees/bounds from cache or chain)
+        let fees = self.get_or_fetch_fees(&config).await?;
+        let bounds = self.get_or_fetch_bounds(&config).await?;
+
+        let perp_data = PerpData {
+            id: perp_id,
+            tick_spacing: i24_to_i32(config.key.tickSpacing),
+            mark,
+            beacon: config.beacon,
+            bounds,
+            fees,
+        };
+
+        let snapshot = PerpSnapshot {
+            mark_price: mark,
+            index_price,
+            funding_rate_daily,
+            open_interest,
+        };
+
+        tracing::debug!(%perp_id, "perp snapshot fetched via multicall");
+        Ok((perp_data, snapshot))
     }
 
     // ── Accessors ────────────────────────────────────────────────────
@@ -1339,6 +1444,48 @@ impl PerpClient {
         );
 
         Ok(receipt)
+    }
+
+    /// Get fees from cache or fetch from chain.
+    async fn get_or_fetch_fees(&self, config: &PerpManager::PerpConfig) -> Result<Fees> {
+        let now_ts = now_secs();
+        let fees_addr: [u8; 20] = config.fees.into();
+
+        let cached = {
+            let cache = self.state_cache.lock().unwrap();
+            cache.get_fees(&fees_addr, now_ts).cloned()
+        };
+
+        match cached {
+            Some(cached) => Ok(Fees::from(cached)),
+            None => {
+                let fees = self.fetch_fees(config).await?;
+                let mut cache = self.state_cache.lock().unwrap();
+                cache.put_fees(fees_addr, CachedFees::from(fees), now_ts);
+                Ok(fees)
+            }
+        }
+    }
+
+    /// Get bounds from cache or fetch from chain.
+    async fn get_or_fetch_bounds(&self, config: &PerpManager::PerpConfig) -> Result<Bounds> {
+        let now_ts = now_secs();
+        let ratios_addr: [u8; 20] = config.marginRatios.into();
+
+        let cached = {
+            let cache = self.state_cache.lock().unwrap();
+            cache.get_bounds(&ratios_addr, now_ts).cloned()
+        };
+
+        match cached {
+            Some(cached) => Ok(Bounds::from(cached)),
+            None => {
+                let bounds = self.fetch_bounds(config).await?;
+                let mut cache = self.state_cache.lock().unwrap();
+                cache.put_bounds(ratios_addr, CachedBounds::from(bounds), now_ts);
+                Ok(bounds)
+            }
+        }
     }
 
     /// Fetch fees from the IFees module contract.
