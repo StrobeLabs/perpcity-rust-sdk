@@ -6,7 +6,7 @@ Rust SDK for the [PerpCity](https://perp.city) perpetual futures protocol on Bas
 
 ```toml
 [dependencies]
-perpcity-sdk = "0.1"
+perpcity-sdk = "0.2"
 ```
 
 ## Quickstart
@@ -60,10 +60,10 @@ All examples load configuration from `.env` automatically via `dotenvy`.
 ```rust
 use perpcity_sdk::*;
 
-// 1. Transport — single or multi-endpoint
+// 1. Transport — single endpoint or read/write split
 let transport = HftTransport::new(
     TransportConfig::builder()
-        .endpoint("https://sepolia.base.org")
+        .shared_endpoint("https://sepolia.base.org")
         .build()?,
 )?;
 
@@ -107,34 +107,44 @@ Every write method takes an `Urgency` level that scales the EIP-1559 priority fe
 ### Market Data
 
 ```rust
-let config = client.get_perp_config(perp_id).await?;  // mark, fees, bounds
-let mark   = client.get_mark_price(perp_id).await?;    // f64 price
+// Snapshot — config + live data in 2 multicalls (2 CUs instead of 5+)
+let (config, snapshot) = client.get_perp_snapshot(perp_id).await?;
+
+// Or individually
+let mark    = client.get_mark_price(perp_id).await?;    // f64 price
 let funding = client.get_funding_rate(perp_id).await?;  // daily rate
-let oi     = client.get_open_interest(perp_id).await?;  // long/short OI
-let live   = client.get_live_details(pos_id).await?;    // PnL, funding, liquidation
-let balance = client.get_usdc_balance().await?;          // wallet USDC
+let oi      = client.get_open_interest(perp_id).await?;  // long/short OI
+let live    = client.get_live_details(pos_id).await?;    // PnL, funding, liquidation
+
+// Batch balances — N addresses in 1 multicall (1 CU instead of 2N)
+let (usdc, eth) = client.get_balances(address).await?;
+let all = client.get_balances_batch(&addresses).await?;
 ```
 
 ### HFT Infrastructure
 
 The SDK is designed for sub-millisecond transaction preparation on the hot path.
 
-**Multi-endpoint transport** — configure multiple RPCs with automatic failover:
+**Multi-endpoint transport with read/write split** — route reads to free public RPCs, writes to paid endpoints:
 
 ```rust
 let transport = HftTransport::new(
     TransportConfig::builder()
-        .endpoint("https://sepolia.base.org")
-        .endpoint("https://base-sepolia-rpc.publicnode.com")
+        .shared_endpoint("https://base.g.alchemy.com/v2/KEY")  // writes + read fallback
+        .read_endpoint("https://base-rpc.publicnode.com")       // dedicated reads
         .strategy(Strategy::LatencyBased)
         .request_timeout(Duration::from_millis(2000))
         .build()?,
 )?;
 ```
 
+Each pool gets independent circuit breakers — if the read endpoint goes down, reads automatically fall back to the shared endpoint.
+
 **Lock-free nonce management** — `AtomicU64::fetch_add` for O(1) nonce acquisition. No mutex on the hot path.
 
-**Gas cache** — EIP-1559 base fee + priority fee cached from block headers. Refreshed per block, never estimated per-tx.
+**Fee cache** — EIP-1559 base fee + priority fee cached from block headers. Refreshed per block.
+
+**Gas limit cache** — `eth_estimateGas` results cached by function selector (1 hour TTL, 20% buffer). First call estimates, subsequent calls use the cache.
 
 **2-tier state cache:**
 - **Slow tier** (60s TTL): fees, margin bounds — rarely change
@@ -161,7 +171,7 @@ pos_manager.track(ManagedPosition {
 ### Math Utilities
 
 ```rust
-use perpcity_sdk::math::tick::{price_to_tick, tick_to_price, align_tick_down};
+use perpcity_sdk::{price_to_tick, tick_to_price, align_tick_down};
 use perpcity_sdk::math::position::{entry_price, liquidation_price};
 use perpcity_sdk::math::liquidity::estimate_liquidity;
 
