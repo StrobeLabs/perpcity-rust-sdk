@@ -38,7 +38,10 @@ pub enum Strategy {
     LatencyBased,
     /// Fan out reads to `fan_out` endpoints, take the fastest response.
     /// Writes always go to a single best endpoint.
-    Hedged { fan_out: usize },
+    Hedged {
+        /// Number of endpoints to fan out reads to.
+        fan_out: usize,
+    },
 }
 
 /// Circuit breaker configuration per endpoint.

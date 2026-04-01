@@ -37,6 +37,8 @@ impl GasLimits {
     pub const ADJUST_NOTIONAL: u64 = 500_000;
     /// Adjust position margin (add/remove collateral).
     pub const ADJUST_MARGIN: u64 = 500_000;
+    /// ERC-20 `transfer` call.
+    pub const TRANSFER: u64 = 65_000;
 }
 
 /// Transaction urgency level, controlling EIP-1559 fee scaling.

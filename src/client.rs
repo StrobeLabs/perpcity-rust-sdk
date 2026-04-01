@@ -579,6 +579,12 @@ impl PerpClient {
 
         // Fetch perp config — sol!(rpc) returns the struct directly
         let config: PerpManager::PerpConfig = contract.cfgs(perp_id).call().await?;
+
+        // Zero beacon means the perp was never created
+        if config.beacon == Address::ZERO {
+            return Err(PerpCityError::PerpNotFound { perp_id });
+        }
+
         let beacon = config.beacon;
 
         // Fetch mark price via TWAP (short window = ~current price)
@@ -1098,7 +1104,12 @@ impl PerpClient {
         let scaled = U256::from(scale_to_6dec(amount)? as u128);
         let calldata = usdc.transfer(to, scaled).calldata().clone();
         let receipt = self
-            .send_tx(self.deployments.usdc, calldata, GasLimits::APPROVE, urgency)
+            .send_tx(
+                self.deployments.usdc,
+                calldata,
+                GasLimits::TRANSFER,
+                urgency,
+            )
             .await?;
         tracing::info!(tx_hash = %receipt.transaction_hash, "USDC transferred");
         Ok(receipt.transaction_hash)
