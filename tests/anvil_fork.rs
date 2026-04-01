@@ -31,8 +31,8 @@ const PERP_ID: &str = "0x73bf6d0e03a284f42639516320642652ab022db0f82aff40e77bdd9
 /// Anvil's default private key #0 (well-known, test-only).
 const ANVIL_KEY: &str = "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
 
-/// Anvil fork RPC port.
-const ANVIL_PORT: u16 = 48545;
+/// Next available Anvil port. Each test gets its own to avoid collisions.
+static NEXT_PORT: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(48545);
 
 // ── Anvil process management ──────────────────────────────────────────
 
@@ -43,13 +43,14 @@ struct AnvilInstance {
 
 impl AnvilInstance {
     async fn fork_base_sepolia() -> Self {
-        let url = format!("http://127.0.0.1:{ANVIL_PORT}");
+        let port = NEXT_PORT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let url = format!("http://127.0.0.1:{port}");
         let child = Command::new("anvil")
             .args([
                 "--fork-url",
                 "https://sepolia.base.org",
                 "--port",
-                &ANVIL_PORT.to_string(),
+                &port.to_string(),
                 "--chain-id",
                 &CHAIN_ID.to_string(),
                 "--block-time",
@@ -513,4 +514,106 @@ async fn batch_balances_via_multicall() {
     assert!(empty.is_empty());
 
     println!("\n=== Batch balances test passed! ===");
+}
+
+#[tokio::test]
+#[ignore] // Requires `anvil` — run with: cargo test --test anvil_fork -- --ignored --nocapture
+async fn perp_snapshot_via_multicall() {
+    // 1. Start Anvil forking Base Sepolia
+    let anvil = AnvilInstance::fork_base_sepolia().await;
+
+    // 2. Setup client
+    let signer: PrivateKeySigner = ANVIL_KEY.parse().unwrap();
+    let address = signer.address();
+
+    let transport = HftTransport::new(
+        TransportConfig::builder()
+            .shared_endpoint(&anvil.url)
+            .build()
+            .unwrap(),
+    )
+    .unwrap();
+
+    let deployments = Deployments {
+        perp_manager: PERP_MANAGER,
+        usdc: USDC,
+        fees_module: None,
+        margin_ratios_module: None,
+        lockup_period_module: None,
+        sqrt_price_impact_limit_module: None,
+    };
+
+    let client = PerpClient::new(transport, signer, deployments, CHAIN_ID).unwrap();
+
+    // 3. Fund test wallet (needed for gas if any writes were required)
+    deal_eth(&anvil.url, address).await;
+
+    // 4. Fetch snapshot via multicall
+    let perp_id: B256 = PERP_ID.parse().unwrap();
+    let (perp_data, snapshot) = client.get_perp_snapshot(perp_id).await.unwrap();
+
+    println!("PerpData:");
+    println!("  id: {}", perp_data.id);
+    println!("  tick_spacing: {}", perp_data.tick_spacing);
+    println!("  mark: {}", perp_data.mark);
+    println!("  beacon: {:?}", perp_data.beacon);
+    println!("  bounds: {:?}", perp_data.bounds);
+    println!("  fees: {:?}", perp_data.fees);
+
+    println!("PerpSnapshot:");
+    println!("  mark_price: {}", snapshot.mark_price);
+    println!("  index_price: {}", snapshot.index_price);
+    println!("  funding_rate_daily: {}", snapshot.funding_rate_daily);
+    println!(
+        "  OI — long: {}, short: {}",
+        snapshot.open_interest.long_oi, snapshot.open_interest.short_oi
+    );
+
+    // 5. Verify PerpData
+    assert_eq!(perp_data.id, perp_id);
+    assert!(
+        perp_data.tick_spacing > 0,
+        "tick_spacing should be positive"
+    );
+    assert!(perp_data.mark > 0.0, "mark price should be positive");
+    assert_ne!(perp_data.beacon, Address::ZERO, "beacon should not be zero");
+
+    // 6. Verify PerpSnapshot
+    assert!(
+        snapshot.mark_price > 0.0,
+        "snapshot mark price should be positive"
+    );
+    assert!(snapshot.index_price > 0.0, "index price should be positive");
+    // Funding rate can be positive or negative, just check it's finite
+    assert!(
+        snapshot.funding_rate_daily.is_finite(),
+        "funding rate should be finite"
+    );
+
+    // 7. Cross-check: mark price from snapshot should match PerpData
+    assert!(
+        (snapshot.mark_price - perp_data.mark).abs() < 0.0001,
+        "snapshot mark ({}) should match perp_data mark ({})",
+        snapshot.mark_price,
+        perp_data.mark,
+    );
+
+    // 8. Cross-check: individual methods should match multicall results
+    let mark_individual = client.get_mark_price(perp_id).await.unwrap();
+    assert!(
+        (snapshot.mark_price - mark_individual).abs() < 0.01,
+        "multicall mark ({}) should match individual ({})",
+        snapshot.mark_price,
+        mark_individual,
+    );
+
+    let funding_individual = client.get_funding_rate(perp_id).await.unwrap();
+    assert!(
+        (snapshot.funding_rate_daily - funding_individual).abs() < 0.001,
+        "multicall funding ({}) should match individual ({})",
+        snapshot.funding_rate_daily,
+        funding_individual,
+    );
+
+    println!("\n=== Perp snapshot test passed! ===");
 }
