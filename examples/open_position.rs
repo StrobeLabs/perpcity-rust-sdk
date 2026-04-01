@@ -74,7 +74,11 @@ async fn main() -> perpcity_sdk::Result<()> {
     dotenvy::dotenv().ok();
     let rpc_url = env::var("RPC_URL").unwrap_or_else(|_| "https://sepolia.base.org".into());
 
-    let transport = HftTransport::new(TransportConfig::builder().endpoint(&rpc_url).build()?)?;
+    let transport = HftTransport::new(
+        TransportConfig::builder()
+            .shared_endpoint(&rpc_url)
+            .build()?,
+    )?;
 
     // ── 2. Client ───────────────────────────────────────────────────
     let signer = load_signer();

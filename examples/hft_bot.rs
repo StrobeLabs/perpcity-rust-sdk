@@ -127,12 +127,12 @@ async fn main() -> perpcity_sdk::Result<()> {
     let rpc_2 = env::var("RPC_URL_2").ok();
 
     let mut builder = TransportConfig::builder()
-        .endpoint(&rpc_1)
+        .shared_endpoint(&rpc_1)
         .strategy(Strategy::LatencyBased)
         .request_timeout(Duration::from_millis(2000));
 
     if let Some(ref url) = rpc_2 {
-        builder = builder.endpoint(url);
+        builder = builder.shared_endpoint(url);
     }
 
     let transport = HftTransport::new(builder.build()?)?;

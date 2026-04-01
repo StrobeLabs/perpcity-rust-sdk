@@ -46,7 +46,11 @@ async fn main() -> Result<()> {
 
     // ── Phase: init ──────────────────────────────────────────────────
     let t = Instant::now();
-    let transport = HftTransport::new(TransportConfig::builder().endpoint(&rpc_url).build()?)?;
+    let transport = HftTransport::new(
+        TransportConfig::builder()
+            .shared_endpoint(&rpc_url)
+            .build()?,
+    )?;
     let signer: PrivateKeySigner = private_key.parse().unwrap();
     let deployments = Deployments {
         perp_manager: manager,

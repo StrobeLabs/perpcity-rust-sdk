@@ -24,7 +24,11 @@ async fn main() -> Result<()> {
     let rpc_url = env_or("RPC_URL", "https://sepolia.base.org");
 
     // -- Connect --
-    let transport = HftTransport::new(TransportConfig::builder().endpoint(&rpc_url).build()?)?;
+    let transport = HftTransport::new(
+        TransportConfig::builder()
+            .shared_endpoint(&rpc_url)
+            .build()?,
+    )?;
 
     let signer: PrivateKeySigner = env::var("PERPCITY_PRIVATE_KEY")
         .expect("set PERPCITY_PRIVATE_KEY")

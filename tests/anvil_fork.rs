@@ -204,7 +204,7 @@ async fn open_and_close_taker_on_fork() {
 
     let transport = HftTransport::new(
         TransportConfig::builder()
-            .endpoint(&anvil.url)
+            .shared_endpoint(&anvil.url)
             .build()
             .unwrap(),
     )

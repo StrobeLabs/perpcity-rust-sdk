@@ -14,7 +14,7 @@
 //! # async fn example() -> perpcity_sdk::Result<()> {
 //! let transport = HftTransport::new(
 //!     TransportConfig::builder()
-//!         .endpoint("https://mainnet.base.org")
+//!         .shared_endpoint("https://mainnet.base.org")
 //!         .build()?
 //! )?;
 //!

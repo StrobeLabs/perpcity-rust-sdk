@@ -28,8 +28,8 @@
 //!
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! let config = TransportConfig::builder()
-//!     .endpoint("https://mainnet.base.org")
-//!     .endpoint("https://base-rpc.publicnode.com")
+//!     .shared_endpoint("https://base.g.alchemy.com/v2/KEY")
+//!     .read_endpoint("https://base-rpc.publicnode.com")
 //!     .build()?;
 //!
 //! let transport = HftTransport::new(config)?;
@@ -145,35 +145,25 @@ impl std::fmt::Debug for ManagedEndpoint {
     }
 }
 
-/// Shared inner state for the transport.
+/// A pool of RPC endpoints with health-aware selection.
+///
+/// Each pool owns its endpoints and round-robin counter, and operates
+/// independently. Selection logic (round-robin, latency-based) is
+/// encapsulated here — the [`Router`] delegates to the appropriate pool
+/// based on whether the request is a read or write.
 #[derive(Debug)]
-struct TransportInner {
+struct EndpointPool {
     endpoints: Vec<ManagedEndpoint>,
-    strategy: Strategy,
-    config: TransportConfig,
     round_robin: AtomicUsize,
 }
 
-/// Multi-endpoint RPC transport with health-aware routing.
-///
-/// Implements `tower::Service<RequestPacket>` → Alloy `Transport` (blanket impl)
-/// → usable with `RootProvider`.
-///
-/// Clone is cheap (Arc).
-#[derive(Clone, Debug)]
-pub struct HftTransport {
-    inner: Arc<TransportInner>,
-}
-
-impl HftTransport {
-    /// Create a new transport from configuration.
-    ///
-    /// Initializes one HTTP transport per configured endpoint. Each gets its own
-    /// circuit breaker. This does NOT make any network calls — the transports
-    /// connect lazily on first request.
-    pub fn new(config: TransportConfig) -> crate::Result<Self> {
-        let endpoints = config
-            .http_endpoints
+impl EndpointPool {
+    /// Build a pool from a list of endpoint URLs.
+    fn from_urls(
+        urls: &[String],
+        cb_config: super::config::CircuitBreakerConfig,
+    ) -> crate::Result<Self> {
+        let endpoints = urls
             .iter()
             .map(|url| {
                 let parsed: url::Url = url.parse().map_err(|e: url::ParseError| {
@@ -185,7 +175,7 @@ impl HftTransport {
                 let boxed = alloy::transports::BoxTransport::new(http);
                 Ok(ManagedEndpoint {
                     transport: boxed,
-                    health: Mutex::new(EndpointHealth::new(config.circuit_breaker)),
+                    health: Mutex::new(EndpointHealth::new(cb_config)),
                     url: url.clone(),
                     atomic_latency_ns: AtomicU64::new(0),
                     atomic_state: AtomicU64::new(TAG_CLOSED),
@@ -194,106 +184,21 @@ impl HftTransport {
             .collect::<crate::Result<Vec<_>>>()?;
 
         Ok(Self {
-            inner: Arc::new(TransportInner {
-                endpoints,
-                strategy: config.strategy,
-                config,
-                round_robin: AtomicUsize::new(0),
-            }),
+            endpoints,
+            round_robin: AtomicUsize::new(0),
         })
     }
 
-    /// Get the health status of all endpoints.
-    pub fn health_status(&self) -> Vec<EndpointStatus> {
-        self.inner
-            .endpoints
-            .iter()
-            .map(|ep| ep.health.lock().unwrap().status())
-            .collect()
+    /// True if this pool has no endpoints.
+    fn is_empty(&self) -> bool {
+        self.endpoints.is_empty()
     }
 
-    /// Number of endpoints currently in Closed (healthy) state.
+    /// Select the best endpoint index based on strategy.
     ///
-    /// Lock-free: reads atomic state mirrors without taking any mutexes.
-    // healthy_count: lock-free via atomics (was N mutex locks)
-    pub fn healthy_count(&self) -> usize {
-        self.inner
-            .endpoints
-            .iter()
-            .filter(|ep| ep.atomic_state.load(Ordering::Relaxed) & TAG_MASK == TAG_CLOSED)
-            .count()
-    }
-
-    /// URLs of all configured endpoints.
-    pub fn endpoint_urls(&self) -> Vec<&str> {
-        self.inner
-            .endpoints
-            .iter()
-            .map(|ep| ep.url.as_str())
-            .collect()
-    }
-
-    // ── Benchmark accessors ─────────────────────────────────────────
-
-    /// Select the best endpoint index based on the current strategy.
-    ///
-    /// Exposed for benchmarking endpoint selection latency.
-    #[doc(hidden)]
-    pub fn select_endpoint(&self, now_ms: u64) -> Option<usize> {
-        self.inner.select_endpoint(now_ms)
-    }
-
-    /// Select up to `n` callable endpoints for hedged requests, ordered by latency.
-    ///
-    /// Exposed for benchmarking hedged fan-out overhead.
-    #[doc(hidden)]
-    pub fn select_n_endpoints(&self, n: usize, now_ms: u64) -> Vec<usize> {
-        self.inner.select_n_endpoints(n, now_ms)
-    }
-
-    /// Record a success with latency on a specific endpoint.
-    ///
-    /// Exposed for benchmarking health recording.
-    #[doc(hidden)]
-    pub fn record_success(&self, idx: usize, latency_ns: u64) {
-        self.inner.endpoints[idx].record_success(latency_ns);
-    }
-
-    /// Record a failure on a specific endpoint.
-    ///
-    /// Exposed for benchmarking health recording.
-    #[doc(hidden)]
-    pub fn record_failure(&self, idx: usize, now_ms: u64) {
-        self.inner.endpoints[idx].record_failure(now_ms);
-    }
-}
-
-// ── JSON-RPC method classification ──────────────────────────────────
-
-/// Returns true if the JSON-RPC method is a write (state-changing) operation.
-///
-/// Write methods must NOT be retried — double-sends could cause double spends.
-/// All other methods are treated as reads (safe to retry/hedge).
-fn is_write_method(req: &RequestPacket) -> bool {
-    match req {
-        RequestPacket::Single(call) => is_write_method_name(call.method()),
-        RequestPacket::Batch(calls) => calls.iter().any(|c| is_write_method_name(c.method())),
-    }
-}
-
-fn is_write_method_name(method: &str) -> bool {
-    matches!(method, "eth_sendRawTransaction" | "eth_sendTransaction")
-}
-
-// ── Endpoint selection ──────────────────────────────────────────────
-
-impl TransportInner {
-    /// Select the best endpoint index based on the current strategy.
-    ///
-    /// Returns `None` if all endpoints are unavailable (circuit open + not yet
-    /// past recovery timeout).
-    fn select_endpoint(&self, now_ms: u64) -> Option<usize> {
-        match self.strategy {
+    /// Returns `None` if all endpoints are unavailable.
+    fn select(&self, strategy: Strategy, now_ms: u64) -> Option<usize> {
+        match strategy {
             Strategy::RoundRobin => self.select_round_robin(now_ms),
             Strategy::LatencyBased | Strategy::Hedged { .. } => self.select_latency_based(now_ms),
         }
@@ -342,7 +247,6 @@ impl TransportInner {
     /// Slow path: no Closed endpoints available. Lock each non-Closed endpoint
     /// and call `is_callable()` which may transition Open→HalfOpen. Only entered
     /// when circuit breakers have tripped (error condition, rare).
-    // select_latency_based: lock-free fast path via atomics (was N mutex locks)
     fn select_latency_based(&self, now_ms: u64) -> Option<usize> {
         // Lock-free fast path: find best Closed endpoint by latency
         let mut best_idx = None;
@@ -395,8 +299,7 @@ impl TransportInner {
     ///
     /// Uses a fixed-size stack buffer (max 16 endpoints) to avoid heap allocation
     /// in the common case.
-    // select_n_endpoints: stack-allocated buffer + lock-free fast path
-    fn select_n_endpoints(&self, n: usize, now_ms: u64) -> Vec<usize> {
+    fn select_n(&self, n: usize, now_ms: u64) -> Vec<usize> {
         // Stack buffer avoids Vec allocation for up to 16 endpoints
         let mut candidates: [(usize, u64); 16] = [(0, u64::MAX); 16];
         let mut count = 0;
@@ -452,6 +355,158 @@ impl TransportInner {
         candidates[..count.min(n)].iter().map(|&(i, _)| i).collect()
     }
 
+    /// Number of endpoints currently in Closed (healthy) state.
+    ///
+    /// Lock-free: reads atomic state mirrors without taking any mutexes.
+    fn healthy_count(&self) -> usize {
+        self.endpoints
+            .iter()
+            .filter(|ep| ep.atomic_state.load(Ordering::Relaxed) & TAG_MASK == TAG_CLOSED)
+            .count()
+    }
+
+    /// Health status of all endpoints in this pool.
+    fn health_status(&self) -> Vec<EndpointStatus> {
+        self.endpoints
+            .iter()
+            .map(|ep| ep.health.lock().unwrap().status())
+            .collect()
+    }
+
+    /// URLs of all endpoints in this pool.
+    fn endpoint_urls(&self) -> Vec<&str> {
+        self.endpoints.iter().map(|ep| ep.url.as_str()).collect()
+    }
+}
+
+/// Request router — manages endpoint pools and dispatches requests.
+///
+/// Holds three pools (shared, read, write) and routes each request to the
+/// appropriate pool based on whether it is a read or write. If the dedicated
+/// pool is empty or all its endpoints are unhealthy, the request falls back
+/// to the shared pool.
+#[derive(Debug)]
+struct Router {
+    shared: EndpointPool,
+    read: EndpointPool,
+    write: EndpointPool,
+    strategy: Strategy,
+    config: TransportConfig,
+}
+
+/// Multi-endpoint RPC transport with health-aware routing.
+///
+/// Implements `tower::Service<RequestPacket>` → Alloy `Transport` (blanket impl)
+/// → usable with `RootProvider`.
+///
+/// Clone is cheap (Arc).
+#[derive(Clone, Debug)]
+pub struct HftTransport {
+    router: Arc<Router>,
+}
+
+impl HftTransport {
+    /// Create a new transport from configuration.
+    ///
+    /// Initializes one HTTP transport per configured endpoint. Each gets its own
+    /// circuit breaker. This does NOT make any network calls — the transports
+    /// connect lazily on first request.
+    pub fn new(config: TransportConfig) -> crate::Result<Self> {
+        let cb = config.circuit_breaker;
+        let shared = EndpointPool::from_urls(&config.shared_endpoints, cb)?;
+        let read = EndpointPool::from_urls(&config.read_endpoints, cb)?;
+        let write = EndpointPool::from_urls(&config.write_endpoints, cb)?;
+
+        Ok(Self {
+            router: Arc::new(Router {
+                shared,
+                read,
+                write,
+                strategy: config.strategy,
+                config,
+            }),
+        })
+    }
+
+    /// Get the health status of all endpoints across all pools.
+    pub fn health_status(&self) -> Vec<EndpointStatus> {
+        let r = &self.router;
+        let mut out = r.shared.health_status();
+        out.extend(r.read.health_status());
+        out.extend(r.write.health_status());
+        out
+    }
+
+    /// Number of endpoints currently in Closed (healthy) state across all pools.
+    ///
+    /// Lock-free: reads atomic state mirrors without taking any mutexes.
+    pub fn healthy_count(&self) -> usize {
+        let r = &self.router;
+        r.shared.healthy_count() + r.read.healthy_count() + r.write.healthy_count()
+    }
+
+    /// URLs of all configured endpoints across all pools.
+    pub fn endpoint_urls(&self) -> Vec<&str> {
+        let r = &self.router;
+        let mut out = r.shared.endpoint_urls();
+        out.extend(r.read.endpoint_urls());
+        out.extend(r.write.endpoint_urls());
+        out
+    }
+}
+
+// ── JSON-RPC method classification ──────────────────────────────────
+
+/// Returns true if the JSON-RPC method is a write (state-changing) operation.
+///
+/// Write methods must NOT be retried — double-sends could cause double spends.
+/// All other methods are treated as reads (safe to retry/hedge).
+fn is_write_method(req: &RequestPacket) -> bool {
+    match req {
+        RequestPacket::Single(call) => is_write_method_name(call.method()),
+        RequestPacket::Batch(calls) => calls.iter().any(|c| is_write_method_name(c.method())),
+    }
+}
+
+fn is_write_method_name(method: &str) -> bool {
+    matches!(method, "eth_sendRawTransaction" | "eth_sendTransaction")
+}
+
+// ── Pool-aware routing ─────────────────────────────────────────────
+
+impl Router {
+    /// Select the pool and endpoint index for a request.
+    ///
+    /// Tries the dedicated pool first (read or write), then falls back to
+    /// the shared pool. Returns a reference to the chosen pool and the
+    /// endpoint index within that pool, or `None` if all endpoints across
+    /// both pools are unavailable.
+    fn select_for(&self, is_write: bool, now_ms: u64) -> Option<(&EndpointPool, usize)> {
+        let dedicated = if is_write { &self.write } else { &self.read };
+
+        // Try dedicated pool first
+        if !dedicated.is_empty() {
+            if let Some(idx) = dedicated.select(self.strategy, now_ms) {
+                return Some((dedicated, idx));
+            }
+        }
+
+        // Fall back to shared pool
+        self.shared
+            .select(self.strategy, now_ms)
+            .map(|idx| (&self.shared, idx))
+    }
+
+    /// Select the pool for hedged reads. Prefers the read pool if non-empty,
+    /// otherwise falls back to shared.
+    fn read_pool(&self) -> &EndpointPool {
+        if !self.read.is_empty() {
+            &self.read
+        } else {
+            &self.shared
+        }
+    }
+
     /// Route a request through the best endpoint, with retry.
     ///
     /// Reads retry on any transport or RPC error. Writes only retry when the
@@ -478,23 +533,25 @@ impl TransportInner {
 
         // Handle hedged reads
         if !is_write && let Strategy::Hedged { fan_out } = self.strategy {
-            return self.hedged_request(req, fan_out, timeout).await;
+            let pool = self.read_pool();
+            return self.hedged_request(pool, req, fan_out, timeout).await;
         }
 
-        // Standard path: select endpoint, try with retry
+        // Standard path: select endpoint from appropriate pool, try with retry
         let mut last_err = None;
         let now_ms = now_ms();
 
         for attempt in 0..max_attempts {
-            let Some(idx) = self.select_endpoint(now_ms) else {
+            let Some((pool, idx)) = self.select_for(is_write, now_ms) else {
                 tracing::error!("all RPC endpoints unavailable (circuits open)");
                 return Err(TransportError::local_usage_str(
                     "all RPC endpoints unavailable (circuits open)",
                 ));
             };
 
+            let ep = &pool.endpoints[idx];
             let start = Instant::now();
-            let mut transport = self.endpoints[idx].transport.clone();
+            let mut transport = ep.transport.clone();
 
             // Apply tower timeout
             let result = tokio::time::timeout(timeout, transport.call(req.clone())).await;
@@ -510,13 +567,13 @@ impl TransportInner {
                             tracing::warn!(
                                 attempt = attempt + 1,
                                 max_attempts,
-                                endpoint = %self.endpoints[idx].url,
+                                endpoint = %ep.url,
                                 error_code = response.first_error_code(),
                                 "write rejected pre-mempool, retrying"
                             );
                         } else {
                             tracing::warn!(
-                                endpoint = %self.endpoints[idx].url,
+                                endpoint = %ep.url,
                                 error_code = response.first_error_code(),
                                 "write rejected after all retries exhausted"
                             );
@@ -524,16 +581,16 @@ impl TransportInner {
                         }
                     } else {
                         let latency_ns = start.elapsed().as_nanos() as u64;
-                        self.endpoints[idx].record_success(latency_ns);
+                        ep.record_success(latency_ns);
                         return Ok(response);
                     }
                 }
                 Ok(Err(e)) => {
-                    self.endpoints[idx].record_failure(now_ms);
+                    ep.record_failure(now_ms);
                     tracing::warn!(
                         attempt = attempt + 1,
                         max_attempts,
-                        endpoint = %self.endpoints[idx].url,
+                        endpoint = %ep.url,
                         error = %e,
                         is_write,
                         "transport error"
@@ -541,11 +598,11 @@ impl TransportInner {
                     last_err = Some(e);
                 }
                 Err(_timeout) => {
-                    self.endpoints[idx].record_failure(now_ms);
+                    ep.record_failure(now_ms);
                     tracing::warn!(
                         attempt = attempt + 1,
                         max_attempts,
-                        endpoint = %self.endpoints[idx].url,
+                        endpoint = %ep.url,
                         is_write,
                         "request timed out"
                     );
@@ -563,20 +620,21 @@ impl TransportInner {
         Err(last_err.unwrap_or_else(|| TransportError::local_usage_str("no endpoints available")))
     }
 
-    /// Fan out a read request to multiple endpoints, return the fastest success.
+    /// Fan out a read request to multiple endpoints in a pool, return the
+    /// fastest success.
     ///
     /// Uses [`JoinSet`] to properly cancel losing requests via `abort_all()`,
     /// saving RPC rate limits and network bandwidth. Health is recorded for all
     /// endpoints that complete before cancellation.
-    // hedged_request: JoinSet + abort_all (was mpsc + leaked tasks)
     async fn hedged_request(
         &self,
+        pool: &EndpointPool,
         req: RequestPacket,
         fan_out: usize,
         timeout: std::time::Duration,
     ) -> Result<ResponsePacket, TransportError> {
         let now_ms = now_ms();
-        let indices = self.select_n_endpoints(fan_out, now_ms);
+        let indices = pool.select_n(fan_out, now_ms);
 
         if indices.is_empty() {
             return Err(TransportError::local_usage_str(
@@ -587,21 +645,22 @@ impl TransportInner {
         // If only one endpoint is available, fall back to single request
         if indices.len() == 1 {
             let idx = indices[0];
+            let ep = &pool.endpoints[idx];
             let start = Instant::now();
-            let mut transport = self.endpoints[idx].transport.clone();
+            let mut transport = ep.transport.clone();
             let result = tokio::time::timeout(timeout, transport.call(req)).await;
 
             return match result {
                 Ok(Ok(resp)) => {
-                    self.endpoints[idx].record_success(start.elapsed().as_nanos() as u64);
+                    ep.record_success(start.elapsed().as_nanos() as u64);
                     Ok(resp)
                 }
                 Ok(Err(e)) => {
-                    self.endpoints[idx].record_failure(now_ms);
+                    ep.record_failure(now_ms);
                     Err(e)
                 }
                 Err(_) => {
-                    self.endpoints[idx].record_failure(now_ms);
+                    ep.record_failure(now_ms);
                     Err(TransportError::local_usage_str("request timed out"))
                 }
             };
@@ -611,7 +670,7 @@ impl TransportInner {
         let mut join_set = tokio::task::JoinSet::new();
 
         for &idx in &indices {
-            let mut transport = self.endpoints[idx].transport.clone();
+            let mut transport = pool.endpoints[idx].transport.clone();
             let req_clone = req.clone();
 
             join_set.spawn(async move {
@@ -631,14 +690,14 @@ impl TransportInner {
             match join_result {
                 Ok((idx, Ok(response), start)) => {
                     let latency_ns = start.elapsed().as_nanos() as u64;
-                    self.endpoints[idx].record_success(latency_ns);
+                    pool.endpoints[idx].record_success(latency_ns);
                     // Cancel remaining in-flight requests — saves RPC rate limits.
                     // JoinSet::drop also aborts, but explicit abort_all is clearer.
                     join_set.abort_all();
                     return Ok(response);
                 }
                 Ok((idx, Err(e), _start)) => {
-                    self.endpoints[idx].record_failure(now_ms);
+                    pool.endpoints[idx].record_failure(now_ms);
                     last_err = Some(e);
                 }
                 // Task was aborted (by our abort_all or JoinSet::drop) — expected
@@ -686,8 +745,8 @@ impl Service<RequestPacket> for HftTransport {
     }
 
     fn call(&mut self, req: RequestPacket) -> Self::Future {
-        let inner = Arc::clone(&self.inner);
-        Box::pin(async move { inner.route_request(req).await })
+        let router = Arc::clone(&self.router);
+        Box::pin(async move { router.route_request(req).await })
     }
 }
 
@@ -724,10 +783,22 @@ mod tests {
     }
 
     #[test]
-    fn new_transport_valid_config() {
+    fn new_transport_shared_only() {
         let config = TransportConfig::builder()
-            .endpoint("https://mainnet.base.org")
-            .endpoint("https://base-rpc.publicnode.com")
+            .shared_endpoint("https://mainnet.base.org")
+            .shared_endpoint("https://base-rpc.publicnode.com")
+            .build()
+            .unwrap();
+        let transport = HftTransport::new(config).unwrap();
+        assert_eq!(transport.healthy_count(), 2);
+        assert_eq!(transport.endpoint_urls().len(), 2);
+    }
+
+    #[test]
+    fn new_transport_read_write_split() {
+        let config = TransportConfig::builder()
+            .shared_endpoint("https://alchemy.example.com")
+            .read_endpoint("https://public.example.com")
             .build()
             .unwrap();
         let transport = HftTransport::new(config).unwrap();
@@ -738,7 +809,7 @@ mod tests {
     #[test]
     fn new_transport_invalid_url() {
         let config = TransportConfig::builder()
-            .endpoint("not a valid url")
+            .shared_endpoint("not a valid url")
             .build()
             .unwrap();
         let result = HftTransport::new(config);
@@ -757,23 +828,25 @@ mod tests {
         assert_service::<HftTransport>();
     }
 
+    // ── EndpointPool selection tests ─────────────────────────────────
+
     #[test]
-    fn round_robin_selection() {
-        let config = TransportConfig::builder()
-            .endpoint("https://rpc1.example.com")
-            .endpoint("https://rpc2.example.com")
-            .endpoint("https://rpc3.example.com")
-            .strategy(crate::transport::config::Strategy::RoundRobin)
-            .build()
-            .unwrap();
-        let transport = HftTransport::new(config).unwrap();
-        let inner = &transport.inner;
+    fn pool_round_robin_selection() {
+        let pool = EndpointPool::from_urls(
+            &[
+                "https://rpc1.example.com".into(),
+                "https://rpc2.example.com".into(),
+                "https://rpc3.example.com".into(),
+            ],
+            Default::default(),
+        )
+        .unwrap();
 
         let now = now_ms();
-        let a = inner.select_endpoint(now).unwrap();
-        let b = inner.select_endpoint(now).unwrap();
-        let c = inner.select_endpoint(now).unwrap();
-        let d = inner.select_endpoint(now).unwrap();
+        let a = pool.select(Strategy::RoundRobin, now).unwrap();
+        let b = pool.select(Strategy::RoundRobin, now).unwrap();
+        let c = pool.select(Strategy::RoundRobin, now).unwrap();
+        let d = pool.select(Strategy::RoundRobin, now).unwrap();
 
         // Should cycle through 0, 1, 2, 0
         assert_eq!(a, 0);
@@ -783,100 +856,146 @@ mod tests {
     }
 
     #[test]
-    fn latency_based_selection_prefers_lower_latency() {
-        let config = TransportConfig::builder()
-            .endpoint("https://rpc1.example.com") // idx 0
-            .endpoint("https://rpc2.example.com") // idx 1
-            .strategy(crate::transport::config::Strategy::LatencyBased)
-            .build()
-            .unwrap();
-        let transport = HftTransport::new(config).unwrap();
-        let inner = &transport.inner;
+    fn pool_latency_based_prefers_lower() {
+        let pool = EndpointPool::from_urls(
+            &[
+                "https://rpc1.example.com".into(),
+                "https://rpc2.example.com".into(),
+            ],
+            Default::default(),
+        )
+        .unwrap();
 
-        // Use the centralized method that syncs atomics
-        inner.endpoints[0].record_success(10_000_000); // 10ms
-        inner.endpoints[1].record_success(1_000_000); // 1ms
+        pool.endpoints[0].record_success(10_000_000); // 10ms
+        pool.endpoints[1].record_success(1_000_000); // 1ms
 
-        let now = now_ms();
-        let selected = inner.select_endpoint(now).unwrap();
+        let selected = pool.select(Strategy::LatencyBased, now_ms()).unwrap();
         assert_eq!(selected, 1); // lower latency
     }
 
     #[test]
-    fn selection_skips_open_circuit() {
-        let config = TransportConfig::builder()
-            .endpoint("https://rpc1.example.com")
-            .endpoint("https://rpc2.example.com")
-            .strategy(crate::transport::config::Strategy::LatencyBased)
-            .build()
-            .unwrap();
-        let transport = HftTransport::new(config).unwrap();
-        let inner = &transport.inner;
+    fn pool_skips_open_circuit() {
+        let pool = EndpointPool::from_urls(
+            &[
+                "https://rpc1.example.com".into(),
+                "https://rpc2.example.com".into(),
+            ],
+            Default::default(),
+        )
+        .unwrap();
 
         let now = now_ms();
-        // Trip circuit breaker on endpoint 0 using centralized method
-        inner.endpoints[0].record_failure(now);
-        inner.endpoints[0].record_failure(now);
-        inner.endpoints[0].record_failure(now);
+        // Trip circuit breaker on endpoint 0
+        pool.endpoints[0].record_failure(now);
+        pool.endpoints[0].record_failure(now);
+        pool.endpoints[0].record_failure(now);
 
-        // Select at `now` — still within 30s recovery timeout
-        let selected = inner.select_endpoint(now).unwrap();
+        let selected = pool.select(Strategy::LatencyBased, now).unwrap();
         assert_eq!(selected, 1); // only healthy endpoint
     }
 
     #[test]
-    fn select_n_endpoints_ordered_by_latency() {
-        let config = TransportConfig::builder()
-            .endpoint("https://rpc1.example.com") // idx 0
-            .endpoint("https://rpc2.example.com") // idx 1
-            .endpoint("https://rpc3.example.com") // idx 2
-            .build()
-            .unwrap();
-        let transport = HftTransport::new(config).unwrap();
-        let inner = &transport.inner;
+    fn pool_select_n_ordered_by_latency() {
+        let pool = EndpointPool::from_urls(
+            &[
+                "https://rpc1.example.com".into(),
+                "https://rpc2.example.com".into(),
+                "https://rpc3.example.com".into(),
+            ],
+            Default::default(),
+        )
+        .unwrap();
 
-        // Set latencies via centralized method (syncs atomics)
-        inner.endpoints[0].record_success(5_000_000);
-        inner.endpoints[1].record_success(1_000_000);
-        inner.endpoints[2].record_success(3_000_000);
+        pool.endpoints[0].record_success(5_000_000);
+        pool.endpoints[1].record_success(1_000_000);
+        pool.endpoints[2].record_success(3_000_000);
 
-        let now = now_ms();
-        let selected = inner.select_n_endpoints(2, now);
+        let selected = pool.select_n(2, now_ms());
         assert_eq!(selected, vec![1, 2]); // ordered by latency, take 2
     }
 
     #[test]
-    fn all_circuits_open_returns_none() {
-        let config = TransportConfig::builder()
-            .endpoint("https://rpc1.example.com")
-            .endpoint("https://rpc2.example.com")
-            .build()
-            .unwrap();
-        let transport = HftTransport::new(config).unwrap();
-        let inner = &transport.inner;
+    fn pool_all_circuits_open_returns_none() {
+        let pool = EndpointPool::from_urls(
+            &[
+                "https://rpc1.example.com".into(),
+                "https://rpc2.example.com".into(),
+            ],
+            Default::default(),
+        )
+        .unwrap();
 
-        // Trip both circuit breakers
-        for ep in &inner.endpoints {
+        for ep in &pool.endpoints {
             for t in 1..=3 {
                 ep.record_failure(t * 1000);
             }
         }
 
-        let now_ms = 5000; // within recovery timeout
-        assert!(inner.select_endpoint(now_ms).is_none());
+        assert!(pool.select(Strategy::LatencyBased, 5000).is_none());
+    }
+
+    // ── Router fallback tests ────────────────────────────────────────
+
+    #[test]
+    fn router_read_uses_read_pool() {
+        let config = TransportConfig::builder()
+            .shared_endpoint("https://shared.example.com")
+            .read_endpoint("https://read.example.com")
+            .build()
+            .unwrap();
+        let transport = HftTransport::new(config).unwrap();
+        let router = &transport.router;
+
+        let (pool, _idx) = router.select_for(false, now_ms()).unwrap();
+        // Should select from the read pool (1 endpoint), not shared
+        assert_eq!(pool.endpoints.len(), 1);
+        assert_eq!(pool.endpoints[0].url, "https://read.example.com");
+    }
+
+    #[test]
+    fn router_write_uses_shared_when_no_write_pool() {
+        let config = TransportConfig::builder()
+            .shared_endpoint("https://shared.example.com")
+            .read_endpoint("https://read.example.com")
+            .build()
+            .unwrap();
+        let transport = HftTransport::new(config).unwrap();
+        let router = &transport.router;
+
+        let (pool, _idx) = router.select_for(true, now_ms()).unwrap();
+        // No write pool → falls back to shared
+        assert_eq!(pool.endpoints[0].url, "https://shared.example.com");
+    }
+
+    #[test]
+    fn router_read_falls_back_to_shared() {
+        let config = TransportConfig::builder()
+            .shared_endpoint("https://shared.example.com")
+            .read_endpoint("https://read.example.com")
+            .build()
+            .unwrap();
+        let transport = HftTransport::new(config).unwrap();
+        let router = &transport.router;
+
+        // Trip the read pool's circuit breaker
+        let now = now_ms();
+        router.read.endpoints[0].record_failure(now);
+        router.read.endpoints[0].record_failure(now);
+        router.read.endpoints[0].record_failure(now);
+
+        // Read should fall back to shared
+        let (pool, _idx) = router.select_for(false, now).unwrap();
+        assert_eq!(pool.endpoints[0].url, "https://shared.example.com");
     }
 
     // ── Lock-free verification tests ─────────────────────────────────
 
     #[test]
     fn atomic_state_reflects_mutations() {
-        let config = TransportConfig::builder()
-            .endpoint("https://rpc1.example.com")
-            .build()
-            .unwrap();
-        let transport = HftTransport::new(config).unwrap();
-        let inner = &transport.inner;
-        let ep = &inner.endpoints[0];
+        let pool =
+            EndpointPool::from_urls(&["https://rpc1.example.com".into()], Default::default())
+                .unwrap();
+        let ep = &pool.endpoints[0];
 
         // Initial state: Closed
         assert_eq!(
@@ -901,64 +1020,62 @@ mod tests {
     }
 
     #[test]
-    fn healthy_count_is_lock_free() {
+    fn healthy_count_across_pools() {
         let config = TransportConfig::builder()
-            .endpoint("https://rpc1.example.com")
-            .endpoint("https://rpc2.example.com")
-            .endpoint("https://rpc3.example.com")
+            .shared_endpoint("https://shared1.example.com")
+            .shared_endpoint("https://shared2.example.com")
+            .read_endpoint("https://read.example.com")
             .build()
             .unwrap();
         let transport = HftTransport::new(config).unwrap();
 
         assert_eq!(transport.healthy_count(), 3);
 
-        // Trip one circuit
-        transport.record_failure(0, 1000);
-        transport.record_failure(0, 2000);
-        transport.record_failure(0, 3000);
+        // Trip the read endpoint's circuit
+        transport.router.read.endpoints[0].record_failure(1000);
+        transport.router.read.endpoints[0].record_failure(2000);
+        transport.router.read.endpoints[0].record_failure(3000);
 
         assert_eq!(transport.healthy_count(), 2);
     }
 
     #[test]
-    fn latency_based_fast_path_no_locks() {
-        // Verify that with all Closed endpoints, select_latency_based
-        // uses the atomic fast path (doesn't modify state)
-        let config = TransportConfig::builder()
-            .endpoint("https://rpc1.example.com")
-            .endpoint("https://rpc2.example.com")
-            .strategy(Strategy::LatencyBased)
-            .build()
-            .unwrap();
-        let transport = HftTransport::new(config).unwrap();
-        let inner = &transport.inner;
+    fn pool_latency_fast_path_no_locks() {
+        let pool = EndpointPool::from_urls(
+            &[
+                "https://rpc1.example.com".into(),
+                "https://rpc2.example.com".into(),
+            ],
+            Default::default(),
+        )
+        .unwrap();
 
-        inner.endpoints[0].record_success(10_000_000);
-        inner.endpoints[1].record_success(2_000_000);
+        pool.endpoints[0].record_success(10_000_000);
+        pool.endpoints[1].record_success(2_000_000);
 
         // Multiple selections should consistently pick endpoint 1 (lower latency)
         for _ in 0..100 {
-            assert_eq!(inner.select_endpoint(1000).unwrap(), 1);
+            assert_eq!(pool.select(Strategy::LatencyBased, 1000).unwrap(), 1);
         }
     }
 
     #[test]
-    fn select_n_fast_path_with_enough_closed() {
-        let config = TransportConfig::builder()
-            .endpoint("https://rpc1.example.com")
-            .endpoint("https://rpc2.example.com")
-            .endpoint("https://rpc3.example.com")
-            .build()
-            .unwrap();
-        let transport = HftTransport::new(config).unwrap();
-        let inner = &transport.inner;
+    fn pool_select_n_fast_path_with_enough_closed() {
+        let pool = EndpointPool::from_urls(
+            &[
+                "https://rpc1.example.com".into(),
+                "https://rpc2.example.com".into(),
+                "https://rpc3.example.com".into(),
+            ],
+            Default::default(),
+        )
+        .unwrap();
 
-        inner.endpoints[0].record_success(8_000_000);
-        inner.endpoints[1].record_success(2_000_000);
-        inner.endpoints[2].record_success(5_000_000);
+        pool.endpoints[0].record_success(8_000_000);
+        pool.endpoints[1].record_success(2_000_000);
+        pool.endpoints[2].record_success(5_000_000);
 
-        // All Closed, requesting 2 — should use fast path
-        let selected = inner.select_n_endpoints(2, 1000);
+        let selected = pool.select_n(2, 1000);
         assert_eq!(selected, vec![1, 2]); // ordered by latency
     }
 }
