@@ -129,5 +129,4 @@ mod tests {
         let expected = U256::from_str_radix("2505414483750479311864138015696", 10).unwrap();
         assert_eq!(MAX_SQRT_PRICE_X96, expected);
     }
-
 }
