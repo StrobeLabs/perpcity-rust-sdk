@@ -102,6 +102,22 @@ pub struct OpenInterest {
     pub short_oi: f64,
 }
 
+/// Live market data from a multicall snapshot.
+///
+/// Pure market state — no static config. Returned alongside [`PerpData`]
+/// from [`PerpClient::get_perp_snapshot`](crate::PerpClient::get_perp_snapshot).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct PerpSnapshot {
+    /// Current mark price (TWAP) in human-readable units.
+    pub mark_price: f64,
+    /// Oracle index price from the beacon contract.
+    pub index_price: f64,
+    /// Daily funding rate (positive = longs pay shorts).
+    pub funding_rate_daily: f64,
+    /// Taker open interest.
+    pub open_interest: OpenInterest,
+}
+
 /// Client-facing parameters for opening a taker (long/short) position.
 ///
 /// The SDK converts these to contract types automatically:
