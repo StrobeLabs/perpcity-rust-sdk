@@ -392,4 +392,32 @@ mod tests {
         // Maker is more expensive than taker (more Uniswap V4 work)
         assert!(GasLimits::OPEN_MAKER > GasLimits::OPEN_TAKER);
     }
+
+    // ── GasEstimateCache tests ───────────────────────────────────────
+
+    #[test]
+    fn estimate_cache_applies_buffer_and_expires() {
+        let mut cache = GasEstimateCache::with_config(1000, 1.5);
+        let selector = [0x01, 0x02, 0x03, 0x04];
+
+        assert!(cache.get(&selector, 0).is_none());
+
+        cache.put(selector, 100_000, 0);
+        assert_eq!(cache.get(&selector, 0), Some(150_000)); // 1.5× buffer
+        assert_eq!(cache.get(&selector, 999), Some(150_000)); // within TTL
+        assert!(cache.get(&selector, 1000).is_none()); // expired
+    }
+
+    #[test]
+    fn estimate_cache_selectors_are_independent() {
+        let mut cache = GasEstimateCache::new();
+        let open = [0xAA, 0xBB, 0xCC, 0xDD];
+        let close = [0x11, 0x22, 0x33, 0x44];
+
+        cache.put(open, 500_000, 0);
+        cache.put(close, 800_000, 0);
+
+        assert_eq!(cache.get(&open, 0), Some(600_000));
+        assert_eq!(cache.get(&close, 0), Some(960_000));
+    }
 }
