@@ -151,15 +151,16 @@ impl std::fmt::Debug for ManagedEndpoint {
 /// independently. Selection logic (round-robin, latency-based) is
 /// encapsulated here — the [`Router`] delegates to the appropriate pool
 /// based on whether the request is a read or write.
+#[doc(hidden)]
 #[derive(Debug)]
-struct EndpointPool {
+pub struct EndpointPool {
     endpoints: Vec<ManagedEndpoint>,
     round_robin: AtomicUsize,
 }
 
 impl EndpointPool {
     /// Build a pool from a list of endpoint URLs.
-    fn from_urls(
+    pub fn from_urls(
         urls: &[String],
         cb_config: super::config::CircuitBreakerConfig,
     ) -> crate::Result<Self> {
@@ -190,14 +191,14 @@ impl EndpointPool {
     }
 
     /// True if this pool has no endpoints.
-    fn is_empty(&self) -> bool {
+    pub fn is_empty(&self) -> bool {
         self.endpoints.is_empty()
     }
 
     /// Select the best endpoint index based on strategy.
     ///
     /// Returns `None` if all endpoints are unavailable.
-    fn select(&self, strategy: Strategy, now_ms: u64) -> Option<usize> {
+    pub fn select(&self, strategy: Strategy, now_ms: u64) -> Option<usize> {
         match strategy {
             Strategy::RoundRobin => self.select_round_robin(now_ms),
             Strategy::LatencyBased | Strategy::Hedged { .. } => self.select_latency_based(now_ms),
@@ -299,7 +300,7 @@ impl EndpointPool {
     ///
     /// Uses a fixed-size stack buffer (max 16 endpoints) to avoid heap allocation
     /// in the common case.
-    fn select_n(&self, n: usize, now_ms: u64) -> Vec<usize> {
+    pub fn select_n(&self, n: usize, now_ms: u64) -> Vec<usize> {
         // Stack buffer avoids Vec allocation for up to 16 endpoints
         let mut candidates: [(usize, u64); 16] = [(0, u64::MAX); 16];
         let mut count = 0;
@@ -355,10 +356,35 @@ impl EndpointPool {
         candidates[..count.min(n)].iter().map(|&(i, _)| i).collect()
     }
 
+    /// Number of endpoints in this pool.
+    pub fn len(&self) -> usize {
+        self.endpoints.len()
+    }
+
+    /// Record a successful request on endpoint `idx`.
+    pub fn record_success(&self, idx: usize, latency_ns: u64) {
+        self.endpoints[idx].record_success(latency_ns);
+    }
+
+    /// Record a failed request on endpoint `idx`.
+    pub fn record_failure(&self, idx: usize, now_ms: u64) {
+        self.endpoints[idx].record_failure(now_ms);
+    }
+
+    /// Clone the transport for endpoint `idx` (cheap, clones the inner Arc).
+    fn transport(&self, idx: usize) -> alloy::transports::BoxTransport {
+        self.endpoints[idx].transport.clone()
+    }
+
+    /// URL of endpoint `idx` (for diagnostics/tracing).
+    fn url(&self, idx: usize) -> &str {
+        &self.endpoints[idx].url
+    }
+
     /// Number of endpoints currently in Closed (healthy) state.
     ///
     /// Lock-free: reads atomic state mirrors without taking any mutexes.
-    fn healthy_count(&self) -> usize {
+    pub fn healthy_count(&self) -> usize {
         self.endpoints
             .iter()
             .filter(|ep| ep.atomic_state.load(Ordering::Relaxed) & TAG_MASK == TAG_CLOSED)
@@ -366,7 +392,7 @@ impl EndpointPool {
     }
 
     /// Health status of all endpoints in this pool.
-    fn health_status(&self) -> Vec<EndpointStatus> {
+    pub fn health_status(&self) -> Vec<EndpointStatus> {
         self.endpoints
             .iter()
             .map(|ep| ep.health.lock().unwrap().status())
@@ -374,7 +400,7 @@ impl EndpointPool {
     }
 
     /// URLs of all endpoints in this pool.
-    fn endpoint_urls(&self) -> Vec<&str> {
+    pub fn endpoint_urls(&self) -> Vec<&str> {
         self.endpoints.iter().map(|ep| ep.url.as_str()).collect()
     }
 }
@@ -549,9 +575,8 @@ impl Router {
                 ));
             };
 
-            let ep = &pool.endpoints[idx];
             let start = Instant::now();
-            let mut transport = ep.transport.clone();
+            let mut transport = pool.transport(idx);
 
             // Apply tower timeout
             let result = tokio::time::timeout(timeout, transport.call(req.clone())).await;
@@ -567,13 +592,13 @@ impl Router {
                             tracing::warn!(
                                 attempt = attempt + 1,
                                 max_attempts,
-                                endpoint = %ep.url,
+                                endpoint = %pool.url(idx),
                                 error_code = response.first_error_code(),
                                 "write rejected pre-mempool, retrying"
                             );
                         } else {
                             tracing::warn!(
-                                endpoint = %ep.url,
+                                endpoint = %pool.url(idx),
                                 error_code = response.first_error_code(),
                                 "write rejected after all retries exhausted"
                             );
@@ -581,16 +606,16 @@ impl Router {
                         }
                     } else {
                         let latency_ns = start.elapsed().as_nanos() as u64;
-                        ep.record_success(latency_ns);
+                        pool.record_success(idx, latency_ns);
                         return Ok(response);
                     }
                 }
                 Ok(Err(e)) => {
-                    ep.record_failure(now_ms);
+                    pool.record_failure(idx, now_ms);
                     tracing::warn!(
                         attempt = attempt + 1,
                         max_attempts,
-                        endpoint = %ep.url,
+                        endpoint = %pool.url(idx),
                         error = %e,
                         is_write,
                         "transport error"
@@ -598,11 +623,11 @@ impl Router {
                     last_err = Some(e);
                 }
                 Err(_timeout) => {
-                    ep.record_failure(now_ms);
+                    pool.record_failure(idx, now_ms);
                     tracing::warn!(
                         attempt = attempt + 1,
                         max_attempts,
-                        endpoint = %ep.url,
+                        endpoint = %pool.url(idx),
                         is_write,
                         "request timed out"
                     );
@@ -645,22 +670,21 @@ impl Router {
         // If only one endpoint is available, fall back to single request
         if indices.len() == 1 {
             let idx = indices[0];
-            let ep = &pool.endpoints[idx];
             let start = Instant::now();
-            let mut transport = ep.transport.clone();
+            let mut transport = pool.transport(idx);
             let result = tokio::time::timeout(timeout, transport.call(req)).await;
 
             return match result {
                 Ok(Ok(resp)) => {
-                    ep.record_success(start.elapsed().as_nanos() as u64);
+                    pool.record_success(idx, start.elapsed().as_nanos() as u64);
                     Ok(resp)
                 }
                 Ok(Err(e)) => {
-                    ep.record_failure(now_ms);
+                    pool.record_failure(idx, now_ms);
                     Err(e)
                 }
                 Err(_) => {
-                    ep.record_failure(now_ms);
+                    pool.record_failure(idx, now_ms);
                     Err(TransportError::local_usage_str("request timed out"))
                 }
             };
@@ -670,7 +694,7 @@ impl Router {
         let mut join_set = tokio::task::JoinSet::new();
 
         for &idx in &indices {
-            let mut transport = pool.endpoints[idx].transport.clone();
+            let mut transport = pool.transport(idx);
             let req_clone = req.clone();
 
             join_set.spawn(async move {
@@ -690,14 +714,14 @@ impl Router {
             match join_result {
                 Ok((idx, Ok(response), start)) => {
                     let latency_ns = start.elapsed().as_nanos() as u64;
-                    pool.endpoints[idx].record_success(latency_ns);
+                    pool.record_success(idx, latency_ns);
                     // Cancel remaining in-flight requests — saves RPC rate limits.
                     // JoinSet::drop also aborts, but explicit abort_all is clearer.
                     join_set.abort_all();
                     return Ok(response);
                 }
                 Ok((idx, Err(e), _start)) => {
-                    pool.endpoints[idx].record_failure(now_ms);
+                    pool.record_failure(idx, now_ms);
                     last_err = Some(e);
                 }
                 // Task was aborted (by our abort_all or JoinSet::drop) — expected
@@ -866,8 +890,8 @@ mod tests {
         )
         .unwrap();
 
-        pool.endpoints[0].record_success(10_000_000); // 10ms
-        pool.endpoints[1].record_success(1_000_000); // 1ms
+        pool.record_success(0, 10_000_000); // 10ms
+        pool.record_success(1, 1_000_000); // 1ms
 
         let selected = pool.select(Strategy::LatencyBased, now_ms()).unwrap();
         assert_eq!(selected, 1); // lower latency
@@ -886,9 +910,9 @@ mod tests {
 
         let now = now_ms();
         // Trip circuit breaker on endpoint 0
-        pool.endpoints[0].record_failure(now);
-        pool.endpoints[0].record_failure(now);
-        pool.endpoints[0].record_failure(now);
+        pool.record_failure(0, now);
+        pool.record_failure(0, now);
+        pool.record_failure(0, now);
 
         let selected = pool.select(Strategy::LatencyBased, now).unwrap();
         assert_eq!(selected, 1); // only healthy endpoint
@@ -906,9 +930,9 @@ mod tests {
         )
         .unwrap();
 
-        pool.endpoints[0].record_success(5_000_000);
-        pool.endpoints[1].record_success(1_000_000);
-        pool.endpoints[2].record_success(3_000_000);
+        pool.record_success(0, 5_000_000);
+        pool.record_success(1, 1_000_000);
+        pool.record_success(2, 3_000_000);
 
         let selected = pool.select_n(2, now_ms());
         assert_eq!(selected, vec![1, 2]); // ordered by latency, take 2
@@ -925,9 +949,9 @@ mod tests {
         )
         .unwrap();
 
-        for ep in &pool.endpoints {
+        for idx in 0..pool.len() {
             for t in 1..=3 {
-                ep.record_failure(t * 1000);
+                pool.record_failure(idx, t * 1000);
             }
         }
 
@@ -948,8 +972,8 @@ mod tests {
 
         let (pool, _idx) = router.select_for(false, now_ms()).unwrap();
         // Should select from the read pool (1 endpoint), not shared
-        assert_eq!(pool.endpoints.len(), 1);
-        assert_eq!(pool.endpoints[0].url, "https://read.example.com");
+        assert_eq!(pool.len(), 1);
+        assert_eq!(pool.endpoint_urls()[0], "https://read.example.com");
     }
 
     #[test]
@@ -964,7 +988,7 @@ mod tests {
 
         let (pool, _idx) = router.select_for(true, now_ms()).unwrap();
         // No write pool → falls back to shared
-        assert_eq!(pool.endpoints[0].url, "https://shared.example.com");
+        assert_eq!(pool.endpoint_urls()[0], "https://shared.example.com");
     }
 
     #[test]
@@ -979,19 +1003,22 @@ mod tests {
 
         // Trip the read pool's circuit breaker
         let now = now_ms();
-        router.read.endpoints[0].record_failure(now);
-        router.read.endpoints[0].record_failure(now);
-        router.read.endpoints[0].record_failure(now);
+        router.read.record_failure(0, now);
+        router.read.record_failure(0, now);
+        router.read.record_failure(0, now);
 
         // Read should fall back to shared
         let (pool, _idx) = router.select_for(false, now).unwrap();
-        assert_eq!(pool.endpoints[0].url, "https://shared.example.com");
+        assert_eq!(pool.endpoint_urls()[0], "https://shared.example.com");
     }
 
     // ── Lock-free verification tests ─────────────────────────────────
 
     #[test]
     fn atomic_state_reflects_mutations() {
+        // This test verifies the lock-free atomic mirrors stay in sync
+        // with the Mutex-protected health state. It accesses internal
+        // fields because it's testing the internal consistency guarantee.
         let pool =
             EndpointPool::from_urls(&["https://rpc1.example.com".into()], Default::default())
                 .unwrap();
@@ -1005,7 +1032,7 @@ mod tests {
         assert_eq!(ep.atomic_latency_ns.load(Ordering::Relaxed), 0);
 
         // After success: still Closed, latency updated
-        ep.record_success(5_000_000);
+        pool.record_success(0, 5_000_000);
         assert_eq!(
             ep.atomic_state.load(Ordering::Relaxed) & TAG_MASK,
             TAG_CLOSED
@@ -1013,9 +1040,9 @@ mod tests {
         assert_eq!(ep.atomic_latency_ns.load(Ordering::Relaxed), 5_000_000);
 
         // After 3 failures: state is Open
-        ep.record_failure(1000);
-        ep.record_failure(2000);
-        ep.record_failure(3000);
+        pool.record_failure(0, 1000);
+        pool.record_failure(0, 2000);
+        pool.record_failure(0, 3000);
         assert_eq!(ep.atomic_state.load(Ordering::Relaxed) & TAG_MASK, TAG_OPEN);
     }
 
@@ -1032,9 +1059,9 @@ mod tests {
         assert_eq!(transport.healthy_count(), 3);
 
         // Trip the read endpoint's circuit
-        transport.router.read.endpoints[0].record_failure(1000);
-        transport.router.read.endpoints[0].record_failure(2000);
-        transport.router.read.endpoints[0].record_failure(3000);
+        transport.router.read.record_failure(0, 1000);
+        transport.router.read.record_failure(0, 2000);
+        transport.router.read.record_failure(0, 3000);
 
         assert_eq!(transport.healthy_count(), 2);
     }
@@ -1050,8 +1077,8 @@ mod tests {
         )
         .unwrap();
 
-        pool.endpoints[0].record_success(10_000_000);
-        pool.endpoints[1].record_success(2_000_000);
+        pool.record_success(0, 10_000_000);
+        pool.record_success(1, 2_000_000);
 
         // Multiple selections should consistently pick endpoint 1 (lower latency)
         for _ in 0..100 {
@@ -1071,9 +1098,9 @@ mod tests {
         )
         .unwrap();
 
-        pool.endpoints[0].record_success(8_000_000);
-        pool.endpoints[1].record_success(2_000_000);
-        pool.endpoints[2].record_success(5_000_000);
+        pool.record_success(0, 8_000_000);
+        pool.record_success(1, 2_000_000);
+        pool.record_success(2, 5_000_000);
 
         let selected = pool.select_n(2, 1000);
         assert_eq!(selected, vec![1, 2]); // ordered by latency
