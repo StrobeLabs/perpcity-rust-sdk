@@ -1,15 +1,15 @@
 //! EIP-1559 gas fee caching with urgency-based scaling.
 //!
 //! Pre-computed gas limits eliminate `estimateGas` RPC calls on the hot path.
-//! The [`GasCache`] stores the latest base fee from block headers and
+//! The [`FeeCache`] stores the latest base fee from block headers and
 //! computes EIP-1559 fees scaled by [`Urgency`].
 //!
 //! # Example
 //!
 //! ```
-//! use perpcity_sdk::hft::gas::{GasCache, Urgency, GasLimits};
+//! use perpcity_sdk::hft::gas::{FeeCache, Urgency, GasLimits};
 //!
-//! let mut cache = GasCache::new(2_000, 1_000_000_000);
+//! let mut cache = FeeCache::new(2_000, 1_000_000_000);
 //! cache.update(50_000_000, 1000); // base_fee from block header, at t=1000ms
 //!
 //! let fees = cache.fees_for(Urgency::Normal, 1500).unwrap(); // within TTL
@@ -57,7 +57,7 @@ impl GasLimits {
 /// This replaces the hardcoded [`GasLimits`] as the default gas source. HFT
 /// users can still bypass estimation by passing an explicit gas limit.
 #[derive(Debug)]
-pub struct GasEstimateCache {
+pub struct GasLimitCache {
     estimates: HashMap<Selector, CachedEstimate>,
     ttl_ms: u64,
     /// Buffer multiplied onto raw estimates (e.g. 1.2 = 20% margin).
@@ -76,7 +76,7 @@ const DEFAULT_ESTIMATE_TTL_MS: u64 = 3_600_000;
 /// Default buffer: 20% above the raw estimate.
 const DEFAULT_ESTIMATE_BUFFER: f64 = 1.2;
 
-impl GasEstimateCache {
+impl GasLimitCache {
     /// Create a new cache with default TTL (1 hour) and buffer (20%).
     pub fn new() -> Self {
         Self {
@@ -125,7 +125,7 @@ impl GasEstimateCache {
     }
 }
 
-impl Default for GasEstimateCache {
+impl Default for GasLimitCache {
     fn default() -> Self {
         Self::new()
     }
@@ -163,13 +163,13 @@ pub struct GasFees {
 /// All methods that check freshness take an explicit `now_ms` parameter
 /// for deterministic testing.
 #[derive(Debug)]
-pub struct GasCache {
+pub struct FeeCache {
     current: Option<GasFees>,
     ttl_ms: u64,
     default_priority_fee: u64,
 }
 
-impl GasCache {
+impl FeeCache {
     /// Create a new cache.
     ///
     /// - `ttl_ms`: how long cached fees are valid (2000 = 2 Base L2 blocks)
@@ -271,15 +271,15 @@ mod tests {
     const BASE: u64 = 50_000_000; // 50 Mwei ~ typical Base L2
     const TIP: u64 = 1_000_000_000; // 1 gwei
 
-    fn cache_with_fees(now_ms: u64) -> GasCache {
-        let mut c = GasCache::new(2000, TIP);
+    fn cache_with_fees(now_ms: u64) -> FeeCache {
+        let mut c = FeeCache::new(2000, TIP);
         c.update(BASE, now_ms);
         c
     }
 
     #[test]
     fn empty_cache_is_invalid() {
-        let c = GasCache::new(2000, TIP);
+        let c = FeeCache::new(2000, TIP);
         assert!(!c.is_valid(0));
         assert!(c.get(0).is_none());
         assert!(c.fees_for(Urgency::Normal, 0).is_none());
@@ -361,7 +361,7 @@ mod tests {
 
     #[test]
     fn saturating_arithmetic_on_huge_values() {
-        let mut c = GasCache::new(2000, u64::MAX / 2);
+        let mut c = FeeCache::new(2000, u64::MAX / 2);
         c.update(u64::MAX / 2, 0);
         // Should not panic, uses saturating math
         let f = c.fees_for(Urgency::Critical, 0).unwrap();
@@ -393,11 +393,11 @@ mod tests {
         assert!(GasLimits::OPEN_MAKER > GasLimits::OPEN_TAKER);
     }
 
-    // ── GasEstimateCache tests ───────────────────────────────────────
+    // ── GasLimitCache tests ───────────────────────────────────────
 
     #[test]
     fn estimate_cache_applies_buffer_and_expires() {
-        let mut cache = GasEstimateCache::with_config(1000, 1.5);
+        let mut cache = GasLimitCache::with_config(1000, 1.5);
         let selector = [0x01, 0x02, 0x03, 0x04];
 
         assert!(cache.get(&selector, 0).is_none());
@@ -410,7 +410,7 @@ mod tests {
 
     #[test]
     fn estimate_cache_selectors_are_independent() {
-        let mut cache = GasEstimateCache::new();
+        let mut cache = GasLimitCache::new();
         let open = [0xAA, 0xBB, 0xCC, 0xDD];
         let close = [0x11, 0x22, 0x33, 0x44];
 
