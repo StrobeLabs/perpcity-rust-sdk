@@ -202,7 +202,7 @@ impl PerpClient {
         let wallet = EthereumWallet::from(signer);
 
         let boxed = BoxTransport::new(transport.clone());
-        let rpc_client = RpcClient::new(boxed, true);
+        let rpc_client = RpcClient::new(boxed, false);
         let provider = RootProvider::<Ethereum>::new(rpc_client);
 
         Ok(Self {
