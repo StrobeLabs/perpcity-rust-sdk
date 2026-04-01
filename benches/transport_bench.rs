@@ -13,24 +13,23 @@
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use std::time::Duration;
 
-use perpcity_sdk::transport::config::{CircuitBreakerConfig, Strategy, TransportConfig};
+use perpcity_sdk::transport::config::{CircuitBreakerConfig, Strategy};
 use perpcity_sdk::transport::health::{CircuitState, EndpointHealth};
-use perpcity_sdk::transport::provider::HftTransport;
+use perpcity_sdk::transport::provider::EndpointPool;
 
 // ---------------------------------------------------------------------------
-// Helper: build a transport with N endpoints
+// Helper: build a pool with N endpoints
 // ---------------------------------------------------------------------------
 
-fn make_transport(n: usize, strategy: Strategy) -> HftTransport {
-    let mut builder = TransportConfig::builder().strategy(strategy);
-    for i in 0..n {
-        builder = builder.endpoint(format!("https://rpc{i}.example.com"));
-    }
-    HftTransport::new(builder.build().unwrap()).unwrap()
+fn make_pool(n: usize) -> EndpointPool {
+    let urls: Vec<String> = (0..n)
+        .map(|i| format!("https://rpc{i}.example.com"))
+        .collect();
+    EndpointPool::from_urls(&urls, Default::default()).unwrap()
 }
 
-fn make_warm_transport(n: usize, strategy: Strategy) -> HftTransport {
-    let t = make_transport(n, strategy);
+fn make_warm_pool(n: usize) -> EndpointPool {
+    let pool = make_pool(n);
     // Seed health data so latency-based selection has real values
     for i in 0..n {
         // Varying latencies: endpoint 0 = 5ms, 1 = 2ms, 2 = 8ms, etc.
@@ -41,9 +40,9 @@ fn make_warm_transport(n: usize, strategy: Strategy) -> HftTransport {
             3 => 1_000_000,
             _ => unreachable!(),
         };
-        t.record_success(i, latency_ns);
+        pool.record_success(i, latency_ns);
     }
-    t
+    pool
 }
 
 fn default_cb_config() -> CircuitBreakerConfig {
@@ -125,107 +124,107 @@ fn bench_endpoint_health(c: &mut Criterion) {
 }
 
 // ---------------------------------------------------------------------------
-// Endpoint selection benchmarks (through HftTransport)
+// Endpoint selection benchmarks (through EndpointPool)
 // ---------------------------------------------------------------------------
 
 fn bench_endpoint_selection(c: &mut Criterion) {
     let mut group = c.benchmark_group("endpoint_selection");
 
-    // Round-robin with 3 endpoints — atomic fetch_add + mutex check
+    // Round-robin with 3 endpoints — atomic fetch_add + state check
     group.bench_function("round_robin/3ep", |b| {
-        let t = make_warm_transport(3, Strategy::RoundRobin);
-        b.iter(|| t.select_endpoint(black_box(1000)))
+        let pool = make_warm_pool(3);
+        b.iter(|| pool.select(Strategy::RoundRobin, black_box(1000)))
     });
 
-    // Latency-based with 3 endpoints — lock all, find min
+    // Latency-based with 3 endpoints — lock-free scan
     group.bench_function("latency_based/3ep", |b| {
-        let t = make_warm_transport(3, Strategy::LatencyBased);
-        b.iter(|| t.select_endpoint(black_box(1000)))
+        let pool = make_warm_pool(3);
+        b.iter(|| pool.select(Strategy::LatencyBased, black_box(1000)))
     });
 
     // Latency-based with 5 endpoints
     group.bench_function("latency_based/5ep", |b| {
-        let t = make_warm_transport(5, Strategy::LatencyBased);
-        b.iter(|| t.select_endpoint(black_box(1000)))
+        let pool = make_warm_pool(5);
+        b.iter(|| pool.select(Strategy::LatencyBased, black_box(1000)))
     });
 
     // Latency-based with 10 endpoints (stress test)
     group.bench_function("latency_based/10ep", |b| {
-        let t = make_warm_transport(10, Strategy::LatencyBased);
-        b.iter(|| t.select_endpoint(black_box(1000)))
+        let pool = make_warm_pool(10);
+        b.iter(|| pool.select(Strategy::LatencyBased, black_box(1000)))
     });
 
-    // select_n_endpoints for hedged requests (3-way fan-out from 5 endpoints)
+    // select_n for hedged requests (3-way fan-out from 5 endpoints)
     group.bench_function("select_n/fan3_from5", |b| {
-        let t = make_warm_transport(5, Strategy::LatencyBased);
-        b.iter(|| t.select_n_endpoints(black_box(3), black_box(1000)))
+        let pool = make_warm_pool(5);
+        b.iter(|| pool.select_n(black_box(3), black_box(1000)))
     });
 
-    // select_n_endpoints — 2-way fan-out from 3 endpoints
+    // select_n — 2-way fan-out from 3 endpoints
     group.bench_function("select_n/fan2_from3", |b| {
-        let t = make_warm_transport(3, Strategy::LatencyBased);
-        b.iter(|| t.select_n_endpoints(black_box(2), black_box(1000)))
+        let pool = make_warm_pool(3);
+        b.iter(|| pool.select_n(black_box(2), black_box(1000)))
     });
 
     // Worst case: all endpoints have open circuits except one
     group.bench_function("latency_based/1_of_3_healthy", |b| {
-        let t = make_warm_transport(3, Strategy::LatencyBased);
+        let pool = make_warm_pool(3);
         // Trip circuits on endpoints 0 and 1
         for t_ms in 1..=3 {
-            t.record_failure(0, t_ms * 1000);
-            t.record_failure(1, t_ms * 1000);
+            pool.record_failure(0, t_ms * 1000);
+            pool.record_failure(1, t_ms * 1000);
         }
-        b.iter(|| t.select_endpoint(black_box(5000)))
+        b.iter(|| pool.select(Strategy::LatencyBased, black_box(5000)))
     });
 
     // All endpoints open — should return None fast
     group.bench_function("latency_based/all_open", |b| {
-        let t = make_warm_transport(3, Strategy::LatencyBased);
+        let pool = make_warm_pool(3);
         for ep in 0..3 {
             for t_ms in 1..=3 {
-                t.record_failure(ep, t_ms * 1000);
+                pool.record_failure(ep, t_ms * 1000);
             }
         }
-        b.iter(|| t.select_endpoint(black_box(5000)))
+        b.iter(|| pool.select(Strategy::LatencyBased, black_box(5000)))
     });
 
     group.finish();
 }
 
 // ---------------------------------------------------------------------------
-// Health recording through transport (includes Mutex overhead)
+// Health recording through pool (includes Mutex overhead + atomic sync)
 // ---------------------------------------------------------------------------
 
 fn bench_health_recording(c: &mut Criterion) {
     let mut group = c.benchmark_group("health_recording");
 
-    // record_success through transport (Mutex lock + EMA update)
-    group.bench_function("record_success/through_transport", |b| {
-        let t = make_warm_transport(3, Strategy::LatencyBased);
-        b.iter(|| t.record_success(black_box(1), black_box(3_000_000)))
+    // record_success through pool (Mutex lock + EMA update + atomic sync)
+    group.bench_function("record_success/through_pool", |b| {
+        let pool = make_warm_pool(3);
+        b.iter(|| pool.record_success(black_box(1), black_box(3_000_000)))
     });
 
-    // record_failure through transport
-    group.bench_function("record_failure/through_transport", |b| {
-        let t = make_warm_transport(3, Strategy::LatencyBased);
-        b.iter(|| t.record_failure(black_box(1), black_box(1000)))
+    // record_failure through pool
+    group.bench_function("record_failure/through_pool", |b| {
+        let pool = make_warm_pool(3);
+        b.iter(|| pool.record_failure(black_box(1), black_box(1000)))
     });
 
     // health_status — locks all endpoints, copies status
     group.bench_function("health_status/3ep", |b| {
-        let t = make_warm_transport(3, Strategy::LatencyBased);
-        b.iter(|| t.health_status())
+        let pool = make_warm_pool(3);
+        b.iter(|| pool.health_status())
     });
 
     group.bench_function("health_status/5ep", |b| {
-        let t = make_warm_transport(5, Strategy::LatencyBased);
-        b.iter(|| t.health_status())
+        let pool = make_warm_pool(5);
+        b.iter(|| pool.health_status())
     });
 
-    // healthy_count — locks all, filters
+    // healthy_count — lock-free via atomics
     group.bench_function("healthy_count/3ep", |b| {
-        let t = make_warm_transport(3, Strategy::LatencyBased);
-        b.iter(|| t.healthy_count())
+        let pool = make_warm_pool(3);
+        b.iter(|| pool.healthy_count())
     });
 
     group.finish();
@@ -306,23 +305,25 @@ fn bench_struct_sizes(c: &mut Criterion) {
 fn bench_request_cycle(c: &mut Criterion) {
     let mut group = c.benchmark_group("request_cycle");
 
-    // Full cycle: select_endpoint + record_success (simulates one RPC round-trip)
+    // Full cycle: select + record_success (simulates one RPC round-trip)
     group.bench_function("select_and_record/3ep", |b| {
-        let t = make_warm_transport(3, Strategy::LatencyBased);
+        let pool = make_warm_pool(3);
         b.iter(|| {
-            let idx = t.select_endpoint(black_box(1000)).unwrap();
-            t.record_success(black_box(idx), black_box(5_000_000));
+            let idx = pool
+                .select(Strategy::LatencyBased, black_box(1000))
+                .unwrap();
+            pool.record_success(black_box(idx), black_box(5_000_000));
         })
     });
 
     // Hedged: select_n + record for winner
     group.bench_function("hedged_select_and_record/fan3_from5", |b| {
-        let t = make_warm_transport(5, Strategy::LatencyBased);
+        let pool = make_warm_pool(5);
         b.iter(|| {
-            let indices = t.select_n_endpoints(black_box(3), black_box(1000));
+            let indices = pool.select_n(black_box(3), black_box(1000));
             // Simulate: first endpoint (best latency) wins
             if let Some(&idx) = indices.first() {
-                t.record_success(black_box(idx), black_box(2_000_000));
+                pool.record_success(black_box(idx), black_box(2_000_000));
             }
         })
     });

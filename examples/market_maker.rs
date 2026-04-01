@@ -85,7 +85,11 @@ async fn main() -> perpcity_sdk::Result<()> {
     let tick_spacing = perpcity_sdk::constants::TICK_SPACING;
 
     // ── Setup client ────────────────────────────────────────────────
-    let transport = HftTransport::new(TransportConfig::builder().endpoint(&rpc_url).build()?)?;
+    let transport = HftTransport::new(
+        TransportConfig::builder()
+            .shared_endpoint(&rpc_url)
+            .build()?,
+    )?;
 
     let client = PerpClient::new(transport, load_signer(), load_deployments(), 84532)?;
     let perp_id = load_perp_id();

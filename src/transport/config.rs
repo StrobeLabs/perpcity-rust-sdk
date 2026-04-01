@@ -3,22 +3,41 @@
 //! Configure multi-endpoint RPC transport with per-endpoint timeouts,
 //! retry policies, circuit breaker thresholds, and routing strategies.
 //!
+//! Endpoints are organized into three pools:
+//!
+//! - **Shared** (`.shared_endpoint()`) — handles any request type and serves as
+//!   fallback when dedicated read/write endpoints are unhealthy.
+//! - **Read** (`.read_endpoint()`) — dedicated to read operations (`eth_call`,
+//!   `eth_getBalance`, etc.). Falls back to the shared pool if all read endpoints
+//!   are unhealthy.
+//! - **Write** (`.write_endpoint()`) — dedicated to write operations
+//!   (`eth_sendRawTransaction`). Falls back to the shared pool if all write
+//!   endpoints are unhealthy.
+//!
 //! # Example
 //!
 //! ```
 //! use perpcity_sdk::transport::config::{TransportConfig, Strategy};
 //! use std::time::Duration;
 //!
+//! // Single shared endpoint (simplest setup, all requests go here)
 //! let config = TransportConfig::builder()
-//!     .endpoint("https://mainnet.base.org")
-//!     .endpoint("https://base-rpc.publicnode.com")
+//!     .shared_endpoint("https://base-rpc.publicnode.com")
+//!     .build()
+//!     .unwrap();
+//!
+//! // Read/write split: free public RPC for reads, paid for writes + fallback
+//! let config = TransportConfig::builder()
+//!     .shared_endpoint("https://base.g.alchemy.com/v2/KEY")
+//!     .read_endpoint("https://base-rpc.publicnode.com")
 //!     .ws_endpoint("wss://base-rpc.publicnode.com")
 //!     .strategy(Strategy::LatencyBased)
 //!     .request_timeout(Duration::from_millis(2000))
 //!     .build()
 //!     .unwrap();
 //!
-//! assert_eq!(config.http_endpoints.len(), 2);
+//! assert_eq!(config.shared_endpoints.len(), 1);
+//! assert_eq!(config.read_endpoints.len(), 1);
 //! assert!(config.ws_endpoint.is_some());
 //! ```
 
@@ -125,8 +144,15 @@ impl WriteRetryConfig {
 /// Complete transport configuration.
 #[derive(Debug, Clone)]
 pub struct TransportConfig {
-    /// HTTP RPC endpoint URLs.
-    pub http_endpoints: Vec<String>,
+    /// Shared HTTP RPC endpoints — handle any request type and serve as
+    /// fallback when dedicated read/write endpoints are unhealthy.
+    pub shared_endpoints: Vec<String>,
+    /// Dedicated read endpoints. Read requests prefer these; falls back to
+    /// shared endpoints if all read endpoints are unhealthy.
+    pub read_endpoints: Vec<String>,
+    /// Dedicated write endpoints. Write requests prefer these; falls back to
+    /// shared endpoints if all write endpoints are unhealthy.
+    pub write_endpoints: Vec<String>,
     /// Optional WebSocket endpoint URL for subscriptions.
     pub ws_endpoint: Option<String>,
     /// Per-request timeout.
@@ -151,7 +177,9 @@ impl TransportConfig {
 /// Builder for [`TransportConfig`].
 #[derive(Debug, Clone)]
 pub struct TransportConfigBuilder {
-    http_endpoints: Vec<String>,
+    shared_endpoints: Vec<String>,
+    read_endpoints: Vec<String>,
+    write_endpoints: Vec<String>,
     ws_endpoint: Option<String>,
     request_timeout: Duration,
     strategy: Strategy,
@@ -163,7 +191,9 @@ pub struct TransportConfigBuilder {
 impl Default for TransportConfigBuilder {
     fn default() -> Self {
         Self {
-            http_endpoints: Vec::new(),
+            shared_endpoints: Vec::new(),
+            read_endpoints: Vec::new(),
+            write_endpoints: Vec::new(),
             ws_endpoint: None,
             request_timeout: Duration::from_secs(5),
             strategy: Strategy::default(),
@@ -175,9 +205,34 @@ impl Default for TransportConfigBuilder {
 }
 
 impl TransportConfigBuilder {
-    /// Add an HTTP RPC endpoint URL.
-    pub fn endpoint(mut self, url: impl Into<String>) -> Self {
-        self.http_endpoints.push(url.into());
+    /// Add a shared HTTP RPC endpoint.
+    ///
+    /// Shared endpoints handle any request type (reads and writes) and serve
+    /// as the fallback when dedicated read or write endpoints are unhealthy.
+    ///
+    /// At least one endpoint must be configured across all pools.
+    pub fn shared_endpoint(mut self, url: impl Into<String>) -> Self {
+        self.shared_endpoints.push(url.into());
+        self
+    }
+
+    /// Add a dedicated read endpoint.
+    ///
+    /// Read requests (`eth_call`, `eth_getBalance`, etc.) prefer these
+    /// endpoints. If all read endpoints are unhealthy, reads fall back to
+    /// the shared pool.
+    pub fn read_endpoint(mut self, url: impl Into<String>) -> Self {
+        self.read_endpoints.push(url.into());
+        self
+    }
+
+    /// Add a dedicated write endpoint.
+    ///
+    /// Write requests (`eth_sendRawTransaction`) prefer these endpoints.
+    /// If all write endpoints are unhealthy, writes fall back to the shared
+    /// pool.
+    pub fn write_endpoint(mut self, url: impl Into<String>) -> Self {
+        self.write_endpoints.push(url.into());
         self
     }
 
@@ -219,11 +274,21 @@ impl TransportConfigBuilder {
 
     /// Build the [`TransportConfig`].
     ///
-    /// Returns an error if no HTTP endpoints are configured.
+    /// Returns an error if no endpoints are configured across any pool, or
+    /// if writes have no reachable endpoint (write + shared pools both empty).
     pub fn build(self) -> crate::Result<TransportConfig> {
-        if self.http_endpoints.is_empty() {
+        let total =
+            self.shared_endpoints.len() + self.read_endpoints.len() + self.write_endpoints.len();
+        if total == 0 {
             return Err(PerpCityError::InvalidConfig {
-                reason: "no HTTP endpoints configured".into(),
+                reason: "no endpoints configured".into(),
+            });
+        }
+        if self.write_endpoints.is_empty() && self.shared_endpoints.is_empty() {
+            return Err(PerpCityError::InvalidConfig {
+                reason: "writes have no reachable endpoint: \
+                         configure at least one shared or write endpoint"
+                    .into(),
             });
         }
         if let Strategy::Hedged { fan_out } = self.strategy
@@ -234,7 +299,9 @@ impl TransportConfigBuilder {
             });
         }
         Ok(TransportConfig {
-            http_endpoints: self.http_endpoints,
+            shared_endpoints: self.shared_endpoints,
+            read_endpoints: self.read_endpoints,
+            write_endpoints: self.write_endpoints,
             ws_endpoint: self.ws_endpoint,
             request_timeout: self.request_timeout,
             strategy: self.strategy,
@@ -252,10 +319,12 @@ mod tests {
     #[test]
     fn builder_defaults() {
         let config = TransportConfig::builder()
-            .endpoint("https://rpc1.example.com")
+            .shared_endpoint("https://rpc1.example.com")
             .build()
             .unwrap();
-        assert_eq!(config.http_endpoints.len(), 1);
+        assert_eq!(config.shared_endpoints.len(), 1);
+        assert!(config.read_endpoints.is_empty());
+        assert!(config.write_endpoints.is_empty());
         assert!(config.ws_endpoint.is_none());
         assert_eq!(config.request_timeout, Duration::from_secs(5));
         assert_eq!(config.strategy, Strategy::LatencyBased);
@@ -267,8 +336,10 @@ mod tests {
     #[test]
     fn builder_all_options() {
         let config = TransportConfig::builder()
-            .endpoint("https://rpc1.example.com")
-            .endpoint("https://rpc2.example.com")
+            .shared_endpoint("https://rpc1.example.com")
+            .shared_endpoint("https://rpc2.example.com")
+            .read_endpoint("https://read.example.com")
+            .write_endpoint("https://write.example.com")
             .ws_endpoint("wss://ws.example.com")
             .request_timeout(Duration::from_millis(500))
             .strategy(Strategy::Hedged { fan_out: 3 })
@@ -288,7 +359,9 @@ mod tests {
             .build()
             .unwrap();
 
-        assert_eq!(config.http_endpoints.len(), 2);
+        assert_eq!(config.shared_endpoints.len(), 2);
+        assert_eq!(config.read_endpoints.len(), 1);
+        assert_eq!(config.write_endpoints.len(), 1);
         assert_eq!(config.ws_endpoint.as_deref(), Some("wss://ws.example.com"));
         assert_eq!(config.request_timeout, Duration::from_millis(500));
         assert!(matches!(config.strategy, Strategy::Hedged { fan_out: 3 }));
@@ -298,15 +371,47 @@ mod tests {
     }
 
     #[test]
+    fn read_write_split() {
+        let config = TransportConfig::builder()
+            .shared_endpoint("https://alchemy.example.com")
+            .read_endpoint("https://public.example.com")
+            .build()
+            .unwrap();
+        assert_eq!(config.shared_endpoints.len(), 1);
+        assert_eq!(config.read_endpoints.len(), 1);
+        assert!(config.write_endpoints.is_empty());
+    }
+
+    #[test]
     fn no_endpoints_errors() {
         let result = TransportConfig::builder().build();
         assert!(result.is_err());
     }
 
     #[test]
+    fn read_only_endpoints_errors() {
+        // Only read endpoints, no shared or write — writes have nowhere to go
+        let result = TransportConfig::builder()
+            .read_endpoint("https://read.example.com")
+            .build();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn write_only_endpoints_ok() {
+        // Only write endpoints — reads fall back to write pool? No, reads
+        // fall back to shared which is empty. But writes work. This is a
+        // valid (if unusual) config: the user only cares about writes.
+        let result = TransportConfig::builder()
+            .write_endpoint("https://write.example.com")
+            .build();
+        assert!(result.is_ok());
+    }
+
+    #[test]
     fn hedged_fan_out_one_errors() {
         let result = TransportConfig::builder()
-            .endpoint("https://rpc1.example.com")
+            .shared_endpoint("https://rpc1.example.com")
             .strategy(Strategy::Hedged { fan_out: 1 })
             .build();
         assert!(result.is_err());
