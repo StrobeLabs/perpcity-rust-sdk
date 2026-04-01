@@ -16,6 +16,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Transport: read/write/shared endpoint pools.** `TransportConfig` now supports three endpoint pools: shared (`.shared_endpoint()`), read (`.read_endpoint()`), and write (`.write_endpoint()`). Reads prefer the read pool, writes prefer the write pool, both fall back to the shared pool when dedicated endpoints are unhealthy. Each pool gets independent circuit breakers and health tracking. This enables routing reads to free public RPCs while reserving paid endpoints for writes.
+- **Transport: `TransportInner` → `Router` + `EndpointPool`.** Endpoint selection logic extracted into `EndpointPool` (owns endpoints, round-robin counter, and selection methods). `Router` holds three pools and implements pool-aware request routing. `EndpointPool` is public for benchmarking.
+- `.endpoint()` renamed to `.shared_endpoint()` on `TransportConfigBuilder`
+- `http_endpoints` renamed to `shared_endpoints` on `TransportConfig`
+- Removed dead `POOL_MANAGER` and `USDC` address constants (the `Deployments` struct is the actual source of deployed addresses)
 - `refresh_gas()` now fetches the latest block directly in a single RPC call (`get_block_by_number(Latest)`) instead of two (`get_block_number` + `get_block_by_number`)
 - `RetryConfig` split into `ReadRetryConfig` and `WriteRetryConfig` with separate defaults and builder methods (`read_retry()`, `write_retry()`)
 - Writes now retry on any pre-mempool RPC rejection (any error response to `eth_sendRawTransaction` means the tx never entered the mempool, so resending is safe); defaults: 3 retries, 500ms exponential backoff
@@ -30,6 +35,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `IMulticall3` contract interface — `aggregate3`, `Call3`, `Result`, and `getEthBalance` bindings for the canonical [Multicall3](https://www.multicall3.com) contract
+- `MULTICALL3` constant — the canonical Multicall3 address (`0xcA11bde05977b3631167028862bE2a173976CA11`), deployed identically on all EVM chains
+- `PerpClient::get_balances(address) → (f64, U256)` — fetch USDC + ETH balance for one address via a single Multicall3 call (1 CU instead of 2)
+- `PerpClient::get_balances_batch(addresses) → Vec<(f64, U256)>` — fetch USDC + ETH balances for N addresses via a single Multicall3 call (1 CU instead of 2N)
+- `TransportConfigBuilder::read_endpoint()` — add a dedicated read endpoint
+- `TransportConfigBuilder::write_endpoint()` — add a dedicated write endpoint
+- `EndpointPool` — public type encapsulating a pool of endpoints with health-aware selection (`select`, `select_n`, `record_success`, `record_failure`, `healthy_count`, `len`)
+- Re-exported `tick_to_price`, `price_to_tick`, `get_sqrt_ratio_at_tick`, `align_tick_down`, `align_tick_up` from crate root
+- Anvil fork integration test for batch balance multicall
 - `PerpClient::set_base_fee(base_fee)` — inject a base fee from an external source (e.g. shared poller) without RPC calls
 - `PerpClient::base_fee()` — read the current cached base fee (ignores TTL), intended for poller distribution
 - `GasCache::base_fee()` — read the raw cached base fee
