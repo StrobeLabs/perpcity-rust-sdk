@@ -13,9 +13,9 @@
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use std::time::Duration;
 
-use perpcity_sdk::transport::config::{CircuitBreakerConfig, Strategy, TransportConfig};
+use perpcity_sdk::transport::config::{CircuitBreakerConfig, Strategy};
 use perpcity_sdk::transport::health::{CircuitState, EndpointHealth};
-use perpcity_sdk::transport::provider::{EndpointPool, HftTransport};
+use perpcity_sdk::transport::provider::EndpointPool;
 
 // ---------------------------------------------------------------------------
 // Helper: build a pool with N endpoints
