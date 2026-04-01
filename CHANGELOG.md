@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-04-01
+
 ### Fixed
 
 - Write retry: stale-replica rejections no longer affect the circuit breaker — these are transient conditions, not evidence of an unhealthy endpoint
@@ -21,6 +23,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `.endpoint()` renamed to `.shared_endpoint()` on `TransportConfigBuilder`
 - `http_endpoints` renamed to `shared_endpoints` on `TransportConfig`
 - **Gas limits now estimated dynamically.** Contract calls use `eth_estimateGas` on first invocation, cached by function selector (1 hour TTL, 20% buffer). Explicit gas limits can still be passed to skip estimation. Hardcoded `GasLimits` constants are preserved as reference values.
+- `GasCache` renamed to `FeeCache` (caches EIP-1559 base fee pricing); `GasEstimateCache` renamed to `GasLimitCache` (caches per-operation gas limits)
 - Removed dead `POOL_MANAGER` and `USDC` address constants (the `Deployments` struct is the actual source of deployed addresses)
 - `refresh_gas()` now fetches the latest block directly in a single RPC call (`get_block_by_number(Latest)`) instead of two (`get_block_number` + `get_block_by_number`)
 - `RetryConfig` split into `ReadRetryConfig` and `WriteRetryConfig` with separate defaults and builder methods (`read_retry()`, `write_retry()`)
@@ -88,5 +91,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Examples: quickstart, open_position, open_maker, market_maker, hft_bot
 - Benchmarks: math, HFT pipeline, transport
 
-[Unreleased]: https://github.com/StrobeLabs/perpcity-rust-sdk/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/StrobeLabs/perpcity-rust-sdk/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/StrobeLabs/perpcity-rust-sdk/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/StrobeLabs/perpcity-rust-sdk/releases/tag/v0.1.0
