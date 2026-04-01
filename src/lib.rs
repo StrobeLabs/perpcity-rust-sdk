@@ -71,3 +71,8 @@ pub use types::{
     CloseParams, CloseResult, Deployments, Fees, LiveDetails, OpenInterest, OpenMakerParams,
     OpenMakerQuote, OpenResult, OpenTakerParams, OpenTakerQuote, PerpData, SwapQuote,
 };
+
+#[doc(inline)]
+pub use math::tick::{
+    align_tick_down, align_tick_up, get_sqrt_ratio_at_tick, price_to_tick, tick_to_price,
+};
