@@ -1,6 +1,6 @@
 [package]
 name = "perpcity-sdk"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.85"
 description = "Rust SDK for the PerpCity perpetual futures protocol on Base L2"
