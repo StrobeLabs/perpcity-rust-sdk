@@ -3,7 +3,12 @@
 //! All values are exact mirrors of the on-chain constants. Scaling factors
 //! use the same names as the Solidity source to eliminate any ambiguity.
 
-use alloy::primitives::{U256, uint};
+use alloy::primitives::{Address, U256, address, uint};
+
+/// Multicall3 contract address — identical on all EVM chains.
+///
+/// See <https://www.multicall3.com> for deployment details.
+pub const MULTICALL3: Address = address!("cA11bde05977b3631167028862bE2a173976CA11");
 
 /// 2^96 as `U256` — the fixed-point denominator for sqrtPriceX96 values.
 pub const Q96: U256 = U256::from_limbs([0, 0x1_0000_0000, 0, 0]);

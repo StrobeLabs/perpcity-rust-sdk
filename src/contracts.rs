@@ -431,4 +431,34 @@ sol! {
         event Transfer(address indexed from, address indexed to, uint256 value);
         event Approval(address indexed owner, address indexed spender, uint256 value);
     }
+
+    // ═══════════════════════════════════════════════════════════════════
+    //  Multicall3 — batch multiple contract reads into a single eth_call
+    // ═══════════════════════════════════════════════════════════════════
+
+    /// Multicall3 interface for batching contract reads.
+    ///
+    /// Deployed at `0xcA11bde05977b3631167028862bE2a173976CA11` on all
+    /// major EVM chains (including Base mainnet and Base Sepolia).
+    /// A single `aggregate3` call executes N sub-calls and returns all
+    /// results — the RPC provider charges 1 CU regardless of N.
+    #[sol(rpc)]
+    interface IMulticall3 {
+        struct Call3 {
+            address target;
+            bool allowFailure;
+            bytes callData;
+        }
+
+        struct Result {
+            bool success;
+            bytes returnData;
+        }
+
+        function aggregate3(Call3[] calldata calls)
+            external payable returns (Result[] memory returnData);
+
+        function getEthBalance(address addr)
+            external view returns (uint256 balance);
+    }
 }

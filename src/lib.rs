@@ -48,7 +48,9 @@ pub mod types;
 pub use client::PerpClient;
 
 #[doc(inline)]
-pub use contracts::{IBeacon, IERC20, IFees, IMarginRatios, PerpManager, PoolKey, SwapConfig};
+pub use contracts::{
+    IBeacon, IERC20, IFees, IMarginRatios, IMulticall3, PerpManager, PoolKey, SwapConfig,
+};
 
 #[doc(inline)]
 pub use events::{MarketEvent, decode_log};
