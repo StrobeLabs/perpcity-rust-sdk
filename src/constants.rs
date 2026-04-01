@@ -3,13 +3,7 @@
 //! All values are exact mirrors of the on-chain constants. Scaling factors
 //! use the same names as the Solidity source to eliminate any ambiguity.
 
-use alloy::primitives::{Address, U256, address, uint};
-
-/// Uniswap V4 PoolManager on Base L2.
-pub const POOL_MANAGER: Address = address!("05E73354cFDd6745C338b50BcFDfA3Aa6fA03408");
-
-/// USDC token on Base L2 (6 decimals).
-pub const USDC: Address = address!("C1a5D4E99BB224713dd179eA9CA2Fa6600706210");
+use alloy::primitives::{U256, uint};
 
 /// 2^96 as `U256` — the fixed-point denominator for sqrtPriceX96 values.
 pub const Q96: U256 = U256::from_limbs([0, 0x1_0000_0000, 0, 0]);
@@ -134,27 +128,5 @@ mod tests {
     fn max_sqrt_price_x96_matches_contract() {
         let expected = U256::from_str_radix("2505414483750479311864138015696", 10).unwrap();
         assert_eq!(MAX_SQRT_PRICE_X96, expected);
-    }
-
-    // Verify address! macros match checksummed strings.
-
-    #[test]
-    fn usdc_address() {
-        assert_eq!(
-            USDC,
-            "0xC1a5D4E99BB224713dd179eA9CA2Fa6600706210"
-                .parse::<Address>()
-                .unwrap()
-        );
-    }
-
-    #[test]
-    fn pool_manager_address() {
-        assert_eq!(
-            POOL_MANAGER,
-            "0x05E73354cFDd6745C338b50BcFDfA3Aa6fA03408"
-                .parse::<Address>()
-                .unwrap()
-        );
     }
 }
