@@ -54,7 +54,7 @@ use crate::convert::{
     leverage_to_margin_ratio, margin_ratio_to_leverage, scale_from_6dec, scale_to_6dec,
 };
 use crate::errors::{PerpCityError, Result};
-use crate::hft::gas::{GasCache, GasLimits, Urgency};
+use crate::hft::gas::{GasCache, GasEstimateCache, GasLimits, Urgency};
 use crate::hft::pipeline::{PipelineConfig, TxPipeline, TxRequest};
 use crate::hft::state_cache::{CachedBounds, CachedFees, StateCache, StateCacheConfig};
 use crate::math::tick::{align_tick_down, align_tick_up, price_to_tick};
@@ -166,6 +166,8 @@ pub struct PerpClient {
     pipeline: Mutex<TxPipeline>,
     /// Gas fee cache, updated from block headers.
     gas_cache: Mutex<GasCache>,
+    /// Cached gas estimates from `eth_estimateGas`, keyed by function selector.
+    gas_estimate_cache: Mutex<GasEstimateCache>,
     /// Multi-layer state cache for on-chain reads.
     state_cache: Mutex<StateCache>,
 }
@@ -213,6 +215,7 @@ impl PerpClient {
             // Pipeline starts at nonce 0; call sync_nonce() before first tx
             pipeline: Mutex::new(TxPipeline::new(0, PipelineConfig::default())),
             gas_cache: Mutex::new(GasCache::new(DEFAULT_GAS_TTL_MS, DEFAULT_PRIORITY_FEE)),
+            gas_estimate_cache: Mutex::new(GasEstimateCache::new()),
             state_cache: Mutex::new(StateCache::new(StateCacheConfig::default())),
         })
     }
@@ -341,12 +344,7 @@ impl PerpClient {
         tracing::info!(%perp_id, margin = params.margin, leverage = params.leverage, is_long = params.is_long, ?urgency, "opening taker position");
 
         let receipt = self
-            .send_tx(
-                self.deployments.perp_manager,
-                calldata,
-                GasLimits::OPEN_TAKER,
-                urgency,
-            )
+            .send_tx(self.deployments.perp_manager, calldata, None, urgency)
             .await?;
 
         let result = parse_open_result(&receipt)?;
@@ -415,12 +413,7 @@ impl PerpClient {
             .clone();
 
         let receipt = self
-            .send_tx(
-                self.deployments.perp_manager,
-                calldata,
-                GasLimits::OPEN_MAKER,
-                urgency,
-            )
+            .send_tx(self.deployments.perp_manager, calldata, None, urgency)
             .await?;
 
         let result = parse_open_result(&receipt)?;
@@ -451,12 +444,7 @@ impl PerpClient {
         let calldata = contract.closePosition(wire_params).calldata().clone();
 
         let receipt = self
-            .send_tx(
-                self.deployments.perp_manager,
-                calldata,
-                GasLimits::CLOSE_POSITION,
-                urgency,
-            )
+            .send_tx(self.deployments.perp_manager, calldata, None, urgency)
             .await?;
 
         let result = parse_close_result(&receipt, pos_id)?;
@@ -490,12 +478,7 @@ impl PerpClient {
         let calldata = contract.adjustNotional(wire_params).calldata().clone();
 
         let receipt = self
-            .send_tx(
-                self.deployments.perp_manager,
-                calldata,
-                GasLimits::ADJUST_NOTIONAL,
-                urgency,
-            )
+            .send_tx(self.deployments.perp_manager, calldata, None, urgency)
             .await?;
 
         let result = parse_adjust_result(&receipt)?;
@@ -528,12 +511,7 @@ impl PerpClient {
         let calldata = contract.adjustMargin(wire_params).calldata().clone();
 
         let receipt = self
-            .send_tx(
-                self.deployments.perp_manager,
-                calldata,
-                GasLimits::ADJUST_MARGIN,
-                urgency,
-            )
+            .send_tx(self.deployments.perp_manager, calldata, None, urgency)
             .await?;
 
         let result = parse_margin_result(&receipt)?;
@@ -566,12 +544,7 @@ impl PerpClient {
             .clone();
 
         let receipt = self
-            .send_tx(
-                self.deployments.usdc,
-                calldata,
-                GasLimits::APPROVE,
-                Urgency::Normal,
-            )
+            .send_tx(self.deployments.usdc, calldata, None, Urgency::Normal)
             .await?;
 
         tracing::info!(tx_hash = %receipt.transaction_hash, "USDC approved");
@@ -1301,7 +1274,13 @@ impl PerpClient {
     ) -> Result<B256> {
         tracing::info!(%to, amount_wei, ?urgency, "transferring ETH");
         let receipt = self
-            .send_tx_with_value(to, Bytes::new(), amount_wei, 21_000, urgency)
+            .send_tx_with_value(
+                to,
+                Bytes::new(),
+                amount_wei,
+                Some(GasLimits::ETH_TRANSFER),
+                urgency,
+            )
             .await?;
         tracing::info!(tx_hash = %receipt.transaction_hash, "ETH transferred");
         Ok(receipt.transaction_hash)
@@ -1315,12 +1294,7 @@ impl PerpClient {
         let scaled = U256::from(scale_to_6dec(amount)? as u128);
         let calldata = usdc.transfer(to, scaled).calldata().clone();
         let receipt = self
-            .send_tx(
-                self.deployments.usdc,
-                calldata,
-                GasLimits::TRANSFER,
-                urgency,
-            )
+            .send_tx(self.deployments.usdc, calldata, None, urgency)
             .await?;
         tracing::info!(tx_hash = %receipt.transaction_hash, "USDC transferred");
         Ok(receipt.transaction_hash)
@@ -1329,11 +1303,14 @@ impl PerpClient {
     // ── Internal helpers ─────────────────────────────────────────────
 
     /// Prepare, sign, send, and wait for a transaction receipt.
+    ///
+    /// If `gas_limit` is `None`, the gas limit is resolved from the
+    /// estimate cache (keyed by 4-byte selector) or via `eth_estimateGas`.
     async fn send_tx(
         &self,
         to: Address,
         calldata: Bytes,
-        gas_limit: u64,
+        gas_limit: Option<u64>,
         urgency: Urgency,
     ) -> Result<alloy::rpc::types::TransactionReceipt> {
         self.send_tx_with_value(to, calldata, 0, gas_limit, urgency)
@@ -1346,10 +1323,16 @@ impl PerpClient {
         to: Address,
         calldata: Bytes,
         value: u128,
-        gas_limit: u64,
+        gas_limit: Option<u64>,
         urgency: Urgency,
     ) -> Result<alloy::rpc::types::TransactionReceipt> {
         let now = now_ms();
+
+        // Resolve gas limit: explicit override → cached estimate → eth_estimateGas
+        let resolved_gas_limit = match gas_limit {
+            Some(limit) => limit,
+            None => self.resolve_gas_limit(to, &calldata, value, now).await?,
+        };
 
         // Prepare via pipeline (zero RPC)
         let prepared = {
@@ -1360,7 +1343,7 @@ impl PerpClient {
                     to: to.into_array(),
                     calldata: calldata.to_vec(),
                     value,
-                    gas_limit,
+                    gas_limit: resolved_gas_limit,
                     urgency,
                 },
                 &gas_cache,
@@ -1444,6 +1427,68 @@ impl PerpClient {
         );
 
         Ok(receipt)
+    }
+
+    /// Resolve gas limit from cache or via `eth_estimateGas`.
+    ///
+    /// Extracts the 4-byte function selector from calldata, checks the
+    /// estimate cache, and falls back to an RPC call on cache miss.
+    async fn resolve_gas_limit(
+        &self,
+        to: Address,
+        calldata: &Bytes,
+        value: u128,
+        now: u64,
+    ) -> Result<u64> {
+        // Extract selector (first 4 bytes of calldata)
+        if calldata.len() < 4 {
+            return Err(PerpCityError::InvalidConfig {
+                reason: "calldata too short to extract function selector".into(),
+            });
+        }
+        let selector: [u8; 4] = calldata[..4].try_into().unwrap();
+
+        // Check cache
+        {
+            let cache = self.gas_estimate_cache.lock().unwrap();
+            if let Some(limit) = cache.get(&selector, now) {
+                tracing::trace!(selector = %alloy::primitives::hex::encode(selector), limit, "gas estimate cache hit");
+                return Ok(limit);
+            }
+        }
+
+        // Cache miss — call eth_estimateGas
+        let tx = TransactionRequest::default()
+            .with_from(self.address)
+            .with_to(to)
+            .with_input(calldata.clone())
+            .with_value(U256::from(value));
+
+        let raw_estimate = self.provider.estimate_gas(tx).await.map_err(|e| {
+            PerpCityError::GasPriceUnavailable {
+                reason: format!("eth_estimateGas failed: {e}"),
+            }
+        })?;
+
+        // Cache with buffer
+        {
+            let mut cache = self.gas_estimate_cache.lock().unwrap();
+            cache.put(selector, raw_estimate, now);
+        }
+
+        let buffered = {
+            let cache = self.gas_estimate_cache.lock().unwrap();
+            cache.get(&selector, now).unwrap()
+        };
+
+        tracing::debug!(
+            selector = %alloy::primitives::hex::encode(selector),
+            raw_estimate,
+            buffered,
+            "gas estimate cached"
+        );
+
+        Ok(buffered)
     }
 
     /// Get fees from cache or fetch from chain.
