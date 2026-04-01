@@ -16,7 +16,12 @@
 //! assert!(fees.max_fee_per_gas >= fees.max_priority_fee_per_gas);
 //! ```
 
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
+
+/// 4-byte function selector (first 4 bytes of calldata).
+type Selector = [u8; 4];
 
 /// Pre-empirically derived gas limits for PerpCity operations.
 ///
@@ -25,6 +30,8 @@ use serde::{Deserialize, Serialize};
 pub struct GasLimits;
 
 impl GasLimits {
+    /// Simple ETH transfer — protocol-defined, always 21,000 gas.
+    pub const ETH_TRANSFER: u64 = 21_000;
     /// ERC-20 `approve` call.
     pub const APPROVE: u64 = 60_000;
     /// Open a taker position (market order).
@@ -39,6 +46,89 @@ impl GasLimits {
     pub const ADJUST_MARGIN: u64 = 500_000;
     /// ERC-20 `transfer` call.
     pub const TRANSFER: u64 = 65_000;
+}
+
+/// Cached gas estimates from `eth_estimateGas`, keyed by function selector.
+///
+/// On cache miss, the caller performs an `eth_estimateGas` RPC call and stores
+/// the result with a safety buffer. On cache hit, the stored value is returned
+/// with no RPC. Entries expire after a configurable TTL (default: 1 hour).
+///
+/// This replaces the hardcoded [`GasLimits`] as the default gas source. HFT
+/// users can still bypass estimation by passing an explicit gas limit.
+#[derive(Debug)]
+pub struct GasEstimateCache {
+    estimates: HashMap<Selector, CachedEstimate>,
+    ttl_ms: u64,
+    /// Buffer multiplied onto raw estimates (e.g. 1.2 = 20% margin).
+    buffer: f64,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CachedEstimate {
+    gas_limit: u64,
+    cached_at_ms: u64,
+}
+
+/// Default gas estimate TTL: 1 hour.
+const DEFAULT_ESTIMATE_TTL_MS: u64 = 3_600_000;
+
+/// Default buffer: 20% above the raw estimate.
+const DEFAULT_ESTIMATE_BUFFER: f64 = 1.2;
+
+impl GasEstimateCache {
+    /// Create a new cache with default TTL (1 hour) and buffer (20%).
+    pub fn new() -> Self {
+        Self {
+            estimates: HashMap::new(),
+            ttl_ms: DEFAULT_ESTIMATE_TTL_MS,
+            buffer: DEFAULT_ESTIMATE_BUFFER,
+        }
+    }
+
+    /// Create a cache with custom TTL and buffer.
+    pub fn with_config(ttl_ms: u64, buffer: f64) -> Self {
+        Self {
+            estimates: HashMap::new(),
+            ttl_ms,
+            buffer,
+        }
+    }
+
+    /// Look up a cached estimate by function selector.
+    ///
+    /// Returns `None` if no estimate exists or the cached value has expired.
+    pub fn get(&self, selector: &Selector, now_ms: u64) -> Option<u64> {
+        let entry = self.estimates.get(selector)?;
+        if now_ms.saturating_sub(entry.cached_at_ms) < self.ttl_ms {
+            Some(entry.gas_limit)
+        } else {
+            None
+        }
+    }
+
+    /// Store an estimate. Applies the buffer (e.g. raw 580K → stored 696K at 1.2×).
+    pub fn put(&mut self, selector: Selector, raw_estimate: u64, now_ms: u64) {
+        let buffered = (raw_estimate as f64 * self.buffer) as u64;
+        self.estimates.insert(
+            selector,
+            CachedEstimate {
+                gas_limit: buffered,
+                cached_at_ms: now_ms,
+            },
+        );
+    }
+
+    /// Override the TTL.
+    pub fn set_ttl(&mut self, ttl_ms: u64) {
+        self.ttl_ms = ttl_ms;
+    }
+}
+
+impl Default for GasEstimateCache {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// Transaction urgency level, controlling EIP-1559 fee scaling.
@@ -301,5 +391,33 @@ mod tests {
         assert!(GasLimits::CLOSE_POSITION > 100_000 && GasLimits::CLOSE_POSITION < 2_000_000);
         // Maker is more expensive than taker (more Uniswap V4 work)
         assert!(GasLimits::OPEN_MAKER > GasLimits::OPEN_TAKER);
+    }
+
+    // ── GasEstimateCache tests ───────────────────────────────────────
+
+    #[test]
+    fn estimate_cache_applies_buffer_and_expires() {
+        let mut cache = GasEstimateCache::with_config(1000, 1.5);
+        let selector = [0x01, 0x02, 0x03, 0x04];
+
+        assert!(cache.get(&selector, 0).is_none());
+
+        cache.put(selector, 100_000, 0);
+        assert_eq!(cache.get(&selector, 0), Some(150_000)); // 1.5× buffer
+        assert_eq!(cache.get(&selector, 999), Some(150_000)); // within TTL
+        assert!(cache.get(&selector, 1000).is_none()); // expired
+    }
+
+    #[test]
+    fn estimate_cache_selectors_are_independent() {
+        let mut cache = GasEstimateCache::new();
+        let open = [0xAA, 0xBB, 0xCC, 0xDD];
+        let close = [0x11, 0x22, 0x33, 0x44];
+
+        cache.put(open, 500_000, 0);
+        cache.put(close, 800_000, 0);
+
+        assert_eq!(cache.get(&open, 0), Some(600_000));
+        assert_eq!(cache.get(&close, 0), Some(960_000));
     }
 }

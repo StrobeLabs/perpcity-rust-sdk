@@ -20,6 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Transport: `TransportInner` → `Router` + `EndpointPool`.** Endpoint selection logic extracted into `EndpointPool` (owns endpoints, round-robin counter, and selection methods). `Router` holds three pools and implements pool-aware request routing. `EndpointPool` is public for benchmarking.
 - `.endpoint()` renamed to `.shared_endpoint()` on `TransportConfigBuilder`
 - `http_endpoints` renamed to `shared_endpoints` on `TransportConfig`
+- **Gas limits now estimated dynamically.** Contract calls use `eth_estimateGas` on first invocation, cached by function selector (1 hour TTL, 20% buffer). Explicit gas limits can still be passed to skip estimation. Hardcoded `GasLimits` constants are preserved as reference values.
 - Removed dead `POOL_MANAGER` and `USDC` address constants (the `Deployments` struct is the actual source of deployed addresses)
 - `refresh_gas()` now fetches the latest block directly in a single RPC call (`get_block_by_number(Latest)`) instead of two (`get_block_number` + `get_block_by_number`)
 - `RetryConfig` split into `ReadRetryConfig` and `WriteRetryConfig` with separate defaults and builder methods (`read_retry()`, `write_retry()`)
@@ -44,6 +45,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `EndpointPool` — public type encapsulating a pool of endpoints with health-aware selection (`select`, `select_n`, `record_success`, `record_failure`, `healthy_count`, `len`)
 - Re-exported `tick_to_price`, `price_to_tick`, `get_sqrt_ratio_at_tick`, `align_tick_down`, `align_tick_up` from crate root
 - `PerpSnapshot` type — live market data: `mark_price`, `index_price`, `funding_rate_daily`, `open_interest`
+- `GasEstimateCache` — caches `eth_estimateGas` results by function selector with configurable TTL and buffer
+- `GasLimits::ETH_TRANSFER` constant (21,000 gas — protocol-defined invariant)
 - `PerpClient::get_perp_snapshot(perp_id) → (PerpData, PerpSnapshot)` — fetch perp config and live market data via two-phase multicall (2 CUs instead of 5+). Phase 1 multicalls cfgs + mark + funding + OI (1 CU), phase 2 fetches index price from the beacon (1 CU)
 - Anvil fork integration tests for batch balances and perp snapshot multicalls
 - `PerpClient::set_base_fee(base_fee)` — inject a base fee from an external source (e.g. shared poller) without RPC calls
