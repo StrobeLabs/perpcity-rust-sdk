@@ -2,7 +2,7 @@
 //!
 //! [`BlockHeaderFeed`] subscribes to new block headers via [`WsManager`],
 //! yielding each header as it arrives. Consumers typically extract
-//! `base_fee_per_gas` and feed it to [`PerpClient::set_base_fee()`] for
+//! `base_fee_per_gas` and feed it to [`crate::PerpClient::set_base_fee()`] for
 //! zero-RPC gas price updates.
 //!
 //! # Example
