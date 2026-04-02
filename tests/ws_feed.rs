@@ -16,8 +16,8 @@ use std::time::Duration;
 
 use alloy::primitives::{Address, B256, address};
 
-use perpcity_sdk::events::MarketEvent;
-use perpcity_sdk::feed::MarketFeed;
+use perpcity_sdk::feeds::MarketFeed;
+use perpcity_sdk::feeds::events::MarketEvent;
 use perpcity_sdk::transport::ws::{ReconnectConfig, WsManager};
 
 // ── Deployed addresses (Base Sepolia) ─────────────────────────────────

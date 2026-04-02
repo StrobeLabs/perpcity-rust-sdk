@@ -7,7 +7,7 @@
 //! # Usage
 //!
 //! ```rust,no_run
-//! use perpcity_sdk::events::{MarketEvent, decode_log};
+//! use perpcity_sdk::feeds::events::{MarketEvent, decode_log};
 //! # use alloy::rpc::types::Log;
 //! # fn example(log: &Log) {
 //! if let Some(event) = decode_log(log) {
