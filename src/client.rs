@@ -1449,9 +1449,13 @@ impl PerpClient {
                     tokio::time::sleep(RECEIPT_POLL_INTERVAL).await;
                 }
                 Err(e) => {
-                    return Err(PerpCityError::TxReverted {
-                        reason: format!("failed to get receipt: {e}"),
-                    });
+                    if tokio::time::Instant::now() >= deadline {
+                        return Err(PerpCityError::TxReverted {
+                            reason: format!("failed to get receipt: {e}"),
+                        });
+                    }
+                    tracing::warn!(tx_hash = %tx_hash, error = %e, "receipt poll RPC error, retrying");
+                    tokio::time::sleep(RECEIPT_POLL_INTERVAL).await;
                 }
             }
         }
