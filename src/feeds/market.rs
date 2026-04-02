@@ -8,7 +8,7 @@
 //! # Example
 //!
 //! ```rust,no_run
-//! use perpcity_sdk::feed::MarketFeed;
+//! use perpcity_sdk::feeds::MarketFeed;
 //! use perpcity_sdk::transport::ws::{WsManager, ReconnectConfig};
 //! use alloy::primitives::{Address, B256, address};
 //!
@@ -31,7 +31,7 @@ use alloy::primitives::{Address, B256};
 use alloy::rpc::types::{Filter, Log};
 use tokio::sync::mpsc;
 
-use crate::events::{MarketEvent, decode_log};
+use super::events::{MarketEvent, decode_log};
 use crate::transport::ws::WsManager;
 
 /// A filtered stream of decoded [`MarketEvent`]s for a single perp.
