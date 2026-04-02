@@ -82,6 +82,12 @@ const DEFAULT_PRIORITY_FEE: u64 = 10_000_000;
 /// Default receipt polling timeout.
 const RECEIPT_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Wait one block (~2s on Base) before first receipt poll.
+const RECEIPT_POLL_INITIAL_DELAY: Duration = Duration::from_secs(2);
+
+/// Poll for receipt every ~2s (Base block time).
+const RECEIPT_POLL_INTERVAL: Duration = Duration::from_secs(2);
+
 /// Maximum USDC approval amount (2^256 - 1).
 const MAX_APPROVAL: U256 = U256::MAX;
 
@@ -95,7 +101,7 @@ fn funding_x96_to_daily(funding_x96: I256) -> f64 {
     rate_per_sec * crate::constants::INTERVAL as f64
 }
 
-// ── From impls for cache↔client type bridging ────────────────────────
+// ── From impls for cache ↔ client type bridging ────────────────────────
 
 impl From<CachedFees> for Fees {
     fn from(c: CachedFees) -> Self {
@@ -1392,18 +1398,8 @@ impl PerpClient {
             pipeline.record_submission(tx_hash_bytes, prepared, now);
         }
 
-        // Wait for receipt
-        let receipt = tokio::time::timeout(RECEIPT_TIMEOUT, pending.get_receipt())
-            .await
-            .map_err(|_| {
-                tracing::warn!(tx_hash = %tx_hash_b256, timeout_secs = RECEIPT_TIMEOUT.as_secs(), "receipt timeout");
-                PerpCityError::TxReverted {
-                    reason: format!("receipt timeout after {}s", RECEIPT_TIMEOUT.as_secs()),
-                }
-            })?
-            .map_err(|e| PerpCityError::TxReverted {
-                reason: format!("failed to get receipt: {e}"),
-            })?;
+        // Wait for receipt via manual polling (avoids Alloy's background eth_blockNumber poller)
+        let receipt = self.poll_receipt(tx_hash_b256).await?;
 
         // Confirm in pipeline
         {
@@ -1433,6 +1429,38 @@ impl PerpClient {
     ///
     /// Extracts the 4-byte function selector from calldata, checks the
     /// estimate cache, and falls back to an RPC call on cache miss.
+    /// Poll for a transaction receipt with intervals tuned for Base's ~2s block time.
+    ///
+    /// Uses direct `get_transaction_receipt` instead of Alloy's `pending.get_receipt()`
+    /// to avoid triggering the background `eth_blockNumber` poller that persists for
+    /// the provider's lifetime.
+    async fn poll_receipt(&self, tx_hash: B256) -> Result<alloy::rpc::types::TransactionReceipt> {
+        tokio::time::sleep(RECEIPT_POLL_INITIAL_DELAY).await;
+        let deadline = tokio::time::Instant::now() + RECEIPT_TIMEOUT;
+        loop {
+            match self.provider.get_transaction_receipt(tx_hash).await {
+                Ok(Some(receipt)) => return Ok(receipt),
+                Ok(None) => {
+                    if tokio::time::Instant::now() >= deadline {
+                        return Err(PerpCityError::TxReverted {
+                            reason: format!("receipt timeout for {tx_hash}"),
+                        });
+                    }
+                    tokio::time::sleep(RECEIPT_POLL_INTERVAL).await;
+                }
+                Err(e) => {
+                    if tokio::time::Instant::now() >= deadline {
+                        return Err(PerpCityError::TxReverted {
+                            reason: format!("failed to get receipt: {e}"),
+                        });
+                    }
+                    tracing::warn!(tx_hash = %tx_hash, error = %e, "receipt poll RPC error, retrying");
+                    tokio::time::sleep(RECEIPT_POLL_INTERVAL).await;
+                }
+            }
+        }
+    }
+
     async fn resolve_gas_limit(
         &self,
         to: Address,
