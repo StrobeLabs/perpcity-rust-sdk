@@ -26,7 +26,7 @@ impl PerpClient {
 
     /// Get the full perp configuration, fees, and bounds for a market.
     ///
-    /// Uses the [`StateCache`] for fees and bounds (60s TTL). The perp
+    /// Uses the [`crate::hft::state_cache::StateCache`] for fees and bounds (60s TTL). The perp
     /// config itself is always fetched fresh (it's cheap and rarely changes).
     pub async fn get_perp_config(&self, perp_id: B256) -> Result<PerpData> {
         let contract = PerpManager::new(self.deployments.perp_manager, &self.provider);
