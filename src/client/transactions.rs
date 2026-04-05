@@ -114,17 +114,28 @@ impl PerpClient {
         }
 
         // Wait for receipt via manual polling (avoids Alloy's background eth_blockNumber poller)
-        let receipt = self.poll_receipt(tx_hash_b256).await?;
+        let receipt = match self.poll_receipt(tx_hash_b256).await {
+            Ok(receipt) => receipt,
+            Err(e) => {
+                // Evict the failed transaction so it doesn't permanently
+                // consume an in-flight slot.
+                let mut pipeline = self.pipeline.lock().unwrap();
+                pipeline.fail(&tx_hash_bytes);
+                return Err(e);
+            }
+        };
 
         // Confirm in pipeline
         {
             let mut pipeline = self.pipeline.lock().unwrap();
-            pipeline.confirm(&tx_hash_bytes);
+            pipeline.resolve(&tx_hash_bytes);
         }
 
         // Check if reverted
         if !receipt.status() {
             tracing::warn!(tx_hash = %tx_hash_b256, "tx reverted");
+            let mut pipeline = self.pipeline.lock().unwrap();
+            pipeline.fail(&tx_hash_bytes);
             return Err(PerpCityError::TxReverted {
                 reason: format!("transaction {} reverted", tx_hash_b256),
             });
