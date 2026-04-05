@@ -9,7 +9,7 @@
 //! ```text
 //! prepare() → PreparedTx → sign & send → record_submission()
 //!                                              ↓
-//!                                    confirm() or fail()
+//!                                    resolve() or fail()
 //! ```
 //!
 //! Stuck transactions (older than the configured timeout) can be detected
@@ -186,10 +186,11 @@ impl TxPipeline {
         );
     }
 
-    /// Mark a transaction as confirmed (mined). Removes from tracking.
-    pub fn confirm(&mut self, tx_hash: &[u8; 32]) {
+    /// Mark a transaction as resolved (mined, reverted, or timed out).
+    /// Removes from in-flight tracking without rewinding the nonce.
+    pub fn resolve(&mut self, tx_hash: &[u8; 32]) {
         if let Some(tx) = self.in_flight.remove(tx_hash) {
-            tracing::debug!(nonce = tx.nonce, "tx confirmed in pipeline");
+            tracing::debug!(nonce = tx.nonce, "tx resolved in pipeline");
             self.nonce_mgr.confirm(tx.nonce);
         }
     }
@@ -329,17 +330,22 @@ mod tests {
     }
 
     #[test]
-    fn confirm_removes_from_tracking() {
+    fn resolve_removes_from_tracking_without_nonce_rewind() {
         let mut pipe = TxPipeline::new(0, PipelineConfig::default());
         let gc = test_fee_cache(0);
 
         let p = pipe.prepare(test_request(), &gc, 0).unwrap();
+        assert_eq!(p.nonce, 0);
         let hash = [0xAA; 32];
         pipe.record_submission(hash, p, 0);
         assert_eq!(pipe.in_flight_count(), 1);
 
-        pipe.confirm(&hash);
+        pipe.resolve(&hash);
         assert_eq!(pipe.in_flight_count(), 0);
+
+        // Nonce should NOT rewind — next tx gets nonce 1, not 0
+        let p2 = pipe.prepare(test_request(), &gc, 0).unwrap();
+        assert_eq!(p2.nonce, 1);
     }
 
     #[test]
@@ -410,9 +416,9 @@ mod tests {
     }
 
     #[test]
-    fn confirm_unknown_tx_is_noop() {
+    fn resolve_unknown_tx_is_noop() {
         let mut pipe = TxPipeline::new(0, PipelineConfig::default());
-        pipe.confirm(&[0xFF; 32]); // should not panic
+        pipe.resolve(&[0xFF; 32]); // should not panic
         assert_eq!(pipe.in_flight_count(), 0);
     }
 
@@ -449,7 +455,7 @@ mod tests {
 
         assert_eq!(pipe.in_flight_count(), 2);
 
-        pipe.confirm(&[0x01; 32]);
+        pipe.resolve(&[0x01; 32]);
         assert_eq!(pipe.in_flight_count(), 1);
 
         pipe.fail(&[0x02; 32]);

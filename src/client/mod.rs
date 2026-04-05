@@ -333,10 +333,11 @@ impl PerpClient {
         cache.invalidate_all();
     }
 
-    /// Confirm a transaction as mined. Removes from in-flight tracking.
-    pub fn confirm_tx(&self, tx_hash: &[u8; 32]) {
+    /// Resolve a transaction (mined, reverted, or timed out).
+    /// Removes from in-flight tracking without rewinding the nonce.
+    pub fn resolve_tx(&self, tx_hash: &[u8; 32]) {
         let mut pipeline = self.pipeline.lock().unwrap();
-        pipeline.confirm(tx_hash);
+        pipeline.resolve(tx_hash);
     }
 
     /// Mark a transaction as failed. Releases the nonce if possible.
