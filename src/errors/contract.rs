@@ -40,4 +40,11 @@ pub enum ContractError {
         /// The hex-encoded revert data.
         reason: String,
     },
+
+    /// A multicall returned unexpected results (wrong count or subcall failure).
+    #[error("multicall failed: {reason}")]
+    MulticallFailed {
+        /// What went wrong.
+        reason: String,
+    },
 }

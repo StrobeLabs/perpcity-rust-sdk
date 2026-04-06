@@ -478,8 +478,8 @@ impl PerpClient {
         let results = multicall.aggregate3(calls).call().await?;
 
         if results.len() != 2 * n {
-            return Err(ValidationError::Overflow {
-                context: format!(
+            return Err(ContractError::MulticallFailed {
+                reason: format!(
                     "multicall returned {} results, expected {}",
                     results.len(),
                     2 * n
@@ -493,8 +493,8 @@ impl PerpClient {
             // Decode USDC balance (first N results)
             let usdc_result = &results[i];
             if !usdc_result.success {
-                return Err(ValidationError::Overflow {
-                    context: format!("USDC balanceOf failed for address {}", addresses[i]),
+                return Err(ContractError::MulticallFailed {
+                    reason: format!("USDC balanceOf failed for address {}", addresses[i]),
                 }
                 .into());
             }
@@ -511,8 +511,8 @@ impl PerpClient {
             // Decode ETH balance (last N results)
             let eth_result = &results[n + i];
             if !eth_result.success {
-                return Err(ValidationError::Overflow {
-                    context: format!("getEthBalance failed for address {}", addresses[i]),
+                return Err(ContractError::MulticallFailed {
+                    reason: format!("getEthBalance failed for address {}", addresses[i]),
                 }
                 .into());
             }
@@ -580,8 +580,8 @@ impl PerpClient {
         let results = multicall.aggregate3(calls).call().await?;
 
         if results.len() != 4 {
-            return Err(ValidationError::Overflow {
-                context: format!(
+            return Err(ContractError::MulticallFailed {
+                reason: format!(
                     "perp snapshot multicall returned {} results, expected 4",
                     results.len()
                 ),
@@ -597,8 +597,8 @@ impl PerpClient {
         ];
         for (i, name) in call_names.iter().enumerate() {
             if !results[i].success {
-                return Err(ValidationError::Overflow {
-                    context: format!("perp snapshot multicall: {name} call failed"),
+                return Err(ContractError::MulticallFailed {
+                    reason: format!("perp snapshot multicall: {name} call failed"),
                 }
                 .into());
             }
