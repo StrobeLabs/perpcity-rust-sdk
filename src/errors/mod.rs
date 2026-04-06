@@ -80,7 +80,9 @@ impl PerpCityError {
     pub fn is_transient(&self) -> bool {
         matches!(
             self,
-            Self::Rpc(_) | Self::Transaction(TransactionError::GasUnavailable { .. })
+            Self::Rpc(_)
+                | Self::Transaction(TransactionError::GasUnavailable { .. })
+                | Self::Transaction(TransactionError::ReceiptTimeout { .. })
         )
     }
 }

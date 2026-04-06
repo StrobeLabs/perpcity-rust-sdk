@@ -56,6 +56,13 @@ pub enum ValidationError {
         context: String,
     },
 
+    /// ABI decoding of on-chain return data failed.
+    #[error("decode failed: {context}")]
+    DecodeFailed {
+        /// What failed to decode.
+        context: String,
+    },
+
     /// A configuration value is invalid or missing.
     #[error("invalid config: {reason}")]
     InvalidConfig {

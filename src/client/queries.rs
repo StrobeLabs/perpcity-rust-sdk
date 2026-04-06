@@ -499,7 +499,7 @@ impl PerpClient {
                 .into());
             }
             let usdc_raw = U256::abi_decode(&usdc_result.returnData).map_err(|e| {
-                ValidationError::Overflow {
+                ValidationError::DecodeFailed {
                     context: format!("failed to decode USDC balance: {e}"),
                 }
             })?;
@@ -517,7 +517,7 @@ impl PerpClient {
                 .into());
             }
             let eth = U256::abi_decode(&eth_result.returnData).map_err(|e| {
-                ValidationError::Overflow {
+                ValidationError::DecodeFailed {
                     context: format!("failed to decode ETH balance: {e}"),
                 }
             })?;
@@ -606,7 +606,7 @@ impl PerpClient {
 
         // Decode cfgs
         let config = PerpManager::PerpConfig::abi_decode(&results[0].returnData).map_err(|e| {
-            ValidationError::Overflow {
+            ValidationError::DecodeFailed {
                 context: format!("failed to decode PerpConfig: {e}"),
             }
         })?;
@@ -616,23 +616,25 @@ impl PerpClient {
         }
 
         // Decode mark price
-        let sqrt_price_x96 =
-            U256::abi_decode(&results[1].returnData).map_err(|e| ValidationError::Overflow {
+        let sqrt_price_x96 = U256::abi_decode(&results[1].returnData).map_err(|e| {
+            ValidationError::DecodeFailed {
                 context: format!("failed to decode mark price: {e}"),
-            })?;
+            }
+        })?;
         let mark = sqrt_price_x96_to_price(sqrt_price_x96)?;
 
         // Decode funding rate
-        let funding_x96 =
-            I256::abi_decode(&results[2].returnData).map_err(|e| ValidationError::Overflow {
+        let funding_x96 = I256::abi_decode(&results[2].returnData).map_err(|e| {
+            ValidationError::DecodeFailed {
                 context: format!("failed to decode funding rate: {e}"),
-            })?;
+            }
+        })?;
         let funding_rate_daily = funding_x96_to_daily(funding_x96);
 
         // Decode OI — takerOpenInterest returns (uint128 longOI, uint128 shortOI)
         let (long_oi, short_oi) =
             <(u128, u128)>::abi_decode(&results[3].returnData).map_err(|e| {
-                ValidationError::Overflow {
+                ValidationError::DecodeFailed {
                     context: format!("failed to decode open interest: {e}"),
                 }
             })?;

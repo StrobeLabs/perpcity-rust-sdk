@@ -384,17 +384,22 @@ mod tests {
 
     #[test]
     fn no_endpoints_errors() {
-        let result = TransportConfig::builder().build();
-        assert!(result.is_err());
+        let err = TransportConfig::builder().build().unwrap_err();
+        assert!(
+            matches!(err, ValidationError::InvalidConfig { ref reason } if reason.contains("no endpoints configured"))
+        );
     }
 
     #[test]
     fn read_only_endpoints_errors() {
         // Only read endpoints, no shared or write — writes have nowhere to go
-        let result = TransportConfig::builder()
+        let err = TransportConfig::builder()
             .read_endpoint("https://read.example.com")
-            .build();
-        assert!(result.is_err());
+            .build()
+            .unwrap_err();
+        assert!(
+            matches!(err, ValidationError::InvalidConfig { ref reason } if reason.contains("writes have no reachable endpoint"))
+        );
     }
 
     #[test]
@@ -410,10 +415,13 @@ mod tests {
 
     #[test]
     fn hedged_fan_out_one_errors() {
-        let result = TransportConfig::builder()
+        let err = TransportConfig::builder()
             .shared_endpoint("https://rpc1.example.com")
             .strategy(Strategy::Hedged { fan_out: 1 })
-            .build();
-        assert!(result.is_err());
+            .build()
+            .unwrap_err();
+        assert!(
+            matches!(err, ValidationError::InvalidConfig { ref reason } if reason.contains("fan_out >= 2"))
+        );
     }
 }
