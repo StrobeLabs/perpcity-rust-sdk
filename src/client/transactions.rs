@@ -7,7 +7,7 @@ use alloy::primitives::{Address, B256, Bytes, U256};
 use alloy::providers::Provider;
 use alloy::rpc::types::TransactionRequest;
 
-use crate::errors::{Result, TransactionError, ValidationError};
+use crate::errors::{Result, TransactionError, ValidationError, decode};
 use crate::hft::gas::Urgency;
 use crate::hft::pipeline::TxRequest;
 
@@ -221,13 +221,20 @@ impl PerpClient {
             .with_input(calldata.clone())
             .with_value(U256::from(value));
 
-        let raw_estimate =
-            self.provider
-                .estimate_gas(tx)
-                .await
-                .map_err(|e| TransactionError::GasUnavailable {
+        let raw_estimate = self.provider.estimate_gas(tx).await.map_err(|e| {
+            let error_str = e.to_string();
+            if let Some((name, selector, data)) = decode::try_extract_revert(&error_str) {
+                TransactionError::SimulationReverted {
+                    error_name: name,
+                    selector,
+                    revert_data: data,
+                }
+            } else {
+                TransactionError::GasUnavailable {
                     reason: format!("eth_estimateGas failed: {e}"),
-                })?;
+                }
+            }
+        })?;
 
         // Cache with buffer
         {

@@ -9,7 +9,7 @@ use crate::convert::{
     leverage_to_margin_ratio, margin_ratio_to_leverage, price_x96_to_f64, scale_from_6dec,
     scale_to_6dec, sqrt_price_x96_to_price,
 };
-use crate::errors::{ContractError, Result, ValidationError};
+use crate::errors::{ContractError, Result, ValidationError, decode};
 use crate::hft::state_cache::{CachedBounds, CachedFees};
 use crate::math::tick::{align_tick_down, align_tick_up, price_to_tick};
 use crate::types::{
@@ -194,13 +194,8 @@ impl PerpClient {
 
         // Check for unexpected revert reason
         if !result.unexpectedReason.is_empty() {
-            return Err(ContractError::QuoteReverted {
-                reason: format!(
-                    "quoteClosePosition reverted: 0x{}",
-                    alloy::primitives::hex::encode(&result.unexpectedReason)
-                ),
-            }
-            .into());
+            let reason = format_quote_revert("quoteClosePosition", &result.unexpectedReason);
+            return Err(ContractError::QuoteReverted { reason }.into());
         }
 
         let scale = SCALE_F64;
@@ -257,13 +252,8 @@ impl PerpClient {
             .await?;
 
         if !result.unexpectedReason.is_empty() {
-            return Err(ContractError::QuoteReverted {
-                reason: format!(
-                    "quoteOpenTakerPosition reverted: 0x{}",
-                    alloy::primitives::hex::encode(&result.unexpectedReason)
-                ),
-            }
-            .into());
+            let reason = format_quote_revert("quoteOpenTakerPosition", &result.unexpectedReason);
+            return Err(ContractError::QuoteReverted { reason }.into());
         }
 
         let scale = SCALE_F64;
@@ -315,13 +305,8 @@ impl PerpClient {
             .await?;
 
         if !result.unexpectedReason.is_empty() {
-            return Err(ContractError::QuoteReverted {
-                reason: format!(
-                    "quoteOpenMakerPosition reverted: 0x{}",
-                    alloy::primitives::hex::encode(&result.unexpectedReason)
-                ),
-            }
-            .into());
+            let reason = format_quote_revert("quoteOpenMakerPosition", &result.unexpectedReason);
+            return Err(ContractError::QuoteReverted { reason }.into());
         }
 
         let scale = SCALE_F64;
@@ -360,13 +345,8 @@ impl PerpClient {
             .await?;
 
         if !result.unexpectedReason.is_empty() {
-            return Err(ContractError::QuoteReverted {
-                reason: format!(
-                    "quoteSwap reverted: 0x{}",
-                    alloy::primitives::hex::encode(&result.unexpectedReason)
-                ),
-            }
-            .into());
+            let reason = format_quote_revert("quoteSwap", &result.unexpectedReason);
+            return Err(ContractError::QuoteReverted { reason }.into());
         }
 
         let scale = SCALE_F64;
@@ -783,5 +763,14 @@ impl PerpClient {
             max_taker_leverage: margin_ratio_to_leverage(u24_to_u32(ratios.min))?,
             liquidation_taker_ratio: u24_to_u32(ratios.liq) as f64 / scale,
         })
+    }
+}
+
+/// Format a quote revert reason with decoded error name.
+fn format_quote_revert(function_name: &str, revert_bytes: &[u8]) -> String {
+    let hex = format!("0x{}", alloy::primitives::hex::encode(revert_bytes));
+    match decode::decode_revert_data(&hex) {
+        Some((name, _)) => format!("{function_name} reverted: {name} ({hex})"),
+        None => format!("{function_name} reverted: {hex}"),
     }
 }
