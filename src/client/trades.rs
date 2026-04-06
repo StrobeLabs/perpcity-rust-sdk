@@ -54,14 +54,14 @@ impl PerpClient {
             .calldata()
             .clone();
 
-        tracing::info!(%perp_id, margin = params.margin, leverage = params.leverage, is_long = params.is_long, ?urgency, "opening taker position");
+        tracing::debug!(%perp_id, margin = params.margin, leverage = params.leverage, is_long = params.is_long, ?urgency, "opening taker position");
 
         let receipt = self
             .send_tx(self.deployments.perp_manager, calldata, None, urgency)
             .await?;
 
         let result = parse_open_result(&receipt)?;
-        tracing::info!(%perp_id, pos_id = %result.pos_id, perp_delta = result.perp_delta, usd_delta = result.usd_delta, "taker position opened");
+        tracing::debug!(%perp_id, pos_id = %result.pos_id, perp_delta = result.perp_delta, usd_delta = result.usd_delta, "taker position opened");
         Ok(result)
     }
 
@@ -114,7 +114,7 @@ impl PerpClient {
             maxAmt1In: params.max_amt1_in,
         };
 
-        tracing::info!(%perp_id, margin = params.margin, tick_lower, tick_upper, ?urgency, "opening maker position");
+        tracing::debug!(%perp_id, margin = params.margin, tick_lower, tick_upper, ?urgency, "opening maker position");
 
         let contract = PerpManager::new(self.deployments.perp_manager, &self.provider);
         let calldata = contract
@@ -127,7 +127,7 @@ impl PerpClient {
             .await?;
 
         let result = parse_open_result(&receipt)?;
-        tracing::info!(%perp_id, pos_id = %result.pos_id, perp_delta = result.perp_delta, usd_delta = result.usd_delta, "maker position opened");
+        tracing::debug!(%perp_id, pos_id = %result.pos_id, perp_delta = result.perp_delta, usd_delta = result.usd_delta, "maker position opened");
         Ok(result)
     }
 
@@ -145,7 +145,7 @@ impl PerpClient {
             maxAmt1In: params.max_amt1_in,
         };
 
-        tracing::info!(pos_id = %pos_id, ?urgency, "closing position");
+        tracing::debug!(pos_id = %pos_id, ?urgency, "closing position");
 
         let contract = PerpManager::new(self.deployments.perp_manager, &self.provider);
         let calldata = contract.closePosition(wire_params).calldata().clone();
@@ -155,7 +155,7 @@ impl PerpClient {
             .await?;
 
         let result = parse_close_result(&receipt, pos_id)?;
-        tracing::info!(pos_id = %pos_id, was_liquidated = result.was_liquidated, net_margin = result.net_margin, "position closed");
+        tracing::debug!(pos_id = %pos_id, was_liquidated = result.was_liquidated, net_margin = result.net_margin, "position closed");
         Ok(result)
     }
 
@@ -176,7 +176,7 @@ impl PerpClient {
             perpLimit: params.perp_limit,
         };
 
-        tracing::info!(pos_id = %pos_id, usd_delta = params.usd_delta, ?urgency, "adjusting notional");
+        tracing::debug!(pos_id = %pos_id, usd_delta = params.usd_delta, ?urgency, "adjusting notional");
 
         let contract = PerpManager::new(self.deployments.perp_manager, &self.provider);
         let calldata = contract.adjustNotional(wire_params).calldata().clone();
@@ -186,7 +186,7 @@ impl PerpClient {
             .await?;
 
         let result = parse_adjust_result(&receipt)?;
-        tracing::info!(pos_id = %pos_id, new_perp_delta = result.new_perp_delta, "notional adjusted");
+        tracing::debug!(pos_id = %pos_id, new_perp_delta = result.new_perp_delta, "notional adjusted");
         Ok(result)
     }
 
@@ -206,7 +206,7 @@ impl PerpClient {
             })?,
         };
 
-        tracing::info!(pos_id = %pos_id, margin_delta = params.margin_delta, ?urgency, "adjusting margin");
+        tracing::debug!(pos_id = %pos_id, margin_delta = params.margin_delta, ?urgency, "adjusting margin");
 
         let contract = PerpManager::new(self.deployments.perp_manager, &self.provider);
         let calldata = contract.adjustMargin(wire_params).calldata().clone();
@@ -216,7 +216,7 @@ impl PerpClient {
             .await?;
 
         let result = parse_margin_result(&receipt)?;
-        tracing::info!(pos_id = %pos_id, new_margin = result.new_margin, "margin adjusted");
+        tracing::debug!(pos_id = %pos_id, new_margin = result.new_margin, "margin adjusted");
         Ok(result)
     }
 
@@ -235,7 +235,7 @@ impl PerpClient {
             return Ok(None);
         }
 
-        tracing::info!(allowance = %allowance, min_amount = %min_amount, "approving USDC");
+        tracing::debug!(allowance = %allowance, min_amount = %min_amount, "approving USDC");
 
         let calldata = usdc
             .approve(self.deployments.perp_manager, MAX_APPROVAL)
@@ -246,7 +246,7 @@ impl PerpClient {
             .send_tx(self.deployments.usdc, calldata, None, Urgency::Normal)
             .await?;
 
-        tracing::info!(tx_hash = %receipt.transaction_hash, "USDC approved");
+        tracing::debug!(tx_hash = %receipt.transaction_hash, "USDC approved");
         Ok(Some(receipt.transaction_hash))
     }
 
@@ -257,7 +257,7 @@ impl PerpClient {
         amount_wei: u128,
         urgency: Urgency,
     ) -> Result<B256> {
-        tracing::info!(%to, amount_wei, ?urgency, "transferring ETH");
+        tracing::debug!(%to, amount_wei, ?urgency, "transferring ETH");
         let receipt = self
             .send_tx_with_value(
                 to,
@@ -267,20 +267,20 @@ impl PerpClient {
                 urgency,
             )
             .await?;
-        tracing::info!(tx_hash = %receipt.transaction_hash, "ETH transferred");
+        tracing::debug!(tx_hash = %receipt.transaction_hash, "ETH transferred");
         Ok(receipt.transaction_hash)
     }
 
     /// Transfer USDC to an address. `amount` is in human units (e.g. 100.0 = 100 USDC).
     pub async fn transfer_usdc(&self, to: Address, amount: f64, urgency: Urgency) -> Result<B256> {
-        tracing::info!(%to, amount, ?urgency, "transferring USDC");
+        tracing::debug!(%to, amount, ?urgency, "transferring USDC");
         let usdc = IERC20::new(self.deployments.usdc, &self.provider);
         let scaled = U256::from(scale_to_6dec(amount)? as u128);
         let calldata = usdc.transfer(to, scaled).calldata().clone();
         let receipt = self
             .send_tx(self.deployments.usdc, calldata, None, urgency)
             .await?;
-        tracing::info!(tx_hash = %receipt.transaction_hash, "USDC transferred");
+        tracing::debug!(tx_hash = %receipt.transaction_hash, "USDC transferred");
         Ok(receipt.transaction_hash)
     }
 }

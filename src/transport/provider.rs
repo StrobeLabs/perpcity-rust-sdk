@@ -106,7 +106,7 @@ impl ManagedEndpoint {
         self.atomic_state
             .store(pack_state(new_state), Ordering::Relaxed);
         if old_state != new_state {
-            tracing::info!(
+            tracing::debug!(
                 endpoint = %self.url,
                 from = ?old_state,
                 to = ?new_state,

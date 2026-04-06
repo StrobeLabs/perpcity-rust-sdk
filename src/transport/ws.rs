@@ -97,7 +97,7 @@ impl WsManager {
             .await?;
         let provider = RootProvider::new(rpc_client);
 
-        tracing::info!(url = %url, "WebSocket connected");
+        tracing::debug!(url = %url, "WebSocket connected");
 
         Ok(Self {
             url,
@@ -185,12 +185,12 @@ impl WsManager {
                 return None;
             }
 
-            tracing::info!(url = %self.url, attempt = attempts, delay_ms = delay.as_millis() as u64, "reconnecting");
+            tracing::debug!(url = %self.url, attempt = attempts, delay_ms = delay.as_millis() as u64, "reconnecting");
             tokio::time::sleep(delay).await;
 
             match Self::connect(self.url.clone(), self.config).await {
                 Ok(new_manager) => {
-                    tracing::info!(url = %self.url, attempt = attempts, "reconnected");
+                    tracing::debug!(url = %self.url, attempt = attempts, "reconnected");
                     return Some(new_manager);
                 }
                 Err(e) => {

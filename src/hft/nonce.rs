@@ -112,7 +112,7 @@ impl NonceManager {
     pub fn resync(&self, on_chain_nonce: u64) {
         let old = self.next.swap(on_chain_nonce, Ordering::Relaxed);
         self.pending.lock().unwrap().clear();
-        tracing::info!(
+        tracing::debug!(
             old_nonce = old,
             new_nonce = on_chain_nonce,
             "nonce resynced"

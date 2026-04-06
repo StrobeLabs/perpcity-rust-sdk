@@ -231,7 +231,7 @@ impl PerpClient {
         let count = self.provider.get_transaction_count(self.address).await?;
         let mut pipeline = self.pipeline.lock().unwrap();
         *pipeline = TxPipeline::new(count, PipelineConfig::default());
-        tracing::info!(nonce = count, address = %self.address, "nonce synced");
+        tracing::debug!(nonce = count, address = %self.address, "nonce synced");
         Ok(())
     }
 
