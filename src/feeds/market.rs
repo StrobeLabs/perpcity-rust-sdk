@@ -61,7 +61,7 @@ impl MarketFeed {
     ) -> crate::Result<Self> {
         let filter = Filter::new().address(vec![perp_manager, beacon]);
         let rx = ws.subscribe_logs(filter).await?;
-        tracing::info!(%perp_id, %perp_manager, %beacon, "market feed subscribed");
+        tracing::debug!(%perp_id, %perp_manager, %beacon, "market feed subscribed");
         Ok(Self { rx, perp_id })
     }
 

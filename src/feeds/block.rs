@@ -43,7 +43,7 @@ impl BlockHeaderFeed {
     /// Subscribe to new block headers.
     pub async fn subscribe(ws: &WsManager) -> crate::Result<Self> {
         let rx = ws.subscribe_blocks().await?;
-        tracing::info!("block header feed subscribed");
+        tracing::debug!("block header feed subscribed");
         Ok(Self { rx })
     }
 

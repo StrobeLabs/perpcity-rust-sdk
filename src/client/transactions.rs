@@ -105,7 +105,7 @@ impl PerpClient {
         let tx_hash_b256 = *pending.tx_hash();
         let tx_hash_bytes: [u8; 32] = tx_hash_b256.into();
 
-        tracing::info!(tx_hash = %tx_hash_b256, nonce = prepared.nonce, ?urgency, "tx broadcast");
+        tracing::debug!(tx_hash = %tx_hash_b256, nonce = prepared.nonce, ?urgency, "tx broadcast");
 
         // Record in pipeline
         {
@@ -142,7 +142,7 @@ impl PerpClient {
             .into());
         }
 
-        tracing::info!(
+        tracing::debug!(
             tx_hash = %tx_hash_b256,
             block = ?receipt.block_number,
             gas_used = ?receipt.gas_used,
