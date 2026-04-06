@@ -54,7 +54,7 @@ pub use contracts::{
 pub use feeds::{BlockHeaderFeed, MarketEvent, MarketFeed, decode_log};
 
 #[doc(inline)]
-pub use errors::{PerpCityError, Result};
+pub use errors::{ContractError, PerpCityError, Result, TransactionError, ValidationError};
 
 #[doc(inline)]
 pub use hft::gas::{GasLimits, Urgency};

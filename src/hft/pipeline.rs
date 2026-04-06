@@ -18,7 +18,7 @@
 
 use std::collections::HashMap;
 
-use crate::errors::{PerpCityError, Result};
+use crate::errors::TransactionError;
 use crate::hft::gas::{FeeCache, GasFees, Urgency};
 use crate::hft::nonce::NonceManager;
 
@@ -133,7 +133,7 @@ impl TxPipeline {
         request: TxRequest,
         fee_cache: &FeeCache,
         now_ms: u64,
-    ) -> Result<PreparedTx> {
+    ) -> std::result::Result<PreparedTx, TransactionError> {
         // Fail fast: check in-flight limit before acquiring nonce
         if self.in_flight.len() >= self.config.max_in_flight {
             tracing::warn!(
@@ -141,7 +141,7 @@ impl TxPipeline {
                 max = self.config.max_in_flight,
                 "too many in-flight transactions"
             );
-            return Err(PerpCityError::TooManyInFlight {
+            return Err(TransactionError::TooManyInFlight {
                 count: self.in_flight.len(),
                 max: self.config.max_in_flight,
             });
@@ -150,7 +150,7 @@ impl TxPipeline {
         // Resolve gas fees from cache
         let gas_fees = fee_cache.fees_for(request.urgency, now_ms).ok_or_else(|| {
             tracing::warn!("gas cache stale or empty");
-            PerpCityError::GasPriceUnavailable {
+            TransactionError::GasUnavailable {
                 reason: "gas cache stale or empty".into(),
             }
         })?;
@@ -288,7 +288,7 @@ mod tests {
         let result = pipe.prepare(test_request(), &gc, 6000);
         assert!(matches!(
             result,
-            Err(PerpCityError::GasPriceUnavailable { .. })
+            Err(TransactionError::GasUnavailable { .. })
         ));
     }
 
@@ -299,7 +299,7 @@ mod tests {
         let result = pipe.prepare(test_request(), &gc, 0);
         assert!(matches!(
             result,
-            Err(PerpCityError::GasPriceUnavailable { .. })
+            Err(TransactionError::GasUnavailable { .. })
         ));
     }
 
@@ -325,7 +325,7 @@ mod tests {
         let result = pipe.prepare(test_request(), &gc, 0);
         assert!(matches!(
             result,
-            Err(PerpCityError::TooManyInFlight { count: 2, max: 2 })
+            Err(TransactionError::TooManyInFlight { count: 2, max: 2 })
         ));
     }
 

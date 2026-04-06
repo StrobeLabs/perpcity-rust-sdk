@@ -5,7 +5,7 @@ use alloy::primitives::{Address, B256, Bytes, I256, U256};
 use crate::constants::TICK_SPACING;
 use crate::contracts::{IERC20, PerpManager};
 use crate::convert::{leverage_to_margin_ratio, scale_to_6dec};
-use crate::errors::{PerpCityError, Result};
+use crate::errors::{Result, ValidationError};
 use crate::hft::gas::{GasLimits, Urgency};
 use crate::math::tick::{align_tick_down, align_tick_up, price_to_tick};
 use crate::types::{
@@ -33,9 +33,10 @@ impl PerpClient {
     ) -> Result<OpenResult> {
         let margin_scaled = scale_to_6dec(params.margin)?;
         if margin_scaled <= 0 {
-            return Err(PerpCityError::InvalidMargin {
+            return Err(ValidationError::InvalidMargin {
                 reason: format!("margin must be positive, got {}", params.margin),
-            });
+            }
+            .into());
         }
         let margin_ratio = leverage_to_margin_ratio(params.leverage)?;
 
@@ -76,28 +77,31 @@ impl PerpClient {
     ) -> Result<OpenResult> {
         let margin_scaled = scale_to_6dec(params.margin)?;
         if margin_scaled <= 0 {
-            return Err(PerpCityError::InvalidMargin {
+            return Err(ValidationError::InvalidMargin {
                 reason: format!("margin must be positive, got {}", params.margin),
-            });
+            }
+            .into());
         }
 
         let tick_lower = align_tick_down(price_to_tick(params.price_lower)?, TICK_SPACING);
         let tick_upper = align_tick_up(price_to_tick(params.price_upper)?, TICK_SPACING);
 
         if tick_lower >= tick_upper {
-            return Err(PerpCityError::InvalidTickRange {
+            return Err(ValidationError::InvalidTickRange {
                 lower: tick_lower,
                 upper: tick_upper,
-            });
+            }
+            .into());
         }
 
         // Liquidity must fit in u120 on-chain
         let liquidity: u128 = params.liquidity;
         let max_u120: u128 = (1u128 << 120) - 1;
         if liquidity > max_u120 {
-            return Err(PerpCityError::Overflow {
+            return Err(ValidationError::Overflow {
                 context: format!("liquidity {} exceeds uint120 max", liquidity),
-            });
+            }
+            .into());
         }
 
         let wire_params = PerpManager::OpenMakerPositionParams {
@@ -166,7 +170,7 @@ impl PerpClient {
 
         let wire_params = PerpManager::AdjustNotionalParams {
             posId: pos_id,
-            usdDelta: I256::try_from(usd_delta_scaled).map_err(|_| PerpCityError::Overflow {
+            usdDelta: I256::try_from(usd_delta_scaled).map_err(|_| ValidationError::Overflow {
                 context: format!("usd_delta {} overflows I256", usd_delta_scaled),
             })?,
             perpLimit: params.perp_limit,
@@ -197,7 +201,7 @@ impl PerpClient {
 
         let wire_params = PerpManager::AdjustMarginParams {
             posId: pos_id,
-            marginDelta: I256::try_from(delta_scaled).map_err(|_| PerpCityError::Overflow {
+            marginDelta: I256::try_from(delta_scaled).map_err(|_| ValidationError::Overflow {
                 context: format!("margin_delta {} overflows I256", delta_scaled),
             })?,
         };

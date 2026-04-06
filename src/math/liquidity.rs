@@ -7,7 +7,7 @@
 use alloy::primitives::U256;
 
 use crate::constants::Q96;
-use crate::errors::{PerpCityError, Result};
+use crate::errors::ValidationError;
 
 use super::tick::get_sqrt_ratio_at_tick;
 
@@ -24,22 +24,22 @@ use super::tick::get_sqrt_ratio_at_tick;
 ///
 /// # Errors
 ///
-/// - [`PerpCityError::InvalidTickRange`] if `tick_lower >= tick_upper`
-/// - [`PerpCityError::InvalidMargin`] if `usd_amount_scaled` is 0
-/// - [`PerpCityError::Overflow`] if the sqrt price delta is zero
+/// - [`ValidationError::InvalidTickRange`] if `tick_lower >= tick_upper`
+/// - [`ValidationError::InvalidMargin`] if `usd_amount_scaled` is 0
+/// - [`ValidationError::Overflow`] if the sqrt price delta is zero
 pub fn estimate_liquidity(
     tick_lower: i32,
     tick_upper: i32,
     usd_amount_scaled: u128,
-) -> Result<U256> {
+) -> Result<U256, ValidationError> {
     if tick_lower >= tick_upper {
-        return Err(PerpCityError::InvalidTickRange {
+        return Err(ValidationError::InvalidTickRange {
             lower: tick_lower,
             upper: tick_upper,
         });
     }
     if usd_amount_scaled == 0 {
-        return Err(PerpCityError::InvalidMargin {
+        return Err(ValidationError::InvalidMargin {
             reason: "USD amount must be non-zero".into(),
         });
     }
@@ -49,7 +49,7 @@ pub fn estimate_liquidity(
 
     let delta = sqrt_upper - sqrt_lower;
     if delta.is_zero() {
-        return Err(PerpCityError::Overflow {
+        return Err(ValidationError::Overflow {
             context: "sqrtPrice delta is zero".into(),
         });
     }
@@ -76,30 +76,30 @@ pub fn estimate_liquidity(
 ///
 /// # Errors
 ///
-/// - [`PerpCityError::InvalidTickRange`] if `tick_lower >= tick_upper`
-/// - [`PerpCityError::InvalidMargin`] if `margin_scaled` is 0
-/// - [`PerpCityError::InvalidLeverage`] if `target_margin_ratio` is not in `(0, 1)`
-/// - [`PerpCityError::Overflow`] if the result would be non-finite
+/// - [`ValidationError::InvalidTickRange`] if `tick_lower >= tick_upper`
+/// - [`ValidationError::InvalidMargin`] if `margin_scaled` is 0
+/// - [`ValidationError::InvalidLeverage`] if `target_margin_ratio` is not in `(0, 1)`
+/// - [`ValidationError::Overflow`] if the result would be non-finite
 pub fn liquidity_for_target_ratio(
     margin_scaled: u128,
     tick_lower: i32,
     tick_upper: i32,
     current_sqrt_price_x96: U256,
     target_margin_ratio: f64,
-) -> Result<u128> {
+) -> Result<u128, ValidationError> {
     if tick_lower >= tick_upper {
-        return Err(PerpCityError::InvalidTickRange {
+        return Err(ValidationError::InvalidTickRange {
             lower: tick_lower,
             upper: tick_upper,
         });
     }
     if target_margin_ratio <= 0.0 || target_margin_ratio >= 1.0 {
-        return Err(PerpCityError::InvalidLeverage {
+        return Err(ValidationError::InvalidLeverage {
             reason: format!("target_margin_ratio must be in (0, 1), got {target_margin_ratio}"),
         });
     }
     if margin_scaled == 0 {
-        return Err(PerpCityError::InvalidMargin {
+        return Err(ValidationError::InvalidMargin {
             reason: "margin must be non-zero".into(),
         });
     }
@@ -110,10 +110,10 @@ pub fn liquidity_for_target_ratio(
 
     let q96_f = crate::constants::Q96_U128 as f64;
 
-    let to_f64 = |v: U256| -> Result<f64> {
+    let to_f64 = |v: U256| -> Result<f64, ValidationError> {
         u128::try_from(v)
             .map(|n| n as f64)
-            .map_err(|_| PerpCityError::Overflow {
+            .map_err(|_| ValidationError::Overflow {
                 context: "sqrtPriceX96 exceeds u128 range".into(),
             })
     };
@@ -136,7 +136,7 @@ pub fn liquidity_for_target_ratio(
     };
 
     if quote_per_liq <= 0.0 {
-        return Err(PerpCityError::Overflow {
+        return Err(ValidationError::Overflow {
             context: "quote_per_liq is zero (price above range)".into(),
         });
     }
@@ -148,7 +148,7 @@ pub fn liquidity_for_target_ratio(
     let liquidity_f = margin_f / (target_margin_ratio * quote_per_liq);
 
     if !liquidity_f.is_finite() || liquidity_f <= 0.0 {
-        return Err(PerpCityError::Overflow {
+        return Err(ValidationError::Overflow {
             context: format!("computed liquidity is not finite: {liquidity_f}"),
         });
     }

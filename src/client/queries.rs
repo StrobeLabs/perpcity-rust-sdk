@@ -6,9 +6,10 @@ use alloy::sol_types::{SolCall, SolValue};
 use crate::constants::MULTICALL3;
 use crate::contracts::{IBeacon, IERC20, IFees, IMarginRatios, IMulticall3, PerpManager};
 use crate::convert::{
-    leverage_to_margin_ratio, margin_ratio_to_leverage, scale_from_6dec, scale_to_6dec,
+    leverage_to_margin_ratio, margin_ratio_to_leverage, price_x96_to_f64, scale_from_6dec,
+    scale_to_6dec, sqrt_price_x96_to_price,
 };
-use crate::errors::{PerpCityError, Result};
+use crate::errors::{ContractError, Result, ValidationError, decode};
 use crate::hft::state_cache::{CachedBounds, CachedFees};
 use crate::math::tick::{align_tick_down, align_tick_up, price_to_tick};
 use crate::types::{
@@ -36,7 +37,7 @@ impl PerpClient {
 
         // Zero beacon means the perp was never created
         if config.beacon == Address::ZERO {
-            return Err(PerpCityError::PerpNotFound { perp_id });
+            return Err(ContractError::PerpNotFound { perp_id }.into());
         }
 
         let beacon = config.beacon;
@@ -46,7 +47,7 @@ impl PerpClient {
             .timeWeightedAvgSqrtPriceX96(perp_id, 1)
             .call()
             .await?;
-        let mark = crate::convert::sqrt_price_x96_to_price(sqrt_price_x96)?;
+        let mark = sqrt_price_x96_to_price(sqrt_price_x96)?;
 
         let fees = self.get_or_fetch_fees(&config).await?;
         let bounds = self.get_or_fetch_bounds(&config).await?;
@@ -72,7 +73,7 @@ impl PerpClient {
             .timeWeightedAvgSqrtPriceX96(perp_id, 1)
             .call()
             .await?;
-        let mark = crate::convert::sqrt_price_x96_to_price(sqrt_price_x96)?;
+        let mark = sqrt_price_x96_to_price(sqrt_price_x96)?;
 
         Ok((config.beacon, i24_to_i32(config.key.tickSpacing), mark))
     }
@@ -87,7 +88,7 @@ impl PerpClient {
 
         // Check if position exists (empty perpId = uninitialized)
         if pos.perpId == B256::ZERO {
-            return Err(PerpCityError::PositionNotFound { pos_id });
+            return Err(ContractError::PositionNotFound { pos_id }.into());
         }
 
         Ok(pos)
@@ -106,7 +107,7 @@ impl PerpClient {
 
         let total: u64 = next_pos_id
             .try_into()
-            .map_err(|_| PerpCityError::Overflow {
+            .map_err(|_| ValidationError::Overflow {
                 context: "nextPosId exceeds u64".into(),
             })?;
         if total <= 1 {
@@ -152,7 +153,7 @@ impl PerpClient {
             .timeWeightedAvgSqrtPriceX96(perp_id, 1)
             .call()
             .await?;
-        let price = crate::convert::sqrt_price_x96_to_price(sqrt_price_x96)?;
+        let price = sqrt_price_x96_to_price(sqrt_price_x96)?;
 
         tracing::debug!(%perp_id, price, "mark price fetched");
 
@@ -174,12 +175,14 @@ impl PerpClient {
         let index_x96: U256 = contract.index().call().await?;
 
         if index_x96.is_zero() {
-            return Err(PerpCityError::InvalidPrice {
+            return Err(ValidationError::InvalidPrice {
                 reason: "beacon returned zero index".into(),
-            });
+            }
+            .into());
         }
 
-        crate::convert::price_x96_to_f64(index_x96)
+        let index = price_x96_to_f64(index_x96)?;
+        Ok(index)
     }
 
     /// Simulate closing a position to get live PnL, funding, and liquidation status.
@@ -191,12 +194,8 @@ impl PerpClient {
 
         // Check for unexpected revert reason
         if !result.unexpectedReason.is_empty() {
-            return Err(PerpCityError::TxReverted {
-                reason: format!(
-                    "quoteClosePosition reverted: 0x{}",
-                    alloy::primitives::hex::encode(&result.unexpectedReason)
-                ),
-            });
+            let reason = format_quote_revert("quoteClosePosition", &result.unexpectedReason);
+            return Err(ContractError::QuoteReverted { reason }.into());
         }
 
         let scale = SCALE_F64;
@@ -231,9 +230,10 @@ impl PerpClient {
     ) -> Result<OpenTakerQuote> {
         let margin_scaled = scale_to_6dec(params.margin)?;
         if margin_scaled <= 0 {
-            return Err(PerpCityError::InvalidMargin {
+            return Err(ValidationError::InvalidMargin {
                 reason: format!("margin must be positive, got {}", params.margin),
-            });
+            }
+            .into());
         }
         let margin_ratio = leverage_to_margin_ratio(params.leverage)?;
 
@@ -252,12 +252,8 @@ impl PerpClient {
             .await?;
 
         if !result.unexpectedReason.is_empty() {
-            return Err(PerpCityError::TxReverted {
-                reason: format!(
-                    "quoteOpenTakerPosition reverted: 0x{}",
-                    alloy::primitives::hex::encode(&result.unexpectedReason)
-                ),
-            });
+            let reason = format_quote_revert("quoteOpenTakerPosition", &result.unexpectedReason);
+            return Err(ContractError::QuoteReverted { reason }.into());
         }
 
         let scale = SCALE_F64;
@@ -277,9 +273,10 @@ impl PerpClient {
     ) -> Result<OpenMakerQuote> {
         let margin_scaled = scale_to_6dec(params.margin)?;
         if margin_scaled <= 0 {
-            return Err(PerpCityError::InvalidMargin {
+            return Err(ValidationError::InvalidMargin {
                 reason: format!("margin must be positive, got {}", params.margin),
-            });
+            }
+            .into());
         }
 
         let tick_lower = align_tick_down(
@@ -308,12 +305,8 @@ impl PerpClient {
             .await?;
 
         if !result.unexpectedReason.is_empty() {
-            return Err(PerpCityError::TxReverted {
-                reason: format!(
-                    "quoteOpenMakerPosition reverted: 0x{}",
-                    alloy::primitives::hex::encode(&result.unexpectedReason)
-                ),
-            });
+            let reason = format_quote_revert("quoteOpenMakerPosition", &result.unexpectedReason);
+            return Err(ContractError::QuoteReverted { reason }.into());
         }
 
         let scale = SCALE_F64;
@@ -352,12 +345,8 @@ impl PerpClient {
             .await?;
 
         if !result.unexpectedReason.is_empty() {
-            return Err(PerpCityError::TxReverted {
-                reason: format!(
-                    "quoteSwap reverted: 0x{}",
-                    alloy::primitives::hex::encode(&result.unexpectedReason)
-                ),
-            });
+            let reason = format_quote_revert("quoteSwap", &result.unexpectedReason);
+            return Err(ContractError::QuoteReverted { reason }.into());
         }
 
         let scale = SCALE_F64;
@@ -416,7 +405,7 @@ impl PerpClient {
 
         let usdc = IERC20::new(self.deployments.usdc, &self.provider);
         let raw: U256 = usdc.balanceOf(self.address).call().await?;
-        let raw_i128 = i128::try_from(raw).map_err(|_| PerpCityError::Overflow {
+        let raw_i128 = i128::try_from(raw).map_err(|_| ValidationError::Overflow {
             context: format!("USDC balance {} exceeds i128::MAX", raw),
         })?;
         let balance = scale_from_6dec(raw_i128);
@@ -489,13 +478,14 @@ impl PerpClient {
         let results = multicall.aggregate3(calls).call().await?;
 
         if results.len() != 2 * n {
-            return Err(PerpCityError::Overflow {
-                context: format!(
+            return Err(ContractError::MulticallFailed {
+                reason: format!(
                     "multicall returned {} results, expected {}",
                     results.len(),
                     2 * n
                 ),
-            });
+            }
+            .into());
         }
 
         let mut out = Vec::with_capacity(n);
@@ -503,15 +493,17 @@ impl PerpClient {
             // Decode USDC balance (first N results)
             let usdc_result = &results[i];
             if !usdc_result.success {
-                return Err(PerpCityError::Overflow {
-                    context: format!("USDC balanceOf failed for address {}", addresses[i]),
-                });
+                return Err(ContractError::MulticallFailed {
+                    reason: format!("USDC balanceOf failed for address {}", addresses[i]),
+                }
+                .into());
             }
-            let usdc_raw =
-                U256::abi_decode(&usdc_result.returnData).map_err(|e| PerpCityError::Overflow {
+            let usdc_raw = U256::abi_decode(&usdc_result.returnData).map_err(|e| {
+                ValidationError::DecodeFailed {
                     context: format!("failed to decode USDC balance: {e}"),
-                })?;
-            let usdc_i128 = i128::try_from(usdc_raw).map_err(|_| PerpCityError::Overflow {
+                }
+            })?;
+            let usdc_i128 = i128::try_from(usdc_raw).map_err(|_| ValidationError::Overflow {
                 context: format!("USDC balance {} exceeds i128::MAX", usdc_raw),
             })?;
             let usdc = scale_from_6dec(usdc_i128);
@@ -519,14 +511,16 @@ impl PerpClient {
             // Decode ETH balance (last N results)
             let eth_result = &results[n + i];
             if !eth_result.success {
-                return Err(PerpCityError::Overflow {
-                    context: format!("getEthBalance failed for address {}", addresses[i]),
-                });
+                return Err(ContractError::MulticallFailed {
+                    reason: format!("getEthBalance failed for address {}", addresses[i]),
+                }
+                .into());
             }
-            let eth =
-                U256::abi_decode(&eth_result.returnData).map_err(|e| PerpCityError::Overflow {
+            let eth = U256::abi_decode(&eth_result.returnData).map_err(|e| {
+                ValidationError::DecodeFailed {
                     context: format!("failed to decode ETH balance: {e}"),
-                })?;
+                }
+            })?;
 
             out.push((usdc, eth));
         }
@@ -586,12 +580,13 @@ impl PerpClient {
         let results = multicall.aggregate3(calls).call().await?;
 
         if results.len() != 4 {
-            return Err(PerpCityError::Overflow {
-                context: format!(
+            return Err(ContractError::MulticallFailed {
+                reason: format!(
                     "perp snapshot multicall returned {} results, expected 4",
                     results.len()
                 ),
-            });
+            }
+            .into());
         }
 
         let call_names = [
@@ -602,41 +597,44 @@ impl PerpClient {
         ];
         for (i, name) in call_names.iter().enumerate() {
             if !results[i].success {
-                return Err(PerpCityError::Overflow {
-                    context: format!("perp snapshot multicall: {name} call failed"),
-                });
+                return Err(ContractError::MulticallFailed {
+                    reason: format!("perp snapshot multicall: {name} call failed"),
+                }
+                .into());
             }
         }
 
         // Decode cfgs
         let config = PerpManager::PerpConfig::abi_decode(&results[0].returnData).map_err(|e| {
-            PerpCityError::Overflow {
+            ValidationError::DecodeFailed {
                 context: format!("failed to decode PerpConfig: {e}"),
             }
         })?;
 
         if config.beacon == Address::ZERO {
-            return Err(PerpCityError::PerpNotFound { perp_id });
+            return Err(ContractError::PerpNotFound { perp_id }.into());
         }
 
         // Decode mark price
-        let sqrt_price_x96 =
-            U256::abi_decode(&results[1].returnData).map_err(|e| PerpCityError::Overflow {
+        let sqrt_price_x96 = U256::abi_decode(&results[1].returnData).map_err(|e| {
+            ValidationError::DecodeFailed {
                 context: format!("failed to decode mark price: {e}"),
-            })?;
-        let mark = crate::convert::sqrt_price_x96_to_price(sqrt_price_x96)?;
+            }
+        })?;
+        let mark = sqrt_price_x96_to_price(sqrt_price_x96)?;
 
         // Decode funding rate
-        let funding_x96 =
-            I256::abi_decode(&results[2].returnData).map_err(|e| PerpCityError::Overflow {
+        let funding_x96 = I256::abi_decode(&results[2].returnData).map_err(|e| {
+            ValidationError::DecodeFailed {
                 context: format!("failed to decode funding rate: {e}"),
-            })?;
+            }
+        })?;
         let funding_rate_daily = funding_x96_to_daily(funding_x96);
 
         // Decode OI — takerOpenInterest returns (uint128 longOI, uint128 shortOI)
         let (long_oi, short_oi) =
             <(u128, u128)>::abi_decode(&results[3].returnData).map_err(|e| {
-                PerpCityError::Overflow {
+                ValidationError::DecodeFailed {
                     context: format!("failed to decode open interest: {e}"),
                 }
             })?;
@@ -719,9 +717,10 @@ impl PerpClient {
     /// Fetch fees from the IFees module contract.
     async fn fetch_fees(&self, config: &PerpManager::PerpConfig) -> Result<Fees> {
         if config.fees == Address::ZERO {
-            return Err(PerpCityError::ModuleNotRegistered {
+            return Err(ContractError::ModuleNotRegistered {
                 module: "IFees".into(),
-            });
+            }
+            .into());
         }
 
         let fees_contract = IFees::new(config.fees, &self.provider);
@@ -746,9 +745,10 @@ impl PerpClient {
     /// Fetch margin ratio bounds from the IMarginRatios module contract.
     async fn fetch_bounds(&self, config: &PerpManager::PerpConfig) -> Result<Bounds> {
         if config.marginRatios == Address::ZERO {
-            return Err(PerpCityError::ModuleNotRegistered {
+            return Err(ContractError::ModuleNotRegistered {
                 module: "IMarginRatios".into(),
-            });
+            }
+            .into());
         }
 
         let ratios_contract = IMarginRatios::new(config.marginRatios, &self.provider);
@@ -765,5 +765,14 @@ impl PerpClient {
             max_taker_leverage: margin_ratio_to_leverage(u24_to_u32(ratios.min))?,
             liquidation_taker_ratio: u24_to_u32(ratios.liq) as f64 / scale,
         })
+    }
+}
+
+/// Format a quote revert reason with decoded error name.
+fn format_quote_revert(function_name: &str, revert_bytes: &[u8]) -> String {
+    let hex = format!("0x{}", alloy::primitives::hex::encode(revert_bytes));
+    match decode::decode_revert_data(&hex) {
+        Some((name, _)) => format!("{function_name} reverted: {name} ({hex})"),
+        None => format!("{function_name} reverted: {hex}"),
     }
 }

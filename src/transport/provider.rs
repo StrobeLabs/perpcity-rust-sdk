@@ -168,7 +168,7 @@ impl EndpointPool {
             .iter()
             .map(|url| {
                 let parsed: url::Url = url.parse().map_err(|e: url::ParseError| {
-                    crate::PerpCityError::InvalidConfig {
+                    crate::errors::ValidationError::InvalidConfig {
                         reason: format!("invalid endpoint URL '{url}': {e}"),
                     }
                 })?;
