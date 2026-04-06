@@ -6,7 +6,7 @@
 
 use alloy::primitives::{U256, uint};
 
-use crate::errors::{PerpCityError, Result};
+use crate::errors::ValidationError;
 
 /// Uniswap V4 absolute tick bounds.
 const UNISWAP_MIN_TICK: i32 = -887_272;
@@ -29,7 +29,7 @@ const INV_LN_1_0001: f64 = 10000.499991668185;
 ///
 /// # Errors
 ///
-/// Returns [`PerpCityError::InvalidTickRange`] if `|tick| > 887272`.
+/// Returns [`ValidationError::InvalidTickRange`] if `|tick| > 887272`.
 ///
 /// # Examples
 ///
@@ -39,10 +39,10 @@ const INV_LN_1_0001: f64 = 10000.499991668185;
 /// let sqrt_price = get_sqrt_ratio_at_tick(0).unwrap();
 /// assert_eq!(sqrt_price, Q96); // tick 0 → sqrtPrice = 1.0
 /// ```
-pub fn get_sqrt_ratio_at_tick(tick: i32) -> Result<U256> {
+pub fn get_sqrt_ratio_at_tick(tick: i32) -> Result<U256, ValidationError> {
     let abs_tick = tick.unsigned_abs();
     if abs_tick > UNISWAP_MAX_TICK as u32 {
-        return Err(PerpCityError::InvalidTickRange {
+        return Err(ValidationError::InvalidTickRange {
             lower: tick,
             upper: tick,
         });
@@ -156,9 +156,9 @@ fn mul_shift_128(a: u128, b: u128) -> u128 {
 /// ```
 // O(1) float exp — 38.8ns → ~4ns for tick 1000
 #[inline]
-pub fn tick_to_price(tick: i32) -> Result<f64> {
+pub fn tick_to_price(tick: i32) -> Result<f64, ValidationError> {
     if !(UNISWAP_MIN_TICK..=UNISWAP_MAX_TICK).contains(&tick) {
-        return Err(PerpCityError::InvalidTickRange {
+        return Err(ValidationError::InvalidTickRange {
             lower: tick,
             upper: tick,
         });
@@ -173,7 +173,7 @@ pub fn tick_to_price(tick: i32) -> Result<f64> {
 ///
 /// # Errors
 ///
-/// Returns [`PerpCityError::InvalidPrice`] if `price` is not positive/finite,
+/// Returns [`ValidationError::InvalidPrice`] if `price` is not positive/finite,
 /// or if the resulting tick is out of the Uniswap V4 range.
 ///
 /// # Examples
@@ -185,9 +185,9 @@ pub fn tick_to_price(tick: i32) -> Result<f64> {
 /// ```
 // Multiply by reciprocal instead of dividing — avoids fdiv latency
 #[inline]
-pub fn price_to_tick(price: f64) -> Result<i32> {
+pub fn price_to_tick(price: f64) -> Result<i32, ValidationError> {
     if !price.is_finite() || price <= 0.0 {
-        return Err(PerpCityError::InvalidPrice {
+        return Err(ValidationError::InvalidPrice {
             reason: format!("price must be positive and finite, got {price}"),
         });
     }
@@ -196,7 +196,7 @@ pub fn price_to_tick(price: f64) -> Result<i32> {
     let tick = tick_f.round() as i32;
 
     if !(UNISWAP_MIN_TICK..=UNISWAP_MAX_TICK).contains(&tick) {
-        return Err(PerpCityError::InvalidPrice {
+        return Err(ValidationError::InvalidPrice {
             reason: format!(
                 "price {price} maps to tick {tick}, outside [{UNISWAP_MIN_TICK}, {UNISWAP_MAX_TICK}]"
             ),
@@ -252,14 +252,14 @@ pub fn align_tick_up(tick: i32, spacing: i32) -> i32 {
 /// Uses `u128` intermediate to avoid precision loss — the sqrtPriceX96
 /// values we encounter in practice fit within u128.
 #[cfg(test)]
-pub(crate) fn sqrt_price_x96_to_f64_price(sqrt_price_x96: U256) -> Result<f64> {
+pub(crate) fn sqrt_price_x96_to_f64_price(sqrt_price_x96: U256) -> Result<f64, ValidationError> {
     if sqrt_price_x96.is_zero() {
-        return Err(PerpCityError::InvalidPrice {
+        return Err(ValidationError::InvalidPrice {
             reason: "sqrtPriceX96 must be non-zero".into(),
         });
     }
 
-    let narrow = u128::try_from(sqrt_price_x96).map_err(|_| PerpCityError::Overflow {
+    let narrow = u128::try_from(sqrt_price_x96).map_err(|_| ValidationError::Overflow {
         context: "sqrtPriceX96 exceeds u128::MAX".into(),
     })?;
 

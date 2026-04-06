@@ -51,7 +51,7 @@ use alloy::transports::BoxTransport;
 use crate::constants::SCALE_1E6;
 use crate::contracts::PerpManager;
 use crate::convert::scale_from_6dec;
-use crate::errors::{PerpCityError, Result};
+use crate::errors::{ContractError, Result, TransactionError};
 use crate::hft::gas::{FeeCache, GasLimitCache};
 use crate::hft::pipeline::{PipelineConfig, TxPipeline};
 use crate::hft::state_cache::{CachedBounds, CachedFees, StateCache, StateCacheConfig};
@@ -246,7 +246,7 @@ impl PerpClient {
             .provider
             .get_block_by_number(alloy::eips::BlockNumberOrTag::Latest)
             .await?
-            .ok_or_else(|| PerpCityError::GasPriceUnavailable {
+            .ok_or_else(|| TransactionError::GasUnavailable {
                 reason: "latest block not found".into(),
             })?;
 
@@ -254,7 +254,7 @@ impl PerpClient {
             header
                 .header
                 .base_fee_per_gas
-                .ok_or_else(|| PerpCityError::GasPriceUnavailable {
+                .ok_or_else(|| TransactionError::GasUnavailable {
                     reason: "block has no base fee (pre-EIP-1559?)".into(),
                 })?;
 
@@ -420,7 +420,9 @@ fn u256_to_f64_6dec(v: U256) -> f64 {
 }
 
 /// Parse an [`OpenResult`] from a transaction receipt's `PositionOpened` event.
-fn parse_open_result(receipt: &alloy::rpc::types::TransactionReceipt) -> Result<OpenResult> {
+fn parse_open_result(
+    receipt: &alloy::rpc::types::TransactionReceipt,
+) -> std::result::Result<OpenResult, ContractError> {
     for log in receipt.inner.logs() {
         if let Ok(event) = log.log_decode::<PerpManager::PositionOpened>() {
             let data = event.inner.data;
@@ -436,7 +438,7 @@ fn parse_open_result(receipt: &alloy::rpc::types::TransactionReceipt) -> Result<
             });
         }
     }
-    Err(PerpCityError::EventNotFound {
+    Err(ContractError::EventNotFound {
         event_name: "PositionOpened".into(),
     })
 }
@@ -444,7 +446,7 @@ fn parse_open_result(receipt: &alloy::rpc::types::TransactionReceipt) -> Result<
 /// Parse an [`AdjustNotionalResult`] from a transaction receipt's `NotionalAdjusted` event.
 fn parse_adjust_result(
     receipt: &alloy::rpc::types::TransactionReceipt,
-) -> Result<AdjustNotionalResult> {
+) -> std::result::Result<AdjustNotionalResult, ContractError> {
     for log in receipt.inner.logs() {
         if let Ok(event) = log.log_decode::<PerpManager::NotionalAdjusted>() {
             let data = event.inner.data;
@@ -459,7 +461,7 @@ fn parse_adjust_result(
             });
         }
     }
-    Err(PerpCityError::EventNotFound {
+    Err(ContractError::EventNotFound {
         event_name: "NotionalAdjusted".into(),
     })
 }
@@ -467,7 +469,7 @@ fn parse_adjust_result(
 /// Parse an [`AdjustMarginResult`] from a transaction receipt's `MarginAdjusted` event.
 fn parse_margin_result(
     receipt: &alloy::rpc::types::TransactionReceipt,
-) -> Result<AdjustMarginResult> {
+) -> std::result::Result<AdjustMarginResult, ContractError> {
     for log in receipt.inner.logs() {
         if let Ok(event) = log.log_decode::<PerpManager::MarginAdjusted>() {
             return Ok(AdjustMarginResult {
@@ -475,7 +477,7 @@ fn parse_margin_result(
             });
         }
     }
-    Err(PerpCityError::EventNotFound {
+    Err(ContractError::EventNotFound {
         event_name: "MarginAdjusted".into(),
     })
 }
@@ -484,7 +486,7 @@ fn parse_margin_result(
 fn parse_close_result(
     receipt: &alloy::rpc::types::TransactionReceipt,
     pos_id: U256,
-) -> Result<CloseResult> {
+) -> std::result::Result<CloseResult, ContractError> {
     let tx_hash = receipt.transaction_hash;
     for log in receipt.inner.logs() {
         if let Ok(event) = log.log_decode::<PerpManager::PositionClosed>() {
@@ -509,7 +511,7 @@ fn parse_close_result(
             });
         }
     }
-    Err(PerpCityError::EventNotFound {
+    Err(ContractError::EventNotFound {
         event_name: "PositionClosed".into(),
     })
 }

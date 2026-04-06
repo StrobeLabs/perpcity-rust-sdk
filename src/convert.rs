@@ -17,7 +17,7 @@
 use alloy::primitives::U256;
 
 use crate::constants::Q96;
-use crate::errors::{PerpCityError, Result};
+use crate::errors::ValidationError;
 
 // ── Module-level constants ─────────────────────────────────────────────
 
@@ -40,7 +40,7 @@ const MAX_SAFE_F64_INT: u64 = 1_u64 << 53; // 9_007_199_254_740_992
 ///
 /// # Errors
 ///
-/// Returns [`PerpCityError::Overflow`] if `|amount|` exceeds the safe
+/// Returns [`ValidationError::Overflow`] if `|amount|` exceeds the safe
 /// f64 integer range (2^53).
 ///
 /// # Examples
@@ -50,14 +50,14 @@ const MAX_SAFE_F64_INT: u64 = 1_u64 << 53; // 9_007_199_254_740_992
 /// assert_eq!(scale_to_6dec(1.5).unwrap(), 1_500_000);
 /// assert_eq!(scale_to_6dec(-2.5).unwrap(), -2_500_000);
 /// ```
-pub fn scale_to_6dec(amount: f64) -> Result<i128> {
+pub fn scale_to_6dec(amount: f64) -> Result<i128, ValidationError> {
     if amount.is_nan() || amount.is_infinite() {
-        return Err(PerpCityError::Overflow {
+        return Err(ValidationError::Overflow {
             context: format!("amount {amount} is not finite"),
         });
     }
     if amount.abs() > MAX_SAFE_F64_INT as f64 {
-        return Err(PerpCityError::Overflow {
+        return Err(ValidationError::Overflow {
             context: format!("amount {amount} exceeds safe f64 integer range (2^53)"),
         });
     }
@@ -94,7 +94,7 @@ pub fn scale_from_6dec(value: i128) -> f64 {
 ///
 /// # Errors
 ///
-/// Returns [`PerpCityError::InvalidLeverage`] if leverage is zero,
+/// Returns [`ValidationError::InvalidLeverage`] if leverage is zero,
 /// negative, NaN, or produces an out-of-range margin ratio.
 ///
 /// # Examples
@@ -105,15 +105,15 @@ pub fn scale_from_6dec(value: i128) -> f64 {
 /// assert_eq!(leverage_to_margin_ratio(1.0).unwrap(), 1_000_000);
 /// assert_eq!(leverage_to_margin_ratio(100.0).unwrap(), 10_000);
 /// ```
-pub fn leverage_to_margin_ratio(leverage: f64) -> Result<u32> {
+pub fn leverage_to_margin_ratio(leverage: f64) -> Result<u32, ValidationError> {
     if leverage.is_nan() || leverage.is_infinite() || leverage <= 0.0 {
-        return Err(PerpCityError::InvalidLeverage {
+        return Err(ValidationError::InvalidLeverage {
             reason: format!("leverage must be a positive finite number, got {leverage}"),
         });
     }
     let ratio = (F64_1E6 / leverage).round();
     if ratio < 1.0 || ratio > u32::MAX as f64 {
-        return Err(PerpCityError::InvalidLeverage {
+        return Err(ValidationError::InvalidLeverage {
             reason: format!("leverage {leverage} produces out-of-range margin ratio {ratio}"),
         });
     }
@@ -126,7 +126,7 @@ pub fn leverage_to_margin_ratio(leverage: f64) -> Result<u32> {
 ///
 /// # Errors
 ///
-/// Returns [`PerpCityError::InvalidMarginRatio`] if `margin_ratio` is zero.
+/// Returns [`ValidationError::InvalidMarginRatio`] if `margin_ratio` is zero.
 ///
 /// # Examples
 ///
@@ -135,9 +135,9 @@ pub fn leverage_to_margin_ratio(leverage: f64) -> Result<u32> {
 /// let lev = margin_ratio_to_leverage(100_000).unwrap();
 /// assert!((lev - 10.0).abs() < 0.0001);
 /// ```
-pub fn margin_ratio_to_leverage(margin_ratio: u32) -> Result<f64> {
+pub fn margin_ratio_to_leverage(margin_ratio: u32) -> Result<f64, ValidationError> {
     if margin_ratio == 0 {
-        return Err(PerpCityError::InvalidMarginRatio {
+        return Err(ValidationError::InvalidMarginRatio {
             value: 0,
             min: 1,
             max: u32::MAX,
@@ -160,8 +160,8 @@ pub fn margin_ratio_to_leverage(margin_ratio: u32) -> Result<f64> {
 ///
 /// # Errors
 ///
-/// Returns [`PerpCityError::InvalidPrice`] if `value` is zero, or
-/// [`PerpCityError::Overflow`] if the result exceeds safe f64 range.
+/// Returns [`ValidationError::InvalidPrice`] if `value` is zero, or
+/// [`ValidationError::Overflow`] if the result exceeds safe f64 range.
 ///
 /// # Examples
 ///
@@ -172,9 +172,9 @@ pub fn margin_ratio_to_leverage(margin_ratio: u32) -> Result<f64> {
 /// let price = price_x96_to_f64(Q96).unwrap();
 /// assert!((price - 1.0).abs() < Q96_PRECISION);
 /// ```
-pub fn price_x96_to_f64(value: U256) -> Result<f64> {
+pub fn price_x96_to_f64(value: U256) -> Result<f64, ValidationError> {
     if value.is_zero() {
-        return Err(PerpCityError::InvalidPrice {
+        return Err(ValidationError::InvalidPrice {
             reason: "Q96 price value must be non-zero".into(),
         });
     }
@@ -182,7 +182,7 @@ pub fn price_x96_to_f64(value: U256) -> Result<f64> {
     let intermediate = (value * BIGINT_1E6) / Q96;
 
     if intermediate > U256::from(MAX_SAFE_F64_INT) {
-        return Err(PerpCityError::Overflow {
+        return Err(ValidationError::Overflow {
             context: "Q96 price exceeds safe f64 integer range after scaling".into(),
         });
     }
@@ -202,7 +202,7 @@ pub fn price_x96_to_f64(value: U256) -> Result<f64> {
 ///
 /// # Errors
 ///
-/// Returns [`PerpCityError::InvalidPrice`] if `price` is zero, negative,
+/// Returns [`ValidationError::InvalidPrice`] if `price` is zero, negative,
 /// or too large (> 1e30).
 ///
 /// # Examples
@@ -216,14 +216,14 @@ pub fn price_x96_to_f64(value: U256) -> Result<f64> {
 /// let diff = result.abs_diff(Q96);
 /// assert!(diff < Q96 / U256::from(1_000_000));
 /// ```
-pub fn price_to_sqrt_price_x96(price: f64) -> Result<U256> {
+pub fn price_to_sqrt_price_x96(price: f64) -> Result<U256, ValidationError> {
     if price.is_nan() || price.is_infinite() || price <= 0.0 {
-        return Err(PerpCityError::InvalidPrice {
+        return Err(ValidationError::InvalidPrice {
             reason: format!("price must be a positive finite number, got {price}"),
         });
     }
     if price > 1e30 {
-        return Err(PerpCityError::InvalidPrice {
+        return Err(ValidationError::InvalidPrice {
             reason: format!("price {price} exceeds maximum (1e30)"),
         });
     }
@@ -232,7 +232,7 @@ pub fn price_to_sqrt_price_x96(price: f64) -> Result<U256> {
     let scaled = sqrt_price * F64_1E6;
 
     if scaled > MAX_SAFE_F64_INT as f64 {
-        return Err(PerpCityError::InvalidPrice {
+        return Err(ValidationError::InvalidPrice {
             reason: format!("scaled sqrt(price) {scaled} exceeds safe f64 integer range"),
         });
     }
@@ -251,8 +251,8 @@ pub fn price_to_sqrt_price_x96(price: f64) -> Result<U256> {
 ///
 /// # Errors
 ///
-/// Returns [`PerpCityError::InvalidPrice`] if `sqrt_price_x96` is zero,
-/// or [`PerpCityError::Overflow`] if the squared value overflows `U256`
+/// Returns [`ValidationError::InvalidPrice`] if `sqrt_price_x96` is zero,
+/// or [`ValidationError::Overflow`] if the squared value overflows `U256`
 /// or the result exceeds safe f64 range.
 ///
 /// # Examples
@@ -263,9 +263,9 @@ pub fn price_to_sqrt_price_x96(price: f64) -> Result<U256> {
 /// let price = sqrt_price_x96_to_price(Q96).unwrap();
 /// assert!((price - 1.0).abs() < Q96_PRECISION);
 /// ```
-pub fn sqrt_price_x96_to_price(sqrt_price_x96: U256) -> Result<f64> {
+pub fn sqrt_price_x96_to_price(sqrt_price_x96: U256) -> Result<f64, ValidationError> {
     if sqrt_price_x96.is_zero() {
-        return Err(PerpCityError::InvalidPrice {
+        return Err(ValidationError::InvalidPrice {
             reason: "sqrtPriceX96 must be non-zero".into(),
         });
     }
@@ -273,7 +273,7 @@ pub fn sqrt_price_x96_to_price(sqrt_price_x96: U256) -> Result<f64> {
     let squared =
         sqrt_price_x96
             .checked_mul(sqrt_price_x96)
-            .ok_or_else(|| PerpCityError::Overflow {
+            .ok_or_else(|| ValidationError::Overflow {
                 context: "sqrtPriceX96² overflows U256".into(),
             })?;
 

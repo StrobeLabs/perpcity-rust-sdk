@@ -7,7 +7,7 @@ use alloy::primitives::{Address, B256, Bytes, U256};
 use alloy::providers::Provider;
 use alloy::rpc::types::TransactionRequest;
 
-use crate::errors::{PerpCityError, Result};
+use crate::errors::{Result, TransactionError, ValidationError};
 use crate::hft::gas::Urgency;
 use crate::hft::pipeline::TxRequest;
 
@@ -94,12 +94,12 @@ impl PerpClient {
             .with_chain_id(self.chain_id);
 
         // Sign and send
-        let tx_envelope = tx
-            .build(&self.wallet)
-            .await
-            .map_err(|e| PerpCityError::TxReverted {
-                reason: format!("failed to sign transaction: {e}"),
-            })?;
+        let tx_envelope =
+            tx.build(&self.wallet)
+                .await
+                .map_err(|e| TransactionError::SigningFailed {
+                    reason: format!("{e}"),
+                })?;
 
         let pending = self.provider.send_tx_envelope(tx_envelope).await?;
         let tx_hash_b256 = *pending.tx_hash();
@@ -136,9 +136,10 @@ impl PerpClient {
             tracing::warn!(tx_hash = %tx_hash_b256, "tx reverted");
             let mut pipeline = self.pipeline.lock().unwrap();
             pipeline.fail(&tx_hash_bytes);
-            return Err(PerpCityError::TxReverted {
+            return Err(TransactionError::Reverted {
                 reason: format!("transaction {} reverted", tx_hash_b256),
-            });
+            }
+            .into());
         }
 
         tracing::info!(
@@ -164,17 +165,19 @@ impl PerpClient {
                 Ok(Some(receipt)) => return Ok(receipt),
                 Ok(None) => {
                     if tokio::time::Instant::now() >= deadline {
-                        return Err(PerpCityError::TxReverted {
+                        return Err(TransactionError::ReceiptTimeout {
                             reason: format!("receipt timeout for {tx_hash}"),
-                        });
+                        }
+                        .into());
                     }
                     tokio::time::sleep(RECEIPT_POLL_INTERVAL).await;
                 }
                 Err(e) => {
                     if tokio::time::Instant::now() >= deadline {
-                        return Err(PerpCityError::TxReverted {
+                        return Err(TransactionError::ReceiptTimeout {
                             reason: format!("failed to get receipt: {e}"),
-                        });
+                        }
+                        .into());
                     }
                     tracing::warn!(tx_hash = %tx_hash, error = %e, "receipt poll RPC error, retrying");
                     tokio::time::sleep(RECEIPT_POLL_INTERVAL).await;
@@ -195,9 +198,10 @@ impl PerpClient {
         now: u64,
     ) -> Result<u64> {
         if calldata.len() < 4 {
-            return Err(PerpCityError::InvalidConfig {
+            return Err(ValidationError::InvalidConfig {
                 reason: "calldata too short to extract function selector".into(),
-            });
+            }
+            .into());
         }
         let selector: [u8; 4] = calldata[..4].try_into().unwrap();
 
@@ -217,11 +221,13 @@ impl PerpClient {
             .with_input(calldata.clone())
             .with_value(U256::from(value));
 
-        let raw_estimate = self.provider.estimate_gas(tx).await.map_err(|e| {
-            PerpCityError::GasPriceUnavailable {
-                reason: format!("eth_estimateGas failed: {e}"),
-            }
-        })?;
+        let raw_estimate =
+            self.provider
+                .estimate_gas(tx)
+                .await
+                .map_err(|e| TransactionError::GasUnavailable {
+                    reason: format!("eth_estimateGas failed: {e}"),
+                })?;
 
         // Cache with buffer
         {

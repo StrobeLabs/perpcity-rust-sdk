@@ -45,7 +45,7 @@ use std::time::Duration;
 
 use alloy::rpc::json_rpc::ResponsePacket;
 
-use crate::errors::PerpCityError;
+use crate::errors::ValidationError;
 
 /// Endpoint selection strategy for routing RPC requests.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -276,16 +276,16 @@ impl TransportConfigBuilder {
     ///
     /// Returns an error if no endpoints are configured across any pool, or
     /// if writes have no reachable endpoint (write + shared pools both empty).
-    pub fn build(self) -> crate::Result<TransportConfig> {
+    pub fn build(self) -> Result<TransportConfig, ValidationError> {
         let total =
             self.shared_endpoints.len() + self.read_endpoints.len() + self.write_endpoints.len();
         if total == 0 {
-            return Err(PerpCityError::InvalidConfig {
+            return Err(ValidationError::InvalidConfig {
                 reason: "no endpoints configured".into(),
             });
         }
         if self.write_endpoints.is_empty() && self.shared_endpoints.is_empty() {
-            return Err(PerpCityError::InvalidConfig {
+            return Err(ValidationError::InvalidConfig {
                 reason: "writes have no reachable endpoint: \
                          configure at least one shared or write endpoint"
                     .into(),
@@ -294,7 +294,7 @@ impl TransportConfigBuilder {
         if let Strategy::Hedged { fan_out } = self.strategy
             && fan_out < 2
         {
-            return Err(PerpCityError::InvalidConfig {
+            return Err(ValidationError::InvalidConfig {
                 reason: "hedged strategy requires fan_out >= 2".into(),
             });
         }
