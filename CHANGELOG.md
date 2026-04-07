@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Error restructuring.** The monolithic `PerpCityError` enum is now composed from per-module error types: `TransactionError` (simulation, signing, gas, pipeline), `ValidationError` (prices, margins, ticks, leverage, config), and `ContractError` (perps, positions, events, quotes, multicall). `PerpCityError` composes all three via `#[from]` conversions. Internal functions return the narrowest error type they can produce (e.g. `pipeline::prepare()` returns `Result<_, TransactionError>`).
+- **Pre-flight simulation.** `simulate()` replaces `resolve_gas_limit()` as the unified entry point for gas resolution and transaction validation. On cache miss, `eth_estimateGas` provides both the gas estimate and simulation. On cache hit, `eth_call` verifies the transaction is still valid before broadcast. Every code path guarantees the transaction has been simulated — no more on-chain reverts from warm gas cache.
+- **Transaction builder.** `send_tx()` and `send_tx_with_value()` replaced by `TxBuilder`, created via `PerpClient::tx(to, calldata)`. Optional setters: `.with_value()`, `.with_gas_limit()`, `.with_urgency()`. Defaults: `value = 0`, `gas_limit = None` (triggers simulation), `urgency = Normal`. Adding new transaction parameters no longer changes existing call sites.
+- **Tracing discipline.** All SDK logging demoted from `info` to `debug`. The SDK is a library — consumers own the `info`-level narrative. SDK logs are for infrastructure debugging via `RUST_LOG=perpcity_sdk=debug`. Warnings and errors unchanged.
+- **Client module restructured.** `client.rs` (1500+ lines) split into `client/mod.rs`, `client/trades.rs`, `client/queries.rs`, `client/transactions.rs`. Each submodule implements `impl PerpClient` for its methods.
+- **Manual receipt polling.** Replaced Alloy's `pending.get_receipt()` with direct `get_transaction_receipt` polling (2s initial delay, 2s interval, 30s timeout). Avoids triggering Alloy's background `eth_blockNumber` poller that persists for the provider's lifetime. Retries on transient RPC errors during polling.
+
+### Fixed
+
+- **In-flight transaction eviction.** Failed `poll_receipt` and on-chain reverts now evict the transaction from the pipeline's in-flight map, preventing permanent slot consumption. Previously, 16 failed transactions would jam the pipeline and block all new transactions including closes and retreats.
+
+### Added
+
+- `errors::decode` module — decodes PerpCity contract error selectors (20+ known selectors) into human-readable names. Used in gas estimation, pre-flight simulation, and quote functions.
+- `TransactionError::SimulationReverted` — returned when `eth_estimateGas` or `eth_call` detects a contract revert before broadcast. Carries decoded error name, selector, and revert data.
+- `TransactionError::ReceiptTimeout` — distinct from `Reverted` for receipt polling timeouts.
+- `TransactionError::SigningFailed` — distinct from `Reverted` for signing errors.
+- `ValidationError::DecodeFailed` — for ABI decode errors (distinct from `Overflow`).
+- `ContractError::QuoteReverted` — for quote function reverts with decoded error names.
+- `ContractError::MulticallFailed` — for multicall count mismatches and subcall failures.
+- `PerpCityError::is_simulation_revert()` — check if the error is a pre-broadcast simulation revert.
+- `PerpCityError::is_transient()` — check if the error is transient and worth retrying (RPC errors, gas unavailable, receipt timeouts).
+- `TxBuilder` — public transaction builder, re-exported from crate root.
+- Gas limit validation: `TxBuilder::send()` rejects `gas_limit = 0` with a clear `ValidationError`.
+
 ## [0.2.1] - 2026-04-01
 
 ### Fixed
