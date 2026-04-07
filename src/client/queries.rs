@@ -436,20 +436,11 @@ impl PerpClient {
             let perp_delta = i128_from_i256(decoded.perpDelta) as f64 / scale;
             let usd_delta = i128_from_i256(decoded.usdDelta) as f64 / scale;
 
-            if perp_delta.abs() < f64::EPSILON {
-                continue;
+            if let Some(point) =
+                PriceImpactPoint::from_swap(sizes[i], perp_delta, usd_delta, mark_price)
+            {
+                points.push(point);
             }
-
-            let effective_price = (usd_delta / perp_delta).abs();
-            let impact_bps = ((effective_price - mark_price) / mark_price).abs() * 10_000.0;
-
-            points.push(PriceImpactPoint {
-                size: sizes[i],
-                perp_delta,
-                usd_delta,
-                effective_price,
-                impact_bps,
-            });
         }
 
         Ok(points)
@@ -487,15 +478,15 @@ impl PerpClient {
             )
             .await?;
 
-        if full_quote.perp_delta.abs() < f64::EPSILON {
-            return Ok(0.0);
-        }
-
-        let full_price = (full_quote.usd_delta / full_quote.perp_delta).abs();
-        let full_impact = ((full_price - mark_price) / mark_price).abs() * 10_000.0;
-
-        if full_impact <= max_impact_bps {
-            return Ok(desired);
+        match PriceImpactPoint::from_swap(
+            desired,
+            full_quote.perp_delta,
+            full_quote.usd_delta,
+            mark_price,
+        ) {
+            None => return Ok(0.0),
+            Some(p) if p.impact_bps <= max_impact_bps => return Ok(desired),
+            _ => {}
         }
 
         // Binary search
@@ -519,18 +510,10 @@ impl PerpClient {
                 )
                 .await?;
 
-            if quote.perp_delta.abs() < f64::EPSILON {
-                hi = mid;
-                continue;
-            }
-
-            let price = (quote.usd_delta / quote.perp_delta).abs();
-            let impact = ((price - mark_price) / mark_price).abs() * 10_000.0;
-
-            if impact <= max_impact_bps {
-                lo = mid;
-            } else {
-                hi = mid;
+            match PriceImpactPoint::from_swap(mid, quote.perp_delta, quote.usd_delta, mark_price) {
+                None => hi = mid,
+                Some(p) if p.impact_bps <= max_impact_bps => lo = mid,
+                Some(_) => hi = mid,
             }
         }
 
