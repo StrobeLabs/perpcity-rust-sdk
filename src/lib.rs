@@ -43,7 +43,7 @@ pub mod transport;
 pub mod types;
 
 #[doc(inline)]
-pub use client::PerpClient;
+pub use client::{PerpClient, TxBuilder};
 
 #[doc(inline)]
 pub use contracts::{

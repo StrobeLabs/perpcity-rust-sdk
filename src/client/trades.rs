@@ -57,7 +57,9 @@ impl PerpClient {
         tracing::debug!(%perp_id, margin = params.margin, leverage = params.leverage, is_long = params.is_long, ?urgency, "opening taker position");
 
         let receipt = self
-            .send_tx(self.deployments.perp_manager, calldata, None, urgency)
+            .tx(self.deployments.perp_manager, calldata)
+            .with_urgency(urgency)
+            .send()
             .await?;
 
         let result = parse_open_result(&receipt)?;
@@ -123,7 +125,9 @@ impl PerpClient {
             .clone();
 
         let receipt = self
-            .send_tx(self.deployments.perp_manager, calldata, None, urgency)
+            .tx(self.deployments.perp_manager, calldata)
+            .with_urgency(urgency)
+            .send()
             .await?;
 
         let result = parse_open_result(&receipt)?;
@@ -151,7 +155,9 @@ impl PerpClient {
         let calldata = contract.closePosition(wire_params).calldata().clone();
 
         let receipt = self
-            .send_tx(self.deployments.perp_manager, calldata, None, urgency)
+            .tx(self.deployments.perp_manager, calldata)
+            .with_urgency(urgency)
+            .send()
             .await?;
 
         let result = parse_close_result(&receipt, pos_id)?;
@@ -182,7 +188,9 @@ impl PerpClient {
         let calldata = contract.adjustNotional(wire_params).calldata().clone();
 
         let receipt = self
-            .send_tx(self.deployments.perp_manager, calldata, None, urgency)
+            .tx(self.deployments.perp_manager, calldata)
+            .with_urgency(urgency)
+            .send()
             .await?;
 
         let result = parse_adjust_result(&receipt)?;
@@ -212,7 +220,9 @@ impl PerpClient {
         let calldata = contract.adjustMargin(wire_params).calldata().clone();
 
         let receipt = self
-            .send_tx(self.deployments.perp_manager, calldata, None, urgency)
+            .tx(self.deployments.perp_manager, calldata)
+            .with_urgency(urgency)
+            .send()
             .await?;
 
         let result = parse_margin_result(&receipt)?;
@@ -242,9 +252,7 @@ impl PerpClient {
             .calldata()
             .clone();
 
-        let receipt = self
-            .send_tx(self.deployments.usdc, calldata, None, Urgency::Normal)
-            .await?;
+        let receipt = self.tx(self.deployments.usdc, calldata).send().await?;
 
         tracing::debug!(tx_hash = %receipt.transaction_hash, "USDC approved");
         Ok(Some(receipt.transaction_hash))
@@ -259,13 +267,11 @@ impl PerpClient {
     ) -> Result<B256> {
         tracing::debug!(%to, amount_wei, ?urgency, "transferring ETH");
         let receipt = self
-            .send_tx_with_value(
-                to,
-                Bytes::new(),
-                amount_wei,
-                Some(GasLimits::ETH_TRANSFER),
-                urgency,
-            )
+            .tx(to, Bytes::new())
+            .with_value(amount_wei)
+            .with_gas_limit(GasLimits::ETH_TRANSFER)
+            .with_urgency(urgency)
+            .send()
             .await?;
         tracing::debug!(tx_hash = %receipt.transaction_hash, "ETH transferred");
         Ok(receipt.transaction_hash)
@@ -278,7 +284,9 @@ impl PerpClient {
         let scaled = U256::from(scale_to_6dec(amount)? as u128);
         let calldata = usdc.transfer(to, scaled).calldata().clone();
         let receipt = self
-            .send_tx(self.deployments.usdc, calldata, None, urgency)
+            .tx(self.deployments.usdc, calldata)
+            .with_urgency(urgency)
+            .send()
             .await?;
         tracing::debug!(tx_hash = %receipt.transaction_hash, "USDC transferred");
         Ok(receipt.transaction_hash)

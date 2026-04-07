@@ -38,6 +38,8 @@ mod queries;
 mod trades;
 mod transactions;
 
+pub use transactions::TxBuilder;
+
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
