@@ -49,10 +49,10 @@ impl PerpClient {
     ) -> Result<alloy::rpc::types::TransactionReceipt> {
         let now = super::now_ms();
 
-        // Resolve gas limit: explicit override → cached estimate → eth_estimateGas
+        // Simulate + resolve gas limit. Explicit gas_limit (ETH transfers) skips simulation.
         let resolved_gas_limit = match gas_limit {
             Some(limit) => limit,
-            None => self.resolve_gas_limit(to, &calldata, value, now).await?,
+            None => self.simulate(to, &calldata, value, now).await?,
         };
 
         // Prepare via pipeline (zero RPC)
@@ -186,11 +186,48 @@ impl PerpClient {
         }
     }
 
-    /// Resolve gas limit from cache or via `eth_estimateGas`.
+    /// Run an `eth_call` simulation to verify a transaction won't revert.
     ///
-    /// Extracts the 4-byte function selector from calldata, checks the
-    /// estimate cache, and falls back to an RPC call on cache miss.
-    pub(crate) async fn resolve_gas_limit(
+    /// Returns `Ok(())` on success, or `TransactionError::SimulationReverted`
+    /// with the decoded error name if the contract reverts.
+    async fn preflight_call(
+        &self,
+        to: Address,
+        calldata: &Bytes,
+        value: u128,
+    ) -> std::result::Result<(), TransactionError> {
+        let tx = TransactionRequest::default()
+            .with_from(self.address)
+            .with_to(to)
+            .with_input(calldata.clone())
+            .with_value(U256::from(value));
+
+        self.provider.call(tx).await.map_err(|e| {
+            let error_str = e.to_string();
+            if let Some((name, selector, data)) = decode::try_extract_revert(&error_str) {
+                TransactionError::SimulationReverted {
+                    error_name: name,
+                    selector,
+                    revert_data: data,
+                }
+            } else {
+                TransactionError::GasUnavailable {
+                    reason: format!("simulation failed: {e}"),
+                }
+            }
+        })?;
+        Ok(())
+    }
+
+    /// Simulate a transaction and return a gas limit.
+    ///
+    /// On cache miss: `eth_estimateGas` provides both the gas estimate and
+    /// simulation (reverts are detected as a side effect).
+    /// On cache hit: returns the cached gas limit after verifying the
+    /// transaction via `preflight_call()`.
+    ///
+    /// Every code path guarantees the transaction has been simulated.
+    pub(crate) async fn simulate(
         &self,
         to: Address,
         calldata: &Bytes,
@@ -205,13 +242,16 @@ impl PerpClient {
         }
         let selector: [u8; 4] = calldata[..4].try_into().unwrap();
 
-        // Check cache
-        {
+        // Check cache — if hit, simulate via eth_call to verify still valid.
+        // Drop the guard before the async preflight call.
+        let cached_limit = {
             let cache = self.gas_limit_cache.lock().unwrap();
-            if let Some(limit) = cache.get(&selector, now) {
-                tracing::trace!(selector = %alloy::primitives::hex::encode(selector), limit, "gas estimate cache hit");
-                return Ok(limit);
-            }
+            cache.get(&selector, now)
+        };
+        if let Some(limit) = cached_limit {
+            tracing::trace!(selector = %alloy::primitives::hex::encode(selector), limit, "gas estimate cache hit");
+            self.preflight_call(to, calldata, value).await?;
+            return Ok(limit);
         }
 
         // Cache miss — call eth_estimateGas
