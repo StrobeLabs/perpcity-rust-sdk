@@ -277,6 +277,24 @@ pub struct SwapQuote {
     pub usd_delta: f64,
 }
 
+/// A single point on a price impact curve.
+///
+/// Describes the market impact of a trade at a specific size: what price
+/// the trader would get, and how far that deviates from the current mark.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct PriceImpactPoint {
+    /// Trade size in USD that was simulated.
+    pub size: f64,
+    /// Perp token delta from the simulated swap.
+    pub perp_delta: f64,
+    /// USD delta from the simulated swap.
+    pub usd_delta: f64,
+    /// Effective execution price (|usd_delta / perp_delta|).
+    pub effective_price: f64,
+    /// Price impact in basis points relative to the mark price.
+    pub impact_bps: f64,
+}
+
 /// Result of simulating a taker position open via `quoteOpenTakerPosition`.
 ///
 /// All values are human-readable.
