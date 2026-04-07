@@ -1,4 +1,16 @@
 //! Transaction preparation, signing, broadcasting, and receipt polling.
+//!
+//! Transactions are built via [`TxBuilder`], obtained from
+//! [`PerpClient::tx`]. The builder collects parameters and sends in a
+//! single `.send()` call:
+//!
+//! ```rust,ignore
+//! let receipt = client
+//!     .tx(perp_manager, calldata)
+//!     .with_urgency(Urgency::High)
+//!     .send()
+//!     .await?;
+//! ```
 
 use std::time::Duration;
 
@@ -22,50 +34,77 @@ const RECEIPT_POLL_INITIAL_DELAY: Duration = Duration::from_secs(2);
 /// Poll for receipt every ~2s (Base block time).
 const RECEIPT_POLL_INTERVAL: Duration = Duration::from_secs(2);
 
-impl PerpClient {
-    /// Prepare, sign, send, and wait for a transaction receipt.
-    ///
-    /// If `gas_limit` is `None`, the gas limit is resolved from the
-    /// estimate cache (keyed by 4-byte selector) or via `eth_estimateGas`.
-    pub(crate) async fn send_tx(
-        &self,
-        to: Address,
-        calldata: Bytes,
-        gas_limit: Option<u64>,
-        urgency: Urgency,
-    ) -> Result<alloy::rpc::types::TransactionReceipt> {
-        self.send_tx_with_value(to, calldata, 0, gas_limit, urgency)
-            .await
+// ── TxBuilder ───────────────────────────────────────────────────────
+
+/// Builder for constructing and sending transactions.
+///
+/// Created via [`PerpClient::tx`]. Defaults: `value = 0`,
+/// `gas_limit = None` (triggers simulation), `urgency = Normal`.
+#[derive(Debug)]
+pub struct TxBuilder<'a> {
+    client: &'a PerpClient,
+    to: Address,
+    calldata: Bytes,
+    value: u128,
+    gas_limit: Option<u64>,
+    urgency: Urgency,
+}
+
+impl<'a> TxBuilder<'a> {
+    /// Attach ETH value to the transaction.
+    pub fn with_value(mut self, value: u128) -> Self {
+        self.value = value;
+        self
     }
 
-    /// Like `send_tx` but with an explicit ETH value to attach.
-    pub(crate) async fn send_tx_with_value(
-        &self,
-        to: Address,
-        calldata: Bytes,
-        value: u128,
-        gas_limit: Option<u64>,
-        urgency: Urgency,
-    ) -> Result<alloy::rpc::types::TransactionReceipt> {
+    /// Set an explicit gas limit, skipping simulation.
+    pub fn with_gas_limit(mut self, gas_limit: u64) -> Self {
+        self.gas_limit = Some(gas_limit);
+        self
+    }
+
+    /// Set the transaction urgency (affects EIP-1559 fee scaling).
+    pub fn with_urgency(mut self, urgency: Urgency) -> Self {
+        self.urgency = urgency;
+        self
+    }
+
+    /// Simulate, sign, broadcast, and wait for the transaction receipt.
+    ///
+    /// When `gas_limit` is `None` (the default), the transaction is
+    /// simulated before broadcast via `eth_call` or `eth_estimateGas`.
+    /// An explicit `gas_limit` skips simulation (used for simple
+    /// transfers that can't revert from contract logic).
+    pub async fn send(self) -> Result<alloy::rpc::types::TransactionReceipt> {
         let now = super::now_ms();
 
-        // Simulate + resolve gas limit. Explicit gas_limit (ETH transfers) skips simulation.
-        let resolved_gas_limit = match gas_limit {
+        // Simulate + resolve gas limit. Explicit gas_limit skips simulation.
+        let resolved_gas_limit = match self.gas_limit {
+            Some(0) => {
+                return Err(ValidationError::InvalidConfig {
+                    reason: "gas_limit must be > 0".into(),
+                }
+                .into());
+            }
             Some(limit) => limit,
-            None => self.simulate(to, &calldata, value, now).await?,
+            None => {
+                self.client
+                    .simulate(self.to, &self.calldata, self.value, now)
+                    .await?
+            }
         };
 
         // Prepare via pipeline (zero RPC)
         let prepared = {
-            let pipeline = self.pipeline.lock().unwrap();
-            let fee_cache = self.fee_cache.lock().unwrap();
+            let pipeline = self.client.pipeline.lock().unwrap();
+            let fee_cache = self.client.fee_cache.lock().unwrap();
             pipeline.prepare(
                 TxRequest {
-                    to: to.into_array(),
-                    calldata: calldata.to_vec(),
-                    value,
+                    to: self.to.into_array(),
+                    calldata: self.calldata.to_vec(),
+                    value: self.value,
                     gas_limit: resolved_gas_limit,
-                    urgency,
+                    urgency: self.urgency,
                 },
                 &fee_cache,
                 now,
@@ -77,49 +116,47 @@ impl PerpClient {
             gas_limit = prepared.gas_limit,
             max_fee = prepared.gas_fees.max_fee_per_gas,
             priority_fee = prepared.gas_fees.max_priority_fee_per_gas,
-            %to,
-            ?urgency,
+            to = %self.to,
+            urgency = ?self.urgency,
             "tx prepared"
         );
 
         // Build EIP-1559 transaction
         let tx = TransactionRequest::default()
-            .with_to(to)
-            .with_input(calldata)
+            .with_to(self.to)
+            .with_input(self.calldata)
             .with_value(U256::from(prepared.request.value))
             .with_nonce(prepared.nonce)
             .with_gas_limit(prepared.gas_limit)
             .with_max_fee_per_gas(prepared.gas_fees.max_fee_per_gas as u128)
             .with_max_priority_fee_per_gas(prepared.gas_fees.max_priority_fee_per_gas as u128)
-            .with_chain_id(self.chain_id);
+            .with_chain_id(self.client.chain_id);
 
         // Sign and send
         let tx_envelope =
-            tx.build(&self.wallet)
+            tx.build(&self.client.wallet)
                 .await
                 .map_err(|e| TransactionError::SigningFailed {
                     reason: format!("{e}"),
                 })?;
 
-        let pending = self.provider.send_tx_envelope(tx_envelope).await?;
+        let pending = self.client.provider.send_tx_envelope(tx_envelope).await?;
         let tx_hash_b256 = *pending.tx_hash();
         let tx_hash_bytes: [u8; 32] = tx_hash_b256.into();
 
-        tracing::debug!(tx_hash = %tx_hash_b256, nonce = prepared.nonce, ?urgency, "tx broadcast");
+        tracing::debug!(tx_hash = %tx_hash_b256, nonce = prepared.nonce, urgency = ?self.urgency, "tx broadcast");
 
         // Record in pipeline
         {
-            let mut pipeline = self.pipeline.lock().unwrap();
+            let mut pipeline = self.client.pipeline.lock().unwrap();
             pipeline.record_submission(tx_hash_bytes, prepared, now);
         }
 
-        // Wait for receipt via manual polling (avoids Alloy's background eth_blockNumber poller)
-        let receipt = match self.poll_receipt(tx_hash_b256).await {
+        // Wait for receipt
+        let receipt = match self.client.poll_receipt(tx_hash_b256).await {
             Ok(receipt) => receipt,
             Err(e) => {
-                // Evict the failed transaction so it doesn't permanently
-                // consume an in-flight slot.
-                let mut pipeline = self.pipeline.lock().unwrap();
+                let mut pipeline = self.client.pipeline.lock().unwrap();
                 pipeline.fail(&tx_hash_bytes);
                 return Err(e);
             }
@@ -127,14 +164,14 @@ impl PerpClient {
 
         // Confirm in pipeline
         {
-            let mut pipeline = self.pipeline.lock().unwrap();
+            let mut pipeline = self.client.pipeline.lock().unwrap();
             pipeline.resolve(&tx_hash_bytes);
         }
 
         // Check if reverted
         if !receipt.status() {
             tracing::warn!(tx_hash = %tx_hash_b256, "tx reverted");
-            let mut pipeline = self.pipeline.lock().unwrap();
+            let mut pipeline = self.client.pipeline.lock().unwrap();
             pipeline.fail(&tx_hash_bytes);
             return Err(TransactionError::Reverted {
                 reason: format!("transaction {} reverted", tx_hash_b256),
@@ -151,12 +188,27 @@ impl PerpClient {
 
         Ok(receipt)
     }
+}
+
+// ── PerpClient transaction methods ──────────────────────────────────
+
+impl PerpClient {
+    /// Start building a transaction.
+    ///
+    /// Returns a [`TxBuilder`] with defaults: `value = 0`,
+    /// `gas_limit = None` (triggers simulation), `urgency = Normal`.
+    pub fn tx(&self, to: Address, calldata: Bytes) -> TxBuilder<'_> {
+        TxBuilder {
+            client: self,
+            to,
+            calldata,
+            value: 0,
+            gas_limit: None,
+            urgency: Urgency::Normal,
+        }
+    }
 
     /// Poll for a transaction receipt with intervals tuned for Base's ~2s block time.
-    ///
-    /// Uses direct `get_transaction_receipt` instead of Alloy's `pending.get_receipt()`
-    /// to avoid triggering the background `eth_blockNumber` poller that persists for
-    /// the provider's lifetime.
     async fn poll_receipt(&self, tx_hash: B256) -> Result<alloy::rpc::types::TransactionReceipt> {
         tokio::time::sleep(RECEIPT_POLL_INITIAL_DELAY).await;
         let deadline = tokio::time::Instant::now() + RECEIPT_TIMEOUT;
@@ -187,9 +239,6 @@ impl PerpClient {
     }
 
     /// Run an `eth_call` simulation to verify a transaction won't revert.
-    ///
-    /// Returns `Ok(())` on success, or `TransactionError::SimulationReverted`
-    /// with the decoded error name if the contract reverts.
     async fn preflight_call(
         &self,
         to: Address,
@@ -227,13 +276,7 @@ impl PerpClient {
     /// transaction via `preflight_call()`.
     ///
     /// Every code path guarantees the transaction has been simulated.
-    pub(crate) async fn simulate(
-        &self,
-        to: Address,
-        calldata: &Bytes,
-        value: u128,
-        now: u64,
-    ) -> Result<u64> {
+    async fn simulate(&self, to: Address, calldata: &Bytes, value: u128, now: u64) -> Result<u64> {
         if calldata.len() < 4 {
             return Err(ValidationError::InvalidConfig {
                 reason: "calldata too short to extract function selector".into(),
