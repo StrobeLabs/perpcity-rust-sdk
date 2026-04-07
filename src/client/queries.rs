@@ -14,7 +14,7 @@ use crate::hft::state_cache::{CachedBounds, CachedFees};
 use crate::math::tick::{align_tick_down, align_tick_up, price_to_tick};
 use crate::types::{
     Bounds, Fees, LiveDetails, OpenInterest, OpenMakerParams, OpenMakerQuote, OpenTakerParams,
-    OpenTakerQuote, PerpData, PerpSnapshot, SwapQuote,
+    OpenTakerQuote, PerpData, PerpSnapshot, PriceImpactPoint, SwapQuote,
 };
 
 use super::{
@@ -354,6 +354,170 @@ impl PerpClient {
             perp_delta: i128_from_i256(result.perpDelta) as f64 / scale,
             usd_delta: i128_from_i256(result.usdDelta) as f64 / scale,
         })
+    }
+
+    /// Compute a price impact curve by simulating swaps at multiple sizes.
+    ///
+    /// Batches N `quoteSwap` calls into a single Multicall3 `eth_call` (1 RPC).
+    /// Each size is simulated as an exact-input swap with no price limit.
+    ///
+    /// `is_long` selects the swap direction: `true` for buying (long),
+    /// `false` for selling (short).
+    ///
+    /// `mark_price` is used as the reference for computing `impact_bps`.
+    /// Pass the current mark price from your market data cache.
+    ///
+    /// Returns one [`PriceImpactPoint`] per input size, in the same order.
+    /// Sizes where the swap reverts are omitted from the result.
+    pub async fn quote_price_impact_curve(
+        &self,
+        perp_id: B256,
+        is_long: bool,
+        sizes: &[f64],
+        mark_price: f64,
+    ) -> Result<Vec<PriceImpactPoint>> {
+        if sizes.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let pm = self.deployments.perp_manager;
+        let zero_for_one = !is_long;
+        let sqrt_limit = alloy::primitives::Uint::<160, 3>::from(U256::ZERO);
+        let n = sizes.len();
+
+        let mut calls = Vec::with_capacity(n);
+        for &size in sizes {
+            let amount = U256::from(scale_to_6dec(size)? as u128);
+            let calldata = PerpManager::quoteSwapCall {
+                perpId: perp_id,
+                zeroForOne: zero_for_one,
+                isExactIn: true,
+                amount,
+                sqrtPriceLimitX96: sqrt_limit,
+            }
+            .abi_encode();
+            calls.push(IMulticall3::Call3 {
+                target: pm,
+                allowFailure: true,
+                callData: calldata.into(),
+            });
+        }
+
+        let multicall = IMulticall3::new(MULTICALL3, &self.provider);
+        let results = multicall.aggregate3(calls).call().await?;
+
+        if results.len() != n {
+            return Err(ContractError::MulticallFailed {
+                reason: format!(
+                    "price impact multicall returned {} results, expected {}",
+                    results.len(),
+                    n
+                ),
+            }
+            .into());
+        }
+
+        let scale = SCALE_F64;
+        let mut points = Vec::with_capacity(n);
+        for (i, result) in results.iter().enumerate() {
+            if !result.success {
+                continue;
+            }
+            let decoded =
+                <PerpManager::quoteSwapCall as SolCall>::abi_decode_returns(&result.returnData)
+                    .map_err(|e| ValidationError::DecodeFailed {
+                        context: format!("failed to decode quoteSwap result {i}: {e}"),
+                    })?;
+
+            if !decoded.unexpectedReason.is_empty() {
+                continue;
+            }
+
+            let perp_delta = i128_from_i256(decoded.perpDelta) as f64 / scale;
+            let usd_delta = i128_from_i256(decoded.usdDelta) as f64 / scale;
+
+            if let Some(point) =
+                PriceImpactPoint::from_swap(sizes[i], perp_delta, usd_delta, mark_price)
+            {
+                points.push(point);
+            }
+        }
+
+        Ok(points)
+    }
+
+    /// Find the largest trade size that stays below a price impact threshold.
+    ///
+    /// Binary searches between 0 and `desired` using [`Self::quote_swap`]
+    /// to find the maximum size where impact < `max_impact_bps`. Returns
+    /// 0.0 if even the smallest trade exceeds the threshold.
+    ///
+    /// `is_long` selects the swap direction: `true` for buying (long),
+    /// `false` for selling (short).
+    ///
+    /// `mark_price` is the reference price for impact computation.
+    pub async fn max_safe_notional(
+        &self,
+        perp_id: B256,
+        is_long: bool,
+        desired: f64,
+        max_impact_bps: f64,
+        mark_price: f64,
+    ) -> Result<f64> {
+        let zero_for_one = !is_long;
+        let sqrt_limit = U256::ZERO;
+
+        // First check if the full desired size is safe
+        let full_quote = self
+            .quote_swap(
+                perp_id,
+                zero_for_one,
+                true,
+                U256::from(scale_to_6dec(desired)? as u128),
+                sqrt_limit,
+            )
+            .await?;
+
+        match PriceImpactPoint::from_swap(
+            desired,
+            full_quote.perp_delta,
+            full_quote.usd_delta,
+            mark_price,
+        ) {
+            None => return Ok(0.0),
+            Some(p) if p.impact_bps <= max_impact_bps => return Ok(desired),
+            _ => {}
+        }
+
+        // Binary search
+        let mut lo = 0.0_f64;
+        let mut hi = desired;
+        let min_step = 1.0; // 1 USD minimum granularity
+
+        for _ in 0..10 {
+            if (hi - lo) < min_step {
+                break;
+            }
+            let mid = (lo + hi) / 2.0;
+
+            let quote = self
+                .quote_swap(
+                    perp_id,
+                    zero_for_one,
+                    true,
+                    U256::from(scale_to_6dec(mid)? as u128),
+                    sqrt_limit,
+                )
+                .await?;
+
+            match PriceImpactPoint::from_swap(mid, quote.perp_delta, quote.usd_delta, mark_price) {
+                None => hi = mid,
+                Some(p) if p.impact_bps <= max_impact_bps => lo = mid,
+                Some(_) => hi = mid,
+            }
+        }
+
+        Ok(lo)
     }
 
     /// Get the funding rate per second for a perp, converted to a daily rate.

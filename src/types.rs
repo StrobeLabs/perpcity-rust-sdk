@@ -277,6 +277,44 @@ pub struct SwapQuote {
     pub usd_delta: f64,
 }
 
+/// A single point on a price impact curve.
+///
+/// Describes the market impact of a trade at a specific size: what price
+/// the trader would get, and how far that deviates from the current mark.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct PriceImpactPoint {
+    /// Trade size in USD that was simulated.
+    pub size: f64,
+    /// Perp token delta from the simulated swap.
+    pub perp_delta: f64,
+    /// USD delta from the simulated swap.
+    pub usd_delta: f64,
+    /// Effective execution price (|usd_delta / perp_delta|).
+    pub effective_price: f64,
+    /// Price impact in basis points relative to the mark price.
+    pub impact_bps: f64,
+}
+
+impl PriceImpactPoint {
+    /// Compute a price impact point from swap deltas and a reference mark price.
+    ///
+    /// Returns `None` if `perp_delta` is effectively zero (no swap occurred).
+    pub fn from_swap(size: f64, perp_delta: f64, usd_delta: f64, mark_price: f64) -> Option<Self> {
+        if perp_delta.abs() < f64::EPSILON {
+            return None;
+        }
+        let effective_price = (usd_delta / perp_delta).abs();
+        let impact_bps = ((effective_price - mark_price) / mark_price).abs() * 10_000.0;
+        Some(Self {
+            size,
+            perp_delta,
+            usd_delta,
+            effective_price,
+            impact_bps,
+        })
+    }
+}
+
 /// Result of simulating a taker position open via `quoteOpenTakerPosition`.
 ///
 /// All values are human-readable.
@@ -353,5 +391,35 @@ mod tests {
         let json = serde_json::to_string(&deployments).unwrap();
         let recovered: Deployments = serde_json::from_str(&json).unwrap();
         assert_eq!(deployments, recovered);
+    }
+
+    #[test]
+    fn price_impact_point_basic() {
+        // Short trade: sell 100 perp at mark=50, get effective price 49.5 (1% worse)
+        let point = PriceImpactPoint::from_swap(100.0, -100.0, 4950.0, 50.0).unwrap();
+        assert_eq!(point.size, 100.0);
+        assert!((point.effective_price - 49.5).abs() < 0.001);
+        assert!((point.impact_bps - 100.0).abs() < 0.1); // 1% = 100 bps
+    }
+
+    #[test]
+    fn price_impact_point_long() {
+        // Long trade: buy 2 perp at mark=50, pay 101 USD (effective price 50.5)
+        let point = PriceImpactPoint::from_swap(101.0, 2.0, -101.0, 50.0).unwrap();
+        assert!((point.effective_price - 50.5).abs() < 0.001);
+        assert!((point.impact_bps - 100.0).abs() < 0.1); // 1% = 100 bps
+    }
+
+    #[test]
+    fn price_impact_point_zero_impact() {
+        // Perfect execution at mark price
+        let point = PriceImpactPoint::from_swap(50.0, -1.0, 50.0, 50.0).unwrap();
+        assert!((point.impact_bps).abs() < 0.001);
+    }
+
+    #[test]
+    fn price_impact_point_zero_perp_delta() {
+        // No swap occurred — returns None
+        assert!(PriceImpactPoint::from_swap(100.0, 0.0, 0.0, 50.0).is_none());
     }
 }

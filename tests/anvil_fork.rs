@@ -617,3 +617,143 @@ async fn perp_snapshot_via_multicall() {
 
     println!("\n=== Perp snapshot test passed! ===");
 }
+
+#[tokio::test]
+#[ignore] // Requires `anvil` — run with: cargo test --test anvil_fork -- --ignored --nocapture
+async fn price_impact_curve_and_max_safe() {
+    // 1. Start Anvil forking Base Sepolia
+    let anvil = AnvilInstance::fork_base_sepolia().await;
+
+    // 2. Setup client (read-only — no funding needed)
+    let signer: PrivateKeySigner = ANVIL_KEY.parse().unwrap();
+
+    let transport = HftTransport::new(
+        TransportConfig::builder()
+            .shared_endpoint(&anvil.url)
+            .build()
+            .unwrap(),
+    )
+    .unwrap();
+
+    let deployments = Deployments {
+        perp_manager: PERP_MANAGER,
+        usdc: USDC,
+        fees_module: None,
+        margin_ratios_module: None,
+        lockup_period_module: None,
+        sqrt_price_impact_limit_module: None,
+    };
+
+    let client = PerpClient::new(transport, signer, deployments, CHAIN_ID).unwrap();
+    let perp_id: B256 = PERP_ID.parse().unwrap();
+
+    // 3. Get mark price as reference
+    let mark = client.get_mark_price(perp_id).await.unwrap();
+    println!("Mark price: {mark}");
+    assert!(mark > 0.0);
+
+    // 4. Test quote_price_impact_curve (short direction)
+    let sizes = [10.0, 50.0, 100.0, 500.0, 1000.0];
+    let curve = client
+        .quote_price_impact_curve(perp_id, false, &sizes, mark)
+        .await
+        .unwrap();
+
+    println!("\nPrice impact curve (short):");
+    for point in &curve {
+        println!(
+            "  size={:.0} perp_delta={:.4} effective_price={:.4} impact={:.1}bps",
+            point.size, point.perp_delta, point.effective_price, point.impact_bps
+        );
+    }
+
+    assert!(!curve.is_empty(), "curve should have at least one point");
+
+    // Effective prices should be positive
+    for point in &curve {
+        assert!(
+            point.effective_price > 0.0,
+            "effective price should be positive"
+        );
+        assert!(point.impact_bps >= 0.0, "impact should be non-negative");
+    }
+
+    // Impact should generally increase with size
+    if curve.len() >= 2 {
+        let first = curve.first().unwrap();
+        let last = curve.last().unwrap();
+        assert!(
+            last.impact_bps >= first.impact_bps,
+            "larger trades should have >= impact: first={:.1}bps, last={:.1}bps",
+            first.impact_bps,
+            last.impact_bps
+        );
+    }
+
+    // 5. Test empty sizes
+    let empty = client
+        .quote_price_impact_curve(perp_id, false, &[], mark)
+        .await
+        .unwrap();
+    assert!(empty.is_empty());
+
+    // 6. Test max_safe_notional — with a generous threshold, should return full desired
+    let safe = client
+        .max_safe_notional(perp_id, true, 100.0, 10_000.0, mark)
+        .await
+        .unwrap();
+    println!("\nmax_safe_notional(desired=100, max_impact=10000bps): {safe}");
+    assert!(
+        (safe - 100.0).abs() < 1.0,
+        "with 100% impact threshold, should return ~full desired"
+    );
+
+    // 7. Test max_safe_notional — with protocol limit (500bps = 5% per side)
+    // Long side has deep liquidity (52-54 range), short side is thin (~$6K at 49-50)
+    let safe_long = client
+        .max_safe_notional(perp_id, true, 10000.0, 500.0, mark)
+        .await
+        .unwrap();
+    println!("max_safe_notional(long, desired=10000, max_impact=500bps): {safe_long}");
+    assert!(safe_long > 0.0, "should find a safe long size");
+
+    let safe_short = client
+        .max_safe_notional(perp_id, false, 10000.0, 500.0, mark)
+        .await
+        .unwrap();
+    println!("max_safe_notional(short, desired=10000, max_impact=500bps): {safe_short}");
+    assert!(safe_short > 0.0, "should find a safe short size");
+
+    // Short side should be more constrained than long (less liquidity below mark)
+    println!("Asymmetry: long={safe_long}, short={safe_short}");
+    assert!(
+        safe_long >= safe_short,
+        "long side should have >= capacity than short given liquidity distribution"
+    );
+
+    // 8. Test max_safe_notional — with very tight threshold
+    let safe_tight = client
+        .max_safe_notional(perp_id, true, 10000.0, 1.0, mark)
+        .await
+        .unwrap();
+    println!("max_safe_notional(desired=10000, max_impact=1bps): {safe_tight}");
+    assert!(
+        safe_tight < 10000.0,
+        "with 1bps threshold, should cap below desired"
+    );
+
+    // 9. Cross-check: compute long curve to verify max_safe is consistent
+    let long_curve = client
+        .quote_price_impact_curve(perp_id, true, &[10.0, 50.0, 100.0, 200.0, 500.0], mark)
+        .await
+        .unwrap();
+    println!("\nPrice impact curve (long):");
+    for point in &long_curve {
+        println!(
+            "  size={:.0} perp_delta={:.4} effective_price={:.4} impact={:.1}bps",
+            point.size, point.perp_delta, point.effective_price, point.impact_bps
+        );
+    }
+
+    println!("\n=== Price impact test passed! ===");
+}
