@@ -72,9 +72,9 @@ impl<'a> TxBuilder<'a> {
     /// Simulate, sign, broadcast, and wait for the transaction receipt.
     ///
     /// When `gas_limit` is `None` (the default), the transaction is
-    /// simulated via [`PerpClient::simulate`] before broadcast. An
-    /// explicit `gas_limit` skips simulation (used for simple transfers
-    /// that can't revert from contract logic).
+    /// simulated before broadcast via `eth_call` or `eth_estimateGas`.
+    /// An explicit `gas_limit` skips simulation (used for simple
+    /// transfers that can't revert from contract logic).
     pub async fn send(self) -> Result<alloy::rpc::types::TransactionReceipt> {
         let now = super::now_ms();
 
