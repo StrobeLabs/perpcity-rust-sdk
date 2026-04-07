@@ -80,6 +80,12 @@ impl<'a> TxBuilder<'a> {
 
         // Simulate + resolve gas limit. Explicit gas_limit skips simulation.
         let resolved_gas_limit = match self.gas_limit {
+            Some(0) => {
+                return Err(ValidationError::InvalidConfig {
+                    reason: "gas_limit must be > 0".into(),
+                }
+                .into());
+            }
             Some(limit) => limit,
             None => {
                 self.client
