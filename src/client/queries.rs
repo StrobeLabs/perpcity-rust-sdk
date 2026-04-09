@@ -448,50 +448,89 @@ impl PerpClient {
 
     /// Find the largest trade size that stays below a price impact threshold.
     ///
-    /// Binary searches between 0 and `desired` using [`Self::quote_swap`]
-    /// to find the maximum size where impact < `max_impact_bps`. Returns
-    /// 0.0 if even the smallest trade exceeds the threshold.
+    /// Two-phase search: a multicalled logarithmic scan to bracket the answer,
+    /// then a binary search within the bracket. The scan phase is one RPC
+    /// regardless of how many probe points it uses.
     ///
     /// `is_long` selects the swap direction: `true` for buying (long),
     /// `false` for selling (short).
     ///
+    /// `desired` controls the scan range:
+    /// - `Some(size)` — probe sizes scale with `size`, return `min(size, max_safe)`.
+    ///   Use this when the agent has a target trade size in mind.
+    /// - `None` — probe a wide logarithmic range (10 USD to 10M USD) to find
+    ///   the absolute maximum safe size with no cap.
+    ///
     /// `mark_price` is the reference price for impact computation.
+    /// Returns 0.0 if even the smallest probe exceeds the threshold.
     pub async fn max_safe_notional(
         &self,
         perp_id: B256,
         is_long: bool,
-        desired: f64,
+        desired: Option<f64>,
         max_impact_bps: f64,
         mark_price: f64,
     ) -> Result<f64> {
-        let zero_for_one = !is_long;
-        let sqrt_limit = U256::ZERO;
+        // Build the probe set.
+        let probes: Vec<f64> = match desired {
+            Some(d) => {
+                // Logarithmic scan up to and including d.
+                vec![d / 64.0, d / 32.0, d / 16.0, d / 8.0, d / 4.0, d / 2.0, d]
+            }
+            None => {
+                // Wide scan from 10 USD to 10M USD.
+                vec![
+                    10.0,
+                    30.0,
+                    100.0,
+                    300.0,
+                    1_000.0,
+                    3_000.0,
+                    10_000.0,
+                    30_000.0,
+                    100_000.0,
+                    300_000.0,
+                    1_000_000.0,
+                    3_000_000.0,
+                    10_000_000.0,
+                ]
+            }
+        };
 
-        // First check if the full desired size is safe
-        let full_quote = self
-            .quote_swap(
-                perp_id,
-                zero_for_one,
-                true,
-                U256::from(scale_to_6dec(desired)? as u128),
-                sqrt_limit,
-            )
+        // Phase 1: batched scan to bracket the threshold.
+        let curve = self
+            .quote_price_impact_curve(perp_id, is_long, &probes, mark_price)
             .await?;
 
-        match PriceImpactPoint::from_swap(
-            desired,
-            full_quote.perp_delta,
-            full_quote.usd_delta,
-            mark_price,
-        ) {
-            None => return Ok(0.0),
-            Some(p) if p.impact_bps <= max_impact_bps => return Ok(desired),
-            _ => {}
+        // If desired is set and is itself safe, return it directly.
+        if let Some(d) = desired
+            && let Some(point) = curve.last()
+            && point.size >= d
+            && point.impact_bps <= max_impact_bps
+        {
+            return Ok(d);
         }
 
-        // Binary search
+        // Find the bracket: the largest safe probe (lo) and smallest unsafe probe (hi).
         let mut lo = 0.0_f64;
-        let mut hi = desired;
+        let mut hi = desired.unwrap_or(10_000_000.0);
+        for point in &curve {
+            if point.impact_bps <= max_impact_bps {
+                lo = point.size;
+            } else {
+                hi = point.size;
+                break;
+            }
+        }
+
+        if lo == 0.0 && curve.first().is_some_and(|p| p.impact_bps > max_impact_bps) {
+            // Even the smallest probe exceeds the threshold.
+            return Ok(0.0);
+        }
+
+        // Phase 2: binary search within the bracket.
+        let zero_for_one = !is_long;
+        let sqrt_limit = U256::ZERO;
         let min_step = 1.0; // 1 USD minimum granularity
 
         for _ in 0..10 {
@@ -499,7 +538,6 @@ impl PerpClient {
                 break;
             }
             let mid = (lo + hi) / 2.0;
-
             let quote = self
                 .quote_swap(
                     perp_id,
