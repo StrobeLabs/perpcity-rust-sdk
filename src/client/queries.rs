@@ -511,24 +511,33 @@ impl PerpClient {
             return Ok(d);
         }
 
-        // Find the bracket: the largest safe probe (lo) and smallest unsafe probe (hi).
+        // Find the bracket by iterating through the original probes in order.
+        // A probe is safe only if it's present in the curve AND below the
+        // threshold. A missing probe (skipped due to revert/decode failure) is
+        // treated as unsafe — gaps mean we can't trust larger sizes.
         let mut lo = 0.0_f64;
         let mut hi = desired.unwrap_or(10_000_000.0);
-        for point in &curve {
-            if point.impact_bps <= max_impact_bps {
-                lo = point.size;
-            } else {
-                hi = point.size;
-                break;
+        for &probe_size in &probes {
+            let point = curve.iter().find(|p| p.size == probe_size);
+            match point {
+                Some(p) if p.impact_bps <= max_impact_bps => {
+                    lo = probe_size;
+                }
+                _ => {
+                    // Either missing (failed probe) or above threshold.
+                    hi = probe_size;
+                    break;
+                }
             }
         }
 
-        if lo == 0.0 && curve.first().is_some_and(|p| p.impact_bps > max_impact_bps) {
-            // Even the smallest probe exceeds the threshold.
+        if lo == 0.0 {
+            // Even the smallest probe is unsafe (or missing).
             return Ok(0.0);
         }
 
         // Phase 2: binary search within the bracket.
+        // quote_swap reverts are treated as "unsafe" (tighten hi).
         let zero_for_one = !is_long;
         let sqrt_limit = U256::ZERO;
         let min_step = 1.0; // 1 USD minimum granularity
@@ -538,7 +547,7 @@ impl PerpClient {
                 break;
             }
             let mid = (lo + hi) / 2.0;
-            let quote = self
+            let quote_result = self
                 .quote_swap(
                     perp_id,
                     zero_for_one,
@@ -546,12 +555,25 @@ impl PerpClient {
                     U256::from(scale_to_6dec(mid)? as u128),
                     sqrt_limit,
                 )
-                .await?;
+                .await;
 
-            match PriceImpactPoint::from_swap(mid, quote.perp_delta, quote.usd_delta, mark_price) {
-                None => hi = mid,
-                Some(p) if p.impact_bps <= max_impact_bps => lo = mid,
-                Some(_) => hi = mid,
+            match quote_result {
+                Err(_) => {
+                    // Revert at this size — treat as unsafe.
+                    hi = mid;
+                }
+                Ok(quote) => {
+                    match PriceImpactPoint::from_swap(
+                        mid,
+                        quote.perp_delta,
+                        quote.usd_delta,
+                        mark_price,
+                    ) {
+                        None => hi = mid,
+                        Some(p) if p.impact_bps <= max_impact_bps => lo = mid,
+                        Some(_) => hi = mid,
+                    }
+                }
             }
         }
 
