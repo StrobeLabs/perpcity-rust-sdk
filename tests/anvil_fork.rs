@@ -699,7 +699,7 @@ async fn price_impact_curve_and_max_safe() {
 
     // 6. Test max_safe_notional — with a generous threshold, should return full desired
     let safe = client
-        .max_safe_notional(perp_id, true, 100.0, 10_000.0, mark)
+        .max_safe_notional(perp_id, true, Some(100.0), 10_000.0, mark)
         .await
         .unwrap();
     println!("\nmax_safe_notional(desired=100, max_impact=10000bps): {safe}");
@@ -711,14 +711,14 @@ async fn price_impact_curve_and_max_safe() {
     // 7. Test max_safe_notional — with protocol limit (500bps = 5% per side)
     // Long side has deep liquidity (52-54 range), short side is thin (~$6K at 49-50)
     let safe_long = client
-        .max_safe_notional(perp_id, true, 10000.0, 500.0, mark)
+        .max_safe_notional(perp_id, true, Some(10000.0), 500.0, mark)
         .await
         .unwrap();
     println!("max_safe_notional(long, desired=10000, max_impact=500bps): {safe_long}");
     assert!(safe_long > 0.0, "should find a safe long size");
 
     let safe_short = client
-        .max_safe_notional(perp_id, false, 10000.0, 500.0, mark)
+        .max_safe_notional(perp_id, false, Some(10000.0), 500.0, mark)
         .await
         .unwrap();
     println!("max_safe_notional(short, desired=10000, max_impact=500bps): {safe_short}");
@@ -733,13 +733,29 @@ async fn price_impact_curve_and_max_safe() {
 
     // 8. Test max_safe_notional — with very tight threshold
     let safe_tight = client
-        .max_safe_notional(perp_id, true, 10000.0, 1.0, mark)
+        .max_safe_notional(perp_id, true, Some(10000.0), 1.0, mark)
         .await
         .unwrap();
     println!("max_safe_notional(desired=10000, max_impact=1bps): {safe_tight}");
     assert!(
         safe_tight < 10000.0,
         "with 1bps threshold, should cap below desired"
+    );
+
+    // 8b. Test max_safe_notional with desired=None — finds absolute max
+    let safe_unbounded_long = client
+        .max_safe_notional(perp_id, true, None, 500.0, mark)
+        .await
+        .unwrap();
+    let safe_unbounded_short = client
+        .max_safe_notional(perp_id, false, None, 500.0, mark)
+        .await
+        .unwrap();
+    println!("max_safe_notional(long, desired=None, max_impact=500bps): {safe_unbounded_long}");
+    println!("max_safe_notional(short, desired=None, max_impact=500bps): {safe_unbounded_short}");
+    assert!(
+        safe_unbounded_short > 0.0,
+        "should find a safe short size with no cap"
     );
 
     // 9. Cross-check: compute long curve to verify max_safe is consistent
