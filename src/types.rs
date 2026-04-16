@@ -15,18 +15,10 @@ use serde::{Deserialize, Serialize};
 /// Deployed contract addresses for a PerpCity instance.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Deployments {
-    /// PerpManager proxy address.
-    pub perp_manager: Address,
+    /// Perp contract address (one per market).
+    pub perp: Address,
     /// USDC token address.
     pub usdc: Address,
-    /// Fees module address (if registered).
-    pub fees_module: Option<Address>,
-    /// Margin ratios module address (if registered).
-    pub margin_ratios_module: Option<Address>,
-    /// Lockup period module address (if registered).
-    pub lockup_period_module: Option<Address>,
-    /// Sqrt-price impact limit module address (if registered).
-    pub sqrt_price_impact_limit_module: Option<Address>,
 }
 
 /// Metadata about a perpetual market.

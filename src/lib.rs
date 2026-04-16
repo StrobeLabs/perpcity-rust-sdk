@@ -47,7 +47,9 @@ pub use client::{PerpClient, TxBuilder};
 
 #[doc(inline)]
 pub use contracts::{
-    IBeacon, IERC20, IFees, IMarginRatios, IMulticall3, PerpManager, PoolKey, SwapConfig,
+    AdjustMakerParams, AdjustTakerParams, IBeacon, IERC20, IFees, IFunding, IMarginRatios,
+    IMulticall3, IPriceImpact, IPricing, Modules, OpenMakerParams as ContractOpenMakerParams,
+    OpenTakerParams as ContractOpenTakerParams, Perp, PerpFactory, PoolKey,
 };
 
 #[doc(inline)]
