@@ -1,33 +1,65 @@
 //! Write operations: open, close, adjust positions, transfers, approvals.
 
 use alloy::primitives::{Address, B256, Bytes, I256, U256};
+use alloy::sol_types::SolEvent;
 
 use crate::constants::TICK_SPACING;
-use crate::contracts::{IERC20, PerpManager};
-use crate::convert::{leverage_to_margin_ratio, scale_to_6dec};
-use crate::errors::{Result, ValidationError};
+use crate::contracts::{IERC20, Perp};
+use crate::convert::scale_to_6dec;
+use crate::errors::{ContractError, Result, ValidationError};
 use crate::hft::gas::{GasLimits, Urgency};
 use crate::math::tick::{align_tick_down, align_tick_up, price_to_tick};
 use crate::types::{
-    AdjustMarginParams, AdjustMarginResult, AdjustNotionalParams, AdjustNotionalResult,
-    CloseParams, CloseResult, OpenMakerParams, OpenResult, OpenTakerParams,
+    AdjustMakerParams, AdjustMakerResult, AdjustTakerParams, AdjustTakerResult, OpenMakerParams,
+    OpenResult, OpenTakerParams,
 };
 
-use super::{
-    MAX_APPROVAL, PerpClient, i32_to_i24, parse_adjust_result, parse_close_result,
-    parse_margin_result, parse_open_result, u32_to_u24,
-};
+use super::{MAX_APPROVAL, PerpClient, i32_to_i24};
+
+/// Extract the minted token ID from an ERC721 `Transfer(address(0), to, tokenId)` event.
+///
+/// The Perp contract inherits ERC721 and mints a position NFT on open.
+/// The standard Transfer event carries the token ID.
+fn parse_minted_token_id(
+    receipt: &alloy::rpc::types::TransactionReceipt,
+) -> std::result::Result<U256, ContractError> {
+    // ERC721 Transfer event: Transfer(address indexed from, address indexed to, uint256 indexed tokenId)
+    // topic0 = keccak256("Transfer(address,address,uint256)")
+    let transfer_topic = IERC20::Transfer::SIGNATURE_HASH;
+    for log in receipt.inner.logs() {
+        let topics = log.topics();
+        if topics.len() >= 4
+            && topics[0] == transfer_topic
+            && topics[1] == B256::ZERO // from = address(0) means mint
+        {
+            // tokenId is topic[3] (indexed)
+            return Ok(U256::from_be_bytes(topics[3].0));
+        }
+    }
+    Err(ContractError::EventNotFound {
+        event_name: "ERC721 Transfer (mint)".into(),
+    })
+}
+
+/// Scale an f64 perp delta to 18-decimal I256.
+fn scale_perp_delta(delta: f64) -> Result<I256> {
+    let scaled = (delta * 1e18) as i128;
+    I256::try_from(scaled).map_err(|_| {
+        ValidationError::Overflow {
+            context: format!("perp_delta {} overflows I256", delta),
+        }
+        .into()
+    })
+}
 
 impl PerpClient {
     // ── Position operations ──────────────────────────────────────────
 
     /// Open a taker (long/short) position.
     ///
-    /// Returns an [`OpenResult`] with the position ID and entry deltas
-    /// parsed from the `PositionOpened` event.
+    /// Returns an [`OpenResult`] with the transaction hash and position ID.
     pub async fn open_taker(
         &self,
-        perp_id: B256,
         params: &OpenTakerParams,
         urgency: Urgency,
     ) -> Result<OpenResult> {
@@ -38,42 +70,42 @@ impl PerpClient {
             }
             .into());
         }
-        let margin_ratio = leverage_to_margin_ratio(params.leverage)?;
 
-        let wire_params = PerpManager::OpenTakerPositionParams {
+        let perp_delta = scale_perp_delta(params.perp_delta)?;
+
+        let wire_params = crate::contracts::OpenTakerParams {
             holder: self.address,
-            isLong: params.is_long,
             margin: margin_scaled as u128,
-            marginRatio: u32_to_u24(margin_ratio),
-            unspecifiedAmountLimit: params.unspecified_amount_limit,
+            perpDelta: perp_delta,
+            amt1Limit: U256::from(params.amt1_limit),
         };
 
-        let contract = PerpManager::new(self.deployments.perp_manager, &self.provider);
-        let calldata = contract
-            .openTakerPos(perp_id, wire_params)
-            .calldata()
-            .clone();
+        let contract = Perp::new(self.deployments.perp, &self.provider);
+        let calldata = contract.openTaker(wire_params).calldata().clone();
 
-        tracing::debug!(%perp_id, margin = params.margin, leverage = params.leverage, is_long = params.is_long, ?urgency, "opening taker position");
+        tracing::debug!(margin = params.margin, perp_delta = params.perp_delta, ?urgency, "opening taker position");
 
         let receipt = self
-            .tx(self.deployments.perp_manager, calldata)
+            .tx(self.deployments.perp, calldata)
             .with_urgency(urgency)
             .send()
             .await?;
 
-        let result = parse_open_result(&receipt)?;
-        tracing::debug!(%perp_id, pos_id = %result.pos_id, perp_delta = result.perp_delta, usd_delta = result.usd_delta, "taker position opened");
+        let pos_id = parse_minted_token_id(&receipt)?;
+        let result = OpenResult {
+            tx_hash: receipt.transaction_hash,
+            pos_id,
+        };
+        tracing::debug!(pos_id = %result.pos_id, "taker position opened");
         Ok(result)
     }
 
     /// Open a maker (LP) position within a price range.
     ///
     /// Converts `price_lower`/`price_upper` to aligned ticks internally.
-    /// Returns an [`OpenResult`] with the position ID and entry deltas.
+    /// Returns an [`OpenResult`] with the transaction hash and position ID.
     pub async fn open_maker(
         &self,
-        perp_id: B256,
         params: &OpenMakerParams,
         urgency: Urgency,
     ) -> Result<OpenResult> {
@@ -96,147 +128,123 @@ impl PerpClient {
             .into());
         }
 
-        // Liquidity must fit in u120 on-chain
-        let liquidity: u128 = params.liquidity;
-        let max_u120: u128 = (1u128 << 120) - 1;
-        if liquidity > max_u120 {
-            return Err(ValidationError::Overflow {
-                context: format!("liquidity {} exceeds uint120 max", liquidity),
-            }
-            .into());
-        }
-
-        let wire_params = PerpManager::OpenMakerPositionParams {
+        let wire_params = crate::contracts::OpenMakerParams {
             holder: self.address,
             margin: margin_scaled as u128,
-            liquidity: alloy::primitives::Uint::<120, 2>::from(liquidity),
             tickLower: i32_to_i24(tick_lower),
             tickUpper: i32_to_i24(tick_upper),
-            maxAmt0In: params.max_amt0_in,
-            maxAmt1In: params.max_amt1_in,
+            liquidity: params.liquidity,
+            maxAmt0In: U256::from(params.max_amt0_in),
+            maxAmt1In: U256::from(params.max_amt1_in),
         };
 
-        tracing::debug!(%perp_id, margin = params.margin, tick_lower, tick_upper, ?urgency, "opening maker position");
+        tracing::debug!(margin = params.margin, tick_lower, tick_upper, ?urgency, "opening maker position");
 
-        let contract = PerpManager::new(self.deployments.perp_manager, &self.provider);
-        let calldata = contract
-            .openMakerPos(perp_id, wire_params)
-            .calldata()
-            .clone();
+        let contract = Perp::new(self.deployments.perp, &self.provider);
+        let calldata = contract.openMaker(wire_params).calldata().clone();
 
         let receipt = self
-            .tx(self.deployments.perp_manager, calldata)
+            .tx(self.deployments.perp, calldata)
             .with_urgency(urgency)
             .send()
             .await?;
 
-        let result = parse_open_result(&receipt)?;
-        tracing::debug!(%perp_id, pos_id = %result.pos_id, perp_delta = result.perp_delta, usd_delta = result.usd_delta, "maker position opened");
+        let pos_id = parse_minted_token_id(&receipt)?;
+        let result = OpenResult {
+            tx_hash: receipt.transaction_hash,
+            pos_id,
+        };
+        tracing::debug!(pos_id = %result.pos_id, "maker position opened");
         Ok(result)
     }
 
-    /// Close a position (taker or maker).
-    pub async fn close_position(
+    /// Adjust a taker position (margin, notional, or both).
+    ///
+    /// To close a position, pass `perp_delta` opposing the position's current delta.
+    pub async fn adjust_taker(
         &self,
-        pos_id: U256,
-        params: &CloseParams,
+        params: &AdjustTakerParams,
         urgency: Urgency,
-    ) -> Result<CloseResult> {
-        let wire_params = PerpManager::ClosePositionParams {
-            posId: pos_id,
-            minAmt0Out: params.min_amt0_out,
-            minAmt1Out: params.min_amt1_out,
-            maxAmt1In: params.max_amt1_in,
+    ) -> Result<AdjustTakerResult> {
+        let margin_delta = scale_to_6dec(params.margin_delta)?;
+        let perp_delta = scale_perp_delta(params.perp_delta)?;
+
+        let wire_params = crate::contracts::AdjustTakerParams {
+            posId: params.pos_id,
+            marginDelta: margin_delta as i128,
+            perpDelta: perp_delta,
+            amt1Limit: U256::from(params.amt1_limit),
         };
 
-        tracing::debug!(pos_id = %pos_id, ?urgency, "closing position");
+        tracing::debug!(
+            pos_id = %params.pos_id,
+            margin_delta = params.margin_delta,
+            perp_delta = params.perp_delta,
+            ?urgency,
+            "adjusting taker position"
+        );
 
-        let contract = PerpManager::new(self.deployments.perp_manager, &self.provider);
-        let calldata = contract.closePosition(wire_params).calldata().clone();
+        let contract = Perp::new(self.deployments.perp, &self.provider);
+        let calldata = contract.adjustTaker(wire_params).calldata().clone();
 
         let receipt = self
-            .tx(self.deployments.perp_manager, calldata)
+            .tx(self.deployments.perp, calldata)
             .with_urgency(urgency)
             .send()
             .await?;
 
-        let result = parse_close_result(&receipt, pos_id)?;
-        tracing::debug!(pos_id = %pos_id, was_liquidated = result.was_liquidated, net_margin = result.net_margin, "position closed");
-        Ok(result)
+        tracing::debug!(pos_id = %params.pos_id, "taker position adjusted");
+        Ok(AdjustTakerResult {
+            tx_hash: receipt.transaction_hash,
+        })
     }
 
-    /// Adjust the notional exposure of a taker position.
-    pub async fn adjust_notional(
+    /// Adjust a maker position (margin, liquidity, or both).
+    pub async fn adjust_maker(
         &self,
-        pos_id: U256,
-        params: &AdjustNotionalParams,
+        params: &AdjustMakerParams,
         urgency: Urgency,
-    ) -> Result<AdjustNotionalResult> {
-        let usd_delta_scaled = scale_to_6dec(params.usd_delta)?;
+    ) -> Result<AdjustMakerResult> {
+        let margin_delta = scale_to_6dec(params.margin_delta)?;
 
-        let wire_params = PerpManager::AdjustNotionalParams {
-            posId: pos_id,
-            usdDelta: I256::try_from(usd_delta_scaled).map_err(|_| ValidationError::Overflow {
-                context: format!("usd_delta {} overflows I256", usd_delta_scaled),
-            })?,
-            perpLimit: params.perp_limit,
+        let wire_params = crate::contracts::AdjustMakerParams {
+            posId: params.pos_id,
+            marginDelta: margin_delta as i128,
+            liquidityDelta: params.liquidity_delta,
+            amt0Limit: U256::from(params.amt0_limit),
+            amt1Limit: U256::from(params.amt1_limit),
         };
 
-        tracing::debug!(pos_id = %pos_id, usd_delta = params.usd_delta, ?urgency, "adjusting notional");
+        tracing::debug!(
+            pos_id = %params.pos_id,
+            margin_delta = params.margin_delta,
+            liquidity_delta = params.liquidity_delta,
+            ?urgency,
+            "adjusting maker position"
+        );
 
-        let contract = PerpManager::new(self.deployments.perp_manager, &self.provider);
-        let calldata = contract.adjustNotional(wire_params).calldata().clone();
+        let contract = Perp::new(self.deployments.perp, &self.provider);
+        let calldata = contract.adjustMaker(wire_params).calldata().clone();
 
         let receipt = self
-            .tx(self.deployments.perp_manager, calldata)
+            .tx(self.deployments.perp, calldata)
             .with_urgency(urgency)
             .send()
             .await?;
 
-        let result = parse_adjust_result(&receipt)?;
-        tracing::debug!(pos_id = %pos_id, new_perp_delta = result.new_perp_delta, "notional adjusted");
-        Ok(result)
-    }
-
-    /// Add or remove margin from a position.
-    pub async fn adjust_margin(
-        &self,
-        pos_id: U256,
-        params: &AdjustMarginParams,
-        urgency: Urgency,
-    ) -> Result<AdjustMarginResult> {
-        let delta_scaled = scale_to_6dec(params.margin_delta)?;
-
-        let wire_params = PerpManager::AdjustMarginParams {
-            posId: pos_id,
-            marginDelta: I256::try_from(delta_scaled).map_err(|_| ValidationError::Overflow {
-                context: format!("margin_delta {} overflows I256", delta_scaled),
-            })?,
-        };
-
-        tracing::debug!(pos_id = %pos_id, margin_delta = params.margin_delta, ?urgency, "adjusting margin");
-
-        let contract = PerpManager::new(self.deployments.perp_manager, &self.provider);
-        let calldata = contract.adjustMargin(wire_params).calldata().clone();
-
-        let receipt = self
-            .tx(self.deployments.perp_manager, calldata)
-            .with_urgency(urgency)
-            .send()
-            .await?;
-
-        let result = parse_margin_result(&receipt)?;
-        tracing::debug!(pos_id = %pos_id, new_margin = result.new_margin, "margin adjusted");
-        Ok(result)
+        tracing::debug!(pos_id = %params.pos_id, "maker position adjusted");
+        Ok(AdjustMakerResult {
+            tx_hash: receipt.transaction_hash,
+        })
     }
 
     // ── Approval + transfers ────────────────────────────────────────
 
-    /// Ensure USDC is approved for the PerpManager to spend.
+    /// Ensure USDC is approved for the Perp contract to spend.
     pub async fn ensure_approval(&self, min_amount: U256) -> Result<Option<B256>> {
         let usdc = IERC20::new(self.deployments.usdc, &self.provider);
         let allowance: U256 = usdc
-            .allowance(self.address, self.deployments.perp_manager)
+            .allowance(self.address, self.deployments.perp)
             .call()
             .await?;
 
@@ -248,7 +256,7 @@ impl PerpClient {
         tracing::debug!(allowance = %allowance, min_amount = %min_amount, "approving USDC");
 
         let calldata = usdc
-            .approve(self.deployments.perp_manager, MAX_APPROVAL)
+            .approve(self.deployments.perp, MAX_APPROVAL)
             .calldata()
             .clone();
 
