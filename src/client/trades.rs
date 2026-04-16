@@ -28,9 +28,8 @@ fn parse_minted_token_id(
     let transfer_topic = IERC20::Transfer::SIGNATURE_HASH;
     for log in receipt.inner.logs() {
         let topics = log.topics();
-        if topics.len() >= 4
-            && topics[0] == transfer_topic
-            && topics[1] == B256::ZERO // from = address(0) means mint
+        if topics.len() >= 4 && topics[0] == transfer_topic && topics[1] == B256::ZERO
+        // from = address(0) means mint
         {
             // tokenId is topic[3] (indexed)
             return Ok(U256::from_be_bytes(topics[3].0));
@@ -83,7 +82,12 @@ impl PerpClient {
         let contract = Perp::new(self.deployments.perp, &self.provider);
         let calldata = contract.openTaker(wire_params).calldata().clone();
 
-        tracing::debug!(margin = params.margin, perp_delta = params.perp_delta, ?urgency, "opening taker position");
+        tracing::debug!(
+            margin = params.margin,
+            perp_delta = params.perp_delta,
+            ?urgency,
+            "opening taker position"
+        );
 
         let receipt = self
             .tx(self.deployments.perp, calldata)
@@ -138,7 +142,13 @@ impl PerpClient {
             maxAmt1In: U256::from(params.max_amt1_in),
         };
 
-        tracing::debug!(margin = params.margin, tick_lower, tick_upper, ?urgency, "opening maker position");
+        tracing::debug!(
+            margin = params.margin,
+            tick_lower,
+            tick_upper,
+            ?urgency,
+            "opening maker position"
+        );
 
         let contract = Perp::new(self.deployments.perp, &self.provider);
         let calldata = contract.openMaker(wire_params).calldata().clone();
