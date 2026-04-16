@@ -21,12 +21,8 @@
 //! let signer: PrivateKeySigner = "your_private_key_hex".parse().unwrap();
 //!
 //! let deployments = Deployments {
-//!     perp_manager: address!("0000000000000000000000000000000000000001"),
+//!     perp: address!("0000000000000000000000000000000000000001"),
 //!     usdc: address!("C1a5D4E99BB224713dd179eA9CA2Fa6600706210"),
-//!     fees_module: None,
-//!     margin_ratios_module: None,
-//!     lockup_period_module: None,
-//!     sqrt_price_impact_limit_module: None,
 //! };
 //!
 //! let client = PerpClient::new(transport, signer, deployments, 8453)?;
@@ -51,16 +47,12 @@ use alloy::signers::local::PrivateKeySigner;
 use alloy::transports::BoxTransport;
 
 use crate::constants::SCALE_1E6;
-use crate::contracts::PerpManager;
-use crate::convert::scale_from_6dec;
-use crate::errors::{ContractError, Result, TransactionError};
+use crate::errors::{Result, TransactionError};
 use crate::hft::gas::{FeeCache, GasLimitCache};
 use crate::hft::pipeline::{PipelineConfig, TxPipeline};
 use crate::hft::state_cache::{CachedBounds, CachedFees, StateCache, StateCacheConfig};
 use crate::transport::provider::HftTransport;
-use crate::types::{
-    AdjustMarginResult, AdjustNotionalResult, Bounds, CloseResult, Deployments, Fees, OpenResult,
-};
+use crate::types::{Bounds, Deployments, Fees};
 
 // ── Constants ────────────────────────────────────────────────────────
 
@@ -419,103 +411,6 @@ fn i128_from_i256(v: I256) -> i128 {
 /// Scale an unsigned `U256` from 6-decimal on-chain representation to `f64`.
 fn u256_to_f64_6dec(v: U256) -> f64 {
     v.to::<u128>() as f64 / 1_000_000.0
-}
-
-/// Parse an [`OpenResult`] from a transaction receipt's `PositionOpened` event.
-fn parse_open_result(
-    receipt: &alloy::rpc::types::TransactionReceipt,
-) -> std::result::Result<OpenResult, ContractError> {
-    for log in receipt.inner.logs() {
-        if let Ok(event) = log.log_decode::<PerpManager::PositionOpened>() {
-            let data = event.inner.data;
-            let perp_delta = i128_from_i256(data.perpDelta);
-            let usd_delta = i128_from_i256(data.usdDelta);
-            return Ok(OpenResult {
-                pos_id: data.posId,
-                is_maker: data.isMaker,
-                perp_delta: scale_from_6dec(perp_delta),
-                usd_delta: scale_from_6dec(usd_delta),
-                tick_lower: i24_to_i32(data.tickLower),
-                tick_upper: i24_to_i32(data.tickUpper),
-            });
-        }
-    }
-    Err(ContractError::EventNotFound {
-        event_name: "PositionOpened".into(),
-    })
-}
-
-/// Parse an [`AdjustNotionalResult`] from a transaction receipt's `NotionalAdjusted` event.
-fn parse_adjust_result(
-    receipt: &alloy::rpc::types::TransactionReceipt,
-) -> std::result::Result<AdjustNotionalResult, ContractError> {
-    for log in receipt.inner.logs() {
-        if let Ok(event) = log.log_decode::<PerpManager::NotionalAdjusted>() {
-            let data = event.inner.data;
-            return Ok(AdjustNotionalResult {
-                new_perp_delta: scale_from_6dec(i128_from_i256(data.newPerpDelta)),
-                swap_perp_delta: scale_from_6dec(i128_from_i256(data.swapPerpDelta)),
-                swap_usd_delta: scale_from_6dec(i128_from_i256(data.swapUsdDelta)),
-                funding: scale_from_6dec(i128_from_i256(data.funding)),
-                utilization_fee: u256_to_f64_6dec(data.utilizationFee),
-                adl: u256_to_f64_6dec(data.adl),
-                trading_fees: u256_to_f64_6dec(data.tradingFees),
-            });
-        }
-    }
-    Err(ContractError::EventNotFound {
-        event_name: "NotionalAdjusted".into(),
-    })
-}
-
-/// Parse an [`AdjustMarginResult`] from a transaction receipt's `MarginAdjusted` event.
-fn parse_margin_result(
-    receipt: &alloy::rpc::types::TransactionReceipt,
-) -> std::result::Result<AdjustMarginResult, ContractError> {
-    for log in receipt.inner.logs() {
-        if let Ok(event) = log.log_decode::<PerpManager::MarginAdjusted>() {
-            return Ok(AdjustMarginResult {
-                new_margin: u256_to_f64_6dec(event.inner.data.newMargin),
-            });
-        }
-    }
-    Err(ContractError::EventNotFound {
-        event_name: "MarginAdjusted".into(),
-    })
-}
-
-/// Parse a [`CloseResult`] from a transaction receipt's `PositionClosed` event.
-fn parse_close_result(
-    receipt: &alloy::rpc::types::TransactionReceipt,
-    pos_id: U256,
-) -> std::result::Result<CloseResult, ContractError> {
-    let tx_hash = receipt.transaction_hash;
-    for log in receipt.inner.logs() {
-        if let Ok(event) = log.log_decode::<PerpManager::PositionClosed>() {
-            let data = event.inner.data;
-            return Ok(CloseResult {
-                tx_hash,
-                was_maker: data.wasMaker,
-                was_liquidated: data.wasLiquidated,
-                remaining_position_id: if data.wasPartialClose {
-                    Some(pos_id)
-                } else {
-                    None
-                },
-                exit_perp_delta: scale_from_6dec(i128_from_i256(data.exitPerpDelta)),
-                exit_usd_delta: scale_from_6dec(i128_from_i256(data.exitUsdDelta)),
-                net_usd_delta: scale_from_6dec(i128_from_i256(data.netUsdDelta)),
-                funding: scale_from_6dec(i128_from_i256(data.funding)),
-                utilization_fee: u256_to_f64_6dec(data.utilizationFee),
-                adl: u256_to_f64_6dec(data.adl),
-                liquidation_fee: u256_to_f64_6dec(data.liquidationFee),
-                net_margin: scale_from_6dec(i128_from_i256(data.netMargin)),
-            });
-        }
-    }
-    Err(ContractError::EventNotFound {
-        event_name: "PositionClosed".into(),
-    })
 }
 
 #[cfg(test)]

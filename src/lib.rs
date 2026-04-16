@@ -47,9 +47,10 @@ pub use client::{PerpClient, TxBuilder};
 
 #[doc(inline)]
 pub use contracts::{
-    AdjustMakerParams, AdjustTakerParams, IBeacon, IERC20, IFees, IFunding, IMarginRatios,
-    IMulticall3, IPriceImpact, IPricing, Modules, OpenMakerParams as ContractOpenMakerParams,
-    OpenTakerParams as ContractOpenTakerParams, Perp, PerpFactory, PoolKey,
+    AdjustMakerParams as ContractAdjustMakerParams, AdjustTakerParams as ContractAdjustTakerParams,
+    IBeacon, IERC20, IFees, IFunding, IMarginRatios, IMulticall3, IPriceImpact, IPricing, Modules,
+    OpenMakerParams as ContractOpenMakerParams, OpenTakerParams as ContractOpenTakerParams, Perp,
+    PerpFactory, PoolKey,
 };
 
 #[doc(inline)]
@@ -66,10 +67,9 @@ pub use transport::{config::TransportConfig, provider::HftTransport};
 
 #[doc(inline)]
 pub use types::{
-    AdjustMarginParams, AdjustMarginResult, AdjustNotionalParams, AdjustNotionalResult, Bounds,
-    CloseParams, CloseResult, Deployments, Fees, LiveDetails, OpenInterest, OpenMakerParams,
-    OpenMakerQuote, OpenResult, OpenTakerParams, OpenTakerQuote, PerpData, PerpSnapshot,
-    PriceImpactPoint, SwapQuote,
+    AdjustMakerParams, AdjustMakerResult, AdjustTakerParams, AdjustTakerResult, Bounds,
+    Deployments, Fees, LiveDetails, OpenInterest, OpenMakerParams, OpenResult, OpenTakerParams,
+    PerpData, PerpSnapshot, PriceImpactPoint,
 };
 
 #[doc(inline)]

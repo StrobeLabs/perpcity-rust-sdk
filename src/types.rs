@@ -114,17 +114,16 @@ pub struct PerpSnapshot {
 ///
 /// The SDK converts these to contract types automatically:
 /// - `margin` → scaled to 6 decimals
-/// - `leverage` → converted to margin ratio via `1e6 / leverage`
+/// - `perp_delta` → scaled to 18 decimals (positive = long, negative = short)
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct OpenTakerParams {
-    /// `true` for long, `false` for short.
-    pub is_long: bool,
     /// Margin in USDC (e.g. `100.0` for 100 USDC).
     pub margin: f64,
-    /// Leverage multiplier (e.g. `10.0` for 10×).
-    pub leverage: f64,
-    /// Slippage protection: max unspecified token amount. `0` = no limit.
-    pub unspecified_amount_limit: u128,
+    /// Perp token delta: positive = long, negative = short.
+    /// Magnitude is the notional size in perp token units.
+    pub perp_delta: f64,
+    /// Slippage protection: max amount of token1 (USDC) willing to pay. `0` = no limit.
+    pub amt1_limit: u128,
 }
 
 /// Client-facing parameters for opening a maker (LP) position.
@@ -148,125 +147,69 @@ pub struct OpenMakerParams {
     pub max_amt1_in: u128,
 }
 
-/// Client-facing parameters for closing a position.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CloseParams {
-    /// Minimum amount of token0 to receive (slippage protection).
-    pub min_amt0_out: u128,
-    /// Minimum amount of token1 to receive (slippage protection).
-    pub min_amt1_out: u128,
-    /// Maximum amount of token1 willing to pay.
-    pub max_amt1_in: u128,
-}
-
-/// Client-facing parameters for adjusting a position's notional exposure.
+/// Client-facing parameters for adjusting a taker position.
+///
+/// Combines margin adjustment and notional adjustment in a single call.
+/// To close a position, pass `perp_delta` opposing the position's current delta.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-pub struct AdjustNotionalParams {
-    /// USD delta: positive to increase notional, negative to decrease.
-    pub usd_delta: f64,
-    /// Maximum perp token amount for slippage protection. `u128::MAX` = no limit.
-    pub perp_limit: u128,
-}
-
-/// Client-facing parameters for adjusting a position's margin.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-pub struct AdjustMarginParams {
+pub struct AdjustTakerParams {
+    /// Position NFT token ID.
+    pub pos_id: U256,
     /// Margin delta in USDC: positive to deposit, negative to withdraw.
     pub margin_delta: f64,
+    /// Perp token delta: positive to go more long, negative to go more short.
+    /// Set to zero for margin-only adjustments.
+    pub perp_delta: f64,
+    /// Slippage protection: max amount of token1 (USDC). `0` = no limit.
+    pub amt1_limit: u128,
+}
+
+/// Client-facing parameters for adjusting a maker (LP) position.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct AdjustMakerParams {
+    /// Position NFT token ID.
+    pub pos_id: U256,
+    /// Margin delta in USDC: positive to deposit, negative to withdraw.
+    pub margin_delta: f64,
+    /// Liquidity delta: positive to add, negative to remove.
+    pub liquidity_delta: i128,
+    /// Max/min amount of token0 for slippage protection.
+    pub amt0_limit: u128,
+    /// Max/min amount of token1 for slippage protection.
+    pub amt1_limit: u128,
 }
 
 // ── Result types ────────────────────────────────────────────────────
 
-/// Result of opening a position (taker or maker).
+/// Result of opening a taker or maker position.
 ///
-/// Parsed from the `PositionOpened` event in the transaction receipt.
+/// The new contracts emit parameterless events (`TakerOpened`, `MakerOpened`),
+/// so detailed position data must be read via view functions after confirmation.
+/// The `pos_id` comes from the function return value.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct OpenResult {
-    /// Minted position NFT token ID.
-    pub pos_id: U256,
-    /// Whether this is a maker position.
-    pub is_maker: bool,
-    /// Perp token delta (signed). Positive = long, negative = short.
-    pub perp_delta: f64,
-    /// USD delta (signed).
-    pub usd_delta: f64,
-    /// Lower tick of the position's price range.
-    pub tick_lower: i32,
-    /// Upper tick of the position's price range.
-    pub tick_upper: i32,
-}
-
-/// Result of adjusting a position's notional size.
-///
-/// Parsed from the `NotionalAdjusted` event in the transaction receipt.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-pub struct AdjustNotionalResult {
-    /// New cumulative perp delta after adjustment (signed).
-    pub new_perp_delta: f64,
-    /// Perp delta from this specific swap (signed).
-    pub swap_perp_delta: f64,
-    /// USD delta from this specific swap (signed).
-    pub swap_usd_delta: f64,
-    /// Funding settled during this adjustment.
-    pub funding: f64,
-    /// Utilization fee charged.
-    pub utilization_fee: f64,
-    /// Auto-deleveraging amount.
-    pub adl: f64,
-    /// Trading fees charged.
-    pub trading_fees: f64,
-}
-
-/// Result of adjusting a position's margin.
-///
-/// Parsed from the `MarginAdjusted` event in the transaction receipt.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-pub struct AdjustMarginResult {
-    /// New margin after adjustment.
-    pub new_margin: f64,
-}
-
-/// Result of closing a position.
-///
-/// Parsed from the `PositionClosed` event in the transaction receipt.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-pub struct CloseResult {
     /// Transaction hash.
     pub tx_hash: B256,
-    /// Whether this was a maker position.
-    pub was_maker: bool,
-    /// Whether the position was liquidated.
-    pub was_liquidated: bool,
-    /// If the close was partial, the remaining position's NFT token ID.
-    /// `None` means the position was fully closed.
-    pub remaining_position_id: Option<U256>,
-    /// Perp delta at exit (signed).
-    pub exit_perp_delta: f64,
-    /// USD delta at exit (signed).
-    pub exit_usd_delta: f64,
-    /// Net USD delta after settlement.
-    pub net_usd_delta: f64,
-    /// Funding settled at close.
-    pub funding: f64,
-    /// Utilization fee charged.
-    pub utilization_fee: f64,
-    /// Auto-deleveraging amount.
-    pub adl: f64,
-    /// Liquidation fee (zero if not liquidated).
-    pub liquidation_fee: f64,
-    /// Net margin returned.
-    pub net_margin: f64,
+    /// Minted position NFT token ID.
+    pub pos_id: U256,
 }
 
-/// Result of a swap simulation via `quoteSwap`.
+/// Result of adjusting a taker position (margin, notional, or both).
 ///
-/// All values are human-readable (USDC as f64, perp delta as f64).
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-pub struct SwapQuote {
-    /// Perp token delta (positive = received, negative = spent).
-    pub perp_delta: f64,
-    /// USD delta (positive = received, negative = spent).
-    pub usd_delta: f64,
+/// Events are parameterless — read position state via view functions if needed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdjustTakerResult {
+    /// Transaction hash.
+    pub tx_hash: B256,
+}
+
+/// Result of adjusting a maker position (margin, liquidity, or both).
+///
+/// Events are parameterless — read position state via view functions if needed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdjustMakerResult {
+    /// Transaction hash.
+    pub tx_hash: B256,
 }
 
 /// A single point on a price impact curve.
@@ -307,28 +250,6 @@ impl PriceImpactPoint {
     }
 }
 
-/// Result of simulating a taker position open via `quoteOpenTakerPosition`.
-///
-/// All values are human-readable.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-pub struct OpenTakerQuote {
-    /// Perp token delta (positive = long exposure, negative = short).
-    pub perp_delta: f64,
-    /// USD delta (positive = received, negative = spent).
-    pub usd_delta: f64,
-}
-
-/// Result of simulating a maker position open via `quoteOpenMakerPosition`.
-///
-/// All values are human-readable.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-pub struct OpenMakerQuote {
-    /// Perp token delta.
-    pub perp_delta: f64,
-    /// USD delta.
-    pub usd_delta: f64,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -337,12 +258,8 @@ mod tests {
     #[test]
     fn open_result_serde_roundtrip() {
         let result = OpenResult {
+            tx_hash: B256::ZERO,
             pos_id: U256::from(42),
-            is_maker: false,
-            perp_delta: -1234.567,
-            usd_delta: 98765.43,
-            tick_lower: -69090,
-            tick_upper: 69090,
         };
         let json = serde_json::to_string(&result).unwrap();
         let recovered: OpenResult = serde_json::from_str(&json).unwrap();
@@ -350,35 +267,20 @@ mod tests {
     }
 
     #[test]
-    fn close_result_serde_roundtrip() {
-        let result = CloseResult {
+    fn adjust_taker_result_serde_roundtrip() {
+        let result = AdjustTakerResult {
             tx_hash: B256::ZERO,
-            was_maker: false,
-            was_liquidated: false,
-            remaining_position_id: None,
-            exit_perp_delta: -100.0,
-            exit_usd_delta: 200.0,
-            net_usd_delta: 195.0,
-            funding: -0.5,
-            utilization_fee: 0.1,
-            adl: 0.0,
-            liquidation_fee: 0.0,
-            net_margin: 150.0,
         };
         let json = serde_json::to_string(&result).unwrap();
-        let recovered: CloseResult = serde_json::from_str(&json).unwrap();
+        let recovered: AdjustTakerResult = serde_json::from_str(&json).unwrap();
         assert_eq!(result, recovered);
     }
 
     #[test]
     fn deployments_serde_roundtrip() {
         let deployments = Deployments {
-            perp_manager: Address::ZERO,
+            perp: Address::ZERO,
             usdc: Address::ZERO,
-            fees_module: None,
-            margin_ratios_module: None,
-            lockup_period_module: None,
-            sqrt_price_impact_limit_module: None,
         };
         let json = serde_json::to_string(&deployments).unwrap();
         let recovered: Deployments = serde_json::from_str(&json).unwrap();
