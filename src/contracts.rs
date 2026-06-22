@@ -482,3 +482,204 @@ sol! {
             external view returns (uint256 balance);
     }
 }
+
+/// ABI-lock tests: assert the generated bindings match the frozen contracts.
+///
+/// These guard against the class of bug that motivated the binding rewrite —
+/// silently mis-shaped structs and events. Because a function selector is
+/// computed from its *input* types only, return-struct drift (e.g. a view
+/// losing a field) is NOT caught by a selector check; we lock struct field
+/// shapes via EIP-712 type strings, function selectors via `SIGNATURE`, and
+/// event `topic0` via the event `SIGNATURE`. Expected values are transcribed
+/// from `perpcity-contracts/src/` (`Structs.sol` / `Events.sol`).
+#[cfg(test)]
+mod abi_lock {
+    use super::*;
+    use alloy::sol_types::{SolCall, SolEvent, SolStruct};
+
+    /// Struct field shapes (names + types) — catches return-struct drift.
+    #[test]
+    fn struct_shapes_match_frozen_contracts() {
+        // Flat structs (no nested struct fields): exact match.
+        assert_eq!(
+            Position::eip712_encode_type().as_ref(),
+            "Position(int256 delta,uint128 margin,uint24 initMarginRatio,uint24 liqMarginRatio,uint24 backstopMarginRatio,int256 lastCumlFundingX96)"
+        );
+        assert_eq!(
+            Taker::eip712_encode_type().as_ref(),
+            "Taker(uint256 lastLongUtilPaymentsX96,uint256 lastShortUtilPaymentsX96)"
+        );
+        assert_eq!(
+            Rates::eip712_encode_type().as_ref(),
+            "Rates(int88 fundingPerDay,uint64 longUtilFeePerDay,uint64 shortUtilFeePerDay,uint40 lastTouch)"
+        );
+        assert_eq!(
+            Cumulatives::eip712_encode_type().as_ref(),
+            "Cumulatives(int256 fundingX96,int256 fundingDivSqrtPX96,uint256 lpFeeGrowthGlobalX128,uint256 longUtilPaymentsX96,uint256 shortUtilPaymentsX96,uint256 longUtilEarningsX96,uint256 shortUtilEarningsX96)"
+        );
+        assert_eq!(
+            TickInfo::eip712_encode_type().as_ref(),
+            "TickInfo(int256 cumlFundingOppX96,int256 cumlFundingDivSqrtPOppX96,uint256 lpFeeGrowthOutsideX128)"
+        );
+        assert_eq!(
+            FeeFund::eip712_encode_type().as_ref(),
+            "FeeFund(uint80 insurance,uint80 creatorFees,uint80 protocolFees)"
+        );
+        assert_eq!(
+            SolvencyState::eip712_encode_type().as_ref(),
+            "SolvencyState(uint128 badDebt,uint128 totalMargin)"
+        );
+        assert_eq!(
+            OpenInterest::eip712_encode_type().as_ref(),
+            "OpenInterest(uint128 long,uint128 short)"
+        );
+        assert_eq!(
+            Capacity::eip712_encode_type().as_ref(),
+            "Capacity(uint128 long,uint128 short)"
+        );
+        assert_eq!(
+            PricePair::eip712_encode_type().as_ref(),
+            "PricePair(uint128 ammPrice,uint128 index)"
+        );
+        assert_eq!(
+            MakerFunding::eip712_encode_type().as_ref(),
+            "MakerFunding(int256 belowX96,int256 withinX96,int256 divSqrtPriceWithinX96)"
+        );
+        assert_eq!(
+            Modules::eip712_encode_type().as_ref(),
+            "Modules(address beacon,address fees,address funding,address marginRatios,address priceImpact,address pricing)"
+        );
+        assert_eq!(
+            SwapResult::eip712_encode_type().as_ref(),
+            "SwapResult(int256 delta,uint256 ammPrice,int256 totalFeeAmt,uint256 lpFeeAmt,uint256 protocolFeeAmt,uint256 creatorFeeAmt,uint256 insuranceFeeAmt)"
+        );
+
+        // Param structs (the SDK builds these).
+        assert_eq!(
+            OpenTakerParams::eip712_encode_type().as_ref(),
+            "OpenTakerParams(address holder,uint128 margin,int256 perpDelta,uint256 amt1Limit)"
+        );
+        assert_eq!(
+            OpenMakerParams::eip712_encode_type().as_ref(),
+            "OpenMakerParams(address holder,uint128 margin,int24 tickLower,int24 tickUpper,uint128 liquidity,uint256 maxAmt0In,uint256 maxAmt1In)"
+        );
+        assert_eq!(
+            AdjustTakerParams::eip712_encode_type().as_ref(),
+            "AdjustTakerParams(uint256 posId,int128 marginDelta,int256 perpDelta,uint256 amt1Limit)"
+        );
+        assert_eq!(
+            AdjustMakerParams::eip712_encode_type().as_ref(),
+            "AdjustMakerParams(uint256 posId,int128 marginDelta,int128 liquidityDelta,uint256 amt0Limit,uint256 amt1Limit)"
+        );
+
+        // Nested structs: EIP-712 appends referenced type definitions, so lock
+        // the primary field list with a prefix check.
+        assert!(Maker::eip712_encode_type().starts_with(
+            "Maker(int24 tickLower,int24 tickUpper,uint128 liquidity,uint256 lastLpFeeGrowthInsideX128,uint256 lastLongUtilEarningsX96,uint256 lastShortUtilEarningsX96,Capacity capacity,MakerFunding lastCumlFunding)"
+        ));
+    }
+
+    /// Function selectors (input types) — catches arity/param drift.
+    #[test]
+    fn function_selectors_match_frozen_contracts() {
+        assert_eq!(
+            Perp::openTakerCall::SIGNATURE,
+            "openTaker((address,uint128,int256,uint256))"
+        );
+        assert_eq!(
+            Perp::adjustTakerCall::SIGNATURE,
+            "adjustTaker((uint256,int128,int256,uint256))"
+        );
+        assert_eq!(
+            Perp::openMakerCall::SIGNATURE,
+            "openMaker((address,uint128,int24,int24,uint128,uint256,uint256))"
+        );
+        assert_eq!(
+            Perp::adjustMakerCall::SIGNATURE,
+            "adjustMaker((uint256,int128,int128,uint256,uint256))"
+        );
+        // The liquidate functions each take a third uint128 amount (was missing).
+        assert_eq!(
+            Perp::liquidateMakerCall::SIGNATURE,
+            "liquidateMaker(uint256,address,uint128)"
+        );
+        assert_eq!(
+            Perp::liquidateTakerCall::SIGNATURE,
+            "liquidateTaker(uint256,address,uint128)"
+        );
+        assert_eq!(
+            Perp::backstopMakerCall::SIGNATURE,
+            "backstopMaker(uint256,uint128,address)"
+        );
+        assert_eq!(
+            Perp::backstopTakerCall::SIGNATURE,
+            "backstopTaker(uint256,uint128,address)"
+        );
+        assert_eq!(Perp::positionsCall::SIGNATURE, "positions(uint256)");
+        assert_eq!(Perp::poolStateCall::SIGNATURE, "poolState()");
+        assert_eq!(Perp::modulesCall::SIGNATURE, "modules()");
+        assert_eq!(Perp::ratesCall::SIGNATURE, "rates()");
+        assert_eq!(Perp::cumulativesCall::SIGNATURE, "cumulatives()");
+    }
+
+    /// Event signatures (all params) — drives `topic0`; catches event drift.
+    #[test]
+    fn event_signatures_match_frozen_contracts() {
+        const SWAP_RESULT: &str = "(int256,uint256,int256,uint256,uint256,uint256,uint256)";
+
+        assert_eq!(Perp::MakerOpened::SIGNATURE, "MakerOpened(uint256)");
+        assert_eq!(
+            Perp::MakerAdjusted::SIGNATURE,
+            "MakerAdjusted(uint256,int256,uint256,uint256,uint256)"
+        );
+        assert_eq!(
+            Perp::MakerConverted::SIGNATURE,
+            "MakerConverted(uint256,int256,uint256,uint256,uint256)"
+        );
+        assert_eq!(
+            Perp::MakerClosed::SIGNATURE,
+            "MakerClosed(uint256,int256,uint256,uint256,uint256)"
+        );
+        assert_eq!(
+            Perp::MakerLiquidated::SIGNATURE,
+            "MakerLiquidated(uint256,uint128,uint256)"
+        );
+        assert_eq!(
+            Perp::MakerBackstopped::SIGNATURE,
+            "MakerBackstopped(uint256,uint128,address,int256,uint256,uint256,uint256)"
+        );
+        assert_eq!(
+            Perp::TakerOpened::SIGNATURE,
+            format!("TakerOpened(uint256,{SWAP_RESULT})")
+        );
+        assert_eq!(
+            Perp::TakerAdjusted::SIGNATURE,
+            format!("TakerAdjusted(uint256,{SWAP_RESULT},int256,uint256)")
+        );
+        assert_eq!(
+            Perp::TakerClosed::SIGNATURE,
+            format!("TakerClosed(uint256,{SWAP_RESULT},int256,uint256)")
+        );
+        assert_eq!(
+            Perp::TakerLiquidated::SIGNATURE,
+            "TakerLiquidated(uint256,uint128,uint256)"
+        );
+        assert_eq!(
+            Perp::TakerBackstopped::SIGNATURE,
+            "TakerBackstopped(uint256,uint128,address,int256,uint256)"
+        );
+        assert_eq!(
+            Perp::OpenInterestUpdated::SIGNATURE,
+            "OpenInterestUpdated((uint128,uint128))"
+        );
+        assert_eq!(
+            Perp::RatesAndEmasRefreshed::SIGNATURE,
+            "RatesAndEmasRefreshed((int88,uint64,uint64,uint40),(uint128,uint128))"
+        );
+        assert_eq!(
+            Perp::TicksCrossed::SIGNATURE,
+            "TicksCrossed(int24,int24,bool)"
+        );
+        assert_eq!(IBeacon::IndexUpdated::SIGNATURE, "IndexUpdated(uint256)");
+    }
+}
