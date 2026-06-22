@@ -809,8 +809,8 @@ mod tests {
     #[test]
     fn new_transport_shared_only() {
         let config = TransportConfig::builder()
-            .shared_endpoint("https://mainnet.base.org")
-            .shared_endpoint("https://base-rpc.publicnode.com")
+            .shared_endpoint("https://arb1.arbitrum.io/rpc")
+            .shared_endpoint("https://arbitrum-one-rpc.publicnode.com")
             .build()
             .unwrap();
         let transport = HftTransport::new(config).unwrap();

@@ -2,30 +2,31 @@
 //!
 //! [`PerpClient`] wires together the transport layer, HFT infrastructure,
 //! and contract bindings into a single ergonomic API. It is the primary
-//! entry point for interacting with PerpCity on Base L2.
+//! entry point for interacting with PerpCity on Arbitrum (mainnet and
+//! Arbitrum Sepolia testnet).
 //!
 //! # Example
 //!
 //! ```rust,no_run
-//! use perpcity_sdk::{PerpClient, Deployments, HftTransport, TransportConfig};
-//! use alloy::primitives::{address, Address, B256};
+//! use perpcity_sdk::{PerpClient, Deployments, HftTransport, TransportConfig, ARBITRUM_USDC};
+//! use alloy::primitives::address;
 //! use alloy::signers::local::PrivateKeySigner;
 //!
 //! # async fn example() -> perpcity_sdk::Result<()> {
 //! let transport = HftTransport::new(
 //!     TransportConfig::builder()
-//!         .shared_endpoint("https://mainnet.base.org")
+//!         .shared_endpoint("https://arb1.arbitrum.io/rpc")
 //!         .build()?
 //! )?;
 //!
 //! let signer: PrivateKeySigner = "your_private_key_hex".parse().unwrap();
 //!
 //! let deployments = Deployments {
-//!     perp: address!("0000000000000000000000000000000000000001"),
-//!     usdc: address!("C1a5D4E99BB224713dd179eA9CA2Fa6600706210"),
+//!     perp: address!("0000000000000000000000000000000000000001"), // the market's Perp contract
+//!     usdc: ARBITRUM_USDC,
 //! };
 //!
-//! let client = PerpClient::new(transport, signer, deployments, 8453)?;
+//! let client = PerpClient::new_arbitrum(transport, signer, deployments)?;
 //! # Ok(())
 //! # }
 //! ```
@@ -40,7 +41,7 @@ use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use alloy::network::{Ethereum, EthereumWallet};
-use alloy::primitives::{Address, U256};
+use alloy::primitives::{Address, U256, address};
 use alloy::providers::{Provider, RootProvider};
 use alloy::rpc::client::RpcClient;
 use alloy::signers::local::PrivateKeySigner;
@@ -54,18 +55,32 @@ use crate::hft::state_cache::{CachedBounds, CachedFees, StateCache, StateCacheCo
 use crate::transport::provider::HftTransport;
 use crate::types::{Bounds, Deployments, Fees};
 
-// ── Constants ────────────────────────────────────────────────────────
+// ── Network constants ──────────────────────────────────────────────────
 
-/// Base L2 chain ID.
-const BASE_CHAIN_ID: u64 = 8453;
+/// Arbitrum One (mainnet) chain ID.
+pub const ARBITRUM_CHAIN_ID: u64 = 42161;
 
-/// Default gas cache TTL: 2 seconds (2 Base L2 blocks).
+/// Arbitrum Sepolia (testnet) chain ID.
+pub const ARBITRUM_SEPOLIA_CHAIN_ID: u64 = 421614;
+
+/// Canonical USDC on Arbitrum One.
+pub const ARBITRUM_USDC: Address = address!("af88d065e77c8cC2239327C5EDb3A432268e5831");
+
+/// USDC on Arbitrum Sepolia (testnet).
+pub const ARBITRUM_SEPOLIA_USDC: Address = address!("75faf114eafb1BDbe2F0316DF893fd58CE46AA4d");
+
+/// Default gas cache TTL: 2 seconds.
 const DEFAULT_GAS_TTL_MS: u64 = 2_000;
 
 /// Default priority fee: 0.01 gwei.
 ///
-/// Base L2 uses a single sequencer, so priority fees are near-meaningless.
-/// 10 Mwei is sufficient for reliable inclusion while keeping gas escrow low.
+/// Arbitrum sequences transactions first-come-first-served, so priority fees
+/// have little effect; 10 Mwei keeps gas escrow low while remaining a valid
+/// non-zero tip.
+///
+/// NOTE: this models only the L2 execution fee. Arbitrum also charges an L1
+/// calldata (data-availability) component that is not yet accounted for here —
+/// see the gas-model follow-up.
 const DEFAULT_PRIORITY_FEE: u64 = 10_000_000;
 
 /// Maximum USDC approval amount (2^256 - 1).
@@ -167,7 +182,7 @@ impl PerpClient {
     /// - `transport`: Multi-endpoint RPC transport (from [`crate::TransportConfig`])
     /// - `signer`: Private key for signing transactions
     /// - `deployments`: Contract addresses for this PerpCity instance
-    /// - `chain_id`: Chain ID (8453 for Base mainnet, 84532 for Base Sepolia)
+    /// - `chain_id`: Chain ID (42161 for Arbitrum One, 421614 for Arbitrum Sepolia)
     ///
     /// This does NOT make any network calls. Call [`Self::refresh_gas`] and
     /// [`Self::sync_nonce`] before submitting transactions.
@@ -199,13 +214,22 @@ impl PerpClient {
         })
     }
 
-    /// Create a client pre-configured for Base mainnet.
-    pub fn new_base_mainnet(
+    /// Create a client pre-configured for Arbitrum One (mainnet).
+    pub fn new_arbitrum(
         transport: HftTransport,
         signer: PrivateKeySigner,
         deployments: Deployments,
     ) -> Result<Self> {
-        Self::new(transport, signer, deployments, BASE_CHAIN_ID)
+        Self::new(transport, signer, deployments, ARBITRUM_CHAIN_ID)
+    }
+
+    /// Create a client pre-configured for Arbitrum Sepolia (testnet).
+    pub fn new_arbitrum_sepolia(
+        transport: HftTransport,
+        signer: PrivateKeySigner,
+        deployments: Deployments,
+    ) -> Result<Self> {
+        Self::new(transport, signer, deployments, ARBITRUM_SEPOLIA_CHAIN_ID)
     }
 
     // ── Initialization ───────────────────────────────────────────────

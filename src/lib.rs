@@ -1,7 +1,7 @@
 //! # PerpCity Rust SDK
 //!
 //! A Rust SDK for the [PerpCity](https://perpcity.com) perpetual futures
-//! protocol on Base L2.
+//! protocol on Arbitrum (mainnet and Arbitrum Sepolia testnet).
 //!
 //! ## Module overview
 //!
@@ -43,7 +43,10 @@ pub mod transport;
 pub mod types;
 
 #[doc(inline)]
-pub use client::{PerpClient, TxBuilder};
+pub use client::{
+    ARBITRUM_CHAIN_ID, ARBITRUM_SEPOLIA_CHAIN_ID, ARBITRUM_SEPOLIA_USDC, ARBITRUM_USDC, PerpClient,
+    TxBuilder,
+};
 
 #[doc(inline)]
 pub use contracts::{
