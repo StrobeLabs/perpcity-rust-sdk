@@ -1,11 +1,20 @@
 //! On-chain contract bindings generated via Alloy's `sol!` macro.
 //!
-//! Structs, events, errors, and function selectors are derived from
-//! `perpcity-contracts/src/` (branch: unification-and-cleanup).
+//! Structs, events, errors, and function selectors are reconciled against the
+//! frozen, audited `perpcity-contracts/src/` (`Perp.sol`, `PerpFactory.sol`,
+//! `libraries/Structs.sol`, `libraries/Events.sol`, `libraries/Errors.sol`,
+//! `interfaces/modules/*`).
 //!
-//! Architecture: `PerpFactory` creates `Perp` contracts. Each market is
-//! its own `Perp` contract (ERC721 for position NFTs). SDK interacts
-//! with individual `Perp` contracts for trading.
+//! Architecture: `PerpFactory` creates `Perp` contracts. There is no
+//! `PerpManager` — each market is its own `Perp` contract (ERC721 for position
+//! NFTs), identified by its contract address. Positions are keyed by `posId`
+//! (the ERC721 token id) within that `Perp`. The SDK interacts with an
+//! individual `Perp` contract for all trading and reads.
+//!
+//! Units (from `Structs.sol`): prices scaled by 2^96; margin/USD/fees in USDC
+//! decimals (6); fee & margin-ratio params scaled by 1e6; funding & utilization
+//! rates scaled by 1e18 per day. `BalanceDelta` packs `int128 amount0` (perp)
+//! and `int128 amount1` (USD) into an `int256`; positive = asset, negative = debt.
 
 use alloy::sol;
 
@@ -24,7 +33,7 @@ sol! {
     }
 
     // ═══════════════════════════════════════════════════════════════════
-    //  Shared structs (from SharedStructs.sol)
+    //  Shared structs (from libraries/Structs.sol)
     // ═══════════════════════════════════════════════════════════════════
 
     /// Maker-specific funding tracking.
@@ -46,15 +55,6 @@ sol! {
         uint128 index;
     }
 
-    /// Current market snapshot after accrual.
-    struct Snapshot {
-        int24 tick;
-        uint160 sqrtAmmPrice;
-        PricePair spots;
-        PricePair emas;
-        uint256 markPrice;
-    }
-
     /// Funding and utilization rates.
     struct Rates {
         int88 fundingPerDay;
@@ -67,6 +67,7 @@ sol! {
     struct Cumulatives {
         int256 fundingX96;
         int256 fundingDivSqrtPX96;
+        uint256 lpFeeGrowthGlobalX128;
         uint256 longUtilPaymentsX96;
         uint256 shortUtilPaymentsX96;
         uint256 longUtilEarningsX96;
@@ -92,10 +93,11 @@ sol! {
         uint128 totalMargin;
     }
 
-    /// Tick-level funding info.
+    /// Tick-level funding + LP-fee growth info.
     struct TickInfo {
         int256 cumlFundingOppX96;
         int256 cumlFundingDivSqrtPOppX96;
+        uint256 lpFeeGrowthOutsideX128;
     }
 
     /// Module addresses for a Perp market.
@@ -106,6 +108,47 @@ sol! {
         address marginRatios;
         address priceImpact;
         address pricing;
+    }
+
+    /// Base position state shared by makers and takers.
+    /// `delta` is a packed `BalanceDelta` (`int128 amount0`, `int128 amount1`).
+    struct Position {
+        int256 delta;
+        uint128 margin;
+        uint24 initMarginRatio;
+        uint24 liqMarginRatio;
+        uint24 backstopMarginRatio;
+        int256 lastCumlFundingX96;
+    }
+
+    /// Maker-specific state for an active liquidity range.
+    struct Maker {
+        int24 tickLower;
+        int24 tickUpper;
+        uint128 liquidity;
+        uint256 lastLpFeeGrowthInsideX128;
+        uint256 lastLongUtilEarningsX96;
+        uint256 lastShortUtilEarningsX96;
+        Capacity capacity;
+        MakerFunding lastCumlFunding;
+    }
+
+    /// Taker-specific checkpoints for utilization fees.
+    struct Taker {
+        uint256 lastLongUtilPaymentsX96;
+        uint256 lastShortUtilPaymentsX96;
+    }
+
+    /// Result of a taker swap plus fees charged on the swap's USD volume.
+    /// `delta` is a packed `BalanceDelta`.
+    struct SwapResult {
+        int256 delta;
+        uint256 ammPrice;
+        int256 totalFeeAmt;
+        uint256 lpFeeAmt;
+        uint256 protocolFeeAmt;
+        uint256 creatorFeeAmt;
+        uint256 insuranceFeeAmt;
     }
 
     // ── Parameter structs ───────────────────────────────────────────
@@ -143,15 +186,15 @@ sol! {
     }
 
     // ═══════════════════════════════════════════════════════════════════
-    //  Module interfaces
+    //  Module interfaces (from interfaces/modules/*)
     // ═══════════════════════════════════════════════════════════════════
 
     /// Fee module — returns trading fees.
     #[sol(rpc)]
     interface IFees {
         function fees() external view returns (uint24 cFee, uint24 insFee, uint24 lpFee);
-        function utilFees(uint24 longUtilization, uint24 shortUtilization)
-            external view returns (uint96 longFee, uint96 shortFee);
+        function utilFees(uint256 longUtilization, uint256 shortUtilization)
+            external view returns (uint64 longFee, uint64 shortFee);
         function liqFee() external view returns (uint24);
     }
 
@@ -169,11 +212,10 @@ sol! {
             external view returns (uint256);
     }
 
-    /// Funding module — returns funding payment rate.
+    /// Funding module — returns funding paid per day per unit of USD exposure.
     #[sol(rpc)]
     interface IFunding {
-        function funding(uint256 ammPrice, uint256 index, uint256 emaAmmPrice, uint256 emaIndex)
-            external view returns (int96);
+        function funding(PricePair spots, PricePair emas) external view returns (int88);
     }
 
     /// Price impact module — returns sqrt price bounds per transaction.
@@ -184,29 +226,38 @@ sol! {
     }
 
     // ═══════════════════════════════════════════════════════════════════
-    //  Perp — individual perpetual market contract
+    //  Perp — individual perpetual market contract (no PerpManager)
     // ═══════════════════════════════════════════════════════════════════
 
     /// The Perp contract interface. Each market is its own Perp contract.
     /// Inherits ERC721 (position NFTs).
     #[sol(rpc)]
     interface Perp {
-        // ── Events (from Events.sol) ────────────────────────────────
+        // ── Events (from libraries/Events.sol) ──────────────────────
 
-        event MakerOpened();
-        event MakerClosed();
-        event MakerAdjusted();
-        event MakerLiquidated();
-        event TakerOpened();
-        event TakerClosed();
-        event TakerAdjusted();
-        event TakerLiquidated();
-        event MakerBackstopped();
-        event TakerBackstopped();
-        event MakerConvertedToTaker();
+        event MakerOpened(uint256 posId);
+        event MakerAdjusted(uint256 posId, int256 funding, uint256 longUtilFees, uint256 shortUtilFees, uint256 lpFees);
+        event MakerConverted(uint256 posId, int256 funding, uint256 longUtilFees, uint256 shortUtilFees, uint256 lpFees);
+        event MakerClosed(uint256 posId, int256 funding, uint256 longUtilFees, uint256 shortUtilFees, uint256 lpFees);
+        event MakerLiquidated(uint256 indexed posId, uint128 liquidityAmount, uint256 liqFee);
+        event MakerBackstopped(
+            uint256 posId,
+            uint128 marginIn,
+            address posRecipient,
+            int256 funding,
+            uint256 longUtilFees,
+            uint256 shortUtilFees,
+            uint256 lpFees
+        );
+        event TakerOpened(uint256 posId, SwapResult sr);
+        event TakerAdjusted(uint256 posId, SwapResult sr, int256 funding, uint256 utilFees);
+        event TakerClosed(uint256 posId, SwapResult sr, int256 funding, uint256 utilFees);
+        event TakerLiquidated(uint256 indexed posId, uint128 perpAmount, uint256 liqFee);
+        event TakerBackstopped(uint256 posId, uint128 marginIn, address posRecipient, int256 funding, uint256 utilFees);
 
-        // ── Errors (from Errors.sol) ────────────────────────────────
+        // ── Errors (from libraries/Errors.sol) ──────────────────────
 
+        error Abdicated();
         error ZeroDelta();
         error MinAmtUnmet();
         error MarginTooLow();
@@ -220,10 +271,13 @@ sol! {
         error NonMakerPosition();
         error NonTakerPosition();
         error TicksOutOfBounds();
+        error DataNotTimelocked();
+        error HealthNotImproved();
         error MarginRatioTooLow();
+        error DataAlreadyPending();
         error PriceImpactTooHigh();
+        error TimelockNotExpired();
         error UnauthorizedCaller();
-        error PositionValueTooLow();
         error PositionDoesNotExist();
         error LongUtilizationExceeded();
         error ShortUtilizationExceeded();
@@ -239,8 +293,8 @@ sol! {
         /// Burns the position NFT if fully closed.
         function adjustMaker(AdjustMakerParams calldata params) external;
 
-        /// Liquidate an unhealthy maker position.
-        function liquidateMaker(uint256 posId, address liquidationFeeRecipient) external;
+        /// Liquidate an unhealthy maker position (`liquidityAmount` of the range).
+        function liquidateMaker(uint256 posId, address liquidationFeeRecipient, uint128 liquidityAmount) external;
 
         /// Backstop a maker position approaching liquidation.
         function backstopMaker(uint256 posId, uint128 marginIn, address positionRecipient) external;
@@ -254,8 +308,8 @@ sol! {
         /// opposing `perpDelta`. Burns the position NFT if fully closed.
         function adjustTaker(AdjustTakerParams calldata params) external;
 
-        /// Liquidate an unhealthy taker position.
-        function liquidateTaker(uint256 posId, address liquidationFeeRecipient) external;
+        /// Liquidate an unhealthy taker position (`perpAmount` of exposure).
+        function liquidateTaker(uint256 posId, address liquidationFeeRecipient, uint128 perpAmount) external;
 
         /// Backstop a taker position approaching liquidation.
         function backstopTaker(uint256 posId, uint128 marginIn, address positionRecipient) external;
@@ -278,50 +332,36 @@ sol! {
 
         function poolKey() external view returns (PoolKey memory);
 
-        /// Position data. `delta` is a packed BalanceDelta (int128 amount0, int128 amount1).
-        function positions(uint256 posId) external view returns (
-            int256 delta,
-            uint128 margin,
-            uint24 liqMarginRatio,
-            uint24 backstopMarginRatio,
-            int256 lastCumlFundingX96
+        /// Live Uniswap V4 pool state (slot0 + liquidity). `ammPrice` is scaled by 2^96.
+        function poolState() external view returns (
+            int24 tick, uint160 sqrtPrice, uint256 ammPrice, uint128 liquidity
         );
 
-        function makerDetails(uint256 posId) external view returns (
-            int24 tickLower,
-            int24 tickUpper,
-            uint128 liquidity,
-            uint256 lastLongUtilEarningsX96,
-            uint256 lastShortUtilEarningsX96,
-            Capacity capacity_,
-            MakerFunding lastCumlFunding
-        );
+        /// Module addresses (beacon, fees, funding, marginRatios, priceImpact, pricing).
+        function modules() external view returns (Modules memory);
 
-        function takerDetails(uint256 posId) external view returns (
-            uint256 lastLongUtilPaymentsX96,
-            uint256 lastShortUtilPaymentsX96
-        );
+        /// Base position state.
+        function positions(uint256 posId) external view returns (Position memory);
+
+        /// Maker-specific state for a position.
+        function makerDetails(uint256 posId) external view returns (Maker memory);
+
+        /// Taker-specific state for a position.
+        function takerDetails(uint256 posId) external view returns (Taker memory);
 
         function nextPosId() external view returns (uint256);
 
-        function feeFund() external view returns (
-            uint80 insurance, uint80 creatorFees, uint80 protocolFees
-        );
+        function feeFund() external view returns (FeeFund memory);
 
-        function solvencyState() external view returns (
-            uint128 badDebt, uint128 totalMargin
-        );
+        function solvencyState() external view returns (SolvencyState memory);
 
-        function openInterest() external view returns (uint128 long, uint128 short);
+        function openInterest() external view returns (OpenInterest memory);
 
-        function capacity() external view returns (uint128 long, uint128 short);
+        function capacity() external view returns (Capacity memory);
 
-        function rates() external view returns (
-            int88 fundingPerDay,
-            uint64 longUtilFeePerDay,
-            uint64 shortUtilFeePerDay,
-            uint40 lastTouch
-        );
+        function rates() external view returns (Rates memory);
+
+        function cumulatives() external view returns (Cumulatives memory);
 
         // ── ERC721 ─────────────────────────────────────────────────
 
@@ -337,8 +377,23 @@ sol! {
 
     #[sol(rpc)]
     interface PerpFactory {
-        event PerpCreated(address perp);
+        /// Emitted when a new perp market is created. `poolId` is a Uniswap V4 `PoolId` (bytes32).
+        event PerpCreated(
+            address perp,
+            bytes32 poolId,
+            Modules modules,
+            uint256 initialIndex,
+            uint24 emaWindow,
+            uint256 protocolFee,
+            uint160 sqrtPriceX96,
+            int24 tick,
+            address owner,
+            string name,
+            string symbol,
+            string tokenUri
+        );
 
+        error NotPoolManager();
         error StartingPriceTooLow();
         error StartingPriceTooHigh();
         error EmaWindowTooLow();
@@ -346,11 +401,12 @@ sol! {
         /// Create a new perpetual market. Returns the Perp contract address.
         function createPerp(
             address owner,
-            bytes32 name,
-            bytes32 symbol,
-            bytes32 tokenUri,
-            Modules modules,
-            uint24 emaWindow
+            string memory name,
+            string memory symbol,
+            string memory tokenUri,
+            Modules memory modules,
+            uint24 emaWindow,
+            bytes32 salt
         ) external returns (address perp);
     }
 
@@ -359,10 +415,11 @@ sol! {
     // ═══════════════════════════════════════════════════════════════════
 
     /// Beacon interface — emits `IndexUpdated` when the oracle index changes.
+    /// Note: `index()` is state-mutating (not a pure view) per the beacons lib.
     #[sol(rpc)]
     interface IBeacon {
         event IndexUpdated(uint256 index);
-        function index() external view returns (uint256);
+        function index() external returns (uint256);
     }
 
     // ═══════════════════════════════════════════════════════════════════

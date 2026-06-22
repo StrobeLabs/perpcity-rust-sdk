@@ -24,8 +24,8 @@ pub struct Deployments {
 /// Metadata about a perpetual market.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PerpData {
-    /// Unique perp identifier (`PoolId` / `bytes32` on-chain).
-    pub id: B256,
+    /// The market's `Perp` contract address (the market identifier).
+    pub perp: Address,
     /// Tick spacing for the underlying Uniswap V4 pool.
     pub tick_spacing: i32,
     /// Current mark price in human-readable units (e.g. `1.05`).
@@ -68,21 +68,6 @@ pub struct Fees {
     pub lp_fee: f64,
     /// Fee charged on liquidations.
     pub liquidation_fee: f64,
-}
-
-/// Real-time position metrics, typically from a `quoteClosePosition` call.
-///
-/// All USDC values are human-readable (e.g. `12.50` not `12_500_000`).
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-pub struct LiveDetails {
-    /// Unrealized PnL in USDC.
-    pub pnl: f64,
-    /// Accumulated funding payment in USDC (positive = received).
-    pub funding_payment: f64,
-    /// Current effective margin in USDC.
-    pub effective_margin: f64,
-    /// Whether this position would be liquidated at the current price.
-    pub is_liquidatable: bool,
 }
 
 /// Taker open interest for a perp market, in USDC.

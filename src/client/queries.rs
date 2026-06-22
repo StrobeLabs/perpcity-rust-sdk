@@ -1,62 +1,63 @@
-//! Read operations: market data, balances, quotes, and multicall batches.
+//! Read operations: market data, positions, balances, and multicall batches.
+//!
+//! The client is bound to a single `Perp` market (`deployments.perp`). There is
+//! no `PerpManager` and no `perp_id` — the market is identified by which `Perp`
+//! contract the client points at. Positions are keyed by `posId` (ERC721 token
+//! id) within that `Perp`.
+//!
+//! Pre-trade quoting (the old `quote_*` / `quoteClosePosition` family) is not
+//! available: the frozen `Perp` exposes no on-chain quote/preview views. That
+//! surface will return in a later stage (off-chain math or `eth_call`
+//! simulation).
 
-use alloy::primitives::{Address, B256, I256, U256};
+use alloy::primitives::{Address, U256};
 use alloy::sol_types::{SolCall, SolValue};
 
 use crate::constants::MULTICALL3;
-use crate::contracts::{IBeacon, IERC20, IFees, IMarginRatios, IMulticall3, PerpManager};
-use crate::convert::{
-    leverage_to_margin_ratio, margin_ratio_to_leverage, price_x96_to_f64, scale_from_6dec,
-    scale_to_6dec, sqrt_price_x96_to_price,
-};
-use crate::errors::{ContractError, Result, ValidationError, decode};
+use crate::contracts::{IBeacon, IERC20, IFees, IMarginRatios, IMulticall3, Perp, Position};
+use crate::convert::{margin_ratio_to_leverage, price_x96_to_f64, scale_from_6dec};
+use crate::errors::{ContractError, Result, ValidationError};
 use crate::hft::state_cache::{CachedBounds, CachedFees};
-use crate::math::tick::{align_tick_down, align_tick_up, price_to_tick};
-use crate::types::{
-    Bounds, Fees, LiveDetails, OpenInterest, OpenMakerParams, OpenMakerQuote, OpenTakerParams,
-    OpenTakerQuote, PerpData, PerpSnapshot, PriceImpactPoint, SwapQuote,
-};
+use crate::types::{Bounds, Fees, OpenInterest, PerpData, PerpSnapshot};
 
-use super::{
-    PerpClient, SCALE_F64, funding_x96_to_daily, i24_to_i32, i32_to_i24, i128_from_i256, now_secs,
-    u24_to_u32, u32_to_u24,
-};
+use super::{PerpClient, SCALE_F64, i24_to_i32, now_secs, u24_to_u32};
+
+/// Funding/utilization rates are scaled by 1e18 per day on-chain.
+const WAD_F64: f64 = 1e18;
+
+/// Convert an `int88` per-day funding rate (scaled by 1e18) to a human-readable
+/// fraction. An 88-bit signed value always fits in `i128`.
+fn funding_per_day_to_f64(rate: alloy::primitives::Signed<88, 2>) -> f64 {
+    i128::try_from(rate).unwrap_or(0) as f64 / WAD_F64
+}
 
 impl PerpClient {
     // ── Read operations ──────────────────────────────────────────────
 
-    /// Get the full perp configuration, fees, and bounds for a market.
+    /// Cache key for this client's market: the `Perp` address left-padded to 32 bytes.
+    fn market_key(&self) -> [u8; 32] {
+        self.deployments.perp.into_word().0
+    }
+
+    /// Get the full perp configuration, fees, and bounds for the market.
     ///
-    /// Uses the [`crate::hft::state_cache::StateCache`] for fees and bounds (60s TTL). The perp
-    /// config itself is always fetched fresh (it's cheap and rarely changes).
-    pub async fn get_perp_config(&self, perp_id: B256) -> Result<PerpData> {
-        let contract = PerpManager::new(self.deployments.perp_manager, &self.provider);
+    /// Uses the [`crate::hft::state_cache::StateCache`] for fees and bounds (60s TTL).
+    pub async fn get_perp_config(&self) -> Result<PerpData> {
+        let perp = Perp::new(self.deployments.perp, &self.provider);
 
-        // Fetch perp config — sol!(rpc) returns the struct directly
-        let config: PerpManager::PerpConfig = contract.cfgs(perp_id).call().await?;
+        let modules = perp.modules().call().await?;
+        let pool_key = perp.poolKey().call().await?;
+        let pool_state = perp.poolState().call().await?;
+        let mark = price_x96_to_f64(pool_state.ammPrice)?;
 
-        // Zero beacon means the perp was never created
-        if config.beacon == Address::ZERO {
-            return Err(ContractError::PerpNotFound { perp_id }.into());
-        }
-
-        let beacon = config.beacon;
-
-        // Fetch mark price via TWAP (short window = ~current price)
-        let sqrt_price_x96: U256 = contract
-            .timeWeightedAvgSqrtPriceX96(perp_id, 1)
-            .call()
-            .await?;
-        let mark = sqrt_price_x96_to_price(sqrt_price_x96)?;
-
-        let fees = self.get_or_fetch_fees(&config).await?;
-        let bounds = self.get_or_fetch_bounds(&config).await?;
+        let fees = self.get_or_fetch_fees(modules.fees).await?;
+        let bounds = self.get_or_fetch_bounds(modules.marginRatios).await?;
 
         Ok(PerpData {
-            id: perp_id,
-            tick_spacing: i24_to_i32(config.key.tickSpacing),
+            perp: self.deployments.perp,
+            tick_spacing: i24_to_i32(pool_key.tickSpacing),
             mark,
-            beacon,
+            beacon: modules.beacon,
             bounds,
             fees,
         })
@@ -65,29 +66,26 @@ impl PerpClient {
     /// Get perp data: beacon, tick spacing, and current mark price.
     ///
     /// Lighter-weight than [`Self::get_perp_config`] — skips fees/bounds lookups.
-    pub async fn get_perp_data(&self, perp_id: B256) -> Result<(Address, i32, f64)> {
-        let contract = PerpManager::new(self.deployments.perp_manager, &self.provider);
-        let config: PerpManager::PerpConfig = contract.cfgs(perp_id).call().await?;
+    pub async fn get_perp_data(&self) -> Result<(Address, i32, f64)> {
+        let perp = Perp::new(self.deployments.perp, &self.provider);
+        let modules = perp.modules().call().await?;
+        let pool_key = perp.poolKey().call().await?;
+        let pool_state = perp.poolState().call().await?;
+        let mark = price_x96_to_f64(pool_state.ammPrice)?;
 
-        let sqrt_price_x96: U256 = contract
-            .timeWeightedAvgSqrtPriceX96(perp_id, 1)
-            .call()
-            .await?;
-        let mark = sqrt_price_x96_to_price(sqrt_price_x96)?;
-
-        Ok((config.beacon, i24_to_i32(config.key.tickSpacing), mark))
+        Ok((modules.beacon, i24_to_i32(pool_key.tickSpacing), mark))
     }
 
     /// Get an on-chain position by its NFT token ID.
     ///
     /// Returns the raw contract position struct. Use [`crate::math::position`]
     /// functions to compute derived values (entry price, PnL, etc.).
-    pub async fn get_position(&self, pos_id: U256) -> Result<PerpManager::Position> {
-        let contract = PerpManager::new(self.deployments.perp_manager, &self.provider);
-        let pos: PerpManager::Position = contract.positions(pos_id).call().await?;
+    pub async fn get_position(&self, pos_id: U256) -> Result<Position> {
+        let perp = Perp::new(self.deployments.perp, &self.provider);
+        let pos = perp.positions(pos_id).call().await?;
 
-        // Check if position exists (empty perpId = uninitialized)
-        if pos.perpId == B256::ZERO {
+        // A non-existent or burned position decodes to an all-zero struct.
+        if pos.margin == 0 && pos.delta.is_zero() {
             return Err(ContractError::PositionNotFound { pos_id }.into());
         }
 
@@ -102,8 +100,8 @@ impl PerpClient {
     /// **Note:** This is O(n) in total positions ever minted. For high-throughput
     /// use cases, prefer the bot API's position endpoints instead.
     pub async fn get_positions_by_owner(&self, owner: Address) -> Result<Vec<U256>> {
-        let contract = PerpManager::new(self.deployments.perp_manager, &self.provider);
-        let next_pos_id: U256 = contract.nextPosId().call().await?;
+        let perp = Perp::new(self.deployments.perp, &self.provider);
+        let next_pos_id: U256 = perp.nextPosId().call().await?;
 
         let total: u64 = next_pos_id
             .try_into()
@@ -120,7 +118,7 @@ impl PerpClient {
             // ownerOf reverts for burned/non-existent tokens — those
             // surface as contract errors, which we skip. Other transport
             // errors propagate so network failures aren't silently ignored.
-            match contract.ownerOf(pos_id).call().await {
+            match perp.ownerOf(pos_id).call().await {
                 Ok(addr) if addr == owner => owned.push(pos_id),
                 Ok(_) => {}
                 Err(e @ alloy::contract::Error::TransportError(_)) => return Err(e.into()),
@@ -131,36 +129,34 @@ impl PerpClient {
         Ok(owned)
     }
 
-    /// Get the current mark price for a perp (TWAP with 1-second lookback).
+    /// Get the current mark price for the market (AMM spot price).
     ///
-    /// Uses the fast cache layer (2s TTL).
-    pub async fn get_mark_price(&self, perp_id: B256) -> Result<f64> {
+    /// Reads the live Uniswap V4 pool price via `poolState`. Uses the fast
+    /// cache layer (2s TTL).
+    pub async fn get_mark_price(&self) -> Result<f64> {
         let now_ts = now_secs();
-        let perp_bytes: [u8; 32] = perp_id.into();
+        let key = self.market_key();
 
         // Check cache
         {
             let cache = self.state_cache.lock().unwrap();
-            if let Some(price) = cache.get_mark_price(&perp_bytes, now_ts) {
-                tracing::trace!(%perp_id, price, "mark price cache hit");
+            if let Some(price) = cache.get_mark_price(&key, now_ts) {
+                tracing::trace!(price, "mark price cache hit");
                 return Ok(price);
             }
         }
 
         // Fetch from chain
-        let contract = PerpManager::new(self.deployments.perp_manager, &self.provider);
-        let sqrt_price_x96: U256 = contract
-            .timeWeightedAvgSqrtPriceX96(perp_id, 1)
-            .call()
-            .await?;
-        let price = sqrt_price_x96_to_price(sqrt_price_x96)?;
+        let perp = Perp::new(self.deployments.perp, &self.provider);
+        let pool_state = perp.poolState().call().await?;
+        let price = price_x96_to_f64(pool_state.ammPrice)?;
 
-        tracing::debug!(%perp_id, price, "mark price fetched");
+        tracing::debug!(price, "mark price fetched");
 
         // Update cache
         {
             let mut cache = self.state_cache.lock().unwrap();
-            cache.put_mark_price(perp_bytes, price, now_ts);
+            cache.put_mark_price(key, price, now_ts);
         }
 
         Ok(price)
@@ -170,6 +166,9 @@ impl PerpClient {
     ///
     /// The beacon address is available from `PerpData.beacon` (returned by
     /// [`get_perp_config`](Self::get_perp_config)).
+    ///
+    /// Note: `index()` is a state-mutating function on-chain; this performs an
+    /// `eth_call` (simulation) and does not send a transaction.
     pub async fn get_index_price(&self, beacon: Address) -> Result<f64> {
         let contract = IBeacon::new(beacon, &self.provider);
         let index_x96: U256 = contract.index().call().await?;
@@ -185,428 +184,45 @@ impl PerpClient {
         Ok(index)
     }
 
-    /// Simulate closing a position to get live PnL, funding, and liquidation status.
-    ///
-    /// This is a read-only call (no transaction sent).
-    pub async fn get_live_details(&self, pos_id: U256) -> Result<LiveDetails> {
-        let contract = PerpManager::new(self.deployments.perp_manager, &self.provider);
-        let result = contract.quoteClosePosition(pos_id).call().await?;
+    /// Get taker open interest for the market.
+    pub async fn get_open_interest(&self) -> Result<OpenInterest> {
+        let perp = Perp::new(self.deployments.perp, &self.provider);
+        let oi = perp.openInterest().call().await?;
 
-        // Check for unexpected revert reason
-        if !result.unexpectedReason.is_empty() {
-            let reason = format_quote_revert("quoteClosePosition", &result.unexpectedReason);
-            return Err(ContractError::QuoteReverted { reason }.into());
-        }
-
-        let scale = SCALE_F64;
-        Ok(LiveDetails {
-            pnl: i128_from_i256(result.pnl) as f64 / scale,
-            funding_payment: i128_from_i256(result.funding) as f64 / scale,
-            effective_margin: i128_from_i256(result.netMargin) as f64 / scale,
-            is_liquidatable: result.wasLiquidated,
-        })
-    }
-
-    /// Get taker open interest for a perp market.
-    pub async fn get_open_interest(&self, perp_id: B256) -> Result<OpenInterest> {
-        let contract = PerpManager::new(self.deployments.perp_manager, &self.provider);
-        let result = contract.takerOpenInterest(perp_id).call().await?;
-
-        let scale = SCALE_F64;
         Ok(OpenInterest {
-            long_oi: result.longOI as f64 / scale,
-            short_oi: result.shortOI as f64 / scale,
+            long_oi: oi.long as f64 / SCALE_F64,
+            short_oi: oi.short as f64 / SCALE_F64,
         })
     }
 
-    /// Simulate opening a taker position without sending a transaction.
+    /// Get the current daily funding rate for the market.
     ///
-    /// Returns the perp and USD deltas that would result from the trade.
-    /// Useful for estimating price impact before committing capital.
-    pub async fn quote_open_taker(
-        &self,
-        perp_id: B256,
-        params: &OpenTakerParams,
-    ) -> Result<OpenTakerQuote> {
-        let margin_scaled = scale_to_6dec(params.margin)?;
-        if margin_scaled <= 0 {
-            return Err(ValidationError::InvalidMargin {
-                reason: format!("margin must be positive, got {}", params.margin),
-            }
-            .into());
-        }
-        let margin_ratio = leverage_to_margin_ratio(params.leverage)?;
-
-        let wire_params = PerpManager::OpenTakerPositionParams {
-            holder: self.address,
-            isLong: params.is_long,
-            margin: margin_scaled as u128,
-            marginRatio: u32_to_u24(margin_ratio),
-            unspecifiedAmountLimit: params.unspecified_amount_limit,
-        };
-
-        let contract = PerpManager::new(self.deployments.perp_manager, &self.provider);
-        let result = contract
-            .quoteOpenTakerPosition(perp_id, wire_params)
-            .call()
-            .await?;
-
-        if !result.unexpectedReason.is_empty() {
-            let reason = format_quote_revert("quoteOpenTakerPosition", &result.unexpectedReason);
-            return Err(ContractError::QuoteReverted { reason }.into());
-        }
-
-        let scale = SCALE_F64;
-        Ok(OpenTakerQuote {
-            perp_delta: i128_from_i256(result.perpDelta) as f64 / scale,
-            usd_delta: i128_from_i256(result.usdDelta) as f64 / scale,
-        })
-    }
-
-    /// Simulate opening a maker (LP) position without sending a transaction.
-    ///
-    /// Returns the perp and USD deltas that would result from the position.
-    pub async fn quote_open_maker(
-        &self,
-        perp_id: B256,
-        params: &OpenMakerParams,
-    ) -> Result<OpenMakerQuote> {
-        let margin_scaled = scale_to_6dec(params.margin)?;
-        if margin_scaled <= 0 {
-            return Err(ValidationError::InvalidMargin {
-                reason: format!("margin must be positive, got {}", params.margin),
-            }
-            .into());
-        }
-
-        let tick_lower = align_tick_down(
-            price_to_tick(params.price_lower)?,
-            crate::constants::TICK_SPACING,
-        );
-        let tick_upper = align_tick_up(
-            price_to_tick(params.price_upper)?,
-            crate::constants::TICK_SPACING,
-        );
-
-        let wire_params = PerpManager::OpenMakerPositionParams {
-            holder: self.address,
-            margin: margin_scaled as u128,
-            tickLower: i32_to_i24(tick_lower),
-            tickUpper: i32_to_i24(tick_upper),
-            liquidity: alloy::primitives::Uint::<120, 2>::from(params.liquidity),
-            maxAmt0In: params.max_amt0_in,
-            maxAmt1In: params.max_amt1_in,
-        };
-
-        let contract = PerpManager::new(self.deployments.perp_manager, &self.provider);
-        let result = contract
-            .quoteOpenMakerPosition(perp_id, wire_params)
-            .call()
-            .await?;
-
-        if !result.unexpectedReason.is_empty() {
-            let reason = format_quote_revert("quoteOpenMakerPosition", &result.unexpectedReason);
-            return Err(ContractError::QuoteReverted { reason }.into());
-        }
-
-        let scale = SCALE_F64;
-        Ok(OpenMakerQuote {
-            perp_delta: i128_from_i256(result.perpDelta) as f64 / scale,
-            usd_delta: i128_from_i256(result.usdDelta) as f64 / scale,
-        })
-    }
-
-    /// Simulate a raw swap in a perp's Uniswap V4 pool without executing.
-    ///
-    /// This is the lowest-level quote — it simulates a single pool swap and
-    /// returns the resulting token deltas. Use this to estimate price impact
-    /// for a given trade size.
-    ///
-    /// # Arguments
-    ///
-    /// * `perp_id` — The perp market to quote against.
-    /// * `zero_for_one` — Swap direction: `true` sells token0 for token1.
-    /// * `is_exact_in` — `true` if `amount` is the exact input; `false` for exact output.
-    /// * `amount` — The swap amount (scaled to 6 decimals).
-    /// * `sqrt_price_limit_x96` — Price limit in sqrtPriceX96 format. Use `0` for no limit.
-    pub async fn quote_swap(
-        &self,
-        perp_id: B256,
-        zero_for_one: bool,
-        is_exact_in: bool,
-        amount: U256,
-        sqrt_price_limit_x96: U256,
-    ) -> Result<SwapQuote> {
-        let contract = PerpManager::new(self.deployments.perp_manager, &self.provider);
-        let sqrt_limit = alloy::primitives::Uint::<160, 3>::from(sqrt_price_limit_x96);
-        let result = contract
-            .quoteSwap(perp_id, zero_for_one, is_exact_in, amount, sqrt_limit)
-            .call()
-            .await?;
-
-        if !result.unexpectedReason.is_empty() {
-            let reason = format_quote_revert("quoteSwap", &result.unexpectedReason);
-            return Err(ContractError::QuoteReverted { reason }.into());
-        }
-
-        let scale = SCALE_F64;
-        Ok(SwapQuote {
-            perp_delta: i128_from_i256(result.perpDelta) as f64 / scale,
-            usd_delta: i128_from_i256(result.usdDelta) as f64 / scale,
-        })
-    }
-
-    /// Compute a price impact curve by simulating swaps at multiple sizes.
-    ///
-    /// Batches N `quoteSwap` calls into a single Multicall3 `eth_call` (1 RPC).
-    /// Each size is simulated as an exact-input swap with no price limit.
-    ///
-    /// `is_long` selects the swap direction: `true` for buying (long),
-    /// `false` for selling (short).
-    ///
-    /// `mark_price` is used as the reference for computing `impact_bps`.
-    /// Pass the current mark price from your market data cache.
-    ///
-    /// Returns one [`PriceImpactPoint`] per input size, in the same order.
-    /// Sizes where the swap reverts are omitted from the result.
-    pub async fn quote_price_impact_curve(
-        &self,
-        perp_id: B256,
-        is_long: bool,
-        sizes: &[f64],
-        mark_price: f64,
-    ) -> Result<Vec<PriceImpactPoint>> {
-        if sizes.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        let pm = self.deployments.perp_manager;
-        let zero_for_one = !is_long;
-        let sqrt_limit = alloy::primitives::Uint::<160, 3>::from(U256::ZERO);
-        let n = sizes.len();
-
-        let mut calls = Vec::with_capacity(n);
-        for &size in sizes {
-            let amount = U256::from(scale_to_6dec(size)? as u128);
-            let calldata = PerpManager::quoteSwapCall {
-                perpId: perp_id,
-                zeroForOne: zero_for_one,
-                isExactIn: true,
-                amount,
-                sqrtPriceLimitX96: sqrt_limit,
-            }
-            .abi_encode();
-            calls.push(IMulticall3::Call3 {
-                target: pm,
-                allowFailure: true,
-                callData: calldata.into(),
-            });
-        }
-
-        let multicall = IMulticall3::new(MULTICALL3, &self.provider);
-        let results = multicall.aggregate3(calls).call().await?;
-
-        if results.len() != n {
-            return Err(ContractError::MulticallFailed {
-                reason: format!(
-                    "price impact multicall returned {} results, expected {}",
-                    results.len(),
-                    n
-                ),
-            }
-            .into());
-        }
-
-        let scale = SCALE_F64;
-        let mut points = Vec::with_capacity(n);
-        for (i, result) in results.iter().enumerate() {
-            if !result.success {
-                continue;
-            }
-            let decoded =
-                <PerpManager::quoteSwapCall as SolCall>::abi_decode_returns(&result.returnData)
-                    .map_err(|e| ValidationError::DecodeFailed {
-                        context: format!("failed to decode quoteSwap result {i}: {e}"),
-                    })?;
-
-            if !decoded.unexpectedReason.is_empty() {
-                continue;
-            }
-
-            let perp_delta = i128_from_i256(decoded.perpDelta) as f64 / scale;
-            let usd_delta = i128_from_i256(decoded.usdDelta) as f64 / scale;
-
-            if let Some(point) =
-                PriceImpactPoint::from_swap(sizes[i], perp_delta, usd_delta, mark_price)
-            {
-                points.push(point);
-            }
-        }
-
-        Ok(points)
-    }
-
-    /// Find the largest trade size that stays below a price impact threshold.
-    ///
-    /// Two-phase search: a multicalled logarithmic scan to bracket the answer,
-    /// then a binary search within the bracket. The scan phase is one RPC
-    /// regardless of how many probe points it uses.
-    ///
-    /// `is_long` selects the swap direction: `true` for buying (long),
-    /// `false` for selling (short).
-    ///
-    /// `desired` controls the scan range:
-    /// - `Some(size)` — probe sizes scale with `size`, return `min(size, max_safe)`.
-    ///   Use this when the agent has a target trade size in mind.
-    /// - `None` — probe a wide logarithmic range (10 USD to 10M USD) to find
-    ///   the absolute maximum safe size with no cap.
-    ///
-    /// `mark_price` is the reference price for impact computation.
-    /// Returns 0.0 if even the smallest probe exceeds the threshold.
-    pub async fn max_safe_notional(
-        &self,
-        perp_id: B256,
-        is_long: bool,
-        desired: Option<f64>,
-        max_impact_bps: f64,
-        mark_price: f64,
-    ) -> Result<f64> {
-        // Build the probe set.
-        let probes: Vec<f64> = match desired {
-            Some(d) => {
-                // Logarithmic scan up to and including d.
-                vec![d / 64.0, d / 32.0, d / 16.0, d / 8.0, d / 4.0, d / 2.0, d]
-            }
-            None => {
-                // Wide scan from 10 USD to 10M USD.
-                vec![
-                    10.0,
-                    30.0,
-                    100.0,
-                    300.0,
-                    1_000.0,
-                    3_000.0,
-                    10_000.0,
-                    30_000.0,
-                    100_000.0,
-                    300_000.0,
-                    1_000_000.0,
-                    3_000_000.0,
-                    10_000_000.0,
-                ]
-            }
-        };
-
-        // Phase 1: batched scan to bracket the threshold.
-        let curve = self
-            .quote_price_impact_curve(perp_id, is_long, &probes, mark_price)
-            .await?;
-
-        // If desired is set and is itself safe, return it directly.
-        if let Some(d) = desired
-            && let Some(point) = curve.last()
-            && point.size >= d
-            && point.impact_bps <= max_impact_bps
-        {
-            return Ok(d);
-        }
-
-        // Find the bracket by iterating through the original probes in order.
-        // A probe is safe only if it's present in the curve AND below the
-        // threshold. A missing probe (skipped due to revert/decode failure) is
-        // treated as unsafe — gaps mean we can't trust larger sizes.
-        let mut lo = 0.0_f64;
-        let mut hi = desired.unwrap_or(10_000_000.0);
-        for &probe_size in &probes {
-            let point = curve.iter().find(|p| p.size == probe_size);
-            match point {
-                Some(p) if p.impact_bps <= max_impact_bps => {
-                    lo = probe_size;
-                }
-                _ => {
-                    // Either missing (failed probe) or above threshold.
-                    hi = probe_size;
-                    break;
-                }
-            }
-        }
-
-        if lo == 0.0 {
-            // Even the smallest probe is unsafe (or missing).
-            return Ok(0.0);
-        }
-
-        // Phase 2: binary search within the bracket.
-        // quote_swap reverts are treated as "unsafe" (tighten hi).
-        let zero_for_one = !is_long;
-        let sqrt_limit = U256::ZERO;
-        let min_step = 1.0; // 1 USD minimum granularity
-
-        for _ in 0..10 {
-            if (hi - lo) < min_step {
-                break;
-            }
-            let mid = (lo + hi) / 2.0;
-            let quote_result = self
-                .quote_swap(
-                    perp_id,
-                    zero_for_one,
-                    true,
-                    U256::from(scale_to_6dec(mid)? as u128),
-                    sqrt_limit,
-                )
-                .await;
-
-            match quote_result {
-                Err(_) => {
-                    // Revert at this size — treat as unsafe.
-                    hi = mid;
-                }
-                Ok(quote) => {
-                    match PriceImpactPoint::from_swap(
-                        mid,
-                        quote.perp_delta,
-                        quote.usd_delta,
-                        mark_price,
-                    ) {
-                        None => hi = mid,
-                        Some(p) if p.impact_bps <= max_impact_bps => lo = mid,
-                        Some(_) => hi = mid,
-                    }
-                }
-            }
-        }
-
-        Ok(lo)
-    }
-
-    /// Get the funding rate per second for a perp, converted to a daily rate.
-    ///
-    /// Uses the fast cache layer (2s TTL).
-    pub async fn get_funding_rate(&self, perp_id: B256) -> Result<f64> {
+    /// Reads `rates().fundingPerDay` (scaled by 1e18 per day). Positive means
+    /// long-exposed positions pay short-exposed positions. Uses the fast cache
+    /// layer (2s TTL).
+    pub async fn get_funding_rate(&self) -> Result<f64> {
         let now_ts = now_secs();
-        let perp_bytes: [u8; 32] = perp_id.into();
+        let key = self.market_key();
 
         // Check cache
         {
             let cache = self.state_cache.lock().unwrap();
-            if let Some(rate) = cache.get_funding_rate(&perp_bytes, now_ts) {
-                tracing::trace!(%perp_id, rate, "funding rate cache hit");
+            if let Some(rate) = cache.get_funding_rate(&key, now_ts) {
+                tracing::trace!(rate, "funding rate cache hit");
                 return Ok(rate);
             }
         }
 
-        let contract = PerpManager::new(self.deployments.perp_manager, &self.provider);
-        let funding_x96: I256 = contract.fundingPerSecondX96(perp_id).call().await?;
+        let perp = Perp::new(self.deployments.perp, &self.provider);
+        let rates = perp.rates().call().await?;
+        let daily_rate = funding_per_day_to_f64(rates.fundingPerDay);
 
-        let daily_rate = funding_x96_to_daily(funding_x96);
-
-        tracing::debug!(%perp_id, daily_rate, "funding rate fetched");
+        tracing::debug!(daily_rate, "funding rate fetched");
 
         // Update cache
         {
             let mut cache = self.state_cache.lock().unwrap();
-            cache.put_funding_rate(perp_bytes, daily_rate, now_ts);
+            cache.put_funding_rate(key, daily_rate, now_ts);
         }
 
         Ok(daily_rate)
@@ -753,72 +369,60 @@ impl PerpClient {
         Ok(out)
     }
 
-    /// Get perp config and live market data in two multicalls (2 CUs total).
+    /// Get perp config and live market data in a single multicall (plus the
+    /// beacon index read).
     ///
-    /// Phase 1 multicalls `cfgs` + `timeWeightedAvgSqrtPriceX96` +
-    /// `fundingPerSecondX96` + `takerOpenInterest` against PerpManager
-    /// (4 reads → 1 CU). Phase 2 calls `index()` on the beacon returned
-    /// by phase 1 (1 CU).
+    /// Batches `modules` + `poolKey` + `poolState` + `rates` + `openInterest`
+    /// against the `Perp` contract (5 reads → 1 CU), then calls `index()` on the
+    /// beacon returned by the batch (1 CU). Replaces a startup sequence of
+    /// several individual RPCs.
     ///
-    /// Returns `(PerpData, PerpSnapshot)` — static config and live market
-    /// data. Replaces the typical startup sequence of 5+ individual RPCs.
-    pub async fn get_perp_snapshot(&self, perp_id: B256) -> Result<(PerpData, PerpSnapshot)> {
-        let pm = self.deployments.perp_manager;
+    /// Returns `(PerpData, PerpSnapshot)` — static config and live market data.
+    pub async fn get_perp_snapshot(&self) -> Result<(PerpData, PerpSnapshot)> {
+        let perp_addr = self.deployments.perp;
 
-        // Phase 1: multicall cfgs + mark + funding + OI against PerpManager
         let calls = vec![
             IMulticall3::Call3 {
-                target: pm,
+                target: perp_addr,
                 allowFailure: false,
-                callData: PerpManager::cfgsCall { perpId: perp_id }
-                    .abi_encode()
-                    .into(),
+                callData: Perp::modulesCall {}.abi_encode().into(),
             },
             IMulticall3::Call3 {
-                target: pm,
+                target: perp_addr,
                 allowFailure: false,
-                callData: PerpManager::timeWeightedAvgSqrtPriceX96Call {
-                    perpId: perp_id,
-                    lookbackWindow: 1,
-                }
-                .abi_encode()
-                .into(),
+                callData: Perp::poolKeyCall {}.abi_encode().into(),
             },
             IMulticall3::Call3 {
-                target: pm,
+                target: perp_addr,
                 allowFailure: false,
-                callData: PerpManager::fundingPerSecondX96Call { perpId: perp_id }
-                    .abi_encode()
-                    .into(),
+                callData: Perp::poolStateCall {}.abi_encode().into(),
             },
             IMulticall3::Call3 {
-                target: pm,
+                target: perp_addr,
                 allowFailure: false,
-                callData: PerpManager::takerOpenInterestCall { perpId: perp_id }
-                    .abi_encode()
-                    .into(),
+                callData: Perp::ratesCall {}.abi_encode().into(),
+            },
+            IMulticall3::Call3 {
+                target: perp_addr,
+                allowFailure: false,
+                callData: Perp::openInterestCall {}.abi_encode().into(),
             },
         ];
 
         let multicall = IMulticall3::new(MULTICALL3, &self.provider);
         let results = multicall.aggregate3(calls).call().await?;
 
-        if results.len() != 4 {
+        let call_names = ["modules", "poolKey", "poolState", "rates", "openInterest"];
+        if results.len() != call_names.len() {
             return Err(ContractError::MulticallFailed {
                 reason: format!(
-                    "perp snapshot multicall returned {} results, expected 4",
-                    results.len()
+                    "perp snapshot multicall returned {} results, expected {}",
+                    results.len(),
+                    call_names.len()
                 ),
             }
             .into());
         }
-
-        let call_names = [
-            "cfgs",
-            "timeWeightedAvgSqrtPriceX96",
-            "fundingPerSecondX96",
-            "takerOpenInterest",
-        ];
         for (i, name) in call_names.iter().enumerate() {
             if !results[i].success {
                 return Err(ContractError::MulticallFailed {
@@ -828,57 +432,40 @@ impl PerpClient {
             }
         }
 
-        // Decode cfgs
-        let config = PerpManager::PerpConfig::abi_decode(&results[0].returnData).map_err(|e| {
-            ValidationError::DecodeFailed {
-                context: format!("failed to decode PerpConfig: {e}"),
-            }
-        })?;
-
-        if config.beacon == Address::ZERO {
-            return Err(ContractError::PerpNotFound { perp_id }.into());
-        }
-
-        // Decode mark price
-        let sqrt_price_x96 = U256::abi_decode(&results[1].returnData).map_err(|e| {
-            ValidationError::DecodeFailed {
-                context: format!("failed to decode mark price: {e}"),
-            }
-        })?;
-        let mark = sqrt_price_x96_to_price(sqrt_price_x96)?;
-
-        // Decode funding rate
-        let funding_x96 = I256::abi_decode(&results[2].returnData).map_err(|e| {
-            ValidationError::DecodeFailed {
-                context: format!("failed to decode funding rate: {e}"),
-            }
-        })?;
-        let funding_rate_daily = funding_x96_to_daily(funding_x96);
-
-        // Decode OI — takerOpenInterest returns (uint128 longOI, uint128 shortOI)
-        let (long_oi, short_oi) =
-            <(u128, u128)>::abi_decode(&results[3].returnData).map_err(|e| {
-                ValidationError::DecodeFailed {
-                    context: format!("failed to decode open interest: {e}"),
-                }
-            })?;
-        let open_interest = OpenInterest {
-            long_oi: long_oi as f64 / SCALE_F64,
-            short_oi: short_oi as f64 / SCALE_F64,
+        let decode_err = |name: &str, e: alloy::sol_types::Error| ValidationError::DecodeFailed {
+            context: format!("failed to decode {name}: {e}"),
         };
 
-        // Phase 2: fetch index price from beacon (1 CU)
-        let index_price = self.get_index_price(config.beacon).await?;
+        let modules = Perp::modulesCall::abi_decode_returns(&results[0].returnData)
+            .map_err(|e| decode_err("modules", e))?;
+        let pool_key = Perp::poolKeyCall::abi_decode_returns(&results[1].returnData)
+            .map_err(|e| decode_err("poolKey", e))?;
+        let pool_state = Perp::poolStateCall::abi_decode_returns(&results[2].returnData)
+            .map_err(|e| decode_err("poolState", e))?;
+        let rates = Perp::ratesCall::abi_decode_returns(&results[3].returnData)
+            .map_err(|e| decode_err("rates", e))?;
+        let oi = Perp::openInterestCall::abi_decode_returns(&results[4].returnData)
+            .map_err(|e| decode_err("openInterest", e))?;
 
-        // Build PerpData (fetch fees/bounds from cache or chain)
-        let fees = self.get_or_fetch_fees(&config).await?;
-        let bounds = self.get_or_fetch_bounds(&config).await?;
+        let mark = price_x96_to_f64(pool_state.ammPrice)?;
+        let funding_rate_daily = funding_per_day_to_f64(rates.fundingPerDay);
+        let open_interest = OpenInterest {
+            long_oi: oi.long as f64 / SCALE_F64,
+            short_oi: oi.short as f64 / SCALE_F64,
+        };
+
+        // Index price from the beacon (1 CU).
+        let index_price = self.get_index_price(modules.beacon).await?;
+
+        // Fees/bounds (from cache or chain).
+        let fees = self.get_or_fetch_fees(modules.fees).await?;
+        let bounds = self.get_or_fetch_bounds(modules.marginRatios).await?;
 
         let perp_data = PerpData {
-            id: perp_id,
-            tick_spacing: i24_to_i32(config.key.tickSpacing),
+            perp: perp_addr,
+            tick_spacing: i24_to_i32(pool_key.tickSpacing),
             mark,
-            beacon: config.beacon,
+            beacon: modules.beacon,
             bounds,
             fees,
         };
@@ -890,72 +477,71 @@ impl PerpClient {
             open_interest,
         };
 
-        tracing::debug!(%perp_id, "perp snapshot fetched via multicall");
+        tracing::debug!("perp snapshot fetched via multicall");
         Ok((perp_data, snapshot))
     }
 
     // ── Cache helpers ───────────────────────────────────────────────
 
-    /// Get fees from cache or fetch from chain.
-    async fn get_or_fetch_fees(&self, config: &PerpManager::PerpConfig) -> Result<Fees> {
+    /// Get fees from cache or fetch from the `IFees` module at `fees_addr`.
+    async fn get_or_fetch_fees(&self, fees_addr: Address) -> Result<Fees> {
         let now_ts = now_secs();
-        let fees_addr: [u8; 20] = config.fees.into();
+        let key: [u8; 20] = fees_addr.into();
 
         let cached = {
             let cache = self.state_cache.lock().unwrap();
-            cache.get_fees(&fees_addr, now_ts).cloned()
+            cache.get_fees(&key, now_ts).cloned()
         };
 
         match cached {
             Some(cached) => Ok(Fees::from(cached)),
             None => {
-                let fees = self.fetch_fees(config).await?;
+                let fees = self.fetch_fees(fees_addr).await?;
                 let mut cache = self.state_cache.lock().unwrap();
-                cache.put_fees(fees_addr, CachedFees::from(fees), now_ts);
+                cache.put_fees(key, CachedFees::from(fees), now_ts);
                 Ok(fees)
             }
         }
     }
 
-    /// Get bounds from cache or fetch from chain.
-    async fn get_or_fetch_bounds(&self, config: &PerpManager::PerpConfig) -> Result<Bounds> {
+    /// Get bounds from cache or fetch from the `IMarginRatios` module at `ratios_addr`.
+    async fn get_or_fetch_bounds(&self, ratios_addr: Address) -> Result<Bounds> {
         let now_ts = now_secs();
-        let ratios_addr: [u8; 20] = config.marginRatios.into();
+        let key: [u8; 20] = ratios_addr.into();
 
         let cached = {
             let cache = self.state_cache.lock().unwrap();
-            cache.get_bounds(&ratios_addr, now_ts).cloned()
+            cache.get_bounds(&key, now_ts).cloned()
         };
 
         match cached {
             Some(cached) => Ok(Bounds::from(cached)),
             None => {
-                let bounds = self.fetch_bounds(config).await?;
+                let bounds = self.fetch_bounds(ratios_addr).await?;
                 let mut cache = self.state_cache.lock().unwrap();
-                cache.put_bounds(ratios_addr, CachedBounds::from(bounds), now_ts);
+                cache.put_bounds(key, CachedBounds::from(bounds), now_ts);
                 Ok(bounds)
             }
         }
     }
 
-    /// Fetch fees from the IFees module contract.
-    async fn fetch_fees(&self, config: &PerpManager::PerpConfig) -> Result<Fees> {
-        if config.fees == Address::ZERO {
+    /// Fetch fees from the `IFees` module contract.
+    async fn fetch_fees(&self, fees_addr: Address) -> Result<Fees> {
+        if fees_addr == Address::ZERO {
             return Err(ContractError::ModuleNotRegistered {
                 module: "IFees".into(),
             }
             .into());
         }
 
-        let fees_contract = IFees::new(config.fees, &self.provider);
+        let fees_contract = IFees::new(fees_addr, &self.provider);
 
-        let fee_result = fees_contract.fees(config.clone()).call().await?;
+        let fee_result = fees_contract.fees().call().await?;
         let c_fee = u24_to_u32(fee_result.cFee);
         let ins_fee = u24_to_u32(fee_result.insFee);
         let lp_fee = u24_to_u32(fee_result.lpFee);
 
-        let liq_result = fees_contract.liquidationFee(config.clone()).call().await?;
-        let liq_fee = u24_to_u32(liq_result);
+        let liq_fee = u24_to_u32(fees_contract.liqFee().call().await?);
 
         let scale = SCALE_F64;
         Ok(Fees {
@@ -966,37 +552,25 @@ impl PerpClient {
         })
     }
 
-    /// Fetch margin ratio bounds from the IMarginRatios module contract.
-    async fn fetch_bounds(&self, config: &PerpManager::PerpConfig) -> Result<Bounds> {
-        if config.marginRatios == Address::ZERO {
+    /// Fetch taker margin-ratio bounds from the `IMarginRatios` module contract.
+    async fn fetch_bounds(&self, ratios_addr: Address) -> Result<Bounds> {
+        if ratios_addr == Address::ZERO {
             return Err(ContractError::ModuleNotRegistered {
                 module: "IMarginRatios".into(),
             }
             .into());
         }
 
-        let ratios_contract = IMarginRatios::new(config.marginRatios, &self.provider);
-
-        let ratios: IMarginRatios::MarginRatios = ratios_contract
-            .marginRatios(config.clone(), false)
-            .call()
-            .await?;
+        let ratios_contract = IMarginRatios::new(ratios_addr, &self.provider);
+        let taker = ratios_contract.takerMarginRatios().call().await?;
 
         let scale = SCALE_F64;
         Ok(Bounds {
             min_margin: scale_from_6dec(crate::constants::MIN_OPENING_MARGIN as i128),
-            min_taker_leverage: margin_ratio_to_leverage(u24_to_u32(ratios.max))?,
-            max_taker_leverage: margin_ratio_to_leverage(u24_to_u32(ratios.min))?,
-            liquidation_taker_ratio: u24_to_u32(ratios.liq) as f64 / scale,
+            // The initial margin ratio is the minimum margin → maximum leverage.
+            min_taker_leverage: 1.0,
+            max_taker_leverage: margin_ratio_to_leverage(u24_to_u32(taker.init))?,
+            liquidation_taker_ratio: u24_to_u32(taker.liq) as f64 / scale,
         })
-    }
-}
-
-/// Format a quote revert reason with decoded error name.
-fn format_quote_revert(function_name: &str, revert_bytes: &[u8]) -> String {
-    let hex = format!("0x{}", alloy::primitives::hex::encode(revert_bytes));
-    match decode::decode_revert_data(&hex) {
-        Some((name, _)) => format!("{function_name} reverted: {name} ({hex})"),
-        None => format!("{function_name} reverted: {hex}"),
     }
 }
