@@ -40,15 +40,15 @@ fn parse_minted_token_id(
     })
 }
 
-/// Scale an f64 perp delta to 18-decimal I256.
+/// Scale an f64 perp delta to the accounting token's 6-decimal fixed point.
+///
+/// The perp token (Uniswap V4 `currency0`) is an `AccountingToken` with 6
+/// decimals — the same scaling as USD margin — so `perp_delta` uses `scale_to_6dec`,
+/// not 1e18.
 fn scale_perp_delta(delta: f64) -> Result<I256> {
-    let scaled = (delta * 1e18) as i128;
-    I256::try_from(scaled).map_err(|_| {
-        ValidationError::Overflow {
-            context: format!("perp_delta {} overflows I256", delta),
-        }
-        .into()
-    })
+    let scaled = scale_to_6dec(delta)?;
+    // An i128 always fits in I256.
+    Ok(I256::try_from(scaled).expect("i128 fits in I256"))
 }
 
 impl PerpClient {

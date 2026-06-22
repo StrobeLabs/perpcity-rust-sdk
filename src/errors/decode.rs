@@ -66,6 +66,11 @@ fn name_for_selector(selector: [u8; 4]) -> Option<&'static str> {
             "StartingPriceTooHigh",
         ),
         (PerpFactory::EmaWindowTooLow::SELECTOR, "EmaWindowTooLow"),
+        // Solady SafeTransferLib (used throughout the contracts for USDC moves).
+        ([0x79, 0x39, 0xf4, 0x24], "TransferFromFailed"),
+        ([0x90, 0xb8, 0xec, 0x18], "TransferFailed"),
+        ([0x3e, 0x3f, 0x8f, 0x73], "ApproveFailed"),
+        ([0xb1, 0x2d, 0x13, 0xeb], "ETHTransferFailed"),
         // Standard Solidity errors.
         (ERROR_STRING_SELECTOR, "Error"),
         (PANIC_SELECTOR, "Panic"),

@@ -21,7 +21,9 @@ use perpcity_sdk::{
 
 // ── Deployed addresses (Arbitrum Sepolia) ──────────────────────────────
 
-const PERP: Address = address!("722b3Ab70078b8B90f25765d91D7A2519252e369");
+// CITI-NYC ("Citibike Active Trips: NYC") on Arbitrum Sepolia — currently the
+// only market with maker liquidity, so taker trades can fill.
+const PERP: Address = address!("6d4051Ffb71f391a5B4D8643a29Ec6F66F67df50");
 const USDC: Address = address!("75faf114eafb1BDbe2F0316DF893fd58CE46AA4d");
 const CHAIN_ID: u64 = 421614; // Arbitrum Sepolia
 
@@ -259,14 +261,21 @@ async fn open_and_close_taker_on_fork() {
     let oi = client.get_open_interest().await.unwrap();
     println!("OI — long: {}, short: {}", oi.long_oi, oi.short_oi);
 
-    // 8. Open a long taker position (10 USDC margin, 1.0 perp size)
+    // 8. Open a long taker position (10 USDC margin, small perp size).
+    //
+    // NOTE: against a real Circle USDC (FiatToken), the brute-forced
+    // `deal_usdc` storage write makes `balanceOf` read correctly but the
+    // transfer may still revert `TransferFromFailed` — funding spendable USDC
+    // on the fork needs an impersonated minter. Tracked separately; the
+    // binding/scaling/approval path up to the on-chain transfer is exercised.
     println!("\nOpening LONG with 10 USDC margin...");
     client.refresh_gas().await.unwrap();
 
+    // CITI-NYC mark ≈ 7340 with small maker capacity, so size tiny.
     let params = OpenTakerParams {
         margin: 10.0,
-        perp_delta: 1.0,
-        amt1_limit: 0,
+        perp_delta: 0.001,
+        amt1_limit: u128::MAX,
     };
 
     let open_result = client.open_taker(&params, Urgency::Normal).await.unwrap();
@@ -291,7 +300,7 @@ async fn open_and_close_taker_on_fork() {
             &AdjustTakerParams {
                 pos_id,
                 margin_delta: 0.0,
-                perp_delta: -0.5,
+                perp_delta: -0.0005,
                 amt1_limit: u128::MAX,
             },
             Urgency::Normal,
@@ -327,7 +336,7 @@ async fn open_and_close_taker_on_fork() {
             &AdjustTakerParams {
                 pos_id,
                 margin_delta: 0.0,
-                perp_delta: -0.5,
+                perp_delta: -0.0005,
                 amt1_limit: u128::MAX,
             },
             Urgency::Normal,
