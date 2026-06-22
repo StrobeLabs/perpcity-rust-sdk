@@ -44,12 +44,27 @@ fn name_for_selector(selector: [u8; 4]) -> Option<&'static str> {
         (Perp::TimelockNotExpired::SELECTOR, "TimelockNotExpired"),
         (Perp::UnauthorizedCaller::SELECTOR, "UnauthorizedCaller"),
         (Perp::PositionDoesNotExist::SELECTOR, "PositionDoesNotExist"),
-        (Perp::LongUtilizationExceeded::SELECTOR, "LongUtilizationExceeded"),
-        (Perp::ShortUtilizationExceeded::SELECTOR, "ShortUtilizationExceeded"),
-        (Perp::InsufficientLiquidityToFill::SELECTOR, "InsufficientLiquidityToFill"),
+        (
+            Perp::LongUtilizationExceeded::SELECTOR,
+            "LongUtilizationExceeded",
+        ),
+        (
+            Perp::ShortUtilizationExceeded::SELECTOR,
+            "ShortUtilizationExceeded",
+        ),
+        (
+            Perp::InsufficientLiquidityToFill::SELECTOR,
+            "InsufficientLiquidityToFill",
+        ),
         // PerpFactory errors (IPerpFactory). NotPoolManager is shared with Perp.
-        (PerpFactory::StartingPriceTooLow::SELECTOR, "StartingPriceTooLow"),
-        (PerpFactory::StartingPriceTooHigh::SELECTOR, "StartingPriceTooHigh"),
+        (
+            PerpFactory::StartingPriceTooLow::SELECTOR,
+            "StartingPriceTooLow",
+        ),
+        (
+            PerpFactory::StartingPriceTooHigh::SELECTOR,
+            "StartingPriceTooHigh",
+        ),
         (PerpFactory::EmaWindowTooLow::SELECTOR, "EmaWindowTooLow"),
         // Standard Solidity errors.
         (ERROR_STRING_SELECTOR, "Error"),

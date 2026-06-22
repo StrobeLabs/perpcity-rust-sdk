@@ -428,5 +428,4 @@ mod tests {
             assert_eq!(i24_to_i32(i24), v);
         }
     }
-
 }

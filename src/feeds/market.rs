@@ -54,11 +54,7 @@ impl MarketFeed {
     /// Creates a WebSocket log subscription filtered to the `perp` (market) and
     /// `beacon` contract addresses. The `Perp` address alone scopes the stream
     /// to this market; the beacon address adds its `IndexUpdated` events.
-    pub async fn subscribe(
-        ws: &WsManager,
-        perp: Address,
-        beacon: Address,
-    ) -> crate::Result<Self> {
+    pub async fn subscribe(ws: &WsManager, perp: Address, beacon: Address) -> crate::Result<Self> {
         let filter = Filter::new().address(vec![perp, beacon]);
         let rx = ws.subscribe_logs(filter).await?;
         tracing::debug!(%perp, %beacon, "market feed subscribed");

@@ -1,6 +1,6 @@
 //! Maker (LP) position with tick range on PerpCity.
 //!
-//! ** note that we can't actuall execute this strategy at the moment
+//! ** note that we can't actually execute the full lifecycle at the moment
 //! because makers are subject to a 7-day lockup.
 //!
 //! Demonstrates the maker flow:
@@ -8,8 +8,7 @@
 //! 2. Calculate a price range centered around the current mark
 //! 3. Estimate liquidity for the desired margin and range
 //! 4. Open a maker position
-//! 5. Monitor PnL and position details
-//! 6. Close when done
+//! 5. Read the raw position state
 //!
 //! Maker positions provide liquidity in a price range (like Uniswap V3 LP).
 //! They earn LP fees from taker trades that cross through their range, but
@@ -19,27 +18,26 @@
 //!
 //! ```bash
 //! # Set these in .env or export them:
-//! export RPC_URL="https://sepolia.base.org"
+//! export RPC_URL="https://sepolia-rollup.arbitrum.io/rpc"
 //! export PERPCITY_PRIVATE_KEY="0x..."
-//! export PERPCITY_MANAGER="0x..."
-//! export PERPCITY_PERP_ID="0x..."
+//! export PERPCITY_PERP="0x..."
+//! # optional:
+//! export PERPCITY_USDC="0x..."   # defaults to Arbitrum Sepolia USDC
 //! cargo run --example market_maker
 //! ```
 
 use std::env;
 use std::time::Duration;
 
-use alloy::primitives::{Address, B256, U256, address};
+use alloy::primitives::{Address, U256};
 use alloy::signers::local::PrivateKeySigner;
 
 use perpcity_sdk::math::liquidity::estimate_liquidity;
 use perpcity_sdk::math::tick::{align_tick_down, align_tick_up, price_to_tick};
 use perpcity_sdk::{
-    CloseParams, Deployments, HftTransport, OpenMakerParams, PerpClient, TransportConfig, Urgency,
+    ARBITRUM_SEPOLIA_USDC, Deployments, HftTransport, OpenMakerParams, PerpClient, TransportConfig,
+    Urgency,
 };
-
-/// Base Sepolia USDC address.
-const USDC: Address = address!("C1a5D4E99BB224713dd179eA9CA2Fa6600706210");
 
 /// How far above/below the current price to set the range, as a fraction.
 /// 0.05 = ±5% → a 10% total range.
@@ -56,32 +54,24 @@ fn load_signer() -> PrivateKeySigner {
 }
 
 fn load_deployments() -> Deployments {
-    let perp_manager: Address = env::var("PERPCITY_MANAGER")
-        .expect("PERPCITY_MANAGER must be set")
+    let perp: Address = env::var("PERPCITY_PERP")
+        .expect("PERPCITY_PERP must be set")
         .parse()
-        .expect("invalid PERPCITY_MANAGER address");
+        .expect("invalid PERPCITY_PERP address");
 
-    Deployments {
-        perp_manager,
-        usdc: USDC,
-        fees_module: None,
-        margin_ratios_module: None,
-        lockup_period_module: None,
-        sqrt_price_impact_limit_module: None,
-    }
-}
+    let usdc = env::var("PERPCITY_USDC")
+        .ok()
+        .map(|s| s.parse::<Address>().expect("invalid PERPCITY_USDC address"))
+        .unwrap_or(ARBITRUM_SEPOLIA_USDC);
 
-fn load_perp_id() -> B256 {
-    env::var("PERPCITY_PERP_ID")
-        .expect("PERPCITY_PERP_ID must be set")
-        .parse::<B256>()
-        .expect("invalid PERPCITY_PERP_ID")
+    Deployments { perp, usdc }
 }
 
 #[tokio::main]
 async fn main() -> perpcity_sdk::Result<()> {
     dotenvy::dotenv().ok();
-    let rpc_url = env::var("RPC_URL").unwrap_or_else(|_| "https://sepolia.base.org".into());
+    let rpc_url =
+        env::var("RPC_URL").unwrap_or_else(|_| "https://sepolia-rollup.arbitrum.io/rpc".into());
     let tick_spacing = perpcity_sdk::constants::TICK_SPACING;
 
     // ── Setup client ────────────────────────────────────────────────
@@ -91,8 +81,7 @@ async fn main() -> perpcity_sdk::Result<()> {
             .build()?,
     )?;
 
-    let client = PerpClient::new(transport, load_signer(), load_deployments(), 84532)?;
-    let perp_id = load_perp_id();
+    let client = PerpClient::new_arbitrum_sepolia(transport, load_signer(), load_deployments())?;
 
     println!("Market Maker — address: {}", client.address());
 
@@ -103,8 +92,8 @@ async fn main() -> perpcity_sdk::Result<()> {
     client.ensure_approval(U256::from(200_000_000u64)).await?;
 
     // ── Query market state ──────────────────────────────────────────
-    let mark = client.get_mark_price(perp_id).await?;
-    let perp_config = client.get_perp_config(perp_id).await?;
+    let mark = client.get_mark_price().await?;
+    let perp_config = client.get_perp_config().await?;
     let balance = client.get_usdc_balance().await?;
 
     println!("\n=== Market State ===");
@@ -165,65 +154,32 @@ async fn main() -> perpcity_sdk::Result<()> {
         max_amt1_in: u128::MAX, // no slippage limit on token1
     };
 
-    let position_id = client
-        .open_maker(perp_id, &params, Urgency::Normal)
-        .await?
-        .pos_id;
+    let position_id = client.open_maker(&params, Urgency::Normal).await?.pos_id;
     println!("Maker position opened! NFT ID: {position_id}");
 
-    // ── Monitor position ────────────────────────────────────────────
+    // ── Read position state ─────────────────────────────────────────
+    // `delta` is a packed Uniswap V4 BalanceDelta; `margin` is in USDC 6-dec.
+    // Price-impact / live PnL details deferred to the quoting stage — see issue #56.
     let pos = client.get_position(position_id).await?;
     println!("\n=== Position Details ===");
-    println!("  Margin:      {} (6-dec)", pos.margin);
-    println!("  Perp delta:  {}", pos.entryPerpDelta);
-    println!("  USD delta:   {}", pos.entryUsdDelta);
-
-    // Check live details
-    let live = client.get_live_details(position_id).await?;
-    println!("  PnL:         {:.6} USDC", live.pnl);
-    println!("  Funding:     {:.6} USDC", live.funding_payment);
-    println!("  Eff. margin: {:.6} USDC", live.effective_margin);
-    println!("  Liquidatable: {}", live.is_liquidatable);
+    println!("  Margin (6-dec): {}", pos.margin);
+    println!("  Packed delta:   {}", pos.delta);
 
     // ── Simulated monitoring loop ───────────────────────────────────
     //
     // In production, you'd subscribe to new blocks via WebSocket and
-    // refresh state on each block. Here we just poll a few times.
+    // refresh state on each block. Here we just poll the mark a few times.
     println!("\nMonitoring for 5 seconds...");
     for i in 1..=5 {
         tokio::time::sleep(Duration::from_secs(1)).await;
         // Invalidate fast cache to get fresh prices
         client.invalidate_fast_cache();
-        let mark = client.get_mark_price(perp_id).await?;
-        let live = client.get_live_details(position_id).await?;
-        println!(
-            "  [{i}/5] mark={mark:.6}  pnl={:.4}  margin={:.4}  liq={}",
-            live.pnl, live.effective_margin, live.is_liquidatable
-        );
+        let mark = client.get_mark_price().await?;
+        println!("  [{i}/5] mark={mark:.6}");
     }
 
-    // ── Close position ──────────────────────────────────────────────
-    println!("\nClosing maker position...");
-    client.refresh_gas().await?;
-
-    let close_result = client
-        .close_position(
-            position_id,
-            &CloseParams {
-                min_amt0_out: 0,
-                min_amt1_out: 0,
-                max_amt1_in: u128::MAX,
-            },
-            Urgency::Normal,
-        )
-        .await?;
-
-    println!("Closed! tx: {}", close_result.tx_hash);
-    match close_result.remaining_position_id {
-        Some(rem) => println!("  Partial close — remaining: {rem}"),
-        None => println!("  Fully closed."),
-    }
-
-    println!("\nDone.");
+    println!(
+        "\nDone. Note: this maker position is subject to a 7-day lockup before it can be closed."
+    );
     Ok(())
 }

@@ -16,6 +16,11 @@
 //! rates scaled by 1e18 per day. `BalanceDelta` packs `int128 amount0` (perp)
 //! and `int128 amount1` (USD) into an `int256`; positive = asset, negative = debt.
 
+// `sol!`-generated RPC methods mirror the Solidity arity; e.g.
+// `PerpFactory::createPerp` legitimately takes 7 params, which trips clippy's
+// `too_many_arguments` lint on generated code.
+#![allow(clippy::too_many_arguments)]
+
 use alloy::sol;
 
 sol! {

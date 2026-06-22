@@ -11,7 +11,7 @@
 //! [`MarketEvent::RatesAndEmasRefreshed`] / [`MarketEvent::CapacityUpdated`]
 //! events, so a consumer reconstructs live market state from the stream.
 //!
-//! Taker events carry a [`SwapResult`](crate::contracts::SwapResult) whose
+//! Taker events carry a [`SwapResult`] whose
 //! `delta` is a packed Uniswap V4 `BalanceDelta` (`int128 amount0` = perp,
 //! `int128 amount1` = USD). Internal X96/X128 accounting trackers
 //! (cumulatives, tick funding) are surfaced as raw on-chain integers to avoid

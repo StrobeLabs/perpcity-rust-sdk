@@ -1,10 +1,10 @@
 //! Integration test: subscribe to live market events via WebSocket.
 //!
-//! Connects to a Base Sepolia WebSocket endpoint and listens for
-//! PerpManager / Beacon events on the US Foreign Aggression perp.
+//! Connects to an Arbitrum Sepolia WebSocket endpoint and listens for
+//! `Perp` / `Beacon` events on a perp market.
 //!
 //! Requires:
-//! - `WS_URL` environment variable (e.g. `wss://base-sepolia.g.alchemy.com/v2/<key>`)
+//! - `WS_URL` environment variable (e.g. `wss://arb-sepolia.g.alchemy.com/v2/<key>`)
 //!
 //! Run with:
 //!
@@ -14,18 +14,16 @@
 
 use std::time::Duration;
 
-use alloy::primitives::{Address, B256, address};
+use alloy::primitives::{Address, address};
 
 use perpcity_sdk::feeds::MarketFeed;
 use perpcity_sdk::feeds::events::MarketEvent;
 use perpcity_sdk::transport::ws::{ReconnectConfig, WsManager};
 
-// ── Deployed addresses (Base Sepolia) ─────────────────────────────────
+// ── Deployed addresses (Arbitrum Sepolia) ─────────────────────────────
 
-const PERP_MANAGER: Address = address!("722b3Ab70078b8B90f25765d91D7A2519252e369");
+const PERP: Address = address!("722b3Ab70078b8B90f25765d91D7A2519252e369");
 const BEACON: Address = address!("5feae24d83c83fd6fdac0c1f82253aba06c21819");
-const PERP_ID: B256 =
-    alloy::primitives::b256!("73bf6d0e03a284f42639516320642652ab022db0f82aff40e77bdd9996affe26");
 
 #[tokio::test]
 #[ignore] // Requires live WS endpoint — run with: cargo test --test ws_feed -- --ignored --nocapture
@@ -38,8 +36,8 @@ async fn subscribe_and_receive_event() {
         .expect("failed to connect WebSocket");
     println!("Connected.");
 
-    println!("Subscribing to events for perp {PERP_ID}...");
-    let mut feed = MarketFeed::subscribe(&ws, PERP_MANAGER, BEACON, PERP_ID)
+    println!("Subscribing to events for perp {PERP}...");
+    let mut feed = MarketFeed::subscribe(&ws, PERP, BEACON)
         .await
         .expect("failed to subscribe");
     println!("Subscribed. Waiting for events (timeout: 120s)...\n");
@@ -49,33 +47,29 @@ async fn subscribe_and_receive_event() {
         Ok(Some(event)) => {
             println!("Received event:");
             match &event {
-                MarketEvent::PositionOpened {
-                    mark_price,
-                    pos_id,
-                    is_maker,
-                    ..
-                } => {
+                MarketEvent::TakerOpened { pos_id, swap } => {
                     println!(
-                        "  PositionOpened — mark: {mark_price}, pos_id: {pos_id}, maker: {is_maker}"
+                        "  TakerOpened — pos_id: {pos_id}, amm_price: {}",
+                        swap.amm_price
                     );
                 }
-                MarketEvent::NotionalAdjusted {
-                    mark_price, pos_id, ..
-                } => {
-                    println!("  NotionalAdjusted — mark: {mark_price}, pos_id: {pos_id}");
+                MarketEvent::MakerOpened { pos_id } => {
+                    println!("  MakerOpened — pos_id: {pos_id}");
                 }
-                MarketEvent::PositionClosed {
-                    mark_price,
-                    pos_id,
-                    was_liquidated,
-                    ..
-                } => {
+                MarketEvent::TakerClosed { pos_id, swap, .. } => {
                     println!(
-                        "  PositionClosed — mark: {mark_price}, pos_id: {pos_id}, liquidated: {was_liquidated}"
+                        "  TakerClosed — pos_id: {pos_id}, amm_price: {}",
+                        swap.amm_price
                     );
+                }
+                MarketEvent::OpenInterestUpdated { long_oi, short_oi } => {
+                    println!("  OpenInterestUpdated — long: {long_oi}, short: {short_oi}");
                 }
                 MarketEvent::IndexUpdated { index } => {
                     println!("  IndexUpdated — index: {index}");
+                }
+                other => {
+                    println!("  {other:?}");
                 }
             }
             println!("\n=== Test passed! ===");
