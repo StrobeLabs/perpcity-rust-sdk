@@ -40,7 +40,7 @@ use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use alloy::network::{Ethereum, EthereumWallet};
-use alloy::primitives::{Address, I256, U256};
+use alloy::primitives::{Address, U256};
 use alloy::providers::{Provider, RootProvider};
 use alloy::rpc::client::RpcClient;
 use alloy::signers::local::PrivateKeySigner;
@@ -73,13 +73,6 @@ const MAX_APPROVAL: U256 = U256::MAX;
 
 /// SCALE_1E6 as f64, used for converting on-chain fixed-point values.
 const SCALE_F64: f64 = SCALE_1E6 as f64;
-
-/// Convert a Q96 fixed-point funding-per-second value to a daily rate.
-fn funding_x96_to_daily(funding_x96: I256) -> f64 {
-    let funding_i128 = i128_from_i256(funding_x96);
-    let rate_per_sec = funding_i128 as f64 / 2.0_f64.powi(96);
-    rate_per_sec * crate::constants::INTERVAL as f64
-}
 
 // ── From impls for cache ↔ client type bridging ────────────────────────
 
@@ -349,12 +342,6 @@ impl PerpClient {
 
 // ── Type conversion helpers for Alloy fixed-size types ───────────────
 
-/// Convert a u32 margin ratio to Alloy's uint24 type.
-#[inline]
-fn u32_to_u24(v: u32) -> alloy::primitives::Uint<24, 1> {
-    alloy::primitives::Uint::<24, 1>::from(v & 0xFF_FFFF)
-}
-
 /// Convert Alloy's uint24 to a u32.
 #[inline]
 fn u24_to_u32(v: alloy::primitives::Uint<24, 1>) -> u32 {
@@ -396,75 +383,18 @@ fn now_secs() -> u64 {
         .as_secs()
 }
 
-/// Convert an I256 to i128 (clamping to i128::MIN/MAX on overflow).
-#[inline]
-fn i128_from_i256(v: I256) -> i128 {
-    i128::try_from(v).unwrap_or_else(|_| {
-        if v.is_negative() {
-            i128::MIN
-        } else {
-            i128::MAX
-        }
-    })
-}
-
-/// Scale an unsigned `U256` from 6-decimal on-chain representation to `f64`.
-fn u256_to_f64_6dec(v: U256) -> f64 {
-    v.to::<u128>() as f64 / 1_000_000.0
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // ── i128_from_i256 tests ─────────────────────────────────────────
-
-    #[test]
-    fn i128_from_i256_small_values() {
-        assert_eq!(i128_from_i256(I256::ZERO), 0);
-        assert_eq!(i128_from_i256(I256::try_from(42i64).unwrap()), 42);
-        assert_eq!(i128_from_i256(I256::try_from(-100i64).unwrap()), -100);
-    }
-
-    #[test]
-    fn i128_from_i256_boundary_values() {
-        let max_i128 = I256::try_from(i128::MAX).unwrap();
-        assert_eq!(i128_from_i256(max_i128), i128::MAX);
-
-        let min_i128 = I256::try_from(i128::MIN).unwrap();
-        assert_eq!(i128_from_i256(min_i128), i128::MIN);
-    }
-
-    #[test]
-    fn i128_from_i256_overflow_clamps() {
-        assert_eq!(i128_from_i256(I256::MAX), i128::MAX);
-        assert_eq!(i128_from_i256(I256::MIN), i128::MIN);
-    }
-
-    #[test]
-    fn i128_from_i256_just_beyond_i128() {
-        let beyond = I256::try_from(i128::MAX).unwrap() + I256::try_from(1i64).unwrap();
-        assert_eq!(i128_from_i256(beyond), i128::MAX);
-
-        let below = I256::try_from(i128::MIN).unwrap() - I256::try_from(1i64).unwrap();
-        assert_eq!(i128_from_i256(below), i128::MIN);
-    }
 
     // ── Type conversion helpers ──────────────────────────────────────
 
     #[test]
     fn u24_roundtrip() {
         for v in [0u32, 1, 100_000, 0xFF_FFFF] {
-            let u24 = u32_to_u24(v);
+            let u24 = alloy::primitives::Uint::<24, 1>::from(v);
             assert_eq!(u24_to_u32(u24), v);
         }
-    }
-
-    #[test]
-    fn u24_truncates_overflow() {
-        // Values > 0xFFFFFF get masked
-        let u24 = u32_to_u24(0x1FF_FFFF);
-        assert_eq!(u24_to_u32(u24), 0xFF_FFFF);
     }
 
     #[test]
@@ -475,19 +405,4 @@ mod tests {
         }
     }
 
-    // ── Funding rate integration test ───────────────────────────────
-
-    #[test]
-    fn funding_rate_x96_conversion() {
-        let q96 = 2.0_f64.powi(96);
-        let rate_per_sec = 0.0001;
-        let x96_value = (rate_per_sec * q96) as i128;
-        let i256_val = I256::try_from(x96_value).unwrap();
-
-        let recovered = i128_from_i256(i256_val) as f64 / q96;
-        let daily = recovered * 86400.0;
-
-        assert!((recovered - rate_per_sec).abs() < 1e-10);
-        assert!((daily - 8.64).abs() < 0.001);
-    }
 }
