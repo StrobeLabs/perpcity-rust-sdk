@@ -255,6 +255,21 @@ sol! {
         event TakerLiquidated(uint256 indexed posId, uint128 perpAmount, uint256 liqFee);
         event TakerBackstopped(uint256 posId, uint128 marginIn, address posRecipient, int256 funding, uint256 utilFees);
 
+        // Market-state events
+        event CapacityUpdated(Capacity cap);
+        event OpenInterestUpdated(OpenInterest oi);
+        event CumulativesAccrued(Cumulatives cumls);
+        event RatesAndEmasRefreshed(Rates rates, PricePair emas);
+        event TicksCrossed(int24 startingTick, int24 endingTick, bool zeroForOne);
+        event TickInitialized(int24 tick, int256 cumlFundingOppX96, int256 cumlFundingDivSqrtPOppX96);
+        event TickDeleted(int24 tick);
+
+        // Solvency / insurance events
+        event Donated(address donor, uint128 amount, uint128 badDebt, uint80 insurance);
+        event BadDebtAccounted(uint256 badDebt, uint256 insuranceAfter, uint128 badDebtAfter);
+        event LossSocialized(uint256 originalAmount, uint256 feeCharged, uint128 badDebtAfter);
+        event MarginTransferred(int128 marginDelta, uint128 totalMargin);
+
         // ── Errors (from libraries/Errors.sol) ──────────────────────
 
         error Abdicated();
