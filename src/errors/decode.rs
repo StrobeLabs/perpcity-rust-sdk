@@ -1,56 +1,99 @@
 //! Contract error selector decoding.
 //!
-//! Maps 4-byte error selectors from PerpCity contracts (and Solady
-//! SafeTransferLib) to human-readable names. Ported from the-beaconator's
-//! `ContractErrorDecoder`.
+//! Maps 4-byte error selectors from the PerpCity contracts to human-readable
+//! names. The selector values are taken from the generated `sol!` bindings
+//! (`Perp` / `PerpFactory` error types), so they cannot drift from the frozen
+//! `Errors.sol`. The standard Solidity `Error(string)` and `Panic(uint256)`
+//! selectors are included as well.
+
+use alloy::sol_types::SolError;
+
+use crate::contracts::{Perp, PerpFactory};
+
+/// `Error(string)` — the standard Solidity revert-string selector.
+const ERROR_STRING_SELECTOR: [u8; 4] = [0x08, 0xc3, 0x79, 0xa0];
+/// `Panic(uint256)` — the standard Solidity panic selector.
+const PANIC_SELECTOR: [u8; 4] = [0x4e, 0x48, 0x7b, 0x71];
+
+/// Look up the name for a 4-byte error selector.
+///
+/// Driven off the generated binding selectors so the mapping stays in sync
+/// with the frozen contracts.
+fn name_for_selector(selector: [u8; 4]) -> Option<&'static str> {
+    // Perp errors (libraries/Errors.sol).
+    let table: &[([u8; 4], &str)] = &[
+        (Perp::Abdicated::SELECTOR, "Abdicated"),
+        (Perp::ZeroDelta::SELECTOR, "ZeroDelta"),
+        (Perp::MinAmtUnmet::SELECTOR, "MinAmtUnmet"),
+        (Perp::MarginTooLow::SELECTOR, "MarginTooLow"),
+        (Perp::NoSystemFunds::SELECTOR, "NoSystemFunds"),
+        (Perp::ZeroLiquidity::SELECTOR, "ZeroLiquidity"),
+        (Perp::MaxAmtExceeded::SELECTOR, "MaxAmtExceeded"),
+        (Perp::NegativeEquity::SELECTOR, "NegativeEquity"),
+        (Perp::NegativeMargin::SELECTOR, "NegativeMargin"),
+        (Perp::NotPoolManager::SELECTOR, "NotPoolManager"),
+        (Perp::NotLiquidatable::SELECTOR, "NotLiquidatable"),
+        (Perp::NonMakerPosition::SELECTOR, "NonMakerPosition"),
+        (Perp::NonTakerPosition::SELECTOR, "NonTakerPosition"),
+        (Perp::TicksOutOfBounds::SELECTOR, "TicksOutOfBounds"),
+        (Perp::DataNotTimelocked::SELECTOR, "DataNotTimelocked"),
+        (Perp::HealthNotImproved::SELECTOR, "HealthNotImproved"),
+        (Perp::MarginRatioTooLow::SELECTOR, "MarginRatioTooLow"),
+        (Perp::DataAlreadyPending::SELECTOR, "DataAlreadyPending"),
+        (Perp::PriceImpactTooHigh::SELECTOR, "PriceImpactTooHigh"),
+        (Perp::TimelockNotExpired::SELECTOR, "TimelockNotExpired"),
+        (Perp::UnauthorizedCaller::SELECTOR, "UnauthorizedCaller"),
+        (Perp::PositionDoesNotExist::SELECTOR, "PositionDoesNotExist"),
+        (Perp::LongUtilizationExceeded::SELECTOR, "LongUtilizationExceeded"),
+        (Perp::ShortUtilizationExceeded::SELECTOR, "ShortUtilizationExceeded"),
+        (Perp::InsufficientLiquidityToFill::SELECTOR, "InsufficientLiquidityToFill"),
+        // PerpFactory errors (IPerpFactory). NotPoolManager is shared with Perp.
+        (PerpFactory::StartingPriceTooLow::SELECTOR, "StartingPriceTooLow"),
+        (PerpFactory::StartingPriceTooHigh::SELECTOR, "StartingPriceTooHigh"),
+        (PerpFactory::EmaWindowTooLow::SELECTOR, "EmaWindowTooLow"),
+        // Standard Solidity errors.
+        (ERROR_STRING_SELECTOR, "Error"),
+        (PANIC_SELECTOR, "Panic"),
+    ];
+
+    table
+        .iter()
+        .find(|(s, _)| *s == selector)
+        .map(|(_, name)| *name)
+}
 
 /// Decode a hex-encoded revert data string into an error name.
 ///
 /// `hex_data` must include the `0x` prefix and be at least 10 characters
-/// (4-byte selector). Returns `(error_name, selector)`.
+/// (4-byte selector). Returns `(error_name, selector)`. Unrecognized
+/// selectors decode to `"UnknownContractError"`.
 ///
 /// # Examples
 ///
 /// ```
 /// use perpcity_sdk::errors::decode::decode_revert_data;
 ///
-/// let (name, sel) = decode_revert_data("0xbcffc83f").unwrap();
-/// assert_eq!(name, "InvalidMarginRatio");
-/// assert_eq!(sel, "0xbcffc83f");
+/// // Standard Solidity `Error(string)` selector.
+/// let (name, sel) = decode_revert_data("0x08c379a0").unwrap();
+/// assert_eq!(name, "Error");
+/// assert_eq!(sel, "0x08c379a0");
 /// ```
 pub fn decode_revert_data(hex_data: &str) -> Option<(String, String)> {
     if hex_data.len() < 10 {
         return None;
     }
 
-    let selector = &hex_data[0..10];
-    let name = match selector {
-        "0x10074548" => "ZeroLiquidity",
-        "0x96bafbfd" => "ZeroNotional",
-        "0xd6acf910" => "TicksOutOfBounds",
-        "0x3a29e65e" => "InvalidMargin",
-        "0x8acc6d7f" => "InvalidMarginDelta",
-        "0x48f5c3ed" => "InvalidCaller",
-        "0xc7d26d72" => "PositionLocked",
-        "0x6f0f5899" => "ZeroDelta",
-        "0xbcffc83f" => "InvalidMarginRatio",
-        "0x2872ed04" => "FeesNotRegistered",
-        "0x3eea589d" => "MarginRatiosNotRegistered",
-        "0xd9f0aeaf" => "LockupPeriodNotRegistered",
-        "0x5140209c" => "SqrtPriceImpactLimitNotRegistered",
-        "0xfc5bee12" => "FeeTooLarge",
-        "0xc3f6bb4e" => "MakerNotAllowed",
-        "0x7884e2a9" => "BeaconNotRegistered",
-        "0x232ad152" => "PerpDoesNotExist",
-        "0x1d8648bc" => "StartingSqrtPriceTooLow",
-        "0x0947cb52" => "StartingSqrtPriceTooHigh",
-        "0x67cf2eaa" => "CouldNotFullyFill",
-        "0x24775e06" => "SafeCastOverflow",
-        "0x7939f424" => "TransferFromFailed",
-        _ => return Some(("UnknownContractError".into(), selector.into())),
-    };
+    let selector_str = &hex_data[0..10];
 
-    Some((name.into(), selector.into()))
+    // Parse the 8 hex digits after `0x` into a 4-byte selector.
+    let mut selector = [0u8; 4];
+    for (i, byte) in selector.iter_mut().enumerate() {
+        let start = 2 + i * 2;
+        *byte = u8::from_str_radix(&hex_data[start..start + 2], 16).ok()?;
+    }
+
+    let name = name_for_selector(selector).unwrap_or("UnknownContractError");
+    Some((name.into(), selector_str.into()))
 }
 
 /// Try to extract revert data from an Alloy error string.
@@ -59,8 +102,7 @@ pub fn decode_revert_data(hex_data: &str) -> Option<(String, String)> {
 /// Alloy uses for RPC error code 3 responses). Returns
 /// `(error_name, selector, full_revert_data)`.
 pub fn try_extract_revert(error: &str) -> Option<(String, String, Option<String>)> {
-    // Alloy format: `execution reverted, data: "0xbcffc83f"`
-    // or: `execution reverted, data: "0x7939f424"`
+    // Alloy format: `execution reverted, data: "0x...."`
     let data = if let Some(idx) = error.find("data: \"0x") {
         let start = idx + "data: \"".len();
         let end = error[start..].find('"').map(|i| start + i)?;
@@ -95,20 +137,29 @@ pub fn try_extract_revert(error: &str) -> Option<(String, String, Option<String>
 mod tests {
     use super::*;
 
+    /// Format a 4-byte selector as a `0x`-prefixed hex string.
+    fn sel_hex(selector: [u8; 4]) -> String {
+        format!("0x{}", alloy::primitives::hex::encode(selector))
+    }
+
     #[test]
-    fn decode_known_selectors() {
-        let cases = [
-            ("0xbcffc83f", "InvalidMarginRatio"),
-            ("0x7939f424", "TransferFromFailed"),
-            ("0x10074548", "ZeroLiquidity"),
-            ("0x67cf2eaa", "CouldNotFullyFill"),
-            ("0x3a29e65e", "InvalidMargin"),
-        ];
-        for (hex, expected_name) in cases {
-            let (name, sel) = decode_revert_data(hex).unwrap();
-            assert_eq!(name, expected_name);
-            assert_eq!(sel, hex);
-        }
+    fn decode_binding_selectors() {
+        // Driven off the generated bindings so this can't drift from Errors.sol.
+        let (name, _) = decode_revert_data(&sel_hex(Perp::ZeroDelta::SELECTOR)).unwrap();
+        assert_eq!(name, "ZeroDelta");
+
+        let (name, _) = decode_revert_data(&sel_hex(Perp::PositionDoesNotExist::SELECTOR)).unwrap();
+        assert_eq!(name, "PositionDoesNotExist");
+
+        let (name, _) =
+            decode_revert_data(&sel_hex(PerpFactory::StartingPriceTooLow::SELECTOR)).unwrap();
+        assert_eq!(name, "StartingPriceTooLow");
+    }
+
+    #[test]
+    fn decode_standard_solidity_errors() {
+        assert_eq!(decode_revert_data("0x08c379a0").unwrap().0, "Error");
+        assert_eq!(decode_revert_data("0x4e487b71").unwrap().0, "Panic");
     }
 
     #[test]
@@ -126,19 +177,25 @@ mod tests {
 
     #[test]
     fn extract_revert_from_alloy_error() {
-        let error = r#"server returned an error response: error code 3: execution reverted, data: "0xbcffc83f""#;
-        let (name, selector, data) = try_extract_revert(error).unwrap();
-        assert_eq!(name, "InvalidMarginRatio");
-        assert_eq!(selector, "0xbcffc83f");
+        let sel = sel_hex(Perp::ZeroDelta::SELECTOR);
+        let error = format!(
+            r#"server returned an error response: error code 3: execution reverted, data: "{sel}""#
+        );
+        let (name, selector, data) = try_extract_revert(&error).unwrap();
+        assert_eq!(name, "ZeroDelta");
+        assert_eq!(selector, sel);
         assert!(data.is_none()); // no extra params beyond selector
     }
 
     #[test]
     fn extract_revert_with_params() {
-        let error = r#"execution reverted, data: "0x24775e060000000000000000000000000000000000000000000000000000000000000042""#;
-        let (name, selector, data) = try_extract_revert(error).unwrap();
-        assert_eq!(name, "SafeCastOverflow");
-        assert_eq!(selector, "0x24775e06");
+        // A selector followed by 32 bytes of ABI-encoded params.
+        let sel = sel_hex(Perp::MarginTooLow::SELECTOR);
+        let params = "0".repeat(64);
+        let error = format!(r#"execution reverted, data: "{sel}{params}""#);
+        let (name, selector, data) = try_extract_revert(&error).unwrap();
+        assert_eq!(name, "MarginTooLow");
+        assert_eq!(selector, sel);
         assert!(data.is_some());
     }
 
