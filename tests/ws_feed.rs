@@ -22,8 +22,9 @@ use perpcity_sdk::transport::ws::{ReconnectConfig, WsManager};
 
 // ── Deployed addresses (Arbitrum Sepolia) ─────────────────────────────
 
-const PERP: Address = address!("722b3Ab70078b8B90f25765d91D7A2519252e369");
-const BEACON: Address = address!("5feae24d83c83fd6fdac0c1f82253aba06c21819");
+// CITI-NYC market on Arbitrum Sepolia and its beacon.
+const PERP: Address = address!("6d4051Ffb71f391a5B4D8643a29Ec6F66F67df50");
+const BEACON: Address = address!("8e7e8f46b95d44d2baee933c35d3e3e17dcc2009");
 
 #[tokio::test]
 #[ignore] // Requires live WS endpoint — run with: cargo test --test ws_feed -- --ignored --nocapture
