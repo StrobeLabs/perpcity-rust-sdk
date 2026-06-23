@@ -63,11 +63,19 @@ pub const ARBITRUM_CHAIN_ID: u64 = 42161;
 /// Arbitrum Sepolia (testnet) chain ID.
 pub const ARBITRUM_SEPOLIA_CHAIN_ID: u64 = 421614;
 
-/// Canonical USDC on Arbitrum One.
+/// Canonical Circle USDC on Arbitrum One.
 pub const ARBITRUM_USDC: Address = address!("af88d065e77c8cC2239327C5EDb3A432268e5831");
 
-/// USDC on Arbitrum Sepolia (testnet).
-pub const ARBITRUM_SEPOLIA_USDC: Address = address!("75faf114eafb1BDbe2F0316DF893fd58CE46AA4d");
+/// Collateral token used by the Arbitrum Sepolia deployment.
+///
+/// This is the test USDC the deployed contracts actually settle in
+/// (`ExternalAddresses.sol`), NOT Circle's testnet USDC (`0x75faf…`). It is a
+/// Solady-style ERC20 with an open `mint`.
+pub const ARBITRUM_SEPOLIA_USDC: Address = address!("BEF280BefeE2Cb28c20D1E4Cc1da999B4DA0f1fD");
+
+/// `PerpFactory` on Arbitrum Sepolia (the deployment markets are created from).
+pub const ARBITRUM_SEPOLIA_PERP_FACTORY: Address =
+    address!("a54F81e7BD5C0d52d6fdE2ba40d0B1123d53E7a7");
 
 /// Default gas cache TTL: 2 seconds.
 const DEFAULT_GAS_TTL_MS: u64 = 2_000;

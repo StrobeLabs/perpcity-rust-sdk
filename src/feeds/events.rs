@@ -94,7 +94,6 @@ pub struct MakerSettle {
 pub struct CumulativesInfo {
     pub funding_x96: I256,
     pub funding_div_sqrt_p_x96: I256,
-    pub lp_fee_growth_global_x128: U256,
     pub long_util_payments_x96: U256,
     pub short_util_payments_x96: U256,
     pub long_util_earnings_x96: U256,
@@ -351,7 +350,6 @@ pub fn decode_log(log: &Log) -> Option<MarketEvent> {
             cumulatives: CumulativesInfo {
                 funding_x96: c.fundingX96,
                 funding_div_sqrt_p_x96: c.fundingDivSqrtPX96,
-                lp_fee_growth_global_x128: c.lpFeeGrowthGlobalX128,
                 long_util_payments_x96: c.longUtilPaymentsX96,
                 short_util_payments_x96: c.shortUtilPaymentsX96,
                 long_util_earnings_x96: c.longUtilEarningsX96,

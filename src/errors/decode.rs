@@ -37,7 +37,6 @@ fn name_for_selector(selector: [u8; 4]) -> Option<&'static str> {
         (Perp::NonTakerPosition::SELECTOR, "NonTakerPosition"),
         (Perp::TicksOutOfBounds::SELECTOR, "TicksOutOfBounds"),
         (Perp::DataNotTimelocked::SELECTOR, "DataNotTimelocked"),
-        (Perp::HealthNotImproved::SELECTOR, "HealthNotImproved"),
         (Perp::MarginRatioTooLow::SELECTOR, "MarginRatioTooLow"),
         (Perp::DataAlreadyPending::SELECTOR, "DataAlreadyPending"),
         (Perp::PriceImpactTooHigh::SELECTOR, "PriceImpactTooHigh"),

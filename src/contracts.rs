@@ -1,9 +1,12 @@
 //! On-chain contract bindings generated via Alloy's `sol!` macro.
 //!
 //! Structs, events, errors, and function selectors are reconciled against the
-//! frozen, audited `perpcity-contracts/src/` (`Perp.sol`, `PerpFactory.sol`,
-//! `libraries/Structs.sol`, `libraries/Events.sol`, `libraries/Errors.sol`,
-//! `interfaces/modules/*`).
+//! **deployed** `perpcity-contracts` release `v0.2.1` (the version live on
+//! Arbitrum), NOT `main` HEAD — HEAD has post-release work (e.g. `Position`
+//! gained `initMarginRatio` in #176, plus `lpFeeGrowth*` fields and the
+//! `HealthNotImproved` error) that is not yet on-chain. Source: tag `v0.2.1`
+//! (`Perp.sol`, `libraries/Structs.sol`, `libraries/Events.sol`,
+//! `libraries/Errors.sol`, `interfaces/modules/*`).
 //!
 //! Architecture: `PerpFactory` creates `Perp` contracts. There is no
 //! `PerpManager` — each market is its own `Perp` contract (ERC721 for position
@@ -72,7 +75,6 @@ sol! {
     struct Cumulatives {
         int256 fundingX96;
         int256 fundingDivSqrtPX96;
-        uint256 lpFeeGrowthGlobalX128;
         uint256 longUtilPaymentsX96;
         uint256 shortUtilPaymentsX96;
         uint256 longUtilEarningsX96;
@@ -98,11 +100,10 @@ sol! {
         uint128 totalMargin;
     }
 
-    /// Tick-level funding + LP-fee growth info.
+    /// Tick-level funding info.
     struct TickInfo {
         int256 cumlFundingOppX96;
         int256 cumlFundingDivSqrtPOppX96;
-        uint256 lpFeeGrowthOutsideX128;
     }
 
     /// Module addresses for a Perp market.
@@ -120,7 +121,6 @@ sol! {
     struct Position {
         int256 delta;
         uint128 margin;
-        uint24 initMarginRatio;
         uint24 liqMarginRatio;
         uint24 backstopMarginRatio;
         int256 lastCumlFundingX96;
@@ -131,7 +131,6 @@ sol! {
         int24 tickLower;
         int24 tickUpper;
         uint128 liquidity;
-        uint256 lastLpFeeGrowthInsideX128;
         uint256 lastLongUtilEarningsX96;
         uint256 lastShortUtilEarningsX96;
         Capacity capacity;
@@ -292,7 +291,6 @@ sol! {
         error NonTakerPosition();
         error TicksOutOfBounds();
         error DataNotTimelocked();
-        error HealthNotImproved();
         error MarginRatioTooLow();
         error DataAlreadyPending();
         error PriceImpactTooHigh();
@@ -508,7 +506,7 @@ mod abi_lock {
         // Flat structs (no nested struct fields): exact match.
         assert_eq!(
             Position::eip712_encode_type().as_ref(),
-            "Position(int256 delta,uint128 margin,uint24 initMarginRatio,uint24 liqMarginRatio,uint24 backstopMarginRatio,int256 lastCumlFundingX96)"
+            "Position(int256 delta,uint128 margin,uint24 liqMarginRatio,uint24 backstopMarginRatio,int256 lastCumlFundingX96)"
         );
         assert_eq!(
             Taker::eip712_encode_type().as_ref(),
@@ -520,11 +518,11 @@ mod abi_lock {
         );
         assert_eq!(
             Cumulatives::eip712_encode_type().as_ref(),
-            "Cumulatives(int256 fundingX96,int256 fundingDivSqrtPX96,uint256 lpFeeGrowthGlobalX128,uint256 longUtilPaymentsX96,uint256 shortUtilPaymentsX96,uint256 longUtilEarningsX96,uint256 shortUtilEarningsX96)"
+            "Cumulatives(int256 fundingX96,int256 fundingDivSqrtPX96,uint256 longUtilPaymentsX96,uint256 shortUtilPaymentsX96,uint256 longUtilEarningsX96,uint256 shortUtilEarningsX96)"
         );
         assert_eq!(
             TickInfo::eip712_encode_type().as_ref(),
-            "TickInfo(int256 cumlFundingOppX96,int256 cumlFundingDivSqrtPOppX96,uint256 lpFeeGrowthOutsideX128)"
+            "TickInfo(int256 cumlFundingOppX96,int256 cumlFundingDivSqrtPOppX96)"
         );
         assert_eq!(
             FeeFund::eip712_encode_type().as_ref(),
@@ -580,7 +578,7 @@ mod abi_lock {
         // Nested structs: EIP-712 appends referenced type definitions, so lock
         // the primary field list with a prefix check.
         assert!(Maker::eip712_encode_type().starts_with(
-            "Maker(int24 tickLower,int24 tickUpper,uint128 liquidity,uint256 lastLpFeeGrowthInsideX128,uint256 lastLongUtilEarningsX96,uint256 lastShortUtilEarningsX96,Capacity capacity,MakerFunding lastCumlFunding)"
+            "Maker(int24 tickLower,int24 tickUpper,uint128 liquidity,uint256 lastLongUtilEarningsX96,uint256 lastShortUtilEarningsX96,Capacity capacity,MakerFunding lastCumlFunding)"
         ));
     }
 
