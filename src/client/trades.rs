@@ -181,7 +181,7 @@ impl PerpClient {
 
         let wire_params = crate::contracts::AdjustTakerParams {
             posId: params.pos_id,
-            marginDelta: margin_delta as i128,
+            marginDelta: margin_delta,
             perpDelta: perp_delta,
             amt1Limit: U256::from(params.amt1_limit),
         };
@@ -219,7 +219,7 @@ impl PerpClient {
 
         let wire_params = crate::contracts::AdjustMakerParams {
             posId: params.pos_id,
-            marginDelta: margin_delta as i128,
+            marginDelta: margin_delta,
             liquidityDelta: params.liquidity_delta,
             amt0Limit: U256::from(params.amt0_limit),
             amt1Limit: U256::from(params.amt1_limit),
