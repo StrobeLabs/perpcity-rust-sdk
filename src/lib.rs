@@ -1,7 +1,7 @@
 //! # PerpCity Rust SDK
 //!
 //! A Rust SDK for the [PerpCity](https://perpcity.com) perpetual futures
-//! protocol on Base L2.
+//! protocol on Arbitrum (mainnet and Arbitrum Sepolia testnet).
 //!
 //! ## Module overview
 //!
@@ -43,11 +43,17 @@ pub mod transport;
 pub mod types;
 
 #[doc(inline)]
-pub use client::{PerpClient, TxBuilder};
+pub use client::{
+    ARBITRUM_CHAIN_ID, ARBITRUM_SEPOLIA_CHAIN_ID, ARBITRUM_SEPOLIA_PERP_FACTORY,
+    ARBITRUM_SEPOLIA_USDC, ARBITRUM_USDC, PerpClient, TxBuilder,
+};
 
 #[doc(inline)]
 pub use contracts::{
-    IBeacon, IERC20, IFees, IMarginRatios, IMulticall3, PerpManager, PoolKey, SwapConfig,
+    AdjustMakerParams as ContractAdjustMakerParams, AdjustTakerParams as ContractAdjustTakerParams,
+    IBeacon, IERC20, IFees, IFunding, IMarginRatios, IMulticall3, IPriceImpact, IPricing, Modules,
+    OpenMakerParams as ContractOpenMakerParams, OpenTakerParams as ContractOpenTakerParams, Perp,
+    PerpFactory, PoolKey,
 };
 
 #[doc(inline)]
@@ -64,10 +70,9 @@ pub use transport::{config::TransportConfig, provider::HftTransport};
 
 #[doc(inline)]
 pub use types::{
-    AdjustMarginParams, AdjustMarginResult, AdjustNotionalParams, AdjustNotionalResult, Bounds,
-    CloseParams, CloseResult, Deployments, Fees, LiveDetails, OpenInterest, OpenMakerParams,
-    OpenMakerQuote, OpenResult, OpenTakerParams, OpenTakerQuote, PerpData, PerpSnapshot,
-    PriceImpactPoint, SwapQuote,
+    AdjustMakerParams, AdjustMakerResult, AdjustTakerParams, AdjustTakerResult, Bounds,
+    Deployments, Fees, OpenInterest, OpenMakerParams, OpenResult, OpenTakerParams, PerpData,
+    PerpSnapshot, PriceImpactPoint,
 };
 
 #[doc(inline)]

@@ -6,8 +6,9 @@
 //! ```bash
 //! export RPC_URL="http://localhost:8545"          # Anvil
 //! export PERPCITY_PRIVATE_KEY="ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
-//! export PERPCITY_MANAGER="0x..."
-//! export PERPCITY_PERP_ID="0x..."
+//! export PERPCITY_PERP="0x..."
+//! # optional:
+//! export PERPCITY_USDC="0x..."   # defaults to Arbitrum Sepolia USDC
 //! export RACE_ITERATIONS="10"
 //! cargo run --release --example race
 //! ```
@@ -15,12 +16,10 @@
 use std::env;
 use std::time::Instant;
 
-use alloy::primitives::{Address, B256, U256, address};
+use alloy::primitives::{Address, U256};
 use alloy::signers::local::PrivateKeySigner;
 
 use perpcity_sdk::*;
-
-const USDC: Address = address!("C1a5D4E99BB224713dd179eA9CA2Fa6600706210");
 
 fn env_or(key: &str, default: &str) -> String {
     env::var(key).unwrap_or_else(|_| default.into())
@@ -32,14 +31,14 @@ async fn main() -> Result<()> {
     let iterations: usize = env_or("RACE_ITERATIONS", "10").parse().unwrap();
 
     let private_key = env::var("PERPCITY_PRIVATE_KEY").expect("set PERPCITY_PRIVATE_KEY");
-    let manager: Address = env::var("PERPCITY_MANAGER")
-        .expect("set PERPCITY_MANAGER")
+    let perp: Address = env::var("PERPCITY_PERP")
+        .expect("set PERPCITY_PERP")
         .parse()
         .unwrap();
-    let perp_id: B256 = env::var("PERPCITY_PERP_ID")
-        .expect("set PERPCITY_PERP_ID")
-        .parse()
-        .unwrap();
+    let usdc = env::var("PERPCITY_USDC")
+        .ok()
+        .map(|s| s.parse::<Address>().expect("invalid PERPCITY_USDC address"))
+        .unwrap_or(ARBITRUM_SEPOLIA_USDC);
 
     let mut phase_times: Vec<(&str, f64)> = Vec::new();
     let race_start = Instant::now();
@@ -52,16 +51,8 @@ async fn main() -> Result<()> {
             .build()?,
     )?;
     let signer: PrivateKeySigner = private_key.parse().unwrap();
-    let deployments = Deployments {
-        perp_manager: manager,
-        usdc: USDC,
-        fees_module: None,
-        margin_ratios_module: None,
-        lockup_period_module: None,
-        sqrt_price_impact_limit_module: None,
-    };
-    // Base Sepolia chain ID = 84532
-    let client = PerpClient::new(transport, signer, deployments, 84532)?;
+    let deployments = Deployments { perp, usdc };
+    let client = PerpClient::new_arbitrum_sepolia(transport, signer, deployments)?;
     phase_times.push(("init", ms(t)));
 
     // ── Phase: sync_nonce ────────────────────────────────────────────
@@ -81,7 +72,7 @@ async fn main() -> Result<()> {
 
     // ── Phase: read_state ────────────────────────────────────────────
     let t = Instant::now();
-    let _config = client.get_perp_config(perp_id).await?;
+    let _config = client.get_perp_config().await?;
     phase_times.push(("read_state", ms(t)));
 
     // ── Trade iterations ─────────────────────────────────────────────
@@ -101,12 +92,10 @@ async fn main() -> Result<()> {
         let t = Instant::now();
         let result = client
             .open_taker(
-                perp_id,
                 &OpenTakerParams {
-                    is_long: true,
                     margin: 10.0,
-                    leverage: 2.0,
-                    unspecified_amount_limit: 0,
+                    perp_delta: 1.0,
+                    amt1_limit: 0,
                 },
                 Urgency::Normal,
             )

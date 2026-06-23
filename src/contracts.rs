@@ -1,9 +1,28 @@
 //! On-chain contract bindings generated via Alloy's `sol!` macro.
 //!
-//! Structs, events, errors, and function selectors are derived directly from
-//! `perpcity-contracts/src/interfaces/IPerpManager.sol` and related interfaces.
-//! The `sol!` macro produces ABI-compatible Rust types automatically — no
-//! manual encoding or decoding is needed.
+//! Structs, events, errors, and function selectors are reconciled against the
+//! **deployed** `perpcity-contracts` release `v0.2.1` (the version live on
+//! Arbitrum), NOT `main` HEAD — HEAD has post-release work (e.g. `Position`
+//! gained `initMarginRatio` in #176, plus `lpFeeGrowth*` fields and the
+//! `HealthNotImproved` error) that is not yet on-chain. Source: tag `v0.2.1`
+//! (`Perp.sol`, `libraries/Structs.sol`, `libraries/Events.sol`,
+//! `libraries/Errors.sol`, `interfaces/modules/*`).
+//!
+//! Architecture: `PerpFactory` creates `Perp` contracts. There is no
+//! `PerpManager` — each market is its own `Perp` contract (ERC721 for position
+//! NFTs), identified by its contract address. Positions are keyed by `posId`
+//! (the ERC721 token id) within that `Perp`. The SDK interacts with an
+//! individual `Perp` contract for all trading and reads.
+//!
+//! Units (from `Structs.sol`): prices scaled by 2^96; margin/USD/fees in USDC
+//! decimals (6); fee & margin-ratio params scaled by 1e6; funding & utilization
+//! rates scaled by 1e18 per day. `BalanceDelta` packs `int128 amount0` (perp)
+//! and `int128 amount1` (USD) into an `int256`; positive = asset, negative = debt.
+
+// `sol!`-generated RPC methods mirror the Solidity arity; e.g.
+// `PerpFactory::createPerp` legitimately takes 7 params, which trips clippy's
+// `too_many_arguments` lint on generated code.
+#![allow(clippy::too_many_arguments)]
 
 use alloy::sol;
 
@@ -12,8 +31,7 @@ sol! {
     //  Uniswap V4 types used by PerpCity
     // ═══════════════════════════════════════════════════════════════════
 
-    /// Identifies a Uniswap V4 pool (and PerpCity perp) by its constituent
-    /// parameters.
+    /// Identifies a Uniswap V4 pool.
     struct PoolKey {
         address currency0;
         address currency1;
@@ -22,372 +40,392 @@ sol! {
         address hooks;
     }
 
-    /// Swap configuration for quoting through the Uniswap V4 pool.
-    struct SwapConfig {
-        PoolKey poolKey;
-        bool isExactIn;
-        bool zeroForOne;
-        uint256 amountSpecified;
-        uint160 sqrtPriceLimitX96;
-        uint128 unspecifiedAmountLimit;
+    // ═══════════════════════════════════════════════════════════════════
+    //  Shared structs (from libraries/Structs.sol)
+    // ═══════════════════════════════════════════════════════════════════
+
+    /// Maker-specific funding tracking.
+    struct MakerFunding {
+        int256 belowX96;
+        int256 withinX96;
+        int256 divSqrtPriceWithinX96;
+    }
+
+    /// Long/short capacity.
+    struct Capacity {
+        uint128 long;
+        uint128 short;
+    }
+
+    /// AMM price + index price pair (also used for EMAs).
+    struct PricePair {
+        uint128 ammPrice;
+        uint128 index;
+    }
+
+    /// Funding and utilization rates.
+    struct Rates {
+        int88 fundingPerDay;
+        uint64 longUtilFeePerDay;
+        uint64 shortUtilFeePerDay;
+        uint40 lastTouch;
+    }
+
+    /// Cumulative funding and fee trackers.
+    struct Cumulatives {
+        int256 fundingX96;
+        int256 fundingDivSqrtPX96;
+        uint256 longUtilPaymentsX96;
+        uint256 shortUtilPaymentsX96;
+        uint256 longUtilEarningsX96;
+        uint256 shortUtilEarningsX96;
+    }
+
+    /// Long/short open interest.
+    struct OpenInterest {
+        uint128 long;
+        uint128 short;
+    }
+
+    /// Insurance + fee fund balances.
+    struct FeeFund {
+        uint80 insurance;
+        uint80 creatorFees;
+        uint80 protocolFees;
+    }
+
+    /// Bad debt + total margin tracking.
+    struct SolvencyState {
+        uint128 badDebt;
+        uint128 totalMargin;
+    }
+
+    /// Tick-level funding info.
+    struct TickInfo {
+        int256 cumlFundingOppX96;
+        int256 cumlFundingDivSqrtPOppX96;
+    }
+
+    /// Module addresses for a Perp market.
+    struct Modules {
+        address beacon;
+        address fees;
+        address funding;
+        address marginRatios;
+        address priceImpact;
+        address pricing;
+    }
+
+    /// Base position state shared by makers and takers.
+    /// `delta` is a packed `BalanceDelta` (`int128 amount0`, `int128 amount1`).
+    struct Position {
+        int256 delta;
+        uint128 margin;
+        uint24 liqMarginRatio;
+        uint24 backstopMarginRatio;
+        int256 lastCumlFundingX96;
+    }
+
+    /// Maker-specific state for an active liquidity range.
+    struct Maker {
+        int24 tickLower;
+        int24 tickUpper;
+        uint128 liquidity;
+        uint256 lastLongUtilEarningsX96;
+        uint256 lastShortUtilEarningsX96;
+        Capacity capacity;
+        MakerFunding lastCumlFunding;
+    }
+
+    /// Taker-specific checkpoints for utilization fees.
+    struct Taker {
+        uint256 lastLongUtilPaymentsX96;
+        uint256 lastShortUtilPaymentsX96;
+    }
+
+    /// Result of a taker swap plus fees charged on the swap's USD volume.
+    /// `delta` is a packed `BalanceDelta`.
+    struct SwapResult {
+        int256 delta;
+        uint256 ammPrice;
+        int256 totalFeeAmt;
+        uint256 lpFeeAmt;
+        uint256 protocolFeeAmt;
+        uint256 creatorFeeAmt;
+        uint256 insuranceFeeAmt;
+    }
+
+    // ── Parameter structs ───────────────────────────────────────────
+
+    struct OpenMakerParams {
+        address holder;
+        uint128 margin;
+        int24 tickLower;
+        int24 tickUpper;
+        uint128 liquidity;
+        uint256 maxAmt0In;
+        uint256 maxAmt1In;
+    }
+
+    struct AdjustMakerParams {
+        uint256 posId;
+        int128 marginDelta;
+        int128 liquidityDelta;
+        uint256 amt0Limit;
+        uint256 amt1Limit;
+    }
+
+    struct OpenTakerParams {
+        address holder;
+        uint128 margin;
+        int256 perpDelta;
+        uint256 amt1Limit;
+    }
+
+    struct AdjustTakerParams {
+        uint256 posId;
+        int128 marginDelta;
+        int256 perpDelta;
+        uint256 amt1Limit;
     }
 
     // ═══════════════════════════════════════════════════════════════════
-    //  Module interfaces
+    //  Module interfaces (from interfaces/modules/*)
     // ═══════════════════════════════════════════════════════════════════
 
-    /// Fee module — returns trading fees for a perp.
+    /// Fee module — returns trading fees.
     #[sol(rpc)]
     interface IFees {
-        function fees(PerpManager.PerpConfig calldata perp)
-            external
-            returns (uint24 cFee, uint24 insFee, uint24 lpFee);
-
-        function utilizationFee(PoolKey calldata key)
-            external
-            returns (uint24 fee);
-
-        function liquidationFee(PerpManager.PerpConfig calldata perp)
-            external
-            returns (uint24 fee);
+        function fees() external view returns (uint24 cFee, uint24 insFee, uint24 lpFee);
+        function utilFees(uint256 longUtilization, uint256 shortUtilization)
+            external view returns (uint64 longFee, uint64 shortFee);
+        function liqFee() external view returns (uint24);
     }
 
-    /// Margin ratio module — returns min/max/liquidation margin ratios.
+    /// Margin ratio module — returns init/liquidation/backstop ratios.
     #[sol(rpc)]
     interface IMarginRatios {
-        struct MarginRatios {
-            uint24 min;
-            uint24 max;
-            uint24 liq;
-        }
+        function makerMarginRatios() external view returns (uint24 init, uint24 liq, uint24 backstop);
+        function takerMarginRatios() external view returns (uint24 init, uint24 liq, uint24 backstop);
+    }
 
-        function marginRatios(PerpManager.PerpConfig calldata perp, bool isMaker)
-            external
-            returns (MarginRatios memory);
+    /// Pricing module — determines fair/mark price from AMM + index + EMAs.
+    #[sol(rpc)]
+    interface IPricing {
+        function fairPrice(uint256 ammPrice, uint256 index, uint256 emaAmmPrice, uint256 emaIndex)
+            external view returns (uint256);
+    }
+
+    /// Funding module — returns funding paid per day per unit of USD exposure.
+    #[sol(rpc)]
+    interface IFunding {
+        function funding(PricePair spots, PricePair emas) external view returns (int88);
+    }
+
+    /// Price impact module — returns sqrt price bounds per transaction.
+    #[sol(rpc)]
+    interface IPriceImpact {
+        function sqrtPriceBounds(uint256 ammPrice, uint256 index, uint256 emaAmmPrice, uint256 emaIndex)
+            external view returns (uint256 sqrtMin, uint256 sqrtMax);
     }
 
     // ═══════════════════════════════════════════════════════════════════
-    //  PerpManager — the core protocol contract
+    //  Perp — individual perpetual market contract (no PerpManager)
     // ═══════════════════════════════════════════════════════════════════
 
-    /// The PerpManager contract interface. Contains all structs, events,
-    /// errors, and function signatures from IPerpManager.sol and
-    /// PerpManager.sol.
+    /// The Perp contract interface. Each market is its own Perp contract.
+    /// Inherits ERC721 (position NFTs).
     #[sol(rpc)]
-    interface PerpManager {
-        // ── Structs ──────────────────────────────────────────────
+    interface Perp {
+        // ── Events (from libraries/Events.sol) ──────────────────────
 
-        struct PerpConfig {
-            PoolKey key;
-            address creator;
-            address vault;
-            address beacon;
-            address fees;
-            address marginRatios;
-            address lockupPeriod;
-            address sqrtPriceImpactLimit;
-        }
-
-        struct Position {
-            bytes32 perpId;
-            uint256 margin;
-            int256 entryPerpDelta;
-            int256 entryUsdDelta;
-            int256 entryCumlFundingX96;
-            uint256 entryCumlBadDebtX96;
-            uint256 entryCumlUtilizationX96;
-            IMarginRatios.MarginRatios marginRatios;
-            MakerDetails makerDetails;
-        }
-
-        struct MakerDetails {
-            uint32 unlockTimestamp;
-            int24 tickLower;
-            int24 tickUpper;
-            uint128 liquidity;
-            int256 entryCumlFundingBelowX96;
-            int256 entryCumlFundingWithinX96;
-            int256 entryCumlFundingDivSqrtPWithinX96;
-        }
-
-        struct CreatePerpParams {
-            address beacon;
-            address fees;
-            address marginRatios;
-            address lockupPeriod;
-            address sqrtPriceImpactLimit;
-            uint160 startingSqrtPriceX96;
-        }
-
-        struct OpenMakerPositionParams {
-            address holder;
-            uint128 margin;
-            uint120 liquidity;
-            int24 tickLower;
-            int24 tickUpper;
-            uint128 maxAmt0In;
-            uint128 maxAmt1In;
-        }
-
-        struct OpenTakerPositionParams {
-            address holder;
-            bool isLong;
-            uint128 margin;
-            uint24 marginRatio;
-            uint128 unspecifiedAmountLimit;
-        }
-
-        struct AdjustNotionalParams {
-            uint256 posId;
-            int256 usdDelta;
-            uint128 perpLimit;
-        }
-
-        struct AdjustMarginParams {
-            uint256 posId;
-            int256 marginDelta;
-        }
-
-        struct ClosePositionParams {
-            uint256 posId;
-            uint128 minAmt0Out;
-            uint128 minAmt1Out;
-            uint128 maxAmt1In;
-        }
-
-        // ── Events ───────────────────────────────────────────────
-
-        event PerpCreated(
-            bytes32 perpId,
-            address beacon,
-            uint256 sqrtPriceX96,
-            uint256 indexPriceX96
-        );
-
-        event PositionOpened(
-            bytes32 perpId,
-            uint256 sqrtPriceX96,
-            uint256 longOI,
-            uint256 shortOI,
+        event MakerOpened(uint256 posId);
+        event MakerAdjusted(uint256 posId, int256 funding, uint256 longUtilFees, uint256 shortUtilFees, uint256 lpFees);
+        event MakerConverted(uint256 posId, int256 funding, uint256 longUtilFees, uint256 shortUtilFees, uint256 lpFees);
+        event MakerClosed(uint256 posId, int256 funding, uint256 longUtilFees, uint256 shortUtilFees, uint256 lpFees);
+        event MakerLiquidated(uint256 indexed posId, uint128 liquidityAmount, uint256 liqFee);
+        event MakerBackstopped(
             uint256 posId,
-            bool isMaker,
-            int256 perpDelta,
-            int256 usdDelta,
-            int24 tickLower,
-            int24 tickUpper
-        );
-
-        event NotionalAdjusted(
-            bytes32 perpId,
-            uint256 sqrtPriceX96,
-            uint256 longOI,
-            uint256 shortOI,
-            uint256 posId,
-            int256 newPerpDelta,
-            // Settlement details
-            int256 swapPerpDelta,
-            int256 swapUsdDelta,
+            uint128 marginIn,
+            address posRecipient,
             int256 funding,
-            uint256 utilizationFee,
-            uint256 adl,
-            uint256 tradingFees
+            uint256 longUtilFees,
+            uint256 shortUtilFees,
+            uint256 lpFees
         );
+        event TakerOpened(uint256 posId, SwapResult sr);
+        event TakerAdjusted(uint256 posId, SwapResult sr, int256 funding, uint256 utilFees);
+        event TakerClosed(uint256 posId, SwapResult sr, int256 funding, uint256 utilFees);
+        event TakerLiquidated(uint256 indexed posId, uint128 perpAmount, uint256 liqFee);
+        event TakerBackstopped(uint256 posId, uint128 marginIn, address posRecipient, int256 funding, uint256 utilFees);
 
-        event MarginAdjusted(
-            bytes32 perpId,
-            uint256 posId,
-            uint256 newMargin
-        );
+        // Market-state events
+        event CapacityUpdated(Capacity cap);
+        event OpenInterestUpdated(OpenInterest oi);
+        event CumulativesAccrued(Cumulatives cumls);
+        event RatesAndEmasRefreshed(Rates rates, PricePair emas);
+        event TicksCrossed(int24 startingTick, int24 endingTick, bool zeroForOne);
+        event TickInitialized(int24 tick, int256 cumlFundingOppX96, int256 cumlFundingDivSqrtPOppX96);
+        event TickDeleted(int24 tick);
 
-        event PositionClosed(
-            bytes32 perpId,
-            uint256 sqrtPriceX96,
-            uint256 longOI,
-            uint256 shortOI,
-            uint256 posId,
-            bool wasMaker,
-            bool wasLiquidated,
-            bool wasPartialClose,
-            int256 exitPerpDelta,
-            int256 exitUsdDelta,
-            int24 tickLower,
-            int24 tickUpper,
-            // Settlement details
-            int256 netUsdDelta,
-            int256 funding,
-            uint256 utilizationFee,
-            uint256 adl,
-            uint256 liquidationFee,
-            int256 netMargin
-        );
+        // Solvency / insurance events
+        event Donated(address donor, uint128 amount, uint128 badDebt, uint80 insurance);
+        event BadDebtAccounted(uint256 badDebt, uint256 insuranceAfter, uint128 badDebtAfter);
+        event LossSocialized(uint256 originalAmount, uint256 feeCharged, uint128 badDebtAfter);
+        event MarginTransferred(int128 marginDelta, uint128 totalMargin);
 
-        event FeesModuleRegistered(address feesModule);
-        event MarginRatiosModuleRegistered(address marginRatiosModule);
-        event LockupPeriodModuleRegistered(address lockupPeriodModule);
-        event SqrtPriceImpactLimitModuleRegistered(address sqrtPriceImpactLimitModule);
+        // ── Errors (from libraries/Errors.sol) ──────────────────────
 
-        // ── Errors ───────────────────────────────────────────────
-
-        error ZeroLiquidity();
-        error ZeroNotional();
-        error TicksOutOfBounds();
-        error InvalidMargin();
-        error InvalidMarginDelta();
-        error InvalidCaller();
-        error PositionLocked();
+        error Abdicated();
         error ZeroDelta();
-        error InvalidMarginRatio();
-        error FeesNotRegistered();
-        error MarginRatiosNotRegistered();
-        error LockupPeriodNotRegistered();
-        error SqrtPriceImpactLimitNotRegistered();
-        error FeeTooLarge();
-        error MakerNotAllowed();
-        error BeaconNotRegistered();
-        error PerpDoesNotExist();
-        error StartingSqrtPriceTooLow();
-        error StartingSqrtPriceTooHigh();
-        error CouldNotFullyFill();
-        error MarkTooFarFromIndex();
+        error MinAmtUnmet();
+        error MarginTooLow();
+        error NoSystemFunds();
+        error ZeroLiquidity();
+        error MaxAmtExceeded();
+        error NegativeEquity();
+        error NegativeMargin();
+        error NotPoolManager();
+        error NotLiquidatable();
+        error NonMakerPosition();
+        error NonTakerPosition();
+        error TicksOutOfBounds();
+        error DataNotTimelocked();
+        error MarginRatioTooLow();
+        error DataAlreadyPending();
+        error PriceImpactTooHigh();
+        error TimelockNotExpired();
+        error UnauthorizedCaller();
+        error PositionDoesNotExist();
+        error LongUtilizationExceeded();
+        error ShortUtilizationExceeded();
+        error InsufficientLiquidityToFill();
 
-        // ── Perp functions ───────────────────────────────────────
+        // ── Position management ─────────────────────────────────────
 
-        /// Creates a new perpetual market.
-        function createPerp(CreatePerpParams calldata params)
-            external
-            returns (bytes32 perpId);
+        /// Open a maker (LP) position.
+        function openMaker(OpenMakerParams calldata params)
+            external returns (uint256 posId);
 
-        /// Opens a maker (LP) position in a perp.
-        function openMakerPos(bytes32 perpId, OpenMakerPositionParams calldata params)
-            external
-            returns (uint256 posId);
+        /// Adjust a maker position (margin, liquidity, or both).
+        /// Burns the position NFT if fully closed.
+        function adjustMaker(AdjustMakerParams calldata params) external;
 
-        /// Opens a taker (long/short) position in a perp.
-        function openTakerPos(bytes32 perpId, OpenTakerPositionParams calldata params)
-            external
-            returns (uint256 posId);
+        /// Liquidate an unhealthy maker position (`liquidityAmount` of the range).
+        function liquidateMaker(uint256 posId, address liquidationFeeRecipient, uint128 liquidityAmount) external;
 
-        /// Adjusts the notional size of a taker position.
-        function adjustNotional(AdjustNotionalParams calldata params) external;
+        /// Backstop a maker position approaching liquidation.
+        function backstopMaker(uint256 posId, uint128 marginIn, address positionRecipient) external;
 
-        /// Adds or removes margin from an open position.
-        function adjustMargin(AdjustMarginParams calldata params) external;
+        /// Open a taker (long/short) position.
+        /// `perpDelta` > 0 = long, < 0 = short.
+        function openTaker(OpenTakerParams calldata params)
+            external returns (uint256 posId);
 
-        /// Closes an open position (taker or maker).
-        function closePosition(ClosePositionParams calldata params) external;
+        /// Adjust a taker position (margin, size, or both). Close by passing
+        /// opposing `perpDelta`. Burns the position NFT if fully closed.
+        function adjustTaker(AdjustTakerParams calldata params) external;
 
-        /// Increases the oracle cardinality cap for a perp.
-        function increaseCardinalityCap(bytes32 perpId, uint16 newCardinalityCap) external;
+        /// Liquidate an unhealthy taker position (`perpAmount` of exposure).
+        function liquidateTaker(uint256 posId, address liquidationFeeRecipient, uint128 perpAmount) external;
 
-        // ── Module registration (owner only) ─────────────────────
+        /// Backstop a taker position approaching liquidation.
+        function backstopTaker(uint256 posId, uint128 marginIn, address positionRecipient) external;
 
-        function registerFeesModule(address feesModule) external;
-        function registerMarginRatiosModule(address marginRatiosModule) external;
-        function registerLockupPeriodModule(address lockupPeriodModule) external;
-        function registerSqrtPriceImpactLimitModule(address sqrtPriceImpactLimitModule) external;
+        // ── State maintenance ───────────────────────────────────────
 
-        // ── Module registration queries ──────────────────────────
+        /// Accrue funding and update rates without any position changes.
+        function touch() external;
 
-        function isFeesRegistered(address feesModule)
-            external view returns (bool);
-        function isMarginRatiosRegistered(address marginRatiosModule)
-            external view returns (bool);
-        function isLockupPeriodRegistered(address lockupPeriodModule)
-            external view returns (bool);
-        function isSqrtPriceImpactLimitRegistered(address sqrtPriceImpactLimitModule)
-            external view returns (bool);
+        /// Donate USDC to the insurance fund.
+        function donate(uint128 amount) external;
 
-        // ── Protocol fee functions (owner only) ──────────────────
+        // ── Fee collection ──────────────────────────────────────────
 
-        function setProtocolFee(uint24 newProtocolFee) external;
+        function collectCreatorFees(address recipient) external;
         function collectProtocolFees(address recipient) external;
+        function syncProtocolFee() external;
 
-        // ── View functions ───────────────────────────────────────
+        // ── View functions ──────────────────────────────────────────
 
-        /// Returns the perp configuration for a given pool ID.
-        function cfgs(bytes32 perpId) external view returns (PerpConfig memory);
+        function poolKey() external view returns (PoolKey memory);
 
-        /// Returns a position by its NFT token ID.
+        /// Live Uniswap V4 pool state (slot0 + liquidity). `ammPrice` is scaled by 2^96.
+        function poolState() external view returns (
+            int24 tick, uint160 sqrtPrice, uint256 ammPrice, uint128 liquidity
+        );
+
+        /// Module addresses (beacon, fees, funding, marginRatios, priceImpact, pricing).
+        function modules() external view returns (Modules memory);
+
+        /// Base position state.
         function positions(uint256 posId) external view returns (Position memory);
 
-        /// Returns the next position ID to be minted.
+        /// Maker-specific state for a position.
+        function makerDetails(uint256 posId) external view returns (Maker memory);
+
+        /// Taker-specific state for a position.
+        function takerDetails(uint256 posId) external view returns (Taker memory);
+
         function nextPosId() external view returns (uint256);
 
-        /// Returns the current protocol fee.
-        function protocolFee() external view returns (uint24);
+        function feeFund() external view returns (FeeFund memory);
 
-        /// Returns the oracle cardinality cap for a perp.
-        function cardinalityCap(bytes32 perpId) external view returns (uint16);
+        function solvencyState() external view returns (SolvencyState memory);
 
-        /// Returns the time-weighted average sqrtPrice, scaled by 2^96.
-        function timeWeightedAvgSqrtPriceX96(bytes32 perpId, uint32 lookbackWindow)
-            external view returns (uint256 twAvg);
+        function openInterest() external view returns (OpenInterest memory);
 
-        /// Returns funding rate per second, scaled by 2^96.
-        function fundingPerSecondX96(bytes32 perpId) external view returns (int256);
+        function capacity() external view returns (Capacity memory);
 
-        /// Returns utilization fee per second, scaled by 2^96.
-        function utilFeePerSecX96(bytes32 perpId) external view returns (uint256);
+        function rates() external view returns (Rates memory);
 
-        /// Returns the insurance fund balance for a perp.
-        function insurance(bytes32 perpId) external view returns (uint128);
+        function cumulatives() external view returns (Cumulatives memory);
 
-        /// Returns taker long and short open interest.
-        function takerOpenInterest(bytes32 perpId)
-            external view returns (uint128 longOI, uint128 shortOI);
+        // ── ERC721 ─────────────────────────────────────────────────
 
-        // ── Quote (simulation) functions ─────────────────────────
-
-        /// Simulates opening a maker position.
-        function quoteOpenMakerPosition(bytes32 perpId, OpenMakerPositionParams calldata params)
-            external
-            returns (bytes memory unexpectedReason, int256 perpDelta, int256 usdDelta);
-
-        /// Simulates opening a taker position.
-        function quoteOpenTakerPosition(bytes32 perpId, OpenTakerPositionParams calldata params)
-            external
-            returns (bytes memory unexpectedReason, int256 perpDelta, int256 usdDelta);
-
-        /// Simulates closing a position — returns PnL, funding, and liquidation status.
-        function quoteClosePosition(uint256 posId)
-            external
-            returns (
-                bytes memory unexpectedReason,
-                int256 pnl,
-                int256 funding,
-                int256 netMargin,
-                bool wasLiquidated,
-                uint256 notional
-            );
-
-        /// Simulates a swap in a perp's Uniswap V4 pool.
-        function quoteSwap(
-            bytes32 perpId,
-            bool zeroForOne,
-            bool isExactIn,
-            uint256 amount,
-            uint160 sqrtPriceLimitX96
-        )
-            external
-            returns (bytes memory unexpectedReason, int256 perpDelta, int256 usdDelta);
-
-        /// Simulates two sequential swaps.
-        function quoteTwoSwaps(bytes32 perpId, SwapConfig memory first, SwapConfig memory second)
-            external
-            returns (
-                bytes memory unexpectedReason,
-                int256 perpDelta1,
-                int256 usdDelta1,
-                int256 perpDelta2,
-                int256 usdDelta2
-            );
-
-        // ── ERC721 metadata ──────────────────────────────────────
-
-        function name() external pure returns (string memory);
-        function symbol() external pure returns (string memory);
-        function tokenURI(uint256 tokenId) external pure returns (string memory);
+        function name() external view returns (string memory);
+        function symbol() external view returns (string memory);
+        function tokenURI(uint256 tokenId) external view returns (string memory);
         function ownerOf(uint256 tokenId) external view returns (address);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    //  PerpFactory — creates Perp contracts
+    // ═══════════════════════════════════════════════════════════════════
+
+    #[sol(rpc)]
+    interface PerpFactory {
+        /// Emitted when a new perp market is created. `poolId` is a Uniswap V4 `PoolId` (bytes32).
+        event PerpCreated(
+            address perp,
+            bytes32 poolId,
+            Modules modules,
+            uint256 initialIndex,
+            uint24 emaWindow,
+            uint256 protocolFee,
+            uint160 sqrtPriceX96,
+            int24 tick,
+            address owner,
+            string name,
+            string symbol,
+            string tokenUri
+        );
+
+        error NotPoolManager();
+        error StartingPriceTooLow();
+        error StartingPriceTooHigh();
+        error EmaWindowTooLow();
+
+        /// Create a new perpetual market. Returns the Perp contract address.
+        function createPerp(
+            address owner,
+            string memory name,
+            string memory symbol,
+            string memory tokenUri,
+            Modules memory modules,
+            uint24 emaWindow,
+            bytes32 salt
+        ) external returns (address perp);
     }
 
     // ═══════════════════════════════════════════════════════════════════
@@ -395,38 +433,29 @@ sol! {
     // ═══════════════════════════════════════════════════════════════════
 
     /// Beacon interface — emits `IndexUpdated` when the oracle index changes.
-    /// Each perp has its own beacon (from `PerpConfig.beacon`).
+    /// Note: `index()` is state-mutating (not a pure view) per the beacons lib.
     #[sol(rpc)]
     interface IBeacon {
         event IndexUpdated(uint256 index);
-
-        function index() external view returns (uint256);
+        function index() external returns (uint256);
     }
 
     // ═══════════════════════════════════════════════════════════════════
     //  ERC20 (USDC) — minimal interface for approve + balanceOf
     // ═══════════════════════════════════════════════════════════════════
 
-    /// Minimal ERC20 interface for USDC interactions.
     #[sol(rpc)]
     interface IERC20 {
         function approve(address spender, uint256 amount)
-            external
-            returns (bool);
-
+            external returns (bool);
         function allowance(address owner, address spender)
             external view returns (uint256);
-
         function balanceOf(address account)
             external view returns (uint256);
-
         function transfer(address to, uint256 amount)
-            external
-            returns (bool);
-
+            external returns (bool);
         function transferFrom(address from, address to, uint256 amount)
-            external
-            returns (bool);
+            external returns (bool);
 
         event Transfer(address indexed from, address indexed to, uint256 value);
         event Approval(address indexed owner, address indexed spender, uint256 value);
@@ -436,12 +465,6 @@ sol! {
     //  Multicall3 — batch multiple contract reads into a single eth_call
     // ═══════════════════════════════════════════════════════════════════
 
-    /// Multicall3 interface for batching contract reads.
-    ///
-    /// Deployed at `0xcA11bde05977b3631167028862bE2a173976CA11` on all
-    /// major EVM chains (including Base mainnet and Base Sepolia).
-    /// A single `aggregate3` call executes N sub-calls and returns all
-    /// results — the RPC provider charges 1 CU regardless of N.
     #[sol(rpc)]
     interface IMulticall3 {
         struct Call3 {
@@ -460,5 +483,206 @@ sol! {
 
         function getEthBalance(address addr)
             external view returns (uint256 balance);
+    }
+}
+
+/// ABI-lock tests: assert the generated bindings match the frozen contracts.
+///
+/// These guard against the class of bug that motivated the binding rewrite —
+/// silently mis-shaped structs and events. Because a function selector is
+/// computed from its *input* types only, return-struct drift (e.g. a view
+/// losing a field) is NOT caught by a selector check; we lock struct field
+/// shapes via EIP-712 type strings, function selectors via `SIGNATURE`, and
+/// event `topic0` via the event `SIGNATURE`. Expected values are transcribed
+/// from `perpcity-contracts/src/` (`Structs.sol` / `Events.sol`).
+#[cfg(test)]
+mod abi_lock {
+    use super::*;
+    use alloy::sol_types::{SolCall, SolEvent, SolStruct};
+
+    /// Struct field shapes (names + types) — catches return-struct drift.
+    #[test]
+    fn struct_shapes_match_frozen_contracts() {
+        // Flat structs (no nested struct fields): exact match.
+        assert_eq!(
+            Position::eip712_encode_type().as_ref(),
+            "Position(int256 delta,uint128 margin,uint24 liqMarginRatio,uint24 backstopMarginRatio,int256 lastCumlFundingX96)"
+        );
+        assert_eq!(
+            Taker::eip712_encode_type().as_ref(),
+            "Taker(uint256 lastLongUtilPaymentsX96,uint256 lastShortUtilPaymentsX96)"
+        );
+        assert_eq!(
+            Rates::eip712_encode_type().as_ref(),
+            "Rates(int88 fundingPerDay,uint64 longUtilFeePerDay,uint64 shortUtilFeePerDay,uint40 lastTouch)"
+        );
+        assert_eq!(
+            Cumulatives::eip712_encode_type().as_ref(),
+            "Cumulatives(int256 fundingX96,int256 fundingDivSqrtPX96,uint256 longUtilPaymentsX96,uint256 shortUtilPaymentsX96,uint256 longUtilEarningsX96,uint256 shortUtilEarningsX96)"
+        );
+        assert_eq!(
+            TickInfo::eip712_encode_type().as_ref(),
+            "TickInfo(int256 cumlFundingOppX96,int256 cumlFundingDivSqrtPOppX96)"
+        );
+        assert_eq!(
+            FeeFund::eip712_encode_type().as_ref(),
+            "FeeFund(uint80 insurance,uint80 creatorFees,uint80 protocolFees)"
+        );
+        assert_eq!(
+            SolvencyState::eip712_encode_type().as_ref(),
+            "SolvencyState(uint128 badDebt,uint128 totalMargin)"
+        );
+        assert_eq!(
+            OpenInterest::eip712_encode_type().as_ref(),
+            "OpenInterest(uint128 long,uint128 short)"
+        );
+        assert_eq!(
+            Capacity::eip712_encode_type().as_ref(),
+            "Capacity(uint128 long,uint128 short)"
+        );
+        assert_eq!(
+            PricePair::eip712_encode_type().as_ref(),
+            "PricePair(uint128 ammPrice,uint128 index)"
+        );
+        assert_eq!(
+            MakerFunding::eip712_encode_type().as_ref(),
+            "MakerFunding(int256 belowX96,int256 withinX96,int256 divSqrtPriceWithinX96)"
+        );
+        assert_eq!(
+            Modules::eip712_encode_type().as_ref(),
+            "Modules(address beacon,address fees,address funding,address marginRatios,address priceImpact,address pricing)"
+        );
+        assert_eq!(
+            SwapResult::eip712_encode_type().as_ref(),
+            "SwapResult(int256 delta,uint256 ammPrice,int256 totalFeeAmt,uint256 lpFeeAmt,uint256 protocolFeeAmt,uint256 creatorFeeAmt,uint256 insuranceFeeAmt)"
+        );
+
+        // Param structs (the SDK builds these).
+        assert_eq!(
+            OpenTakerParams::eip712_encode_type().as_ref(),
+            "OpenTakerParams(address holder,uint128 margin,int256 perpDelta,uint256 amt1Limit)"
+        );
+        assert_eq!(
+            OpenMakerParams::eip712_encode_type().as_ref(),
+            "OpenMakerParams(address holder,uint128 margin,int24 tickLower,int24 tickUpper,uint128 liquidity,uint256 maxAmt0In,uint256 maxAmt1In)"
+        );
+        assert_eq!(
+            AdjustTakerParams::eip712_encode_type().as_ref(),
+            "AdjustTakerParams(uint256 posId,int128 marginDelta,int256 perpDelta,uint256 amt1Limit)"
+        );
+        assert_eq!(
+            AdjustMakerParams::eip712_encode_type().as_ref(),
+            "AdjustMakerParams(uint256 posId,int128 marginDelta,int128 liquidityDelta,uint256 amt0Limit,uint256 amt1Limit)"
+        );
+
+        // Nested structs: EIP-712 appends referenced type definitions, so lock
+        // the primary field list with a prefix check.
+        assert!(Maker::eip712_encode_type().starts_with(
+            "Maker(int24 tickLower,int24 tickUpper,uint128 liquidity,uint256 lastLongUtilEarningsX96,uint256 lastShortUtilEarningsX96,Capacity capacity,MakerFunding lastCumlFunding)"
+        ));
+    }
+
+    /// Function selectors (input types) — catches arity/param drift.
+    #[test]
+    fn function_selectors_match_frozen_contracts() {
+        assert_eq!(
+            Perp::openTakerCall::SIGNATURE,
+            "openTaker((address,uint128,int256,uint256))"
+        );
+        assert_eq!(
+            Perp::adjustTakerCall::SIGNATURE,
+            "adjustTaker((uint256,int128,int256,uint256))"
+        );
+        assert_eq!(
+            Perp::openMakerCall::SIGNATURE,
+            "openMaker((address,uint128,int24,int24,uint128,uint256,uint256))"
+        );
+        assert_eq!(
+            Perp::adjustMakerCall::SIGNATURE,
+            "adjustMaker((uint256,int128,int128,uint256,uint256))"
+        );
+        // The liquidate functions each take a third uint128 amount (was missing).
+        assert_eq!(
+            Perp::liquidateMakerCall::SIGNATURE,
+            "liquidateMaker(uint256,address,uint128)"
+        );
+        assert_eq!(
+            Perp::liquidateTakerCall::SIGNATURE,
+            "liquidateTaker(uint256,address,uint128)"
+        );
+        assert_eq!(
+            Perp::backstopMakerCall::SIGNATURE,
+            "backstopMaker(uint256,uint128,address)"
+        );
+        assert_eq!(
+            Perp::backstopTakerCall::SIGNATURE,
+            "backstopTaker(uint256,uint128,address)"
+        );
+        assert_eq!(Perp::positionsCall::SIGNATURE, "positions(uint256)");
+        assert_eq!(Perp::poolStateCall::SIGNATURE, "poolState()");
+        assert_eq!(Perp::modulesCall::SIGNATURE, "modules()");
+        assert_eq!(Perp::ratesCall::SIGNATURE, "rates()");
+        assert_eq!(Perp::cumulativesCall::SIGNATURE, "cumulatives()");
+    }
+
+    /// Event signatures (all params) — drives `topic0`; catches event drift.
+    #[test]
+    fn event_signatures_match_frozen_contracts() {
+        const SWAP_RESULT: &str = "(int256,uint256,int256,uint256,uint256,uint256,uint256)";
+
+        assert_eq!(Perp::MakerOpened::SIGNATURE, "MakerOpened(uint256)");
+        assert_eq!(
+            Perp::MakerAdjusted::SIGNATURE,
+            "MakerAdjusted(uint256,int256,uint256,uint256,uint256)"
+        );
+        assert_eq!(
+            Perp::MakerConverted::SIGNATURE,
+            "MakerConverted(uint256,int256,uint256,uint256,uint256)"
+        );
+        assert_eq!(
+            Perp::MakerClosed::SIGNATURE,
+            "MakerClosed(uint256,int256,uint256,uint256,uint256)"
+        );
+        assert_eq!(
+            Perp::MakerLiquidated::SIGNATURE,
+            "MakerLiquidated(uint256,uint128,uint256)"
+        );
+        assert_eq!(
+            Perp::MakerBackstopped::SIGNATURE,
+            "MakerBackstopped(uint256,uint128,address,int256,uint256,uint256,uint256)"
+        );
+        assert_eq!(
+            Perp::TakerOpened::SIGNATURE,
+            format!("TakerOpened(uint256,{SWAP_RESULT})")
+        );
+        assert_eq!(
+            Perp::TakerAdjusted::SIGNATURE,
+            format!("TakerAdjusted(uint256,{SWAP_RESULT},int256,uint256)")
+        );
+        assert_eq!(
+            Perp::TakerClosed::SIGNATURE,
+            format!("TakerClosed(uint256,{SWAP_RESULT},int256,uint256)")
+        );
+        assert_eq!(
+            Perp::TakerLiquidated::SIGNATURE,
+            "TakerLiquidated(uint256,uint128,uint256)"
+        );
+        assert_eq!(
+            Perp::TakerBackstopped::SIGNATURE,
+            "TakerBackstopped(uint256,uint128,address,int256,uint256)"
+        );
+        assert_eq!(
+            Perp::OpenInterestUpdated::SIGNATURE,
+            "OpenInterestUpdated((uint128,uint128))"
+        );
+        assert_eq!(
+            Perp::RatesAndEmasRefreshed::SIGNATURE,
+            "RatesAndEmasRefreshed((int88,uint64,uint64,uint40),(uint128,uint128))"
+        );
+        assert_eq!(
+            Perp::TicksCrossed::SIGNATURE,
+            "TicksCrossed(int24,int24,bool)"
+        );
+        assert_eq!(IBeacon::IndexUpdated::SIGNATURE, "IndexUpdated(uint256)");
     }
 }

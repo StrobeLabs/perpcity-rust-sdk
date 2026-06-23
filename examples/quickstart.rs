@@ -1,15 +1,16 @@
-//! Minimal PerpCity quickstart — open a long, check PnL, close it.
+//! Minimal PerpCity quickstart — open a long, then close it by reversing.
 //!
 //! ```bash
 //! # Set these in .env or export them:
-//! export RPC_URL="https://sepolia.base.org"
+//! export RPC_URL="https://sepolia-rollup.arbitrum.io/rpc"
 //! export PERPCITY_PRIVATE_KEY="0x..."
-//! export PERPCITY_MANAGER="0x..."
-//! export PERPCITY_PERP_ID="0x..."
+//! export PERPCITY_PERP="0x..."
+//! # optional:
+//! export PERPCITY_USDC="0x..."   # defaults to Arbitrum Sepolia USDC
 //! cargo run --release --example quickstart
 //! ```
 
-use alloy::primitives::{Address, B256, U256, address};
+use alloy::primitives::{Address, U256};
 use alloy::signers::local::PrivateKeySigner;
 use perpcity_sdk::*;
 use std::env;
@@ -21,7 +22,7 @@ fn env_or(key: &str, default: &str) -> String {
 #[tokio::main]
 async fn main() -> Result<()> {
     dotenvy::dotenv().ok();
-    let rpc_url = env_or("RPC_URL", "https://sepolia.base.org");
+    let rpc_url = env_or("RPC_URL", "https://sepolia-rollup.arbitrum.io/rpc");
 
     // -- Connect --
     let transport = HftTransport::new(
@@ -35,20 +36,20 @@ async fn main() -> Result<()> {
         .parse()
         .unwrap();
 
-    // Base Sepolia defaults
+    let usdc = env::var("PERPCITY_USDC")
+        .ok()
+        .map(|s| s.parse::<Address>().expect("invalid PERPCITY_USDC address"))
+        .unwrap_or(ARBITRUM_SEPOLIA_USDC);
+
     let deployments = Deployments {
-        perp_manager: env::var("PERPCITY_MANAGER")
-            .expect("set PERPCITY_MANAGER")
+        perp: env::var("PERPCITY_PERP")
+            .expect("set PERPCITY_PERP")
             .parse::<Address>()
             .unwrap(),
-        usdc: address!("C1a5D4E99BB224713dd179eA9CA2Fa6600706210"),
-        fees_module: None,
-        margin_ratios_module: None,
-        lockup_period_module: None,
-        sqrt_price_impact_limit_module: None,
+        usdc,
     };
 
-    let client = PerpClient::new(transport, signer, deployments, 84532)?;
+    let client = PerpClient::new_arbitrum_sepolia(transport, signer, deployments)?;
     println!("connected to {rpc_url}");
 
     // -- Warm caches --
@@ -57,38 +58,32 @@ async fn main() -> Result<()> {
     client.ensure_approval(U256::MAX).await?;
 
     // -- Read market state --
-    let perp_id: B256 = env::var("PERPCITY_PERP_ID")
-        .expect("set PERPCITY_PERP_ID")
-        .parse()
-        .unwrap();
-
-    let config = client.get_perp_config(perp_id).await?;
+    let config = client.get_perp_config().await?;
     println!("mark price: {:.2}", config.mark);
 
-    // -- Open a 2x long with 10 USDC margin --
-    let pos_id = client
+    // -- Open a long with 10 USDC margin (perp_delta > 0 = long) --
+    let open = client
         .open_taker(
-            perp_id,
             &OpenTakerParams {
-                is_long: true,
                 margin: 10.0,
-                leverage: 2.0,
-                unspecified_amount_limit: 0,
+                perp_delta: 1.0,
+                amt1_limit: 0,
             },
             Urgency::Normal,
         )
-        .await?
-        .pos_id;
+        .await?;
+    let pos_id = open.pos_id;
     println!("opened position {pos_id}");
 
-    // -- Close it --
+    // -- Close it by adjusting the taker with the opposing perp delta --
+    client.refresh_gas().await?;
     let result = client
-        .close_position(
-            pos_id,
-            &CloseParams {
-                min_amt0_out: 0,
-                min_amt1_out: 0,
-                max_amt1_in: u128::MAX,
+        .adjust_taker(
+            &AdjustTakerParams {
+                pos_id,
+                margin_delta: 0.0,
+                perp_delta: -1.0,
+                amt1_limit: u128::MAX,
             },
             Urgency::Normal,
         )

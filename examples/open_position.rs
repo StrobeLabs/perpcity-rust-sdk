@@ -7,31 +7,30 @@
 //! 4. Ensure USDC approval
 //! 5. Query market data (mark price, funding, OI)
 //! 6. Open a long taker position
-//! 7. Monitor position (PnL, funding, liquidation status)
-//! 8. Close the position
+//! 7. Read the position state
+//! 8. Close the position by reversing the taker delta
 //!
 //! # Running
 //!
 //! ```bash
 //! # Set these in .env or export them:
-//! export RPC_URL="https://sepolia.base.org"
+//! export RPC_URL="https://sepolia-rollup.arbitrum.io/rpc"
 //! export PERPCITY_PRIVATE_KEY="0x..."
-//! export PERPCITY_MANAGER="0x..."
-//! export PERPCITY_PERP_ID="0x..."
+//! export PERPCITY_PERP="0x..."
+//! # optional:
+//! export PERPCITY_USDC="0x..."   # defaults to Arbitrum Sepolia USDC
 //! cargo run --example open_position
 //! ```
 
 use std::env;
 
-use alloy::primitives::{Address, B256, U256, address};
+use alloy::primitives::{Address, U256};
 use alloy::signers::local::PrivateKeySigner;
 
 use perpcity_sdk::{
-    CloseParams, Deployments, HftTransport, OpenTakerParams, PerpClient, TransportConfig, Urgency,
+    ARBITRUM_SEPOLIA_USDC, AdjustTakerParams, Deployments, HftTransport, OpenTakerParams,
+    PerpClient, TransportConfig, Urgency,
 };
-
-/// Base Sepolia USDC address.
-const USDC: Address = address!("C1a5D4E99BB224713dd179eA9CA2Fa6600706210");
 
 /// Load a hex-encoded private key from the environment.
 fn load_signer() -> PrivateKeySigner {
@@ -45,34 +44,25 @@ fn load_signer() -> PrivateKeySigner {
 
 /// Load contract deployment addresses from the environment.
 fn load_deployments() -> Deployments {
-    let perp_manager: Address = env::var("PERPCITY_MANAGER")
-        .expect("PERPCITY_MANAGER must be set")
+    let perp: Address = env::var("PERPCITY_PERP")
+        .expect("PERPCITY_PERP must be set")
         .parse()
-        .expect("invalid PERPCITY_MANAGER address");
+        .expect("invalid PERPCITY_PERP address");
 
-    Deployments {
-        perp_manager,
-        usdc: USDC,
-        fees_module: None,
-        margin_ratios_module: None,
-        lockup_period_module: None,
-        sqrt_price_impact_limit_module: None,
-    }
-}
+    let usdc = env::var("PERPCITY_USDC")
+        .ok()
+        .map(|s| s.parse::<Address>().expect("invalid PERPCITY_USDC address"))
+        .unwrap_or(ARBITRUM_SEPOLIA_USDC);
 
-/// Load the perp ID (bytes32 pool identifier) from the environment.
-fn load_perp_id() -> B256 {
-    env::var("PERPCITY_PERP_ID")
-        .expect("PERPCITY_PERP_ID must be set")
-        .parse::<B256>()
-        .expect("invalid PERPCITY_PERP_ID (expected 0x-prefixed 32-byte hex)")
+    Deployments { perp, usdc }
 }
 
 #[tokio::main]
 async fn main() -> perpcity_sdk::Result<()> {
     // ── 1. Transport ────────────────────────────────────────────────
     dotenvy::dotenv().ok();
-    let rpc_url = env::var("RPC_URL").unwrap_or_else(|_| "https://sepolia.base.org".into());
+    let rpc_url =
+        env::var("RPC_URL").unwrap_or_else(|_| "https://sepolia-rollup.arbitrum.io/rpc".into());
 
     let transport = HftTransport::new(
         TransportConfig::builder()
@@ -83,9 +73,9 @@ async fn main() -> perpcity_sdk::Result<()> {
     // ── 2. Client ───────────────────────────────────────────────────
     let signer = load_signer();
     let deployments = load_deployments();
-    let perp_id = load_perp_id();
+    let perp = deployments.perp;
 
-    let client = PerpClient::new(transport, signer, deployments, 84532)?;
+    let client = PerpClient::new_arbitrum_sepolia(transport, signer, deployments)?;
     println!("PerpClient initialized for address: {}", client.address());
 
     // ── 3. Sync nonce + gas (required before any transaction) ──────
@@ -94,16 +84,15 @@ async fn main() -> perpcity_sdk::Result<()> {
     println!("Nonce synced, gas cache refreshed");
 
     // ── 4. USDC approval ────────────────────────────────────────────
-    // Approve the PerpManager to spend our USDC. Uses infinite approval
-    // (U256::MAX) so this only needs to happen once per wallet.
+    // Approve the Perp contract to spend our USDC.
     match client.ensure_approval(U256::from(100_000_000u64)).await? {
         Some(tx_hash) => println!("USDC approved, tx: {tx_hash}"),
         None => println!("USDC already approved"),
     }
 
     // ── 5. Query market data ────────────────────────────────────────
-    let perp_data = client.get_perp_config(perp_id).await?;
-    println!("\n=== Market: {} ===", perp_id);
+    let perp_data = client.get_perp_config().await?;
+    println!("\n=== Market: {perp} ===");
     println!("  Mark price:      {:.6}", perp_data.mark);
     println!("  Tick spacing:    {}", perp_data.tick_spacing);
     println!(
@@ -117,78 +106,57 @@ async fn main() -> perpcity_sdk::Result<()> {
     );
     println!("  LP fee:          {:.4}%", perp_data.fees.lp_fee * 100.0);
 
-    let funding = client.get_funding_rate(perp_id).await?;
+    let funding = client.get_funding_rate().await?;
     println!("  Daily funding:   {:.6}%", funding * 100.0);
 
-    let oi = client.get_open_interest(perp_id).await?;
+    let oi = client.get_open_interest().await?;
     println!("  Long OI:         {:.2} USDC", oi.long_oi);
     println!("  Short OI:        {:.2} USDC", oi.short_oi);
 
     let balance = client.get_usdc_balance().await?;
-    println!("\n  Wallet USDC:     {:.2}", balance);
+    println!("\n  Wallet USDC:     {balance:.2}");
 
     // ── 6. Open a long taker position ───────────────────────────────
     let margin = 10.0; // 10 USDC
-    let leverage = 5.0; // 5× leverage → 50 USDC notional
-    println!("\nOpening LONG {leverage}x with {margin} USDC margin...");
+    let perp_size = 1.0; // notional in perp token units (positive = long)
+    println!("\nOpening LONG with {margin} USDC margin, {perp_size} perp size...");
 
     let params = OpenTakerParams {
-        is_long: true,
         margin,
-        leverage,
-        unspecified_amount_limit: 0, // no slippage limit for this example
+        perp_delta: perp_size,
+        amt1_limit: 0, // no slippage limit for this example
     };
 
-    let position_id = client
-        .open_taker(perp_id, &params, Urgency::Normal)
-        .await?
-        .pos_id;
+    let position_id = client.open_taker(&params, Urgency::Normal).await?.pos_id;
     println!("Position opened! NFT ID: {position_id}");
 
-    // ── 7. Monitor position ─────────────────────────────────────────
+    // ── 7. Read position state ──────────────────────────────────────
+    // The position's `delta` is a packed Uniswap V4 BalanceDelta; `margin` is
+    // in USDC 6-decimal units. Price-impact / live PnL details deferred to the
+    // quoting stage — see issue #56.
     let pos = client.get_position(position_id).await?;
     println!("\n=== Position {position_id} ===");
-    println!("  Perp ID:     {}", pos.perpId);
-    println!("  Margin:      {} (6-dec)", pos.margin);
-    println!("  Perp delta:  {}", pos.entryPerpDelta);
-    println!("  USD delta:   {}", pos.entryUsdDelta);
+    println!("  Margin (6-dec): {}", pos.margin);
+    println!("  Packed delta:   {}", pos.delta);
 
-    // Use math helpers for derived values
-    let entry_price =
-        perpcity_sdk::math::position::entry_price(pos.entryPerpDelta, pos.entryUsdDelta);
-    let size = perpcity_sdk::math::position::position_size(pos.entryPerpDelta);
-    println!("  Entry price: {entry_price:.6}");
-    println!("  Size:        {size:.6}");
-
-    // Live details (PnL, funding, liquidation check)
-    let live = client.get_live_details(position_id).await?;
-    println!("\n  PnL:              {:.6} USDC", live.pnl);
-    println!("  Funding payment:  {:.6} USDC", live.funding_payment);
-    println!("  Effective margin: {:.6} USDC", live.effective_margin);
-    println!("  Liquidatable:     {}", live.is_liquidatable);
-
-    // ── 8. Close position ───────────────────────────────────────────
-    println!("\nClosing position...");
+    // ── 8. Close position (reverse the taker delta) ─────────────────
+    println!("\nClosing position by reversing the taker delta...");
     // Refresh gas before sending another tx (in production, use a block subscription)
     client.refresh_gas().await?;
 
     let close_result = client
-        .close_position(
-            position_id,
-            &CloseParams {
-                min_amt0_out: 0,
-                min_amt1_out: 0,
-                max_amt1_in: u128::MAX,
+        .adjust_taker(
+            &AdjustTakerParams {
+                pos_id: position_id,
+                margin_delta: 0.0,
+                perp_delta: -perp_size,
+                amt1_limit: u128::MAX,
             },
             Urgency::Normal,
         )
         .await?;
 
     println!("Position closed! tx: {}", close_result.tx_hash);
-    match close_result.remaining_position_id {
-        Some(remaining) => println!("  Partial close — remaining position: {remaining}"),
-        None => println!("  Fully closed."),
-    }
 
     println!("\nDone.");
     Ok(())

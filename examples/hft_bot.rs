@@ -10,7 +10,7 @@
 //! 4. **Position manager** — automated stop-loss / take-profit / trailing-stop
 //! 5. **Latency tracker** — rolling-window P50/P95/P99 stats
 //!
-//! The main loop runs on every new block (~1 second on Base L2):
+//! The main loop runs on every new block (~250ms on Arbitrum):
 //! - Refresh gas cache from block header
 //! - Invalidate fast-cache entries
 //! - Fetch mark price for all tracked perps
@@ -23,10 +23,11 @@
 //! ```bash
 //! # Set these in .env or export them:
 //! export PERPCITY_PRIVATE_KEY="0x..."
-//! export PERPCITY_MANAGER="0x..."
-//! export PERPCITY_PERP_ID="0x..."
-//! export RPC_URL_1="https://sepolia.base.org"
-//! export RPC_URL_2="https://base-sepolia-rpc.publicnode.com"  # optional second endpoint
+//! export PERPCITY_PERP="0x..."
+//! # optional:
+//! export PERPCITY_USDC="0x..."   # defaults to Arbitrum Sepolia USDC
+//! export RPC_URL_1="https://sepolia-rollup.arbitrum.io/rpc"
+//! export RPC_URL_2="https://arbitrum-sepolia-rpc.publicnode.com"  # optional second endpoint
 //! cargo run --example hft_bot
 //! ```
 
@@ -34,18 +35,16 @@ use std::collections::HashMap;
 use std::env;
 use std::time::{Duration, Instant};
 
-use alloy::primitives::{Address, B256, U256, address};
+use alloy::primitives::{Address, U256};
 use alloy::signers::local::PrivateKeySigner;
 
 use perpcity_sdk::hft::latency::LatencyTracker;
 use perpcity_sdk::hft::position_manager::{ManagedPosition, PositionManager, TriggerType};
 use perpcity_sdk::transport::config::Strategy;
 use perpcity_sdk::{
-    Deployments, HftTransport, OpenTakerParams, PerpClient, TransportConfig, Urgency,
+    ARBITRUM_SEPOLIA_USDC, Deployments, HftTransport, OpenTakerParams, PerpClient, TransportConfig,
+    Urgency,
 };
-
-/// Base Sepolia USDC address.
-const USDC: Address = address!("C1a5D4E99BB224713dd179eA9CA2Fa6600706210");
 
 /// Number of blocks to run the HFT loop before exiting.
 const MAX_BLOCKS: u32 = 30;
@@ -53,8 +52,8 @@ const MAX_BLOCKS: u32 = 30;
 /// Position sizing: margin in USDC per trade.
 const TRADE_MARGIN: f64 = 10.0;
 
-/// Leverage for taker positions.
-const TRADE_LEVERAGE: f64 = 5.0;
+/// Notional size in perp token units per trade (magnitude).
+const TRADE_PERP_SIZE: f64 = 1.0;
 
 /// Stop-loss distance from entry price (fraction). 0.02 = 2%.
 const STOP_LOSS_PCT: f64 = 0.02;
@@ -73,26 +72,17 @@ fn load_signer() -> PrivateKeySigner {
 }
 
 fn load_deployments() -> Deployments {
-    let perp_manager: Address = env::var("PERPCITY_MANAGER")
-        .expect("PERPCITY_MANAGER must be set")
+    let perp: Address = env::var("PERPCITY_PERP")
+        .expect("PERPCITY_PERP must be set")
         .parse()
-        .expect("invalid PERPCITY_MANAGER address");
+        .expect("invalid PERPCITY_PERP address");
 
-    Deployments {
-        perp_manager,
-        usdc: USDC,
-        fees_module: None,
-        margin_ratios_module: None,
-        lockup_period_module: None,
-        sqrt_price_impact_limit_module: None,
-    }
-}
+    let usdc = env::var("PERPCITY_USDC")
+        .ok()
+        .map(|s| s.parse::<Address>().expect("invalid PERPCITY_USDC address"))
+        .unwrap_or(ARBITRUM_SEPOLIA_USDC);
 
-fn load_perp_id() -> B256 {
-    env::var("PERPCITY_PERP_ID")
-        .expect("PERPCITY_PERP_ID must be set")
-        .parse::<B256>()
-        .expect("invalid PERPCITY_PERP_ID")
+    Deployments { perp, usdc }
 }
 
 /// Simple momentum signal: compare current price to a moving average.
@@ -117,13 +107,17 @@ fn momentum_signal(prices: &[f64]) -> Option<bool> {
 #[tokio::main]
 async fn main() -> perpcity_sdk::Result<()> {
     dotenvy::dotenv().ok();
-    let perp_id = load_perp_id();
+    let deployments = load_deployments();
+    // The position manager keys positions by a [u8; 32]. There's no perp_id in
+    // the new architecture, so derive the key from the Perp contract address.
+    let perp_key: [u8; 32] = deployments.perp.into_word().0;
 
     // ── 1. Multi-endpoint transport ─────────────────────────────────
     //
     // Configure two RPC endpoints with latency-based routing.
     // The transport auto-failovers if one endpoint goes down.
-    let rpc_1 = env::var("RPC_URL_1").unwrap_or_else(|_| "https://sepolia.base.org".into());
+    let rpc_1 =
+        env::var("RPC_URL_1").unwrap_or_else(|_| "https://sepolia-rollup.arbitrum.io/rpc".into());
     let rpc_2 = env::var("RPC_URL_2").ok();
 
     let mut builder = TransportConfig::builder()
@@ -150,7 +144,7 @@ async fn main() -> perpcity_sdk::Result<()> {
     }
 
     // ── 2. Client setup ─────────────────────────────────────────────
-    let client = PerpClient::new(transport, load_signer(), load_deployments(), 84532)?;
+    let client = PerpClient::new_arbitrum_sepolia(transport, load_signer(), deployments)?;
     println!("\nHFT Bot — address: {}", client.address());
 
     client.sync_nonce().await?;
@@ -166,7 +160,7 @@ async fn main() -> perpcity_sdk::Result<()> {
     let mut next_position_id_counter: u64 = 0;
 
     // Pre-fetch market config (cached for 60s in the slow layer)
-    let perp_config = client.get_perp_config(perp_id).await?;
+    let perp_config = client.get_perp_config().await?;
     println!("\n=== Market Config ===");
     println!(
         "  Max leverage: {:.0}x",
@@ -195,7 +189,7 @@ async fn main() -> perpcity_sdk::Result<()> {
 
         // 4c. Fetch mark price
         let price_start = Instant::now();
-        let mark = match client.get_mark_price(perp_id).await {
+        let mark = match client.get_mark_price().await {
             Ok(p) => p,
             Err(e) => {
                 eprintln!("  [block {block}] price fetch failed: {e}");
@@ -209,9 +203,8 @@ async fn main() -> perpcity_sdk::Result<()> {
         price_history.push(mark);
 
         // 4d. Evaluate position triggers
-        let perp_bytes: [u8; 32] = perp_id.into();
         let mut prices_map: HashMap<[u8; 32], f64> = HashMap::new();
-        prices_map.insert(perp_bytes, mark);
+        prices_map.insert(perp_key, mark);
 
         trigger_buf.clear();
         pos_manager.check_triggers_into(&prices_map, &mut trigger_buf);
@@ -251,16 +244,19 @@ async fn main() -> perpcity_sdk::Result<()> {
                 "  [block {block}] Signal: {direction} at {mark:.6} | SL={stop_loss:.6} TP={take_profit:.6}"
             );
 
-            // Open position on-chain
+            // Open position on-chain. perp_delta > 0 = long, < 0 = short.
+            let perp_delta = if is_long {
+                TRADE_PERP_SIZE
+            } else {
+                -TRADE_PERP_SIZE
+            };
             let tx_start = Instant::now();
             match client
                 .open_taker(
-                    perp_id,
                     &OpenTakerParams {
-                        is_long,
                         margin: TRADE_MARGIN,
-                        leverage: TRADE_LEVERAGE,
-                        unspecified_amount_limit: 0,
+                        perp_delta,
+                        amt1_limit: 0,
                     },
                     Urgency::High,
                 )
@@ -282,7 +278,7 @@ async fn main() -> perpcity_sdk::Result<()> {
 
                     // Track in position manager for automated triggers
                     pos_manager.track(ManagedPosition {
-                        perp_id: perp_bytes,
+                        perp_id: perp_key,
                         position_id: pos_id_u64,
                         is_long,
                         entry_price: mark,

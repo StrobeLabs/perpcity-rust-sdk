@@ -1,18 +1,11 @@
 //! On-chain / protocol state errors.
 
-use alloy::primitives::{B256, U256};
+use alloy::primitives::U256;
 use thiserror::Error;
 
 /// Errors from querying on-chain protocol state.
 #[derive(Error, Debug)]
 pub enum ContractError {
-    /// The perp does not exist on-chain.
-    #[error("perp not found: {perp_id}")]
-    PerpNotFound {
-        /// The perp ID that was not found.
-        perp_id: B256,
-    },
-
     /// The position does not exist on-chain.
     #[error("position not found: id={pos_id}")]
     PositionNotFound {
@@ -32,13 +25,6 @@ pub enum ContractError {
     EventNotFound {
         /// Name of the missing event.
         event_name: String,
-    },
-
-    /// A quote simulation (e.g. `quoteClosePosition`) returned a revert reason.
-    #[error("quote reverted: {reason}")]
-    QuoteReverted {
-        /// The hex-encoded revert data.
-        reason: String,
     },
 
     /// A multicall returned unexpected results (wrong count or subcall failure).

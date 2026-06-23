@@ -2,34 +2,31 @@
 //!
 //! [`PerpClient`] wires together the transport layer, HFT infrastructure,
 //! and contract bindings into a single ergonomic API. It is the primary
-//! entry point for interacting with PerpCity on Base L2.
+//! entry point for interacting with PerpCity on Arbitrum (mainnet and
+//! Arbitrum Sepolia testnet).
 //!
 //! # Example
 //!
 //! ```rust,no_run
-//! use perpcity_sdk::{PerpClient, Deployments, HftTransport, TransportConfig};
-//! use alloy::primitives::{address, Address, B256};
+//! use perpcity_sdk::{PerpClient, Deployments, HftTransport, TransportConfig, ARBITRUM_USDC};
+//! use alloy::primitives::address;
 //! use alloy::signers::local::PrivateKeySigner;
 //!
 //! # async fn example() -> perpcity_sdk::Result<()> {
 //! let transport = HftTransport::new(
 //!     TransportConfig::builder()
-//!         .shared_endpoint("https://mainnet.base.org")
+//!         .shared_endpoint("https://arb1.arbitrum.io/rpc")
 //!         .build()?
 //! )?;
 //!
 //! let signer: PrivateKeySigner = "your_private_key_hex".parse().unwrap();
 //!
 //! let deployments = Deployments {
-//!     perp_manager: address!("0000000000000000000000000000000000000001"),
-//!     usdc: address!("C1a5D4E99BB224713dd179eA9CA2Fa6600706210"),
-//!     fees_module: None,
-//!     margin_ratios_module: None,
-//!     lockup_period_module: None,
-//!     sqrt_price_impact_limit_module: None,
+//!     perp: address!("0000000000000000000000000000000000000001"), // the market's Perp contract
+//!     usdc: ARBITRUM_USDC,
 //! };
 //!
-//! let client = PerpClient::new(transport, signer, deployments, 8453)?;
+//! let client = PerpClient::new_arbitrum(transport, signer, deployments)?;
 //! # Ok(())
 //! # }
 //! ```
@@ -44,36 +41,54 @@ use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use alloy::network::{Ethereum, EthereumWallet};
-use alloy::primitives::{Address, I256, U256};
+use alloy::primitives::{Address, U256, address};
 use alloy::providers::{Provider, RootProvider};
 use alloy::rpc::client::RpcClient;
 use alloy::signers::local::PrivateKeySigner;
 use alloy::transports::BoxTransport;
 
 use crate::constants::SCALE_1E6;
-use crate::contracts::PerpManager;
-use crate::convert::scale_from_6dec;
-use crate::errors::{ContractError, Result, TransactionError};
+use crate::errors::{Result, TransactionError};
 use crate::hft::gas::{FeeCache, GasLimitCache};
 use crate::hft::pipeline::{PipelineConfig, TxPipeline};
 use crate::hft::state_cache::{CachedBounds, CachedFees, StateCache, StateCacheConfig};
 use crate::transport::provider::HftTransport;
-use crate::types::{
-    AdjustMarginResult, AdjustNotionalResult, Bounds, CloseResult, Deployments, Fees, OpenResult,
-};
+use crate::types::{Bounds, Deployments, Fees};
 
-// ── Constants ────────────────────────────────────────────────────────
+// ── Network constants ──────────────────────────────────────────────────
 
-/// Base L2 chain ID.
-const BASE_CHAIN_ID: u64 = 8453;
+/// Arbitrum One (mainnet) chain ID.
+pub const ARBITRUM_CHAIN_ID: u64 = 42161;
 
-/// Default gas cache TTL: 2 seconds (2 Base L2 blocks).
+/// Arbitrum Sepolia (testnet) chain ID.
+pub const ARBITRUM_SEPOLIA_CHAIN_ID: u64 = 421614;
+
+/// Canonical Circle USDC on Arbitrum One.
+pub const ARBITRUM_USDC: Address = address!("af88d065e77c8cC2239327C5EDb3A432268e5831");
+
+/// Collateral token used by the Arbitrum Sepolia deployment.
+///
+/// This is the test USDC the deployed contracts actually settle in
+/// (`ExternalAddresses.sol`), NOT Circle's testnet USDC (`0x75faf…`). It is a
+/// Solady-style ERC20 with an open `mint`.
+pub const ARBITRUM_SEPOLIA_USDC: Address = address!("BEF280BefeE2Cb28c20D1E4Cc1da999B4DA0f1fD");
+
+/// `PerpFactory` on Arbitrum Sepolia (the deployment markets are created from).
+pub const ARBITRUM_SEPOLIA_PERP_FACTORY: Address =
+    address!("a54F81e7BD5C0d52d6fdE2ba40d0B1123d53E7a7");
+
+/// Default gas cache TTL: 2 seconds.
 const DEFAULT_GAS_TTL_MS: u64 = 2_000;
 
 /// Default priority fee: 0.01 gwei.
 ///
-/// Base L2 uses a single sequencer, so priority fees are near-meaningless.
-/// 10 Mwei is sufficient for reliable inclusion while keeping gas escrow low.
+/// Arbitrum sequences transactions first-come-first-served, so priority fees
+/// have little effect; 10 Mwei keeps gas escrow low while remaining a valid
+/// non-zero tip.
+///
+/// NOTE: this models only the L2 execution fee. Arbitrum also charges an L1
+/// calldata (data-availability) component that is not yet accounted for here —
+/// see the gas-model follow-up.
 const DEFAULT_PRIORITY_FEE: u64 = 10_000_000;
 
 /// Maximum USDC approval amount (2^256 - 1).
@@ -81,13 +96,6 @@ const MAX_APPROVAL: U256 = U256::MAX;
 
 /// SCALE_1E6 as f64, used for converting on-chain fixed-point values.
 const SCALE_F64: f64 = SCALE_1E6 as f64;
-
-/// Convert a Q96 fixed-point funding-per-second value to a daily rate.
-fn funding_x96_to_daily(funding_x96: I256) -> f64 {
-    let funding_i128 = i128_from_i256(funding_x96);
-    let rate_per_sec = funding_i128 as f64 / 2.0_f64.powi(96);
-    rate_per_sec * crate::constants::INTERVAL as f64
-}
 
 // ── From impls for cache ↔ client type bridging ────────────────────────
 
@@ -182,7 +190,7 @@ impl PerpClient {
     /// - `transport`: Multi-endpoint RPC transport (from [`crate::TransportConfig`])
     /// - `signer`: Private key for signing transactions
     /// - `deployments`: Contract addresses for this PerpCity instance
-    /// - `chain_id`: Chain ID (8453 for Base mainnet, 84532 for Base Sepolia)
+    /// - `chain_id`: Chain ID (42161 for Arbitrum One, 421614 for Arbitrum Sepolia)
     ///
     /// This does NOT make any network calls. Call [`Self::refresh_gas`] and
     /// [`Self::sync_nonce`] before submitting transactions.
@@ -214,13 +222,22 @@ impl PerpClient {
         })
     }
 
-    /// Create a client pre-configured for Base mainnet.
-    pub fn new_base_mainnet(
+    /// Create a client pre-configured for Arbitrum One (mainnet).
+    pub fn new_arbitrum(
         transport: HftTransport,
         signer: PrivateKeySigner,
         deployments: Deployments,
     ) -> Result<Self> {
-        Self::new(transport, signer, deployments, BASE_CHAIN_ID)
+        Self::new(transport, signer, deployments, ARBITRUM_CHAIN_ID)
+    }
+
+    /// Create a client pre-configured for Arbitrum Sepolia (testnet).
+    pub fn new_arbitrum_sepolia(
+        transport: HftTransport,
+        signer: PrivateKeySigner,
+        deployments: Deployments,
+    ) -> Result<Self> {
+        Self::new(transport, signer, deployments, ARBITRUM_SEPOLIA_CHAIN_ID)
     }
 
     // ── Initialization ───────────────────────────────────────────────
@@ -357,12 +374,6 @@ impl PerpClient {
 
 // ── Type conversion helpers for Alloy fixed-size types ───────────────
 
-/// Convert a u32 margin ratio to Alloy's uint24 type.
-#[inline]
-fn u32_to_u24(v: u32) -> alloy::primitives::Uint<24, 1> {
-    alloy::primitives::Uint::<24, 1>::from(v & 0xFF_FFFF)
-}
-
 /// Convert Alloy's uint24 to a u32.
 #[inline]
 fn u24_to_u32(v: alloy::primitives::Uint<24, 1>) -> u32 {
@@ -404,172 +415,18 @@ fn now_secs() -> u64 {
         .as_secs()
 }
 
-/// Convert an I256 to i128 (clamping to i128::MIN/MAX on overflow).
-#[inline]
-fn i128_from_i256(v: I256) -> i128 {
-    i128::try_from(v).unwrap_or_else(|_| {
-        if v.is_negative() {
-            i128::MIN
-        } else {
-            i128::MAX
-        }
-    })
-}
-
-/// Scale an unsigned `U256` from 6-decimal on-chain representation to `f64`.
-fn u256_to_f64_6dec(v: U256) -> f64 {
-    v.to::<u128>() as f64 / 1_000_000.0
-}
-
-/// Parse an [`OpenResult`] from a transaction receipt's `PositionOpened` event.
-fn parse_open_result(
-    receipt: &alloy::rpc::types::TransactionReceipt,
-) -> std::result::Result<OpenResult, ContractError> {
-    for log in receipt.inner.logs() {
-        if let Ok(event) = log.log_decode::<PerpManager::PositionOpened>() {
-            let data = event.inner.data;
-            let perp_delta = i128_from_i256(data.perpDelta);
-            let usd_delta = i128_from_i256(data.usdDelta);
-            return Ok(OpenResult {
-                pos_id: data.posId,
-                is_maker: data.isMaker,
-                perp_delta: scale_from_6dec(perp_delta),
-                usd_delta: scale_from_6dec(usd_delta),
-                tick_lower: i24_to_i32(data.tickLower),
-                tick_upper: i24_to_i32(data.tickUpper),
-            });
-        }
-    }
-    Err(ContractError::EventNotFound {
-        event_name: "PositionOpened".into(),
-    })
-}
-
-/// Parse an [`AdjustNotionalResult`] from a transaction receipt's `NotionalAdjusted` event.
-fn parse_adjust_result(
-    receipt: &alloy::rpc::types::TransactionReceipt,
-) -> std::result::Result<AdjustNotionalResult, ContractError> {
-    for log in receipt.inner.logs() {
-        if let Ok(event) = log.log_decode::<PerpManager::NotionalAdjusted>() {
-            let data = event.inner.data;
-            return Ok(AdjustNotionalResult {
-                new_perp_delta: scale_from_6dec(i128_from_i256(data.newPerpDelta)),
-                swap_perp_delta: scale_from_6dec(i128_from_i256(data.swapPerpDelta)),
-                swap_usd_delta: scale_from_6dec(i128_from_i256(data.swapUsdDelta)),
-                funding: scale_from_6dec(i128_from_i256(data.funding)),
-                utilization_fee: u256_to_f64_6dec(data.utilizationFee),
-                adl: u256_to_f64_6dec(data.adl),
-                trading_fees: u256_to_f64_6dec(data.tradingFees),
-            });
-        }
-    }
-    Err(ContractError::EventNotFound {
-        event_name: "NotionalAdjusted".into(),
-    })
-}
-
-/// Parse an [`AdjustMarginResult`] from a transaction receipt's `MarginAdjusted` event.
-fn parse_margin_result(
-    receipt: &alloy::rpc::types::TransactionReceipt,
-) -> std::result::Result<AdjustMarginResult, ContractError> {
-    for log in receipt.inner.logs() {
-        if let Ok(event) = log.log_decode::<PerpManager::MarginAdjusted>() {
-            return Ok(AdjustMarginResult {
-                new_margin: u256_to_f64_6dec(event.inner.data.newMargin),
-            });
-        }
-    }
-    Err(ContractError::EventNotFound {
-        event_name: "MarginAdjusted".into(),
-    })
-}
-
-/// Parse a [`CloseResult`] from a transaction receipt's `PositionClosed` event.
-fn parse_close_result(
-    receipt: &alloy::rpc::types::TransactionReceipt,
-    pos_id: U256,
-) -> std::result::Result<CloseResult, ContractError> {
-    let tx_hash = receipt.transaction_hash;
-    for log in receipt.inner.logs() {
-        if let Ok(event) = log.log_decode::<PerpManager::PositionClosed>() {
-            let data = event.inner.data;
-            return Ok(CloseResult {
-                tx_hash,
-                was_maker: data.wasMaker,
-                was_liquidated: data.wasLiquidated,
-                remaining_position_id: if data.wasPartialClose {
-                    Some(pos_id)
-                } else {
-                    None
-                },
-                exit_perp_delta: scale_from_6dec(i128_from_i256(data.exitPerpDelta)),
-                exit_usd_delta: scale_from_6dec(i128_from_i256(data.exitUsdDelta)),
-                net_usd_delta: scale_from_6dec(i128_from_i256(data.netUsdDelta)),
-                funding: scale_from_6dec(i128_from_i256(data.funding)),
-                utilization_fee: u256_to_f64_6dec(data.utilizationFee),
-                adl: u256_to_f64_6dec(data.adl),
-                liquidation_fee: u256_to_f64_6dec(data.liquidationFee),
-                net_margin: scale_from_6dec(i128_from_i256(data.netMargin)),
-            });
-        }
-    }
-    Err(ContractError::EventNotFound {
-        event_name: "PositionClosed".into(),
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // ── i128_from_i256 tests ─────────────────────────────────────────
-
-    #[test]
-    fn i128_from_i256_small_values() {
-        assert_eq!(i128_from_i256(I256::ZERO), 0);
-        assert_eq!(i128_from_i256(I256::try_from(42i64).unwrap()), 42);
-        assert_eq!(i128_from_i256(I256::try_from(-100i64).unwrap()), -100);
-    }
-
-    #[test]
-    fn i128_from_i256_boundary_values() {
-        let max_i128 = I256::try_from(i128::MAX).unwrap();
-        assert_eq!(i128_from_i256(max_i128), i128::MAX);
-
-        let min_i128 = I256::try_from(i128::MIN).unwrap();
-        assert_eq!(i128_from_i256(min_i128), i128::MIN);
-    }
-
-    #[test]
-    fn i128_from_i256_overflow_clamps() {
-        assert_eq!(i128_from_i256(I256::MAX), i128::MAX);
-        assert_eq!(i128_from_i256(I256::MIN), i128::MIN);
-    }
-
-    #[test]
-    fn i128_from_i256_just_beyond_i128() {
-        let beyond = I256::try_from(i128::MAX).unwrap() + I256::try_from(1i64).unwrap();
-        assert_eq!(i128_from_i256(beyond), i128::MAX);
-
-        let below = I256::try_from(i128::MIN).unwrap() - I256::try_from(1i64).unwrap();
-        assert_eq!(i128_from_i256(below), i128::MIN);
-    }
 
     // ── Type conversion helpers ──────────────────────────────────────
 
     #[test]
     fn u24_roundtrip() {
         for v in [0u32, 1, 100_000, 0xFF_FFFF] {
-            let u24 = u32_to_u24(v);
+            let u24 = alloy::primitives::Uint::<24, 1>::from(v);
             assert_eq!(u24_to_u32(u24), v);
         }
-    }
-
-    #[test]
-    fn u24_truncates_overflow() {
-        // Values > 0xFFFFFF get masked
-        let u24 = u32_to_u24(0x1FF_FFFF);
-        assert_eq!(u24_to_u32(u24), 0xFF_FFFF);
     }
 
     #[test]
@@ -578,21 +435,5 @@ mod tests {
             let i24 = i32_to_i24(v);
             assert_eq!(i24_to_i32(i24), v);
         }
-    }
-
-    // ── Funding rate integration test ───────────────────────────────
-
-    #[test]
-    fn funding_rate_x96_conversion() {
-        let q96 = 2.0_f64.powi(96);
-        let rate_per_sec = 0.0001;
-        let x96_value = (rate_per_sec * q96) as i128;
-        let i256_val = I256::try_from(x96_value).unwrap();
-
-        let recovered = i128_from_i256(i256_val) as f64 / q96;
-        let daily = recovered * 86400.0;
-
-        assert!((recovered - rate_per_sec).abs() < 1e-10);
-        assert!((daily - 8.64).abs() < 0.001);
     }
 }
