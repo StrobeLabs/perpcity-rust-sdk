@@ -168,24 +168,36 @@ pub struct AdjustMakerParams {
 
 /// Result of opening a taker or maker position.
 ///
-/// The new contracts emit parameterless events (`TakerOpened`, `MakerOpened`),
-/// so detailed position data must be read via view functions after confirmation.
-/// The `pos_id` comes from the function return value.
+/// `pos_id` is the minted position NFT id. For taker opens, `perp_delta` and
+/// `usd_delta` are the realized swap amounts decoded from the `TakerOpened`
+/// event (signed: positive = received, negative = paid). Maker opens emit no
+/// swap, so both are `0.0`.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct OpenResult {
     /// Transaction hash.
     pub tx_hash: B256,
     /// Minted position NFT token ID.
     pub pos_id: U256,
+    /// Realized perp-token delta from the open swap (taker only; `0.0` for makers).
+    pub perp_delta: f64,
+    /// Realized USD delta from the open swap (taker only; `0.0` for makers).
+    pub usd_delta: f64,
 }
 
 /// Result of adjusting a taker position (margin, notional, or both).
 ///
-/// Events are parameterless — read position state via view functions if needed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// `perp_delta` and `usd_delta` are the realized swap amounts decoded from the
+/// `TakerAdjusted` event — or `TakerClosed`, when the adjust reverses the full
+/// delta and closes the position (signed: positive = received, negative =
+/// paid). Both are `0.0` for a margin-only adjust, which performs no swap.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct AdjustTakerResult {
     /// Transaction hash.
     pub tx_hash: B256,
+    /// Realized perp-token delta from the adjust swap (`0.0` if margin-only).
+    pub perp_delta: f64,
+    /// Realized USD delta from the adjust swap (`0.0` if margin-only).
+    pub usd_delta: f64,
 }
 
 /// Result of adjusting a maker position (margin, liquidity, or both).
@@ -245,6 +257,8 @@ mod tests {
         let result = OpenResult {
             tx_hash: B256::ZERO,
             pos_id: U256::from(42),
+            perp_delta: 0.0681,
+            usd_delta: -500.0,
         };
         let json = serde_json::to_string(&result).unwrap();
         let recovered: OpenResult = serde_json::from_str(&json).unwrap();
@@ -255,6 +269,8 @@ mod tests {
     fn adjust_taker_result_serde_roundtrip() {
         let result = AdjustTakerResult {
             tx_hash: B256::ZERO,
+            perp_delta: -0.0681,
+            usd_delta: 499.5,
         };
         let json = serde_json::to_string(&result).unwrap();
         let recovered: AdjustTakerResult = serde_json::from_str(&json).unwrap();

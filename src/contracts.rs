@@ -255,7 +255,7 @@ sol! {
         );
         event TakerOpened(uint256 posId, SwapResult sr);
         event TakerAdjusted(uint256 posId, SwapResult sr, int256 funding, uint256 utilFees);
-        event TakerClosed(uint256 posId, SwapResult sr, int256 funding, uint256 utilFees);
+        event TakerClosed(uint256 posId, SwapResult sr, int256 funding, uint256 utilFees, uint256 liqFee, bool isLiquidation);
         event TakerLiquidated(uint256 indexed posId, uint128 perpAmount, uint256 liqFee);
         event TakerBackstopped(uint256 posId, uint128 marginIn, address posRecipient, int256 funding, uint256 utilFees);
 
@@ -659,9 +659,19 @@ mod abi_lock {
             Perp::TakerAdjusted::SIGNATURE,
             format!("TakerAdjusted(uint256,{SWAP_RESULT},int256,uint256)")
         );
+        // Verified against the deployed contract: topic0 of this signature is
+        // 0xc6d1565765c65beb63cd0a76e37c058e0908e6e24a609d0dc1a724106ae0576e,
+        // matching the `TakerClosed` log emitted on Arbitrum Sepolia. The
+        // deployed event unifies close + liquidation (`liqFee`, `isLiquidation`).
         assert_eq!(
             Perp::TakerClosed::SIGNATURE,
-            format!("TakerClosed(uint256,{SWAP_RESULT},int256,uint256)")
+            format!("TakerClosed(uint256,{SWAP_RESULT},int256,uint256,uint256,bool)")
+        );
+        assert_eq!(
+            Perp::TakerClosed::SIGNATURE_HASH,
+            alloy::primitives::b256!(
+                "c6d1565765c65beb63cd0a76e37c058e0908e6e24a609d0dc1a724106ae0576e"
+            )
         );
         assert_eq!(
             Perp::TakerLiquidated::SIGNATURE,

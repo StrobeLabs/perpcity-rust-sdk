@@ -7,6 +7,7 @@ use crate::constants::TICK_SPACING;
 use crate::contracts::{IERC20, Perp};
 use crate::convert::scale_to_6dec;
 use crate::errors::{ContractError, Result, ValidationError};
+use crate::feeds::{MarketEvent, decode_log};
 use crate::hft::gas::{GasLimits, Urgency};
 use crate::math::tick::{align_tick_down, align_tick_up, price_to_tick};
 use crate::types::{
@@ -38,6 +39,30 @@ fn parse_minted_token_id(
     Err(ContractError::EventNotFound {
         event_name: "ERC721 Transfer (mint)".into(),
     })
+}
+
+/// Extract the realized swap `(perp_delta, usd_delta)` from a taker
+/// open/adjust/close receipt.
+///
+/// Reuses the market feed's [`decode_log`] to find the `TakerOpened` /
+/// `TakerAdjusted` / `TakerClosed` event and reads its decoded `SwapInfo`
+/// (already unpacked from the `BalanceDelta` and scaled to f64). Every taker
+/// open/adjust/close emits one of these — a margin-only adjust still emits a
+/// `TakerAdjusted` with a zero-delta swap — so on the taker paths `None` means
+/// a decode/ABI failure, which the caller surfaces as an error rather than a
+/// zero fill. (Maker opens emit no taker swap, but they don't call this.)
+fn parse_taker_swap(receipt: &alloy::rpc::types::TransactionReceipt) -> Option<(f64, f64)> {
+    for log in receipt.inner.logs() {
+        if let Some(
+            MarketEvent::TakerOpened { swap, .. }
+            | MarketEvent::TakerAdjusted { swap, .. }
+            | MarketEvent::TakerClosed { swap, .. },
+        ) = decode_log(log)
+        {
+            return Some((swap.perp_delta, swap.usd_delta));
+        }
+    }
+    None
 }
 
 /// Scale an f64 perp delta to the accounting token's 6-decimal fixed point.
@@ -96,9 +121,18 @@ impl PerpClient {
             .await?;
 
         let pos_id = parse_minted_token_id(&receipt)?;
+        // A taker open always emits a decodable `TakerOpened`; a missing one
+        // signals an ABI/decode problem, so fail loudly rather than recording a
+        // bogus zero fill.
+        let (perp_delta, usd_delta) =
+            parse_taker_swap(&receipt).ok_or(ContractError::EventNotFound {
+                event_name: "TakerOpened".into(),
+            })?;
         let result = OpenResult {
             tx_hash: receipt.transaction_hash,
             pos_id,
+            perp_delta,
+            usd_delta,
         };
         tracing::debug!(pos_id = %result.pos_id, "taker position opened");
         Ok(result)
@@ -163,6 +197,9 @@ impl PerpClient {
         let result = OpenResult {
             tx_hash: receipt.transaction_hash,
             pos_id,
+            // Maker opens emit no taker swap (`MakerOpened` carries no deltas).
+            perp_delta: 0.0,
+            usd_delta: 0.0,
         };
         tracing::debug!(pos_id = %result.pos_id, "maker position opened");
         Ok(result)
@@ -204,8 +241,18 @@ impl PerpClient {
             .await?;
 
         tracing::debug!(pos_id = %params.pos_id, "taker position adjusted");
+        // Every taker adjust emits a decodable event — `TakerAdjusted` (a
+        // margin-only adjust carries a zero-delta swap) or `TakerClosed` on a
+        // full close. A missing one signals an ABI/decode problem, so fail
+        // loudly rather than recording a bogus zero fill.
+        let (perp_delta, usd_delta) =
+            parse_taker_swap(&receipt).ok_or(ContractError::EventNotFound {
+                event_name: "TakerAdjusted/TakerClosed".into(),
+            })?;
         Ok(AdjustTakerResult {
             tx_hash: receipt.transaction_hash,
+            perp_delta,
+            usd_delta,
         })
     }
 
