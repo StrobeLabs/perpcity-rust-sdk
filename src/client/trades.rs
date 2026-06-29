@@ -209,6 +209,42 @@ impl PerpClient {
         })
     }
 
+    /// Close a taker position by reversing its full perp delta.
+    ///
+    /// Reversing the entire delta drives the position's notional to exactly
+    /// zero, which the contract settles automatically: it returns the
+    /// position's equity (remaining margin + realized PnL) to the caller and
+    /// burns the position NFT. No separate margin withdrawal is required.
+    ///
+    /// `current_perp_delta` must be the position's **full** signed delta
+    /// (positive = long, negative = short), typically from locally tracked
+    /// state. If it does not match the on-chain delta exactly, the position
+    /// will not fully close (and the contract may revert).
+    ///
+    /// This is a market close: slippage is unconstrained. The `amt1` limit is
+    /// set to the no-op sentinel for the swap direction — selling (reversing a
+    /// long) floors the USD received at `0`; buying (reversing a short) caps
+    /// the USD paid at `u128::MAX`. For a protected close, call
+    /// [`Self::adjust_taker`] directly with an explicit `amt1_limit`.
+    pub async fn close_taker(
+        &self,
+        pos_id: U256,
+        current_perp_delta: f64,
+        urgency: Urgency,
+    ) -> Result<AdjustTakerResult> {
+        let perp_delta = -current_perp_delta;
+        self.adjust_taker(
+            &AdjustTakerParams {
+                pos_id,
+                margin_delta: 0.0,
+                perp_delta,
+                amt1_limit: if perp_delta > 0.0 { u128::MAX } else { 0 },
+            },
+            urgency,
+        )
+        .await
+    }
+
     /// Adjust a maker position (margin, liquidity, or both).
     pub async fn adjust_maker(
         &self,
@@ -246,6 +282,42 @@ impl PerpClient {
         Ok(AdjustMakerResult {
             tx_hash: receipt.transaction_hash,
         })
+    }
+
+    /// Close a maker position by removing its full liquidity.
+    ///
+    /// Removing all liquidity drives the position to zero, which the contract
+    /// settles automatically: it returns the position's tokens/equity to the
+    /// caller and burns the position NFT.
+    ///
+    /// `current_liquidity` must be the position's full current liquidity,
+    /// typically from locally tracked state.
+    ///
+    /// This is a market close: the `amt0`/`amt1` minimums are set to `0`
+    /// (accept any output). For a protected close, call [`Self::adjust_maker`]
+    /// directly with explicit limits.
+    pub async fn close_maker(
+        &self,
+        pos_id: U256,
+        current_liquidity: u128,
+        urgency: Urgency,
+    ) -> Result<AdjustMakerResult> {
+        let liquidity_delta = i128::try_from(current_liquidity).map(|l| -l).map_err(|_| {
+            ValidationError::Overflow {
+                context: format!("liquidity {current_liquidity} exceeds i128::MAX"),
+            }
+        })?;
+        self.adjust_maker(
+            &AdjustMakerParams {
+                pos_id,
+                margin_delta: 0.0,
+                liquidity_delta,
+                amt0_limit: 0,
+                amt1_limit: 0,
+            },
+            urgency,
+        )
+        .await
     }
 
     // ── Approval + transfers ────────────────────────────────────────
