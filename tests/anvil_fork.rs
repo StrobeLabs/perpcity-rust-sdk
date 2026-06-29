@@ -350,22 +350,15 @@ async fn open_and_close_taker_on_fork() {
         .unwrap();
     println!("  tx_hash: {}", margin_result.tx_hash);
 
-    // 12. Close position by reversing the remaining taker delta.
+    // 12. Close the position via the close_taker wrapper. The remaining delta
+    //     is 0.0005 (opened 0.001, reduced 0.0005), so reversing it lands the
+    //     notional on exactly zero — the contract auto-settles equity to the
+    //     caller and burns the position NFT.
     println!("\nClosing position...");
     client.refresh_gas().await.unwrap();
 
     let close_result = client
-        .adjust_taker(
-            &AdjustTakerParams {
-                pos_id,
-                margin_delta: 0.0,
-                perp_delta: -0.0005,
-                // Reducing a long is a sell: amt1_limit is the MIN USD to
-                // receive, so 0 = accept any output (MAX would never be met).
-                amt1_limit: 0,
-            },
-            Urgency::Normal,
-        )
+        .close_taker(pos_id, 0.0005, Urgency::Normal)
         .await
         .unwrap();
 
