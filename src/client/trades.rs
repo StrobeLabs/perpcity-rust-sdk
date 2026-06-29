@@ -46,9 +46,11 @@ fn parse_minted_token_id(
 ///
 /// Reuses the market feed's [`decode_log`] to find the `TakerOpened` /
 /// `TakerAdjusted` / `TakerClosed` event and reads its decoded `SwapInfo`
-/// (already unpacked from the `BalanceDelta` and scaled to f64). Returns
-/// `None` for receipts with no taker swap — maker opens (no swap event) and
-/// margin-only adjusts both fall through to the caller's `0.0` default.
+/// (already unpacked from the `BalanceDelta` and scaled to f64). Every taker
+/// open/adjust/close emits one of these — a margin-only adjust still emits a
+/// `TakerAdjusted` with a zero-delta swap — so on the taker paths `None` means
+/// a decode/ABI failure, which the caller surfaces as an error rather than a
+/// zero fill. (Maker opens emit no taker swap, but they don't call this.)
 fn parse_taker_swap(receipt: &alloy::rpc::types::TransactionReceipt) -> Option<(f64, f64)> {
     for log in receipt.inner.logs() {
         if let Some(
@@ -119,7 +121,13 @@ impl PerpClient {
             .await?;
 
         let pos_id = parse_minted_token_id(&receipt)?;
-        let (perp_delta, usd_delta) = parse_taker_swap(&receipt).unwrap_or((0.0, 0.0));
+        // A taker open always emits a decodable `TakerOpened`; a missing one
+        // signals an ABI/decode problem, so fail loudly rather than recording a
+        // bogus zero fill.
+        let (perp_delta, usd_delta) =
+            parse_taker_swap(&receipt).ok_or(ContractError::EventNotFound {
+                event_name: "TakerOpened".into(),
+            })?;
         let result = OpenResult {
             tx_hash: receipt.transaction_hash,
             pos_id,
@@ -233,7 +241,14 @@ impl PerpClient {
             .await?;
 
         tracing::debug!(pos_id = %params.pos_id, "taker position adjusted");
-        let (perp_delta, usd_delta) = parse_taker_swap(&receipt).unwrap_or((0.0, 0.0));
+        // Every taker adjust emits a decodable event — `TakerAdjusted` (a
+        // margin-only adjust carries a zero-delta swap) or `TakerClosed` on a
+        // full close. A missing one signals an ABI/decode problem, so fail
+        // loudly rather than recording a bogus zero fill.
+        let (perp_delta, usd_delta) =
+            parse_taker_swap(&receipt).ok_or(ContractError::EventNotFound {
+                event_name: "TakerAdjusted/TakerClosed".into(),
+            })?;
         Ok(AdjustTakerResult {
             tx_hash: receipt.transaction_hash,
             perp_delta,
