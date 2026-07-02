@@ -1,6 +1,6 @@
 # PerpCity Rust SDK
 
-Rust SDK for the [PerpCity](https://perp.city) perpetual futures protocol on Base L2. Built for high-frequency trading with lock-free nonce management, multi-endpoint transport with circuit breakers, and a 2-tier state cache.
+Rust SDK for the [PerpCity](https://perp.city) perpetual futures protocol on Arbitrum. Built for high-frequency trading with lock-free nonce management, multi-endpoint transport with circuit breakers, and a 2-tier state cache.
 
 ## Installation
 
@@ -11,7 +11,7 @@ perpcity-sdk = "0.2"
 
 ## Quickstart
 
-**Prerequisites:** Rust 1.85+, a Base Sepolia RPC (the public endpoint works fine).
+**Prerequisites:** Rust 1.85+, an Arbitrum Sepolia RPC (the public endpoint works fine).
 
 1. Clone and create a `.env` file:
 
@@ -26,13 +26,13 @@ PERPCITY_MANAGER=0x...   # PerpManager contract address
 PERPCITY_PERP_ID=0x...   # bytes32 perp market ID
 ```
 
-2. Fund your wallet on Base Sepolia — you need a small amount of ETH for gas and some USDC for margin. The testnet USDC has a public `mint` function:
+2. Fund your wallet on Arbitrum Sepolia — you need a small amount of ETH for gas and some USDC for margin. The testnet USDC has a public `mint` function:
 
 ```bash
 # Mint 10,000 USDC to your address
-cast send 0xC1a5D4E99BB224713dd179eA9CA2Fa6600706210 \
+cast send 0xBEF280BefeE2Cb28c20D1E4Cc1da999B4DA0f1fD \
   "mint(address,uint256)" YOUR_ADDRESS 10000000000 \
-  --rpc-url https://sepolia.base.org \
+  --rpc-url https://sepolia-rollup.arbitrum.io/rpc \
   --private-key YOUR_PRIVATE_KEY
 ```
 
@@ -63,12 +63,12 @@ use perpcity_sdk::*;
 // 1. Transport — single endpoint or read/write split
 let transport = HftTransport::new(
     TransportConfig::builder()
-        .shared_endpoint("https://sepolia.base.org")
+        .shared_endpoint("https://sepolia-rollup.arbitrum.io/rpc")
         .build()?,
 )?;
 
 // 2. Client
-let client = PerpClient::new(transport, signer, deployments, 84532)?;
+let client = PerpClient::new(transport, signer, deployments, 421614)?;
 
 // 3. Warm caches (required before first transaction)
 client.sync_nonce().await?;
@@ -130,8 +130,8 @@ The SDK is designed for sub-millisecond transaction preparation on the hot path.
 ```rust
 let transport = HftTransport::new(
     TransportConfig::builder()
-        .shared_endpoint("https://base.g.alchemy.com/v2/KEY")  // writes + read fallback
-        .read_endpoint("https://base-rpc.publicnode.com")       // dedicated reads
+        .shared_endpoint("https://arb-mainnet.g.alchemy.com/v2/KEY")  // writes + read fallback
+        .read_endpoint("https://arbitrum-one-rpc.publicnode.com")      // dedicated reads
         .strategy(Strategy::LatencyBased)
         .request_timeout(Duration::from_millis(2000))
         .build()?,
@@ -189,31 +189,31 @@ All math functions are pure, `O(1)`, and ported faithfully from PerpCity's Solid
 | `PERPCITY_PRIVATE_KEY` | Yes | Hex-encoded private key (with or without `0x` prefix) |
 | `PERPCITY_MANAGER` | Yes | PerpManager contract address |
 | `PERPCITY_PERP_ID` | Yes | bytes32 perp market identifier |
-| `RPC_URL` | No | RPC endpoint (default: `https://sepolia.base.org`) |
+| `RPC_URL` | No | RPC endpoint (default: `https://sepolia-rollup.arbitrum.io/rpc`) |
 | `RPC_URL_1`, `RPC_URL_2` | No | Multi-endpoint config for `hft_bot` example |
 
 ## Configuration
 
 ### Deployments
 
-The `Deployments` struct holds contract addresses. For Base Sepolia:
+The `Deployments` struct holds contract addresses. For Arbitrum Sepolia:
 
 ```rust
 let manager: Address = std::env::var("PERPCITY_MANAGER")?.parse()?;
 
 let deployments = Deployments {
     perp_manager: manager,
-    usdc: address!("C1a5D4E99BB224713dd179eA9CA2Fa6600706210"),
+    usdc: ARBITRUM_SEPOLIA_USDC, // 0xBEF280BefeE2Cb28c20D1E4Cc1da999B4DA0f1fD (PerpCity test USDC, not Circle's)
     fees_module: None,
     margin_ratios_module: None,
     lockup_period_module: None,
     sqrt_price_impact_limit_module: None,
 };
 
-let client = PerpClient::new(transport, signer, deployments, 84532)?; // Base Sepolia
+let client = PerpClient::new(transport, signer, deployments, 421614)?; // Arbitrum Sepolia
 ```
 
-For Base mainnet, use `PerpClient::new_base_mainnet()` which sets chain ID 8453 and the mainnet USDC address (`0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913`).
+For Arbitrum One (mainnet), use `PerpClient::new_arbitrum()` which sets chain ID 42161, and pass `ARBITRUM_USDC` — canonical Circle USDC on Arbitrum One (`0xaf88d065e77c8cC2239327C5EDb3A432268e5831`) — in `Deployments`.
 
 ### Release Profile
 
