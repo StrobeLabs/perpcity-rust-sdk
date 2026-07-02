@@ -7,7 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`aws` feature — AWS KMS signing.** Enables alloy's `signer-aws` so bots can sign with a KMS asymmetric secp256k1 key that never leaves AWS (`alloy::signers::aws::AwsSigner`). New `examples/aws_kms_signer.rs` shows the full flow: AWS credential chain → KMS client → `AwsSigner` → `PerpClient`.
+
 ### Changed
+
+- **Generic signer support.** `PerpClient::new`, `new_arbitrum`, and `new_arbitrum_sepolia` now accept any `S: TxSigner<Signature> + Send + Sync + 'static` instead of a concrete `PrivateKeySigner`. Existing callers compile unchanged (`PrivateKeySigner` satisfies the bound); remote signers (AWS KMS, GCP, Ledger, …) can now be used directly.
 
 - **Error restructuring.** The monolithic `PerpCityError` enum is now composed from per-module error types: `TransactionError` (simulation, signing, gas, pipeline), `ValidationError` (prices, margins, ticks, leverage, config), and `ContractError` (perps, positions, events, quotes, multicall). `PerpCityError` composes all three via `#[from]` conversions. Internal functions return the narrowest error type they can produce (e.g. `pipeline::prepare()` returns `Result<_, TransactionError>`).
 - **Pre-flight simulation.** `simulate()` replaces `resolve_gas_limit()` as the unified entry point for gas resolution and transaction validation. On cache miss, `eth_estimateGas` provides both the gas estimate and simulation. On cache hit, `eth_call` verifies the transaction is still valid before broadcast. Every code path guarantees the transaction has been simulated — no more on-chain reverts from warm gas cache.

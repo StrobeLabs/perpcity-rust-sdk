@@ -27,6 +27,10 @@
 //! };
 //! use alloy::signers::local::PrivateKeySigner;
 //! ```
+//!
+//! [`PerpClient`] accepts any `alloy` transaction signer (`TxSigner`), not just
+//! `PrivateKeySigner` — e.g. AWS KMS via `alloy::signers::aws::AwsSigner` with
+//! this crate's `aws` feature enabled (see `examples/aws_kms_signer.rs`).
 
 #![deny(unreachable_pub)]
 #![warn(missing_debug_implementations, missing_docs, rust_2018_idioms)]
