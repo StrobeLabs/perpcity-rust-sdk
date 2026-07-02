@@ -12,6 +12,12 @@ homepage = "https://docs.perp.city"
 keywords = ["perpetuals", "defi", "trading", "ethereum", "uniswap"]
 categories = ["api-bindings", "cryptography::cryptocurrencies", "finance"]
 
+[features]
+# AWS KMS signing: pulls in alloy's AwsSigner (alloy::signers::aws) so clients
+# can sign with a KMS asymmetric secp256k1 key that never leaves AWS.
+# See examples/aws_kms_signer.rs.
+aws = ["alloy/signer-aws"]
+
 [dependencies]
 alloy = { version = "1", features = ["full", "sol-types", "json-rpc", "rpc-client"] }
 tokio = { version = "1", features = ["full"] }
@@ -24,6 +30,8 @@ tracing = "0.1"
 url = "2"
 
 [dev-dependencies]
+aws-config = "1"
+aws-sdk-kms = "1"
 criterion = { version = "0.5", features = ["html_reports"] }
 dotenvy = "0.15"
 reqwest = { version = "0.12", features = ["json"] }
@@ -40,6 +48,10 @@ name = "market_maker"
 
 [[example]]
 name = "hft_bot"
+
+[[example]]
+name = "aws_kms_signer"
+required-features = ["aws"]
 
 [[bench]]
 name = "math_bench"

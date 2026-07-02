@@ -5,6 +5,11 @@
 //! entry point for interacting with PerpCity on Arbitrum (mainnet and
 //! Arbitrum Sepolia testnet).
 //!
+//! The client accepts any [`TxSigner`] implementation: a local
+//! [`PrivateKeySigner`](alloy::signers::local::PrivateKeySigner) as shown
+//! below, or a remote signer such as AWS KMS via alloy's `AwsSigner`
+//! (enable this crate's `aws` feature; see `examples/aws_kms_signer.rs`).
+//!
 //! # Example
 //!
 //! ```rust,no_run
@@ -40,11 +45,10 @@ pub use transactions::TxBuilder;
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use alloy::network::{Ethereum, EthereumWallet};
-use alloy::primitives::{Address, U256, address};
+use alloy::network::{Ethereum, EthereumWallet, TxSigner};
+use alloy::primitives::{Address, Signature, U256, address};
 use alloy::providers::{Provider, RootProvider};
 use alloy::rpc::client::RpcClient;
-use alloy::signers::local::PrivateKeySigner;
 use alloy::transports::BoxTransport;
 
 use crate::constants::SCALE_1E6;
@@ -188,19 +192,25 @@ impl PerpClient {
     /// Create a new PerpClient.
     ///
     /// - `transport`: Multi-endpoint RPC transport (from [`crate::TransportConfig`])
-    /// - `signer`: Private key for signing transactions
+    /// - `signer`: Any transaction signer — a local
+    ///   [`PrivateKeySigner`](alloy::signers::local::PrivateKeySigner), an AWS KMS
+    ///   [`AwsSigner`](https://docs.rs/alloy-signer-aws) (enable the `aws` feature),
+    ///   or any other [`TxSigner`] implementation
     /// - `deployments`: Contract addresses for this PerpCity instance
     /// - `chain_id`: Chain ID (42161 for Arbitrum One, 421614 for Arbitrum Sepolia)
     ///
     /// This does NOT make any network calls. Call [`Self::refresh_gas`] and
     /// [`Self::sync_nonce`] before submitting transactions.
-    pub fn new(
+    pub fn new<S>(
         transport: HftTransport,
-        signer: PrivateKeySigner,
+        signer: S,
         deployments: Deployments,
         chain_id: u64,
-    ) -> Result<Self> {
-        let address = signer.address();
+    ) -> Result<Self>
+    where
+        S: TxSigner<Signature> + Send + Sync + 'static,
+    {
+        let address = TxSigner::address(&signer);
         let wallet = EthereumWallet::from(signer);
 
         let boxed = BoxTransport::new(transport.clone());
@@ -223,20 +233,26 @@ impl PerpClient {
     }
 
     /// Create a client pre-configured for Arbitrum One (mainnet).
-    pub fn new_arbitrum(
+    pub fn new_arbitrum<S>(
         transport: HftTransport,
-        signer: PrivateKeySigner,
+        signer: S,
         deployments: Deployments,
-    ) -> Result<Self> {
+    ) -> Result<Self>
+    where
+        S: TxSigner<Signature> + Send + Sync + 'static,
+    {
         Self::new(transport, signer, deployments, ARBITRUM_CHAIN_ID)
     }
 
     /// Create a client pre-configured for Arbitrum Sepolia (testnet).
-    pub fn new_arbitrum_sepolia(
+    pub fn new_arbitrum_sepolia<S>(
         transport: HftTransport,
-        signer: PrivateKeySigner,
+        signer: S,
         deployments: Deployments,
-    ) -> Result<Self> {
+    ) -> Result<Self>
+    where
+        S: TxSigner<Signature> + Send + Sync + 'static,
+    {
         Self::new(transport, signer, deployments, ARBITRUM_SEPOLIA_CHAIN_ID)
     }
 
