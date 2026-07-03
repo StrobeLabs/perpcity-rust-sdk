@@ -115,13 +115,22 @@ impl PerpClient {
         let mut owned = Vec::new();
         for id in 1..total {
             let pos_id = U256::from(id);
-            // ownerOf reverts for burned/non-existent tokens — those
-            // surface as contract errors, which we skip. Other transport
-            // errors propagate so network failures aren't silently ignored.
+            // ownerOf reverts for burned/non-existent tokens — skip those.
+            // How a revert surfaces is provider-dependent: some decode into
+            // contract errors, others wrap the raw JSON-RPC error response
+            // (code 3, revert data attached) as a transport error. Classify
+            // by revert data, and only propagate genuine transport failures
+            // so network errors aren't silently ignored.
             match perp.ownerOf(pos_id).call().await {
                 Ok(addr) if addr == owner => owned.push(pos_id),
                 Ok(_) => {}
-                Err(e @ alloy::contract::Error::TransportError(_)) => return Err(e.into()),
+                Err(alloy::contract::Error::TransportError(e))
+                    if e.as_error_resp()
+                        .and_then(|resp| resp.as_revert_data())
+                        .is_none() =>
+                {
+                    return Err(alloy::contract::Error::TransportError(e).into());
+                }
                 Err(_) => {} // burned or non-existent token
             }
         }

@@ -24,6 +24,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Burned-token classification in `get_positions_by_owner` is provider-dependent no more.** `ownerOf` reverts for burned positions; some RPC providers wrap that revert as a raw JSON-RPC error response, which the scan classified as a transport failure and propagated — aborting the enumeration on any market with a burned position. Reverts are now recognized by their revert data regardless of how the provider encodes them; only genuine transport failures propagate.
 - **ETH transfer gas on Arbitrum.** `transfer_eth` hardcoded `GasLimits::ETH_TRANSFER` (21,000), the Ethereum L1 intrinsic. Arbitrum folds an L1 data component into intrinsic gas, so the node rejected these transfers as "intrinsic gas too low", breaking cohort wallet funding. Transfers now estimate gas via `eth_estimateGas` (like other operations); `simulate()` handles the empty calldata of a plain transfer. `GasLimits::ETH_TRANSFER` remains as a reference value.
 - **In-flight transaction eviction.** Failed `poll_receipt` and on-chain reverts now evict the transaction from the pipeline's in-flight map, preventing permanent slot consumption. Previously, 16 failed transactions would jam the pipeline and block all new transactions including closes and retreats.
 
