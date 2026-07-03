@@ -277,11 +277,16 @@ impl PerpClient {
     ///
     /// Every code path guarantees the transaction has been simulated.
     async fn simulate(&self, to: Address, calldata: &Bytes, value: u128, now: u64) -> Result<u64> {
+        // Transactions with fewer than 4 bytes of calldata carry no function
+        // selector to key the estimate cache on — in practice plain value
+        // transfers, which cannot revert from contract logic. Estimate their
+        // gas directly rather than assuming a fixed 21_000: on Arbitrum the
+        // intrinsic gas folds in an L1 data component, so a hardcoded 21_000 is
+        // rejected as "intrinsic gas too low". Apply the same 20% buffer the
+        // cache uses.
         if calldata.len() < 4 {
-            return Err(ValidationError::InvalidConfig {
-                reason: "calldata too short to extract function selector".into(),
-            }
-            .into());
+            let raw = self.estimate_gas(to, calldata, value).await?;
+            return Ok(raw + raw / 5);
         }
         let selector: [u8; 4] = calldata[..4].try_into().unwrap();
 
@@ -298,26 +303,7 @@ impl PerpClient {
         }
 
         // Cache miss — call eth_estimateGas
-        let tx = TransactionRequest::default()
-            .with_from(self.address)
-            .with_to(to)
-            .with_input(calldata.clone())
-            .with_value(U256::from(value));
-
-        let raw_estimate = self.provider.estimate_gas(tx).await.map_err(|e| {
-            let error_str = e.to_string();
-            if let Some((name, selector, data)) = decode::try_extract_revert(&error_str) {
-                TransactionError::SimulationReverted {
-                    error_name: name,
-                    selector,
-                    revert_data: data,
-                }
-            } else {
-                TransactionError::GasUnavailable {
-                    reason: format!("eth_estimateGas failed: {e}"),
-                }
-            }
-        })?;
+        let raw_estimate = self.estimate_gas(to, calldata, value).await?;
 
         // Cache with buffer
         {
@@ -338,5 +324,31 @@ impl PerpClient {
         );
 
         Ok(buffered)
+    }
+
+    /// Run `eth_estimateGas`, decoding contract reverts into structured errors.
+    async fn estimate_gas(&self, to: Address, calldata: &Bytes, value: u128) -> Result<u64> {
+        let tx = TransactionRequest::default()
+            .with_from(self.address)
+            .with_to(to)
+            .with_input(calldata.clone())
+            .with_value(U256::from(value));
+
+        self.provider.estimate_gas(tx).await.map_err(|e| {
+            let error_str = e.to_string();
+            if let Some((name, selector, data)) = decode::try_extract_revert(&error_str) {
+                TransactionError::SimulationReverted {
+                    error_name: name,
+                    selector,
+                    revert_data: data,
+                }
+                .into()
+            } else {
+                TransactionError::GasUnavailable {
+                    reason: format!("eth_estimateGas failed: {e}"),
+                }
+                .into()
+            }
+        })
     }
 }

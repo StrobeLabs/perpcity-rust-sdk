@@ -30,7 +30,9 @@ type Selector = [u8; 4];
 pub struct GasLimits;
 
 impl GasLimits {
-    /// Simple ETH transfer — protocol-defined, always 21,000 gas.
+    /// Simple ETH transfer — 21,000 gas on Ethereum L1. Reference value only:
+    /// transfers now estimate gas via the node, since Arbitrum's intrinsic gas
+    /// folds in an L1 data component and exceeds 21,000.
     pub const ETH_TRANSFER: u64 = 21_000;
     /// ERC-20 `approve` call.
     pub const APPROVE: u64 = 60_000;

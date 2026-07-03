@@ -8,7 +8,7 @@ use crate::contracts::{IERC20, Perp};
 use crate::convert::scale_to_6dec;
 use crate::errors::{ContractError, Result, ValidationError};
 use crate::feeds::{MarketEvent, decode_log};
-use crate::hft::gas::{GasLimits, Urgency};
+use crate::hft::gas::Urgency;
 use crate::math::tick::{align_tick_down, align_tick_up, price_to_tick};
 use crate::types::{
     AdjustMakerParams, AdjustMakerResult, AdjustTakerParams, AdjustTakerResult, OpenMakerParams,
@@ -403,10 +403,12 @@ impl PerpClient {
         urgency: Urgency,
     ) -> Result<B256> {
         tracing::debug!(%to, amount_wei, ?urgency, "transferring ETH");
+        // Estimate gas rather than hardcoding 21_000: Arbitrum's intrinsic gas
+        // includes an L1 data component, so a fixed 21_000 is rejected as
+        // "intrinsic gas too low".
         let receipt = self
             .tx(to, Bytes::new())
             .with_value(amount_wei)
-            .with_gas_limit(GasLimits::ETH_TRANSFER)
             .with_urgency(urgency)
             .send()
             .await?;
