@@ -110,4 +110,4 @@ This avoids overfunding single ranges and makes maker capital reusable across no
 - Maker margin formula is approximate; binary search is authoritative.
 - Tiny deltas may look economically meaningless but are useful to validate mechanics.
 - Testnet mints and large testnet balances must never be confused with mainnet readiness.
-- Mainnet requires a separate capped daemon design, kill switch, monitoring, wallet caps, gas/loss limits, allowlist, and explicit approvals.
+- Mainnet requires a separate capped daemon design, kill switch, monitoring, wallet caps, gas/loss limits, allowlist, and explicit approvals. See `docs/mainnet-live-wallet-runtime-plan.md` for the gated mainnet rollout/runbook draft.
