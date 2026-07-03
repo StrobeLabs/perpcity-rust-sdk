@@ -26,8 +26,32 @@ url = "2"
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
 dotenvy = "0.15"
-reqwest = { version = "0.12", features = ["json"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 tokio = { version = "1", features = ["full", "test-util"] }
+
+[[example]]
+name = "funding_arb_scanner"
+
+[[example]]
+name = "funding_arb_sim"
+
+[[example]]
+name = "maker_allocation_dry_run"
+
+[[example]]
+name = "testnet_liquidity_once"
+
+[[example]]
+name = "testnet_mint_usdc"
+
+[[example]]
+name = "testnet_taker_once"
+
+[[example]]
+name = "decode_selector"
+
+[[example]]
+name = "testnet_market_sizing"
 
 [[example]]
 name = "quickstart"

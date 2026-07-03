@@ -40,14 +40,26 @@ fn parse_minted_token_id(
     })
 }
 
-/// Scale an f64 perp delta to the accounting token's 6-decimal fixed point.
+/// Scale an f64 perp delta to the accounting token's 18-decimal fixed point.
 ///
-/// The perp token (Uniswap V4 `currency0`) is an `AccountingToken` with 6
-/// decimals — the same scaling as USD margin — so `perp_delta` uses `scale_to_6dec`,
-/// not 1e18.
+/// Taker capacity/OI/perp deltas are amount0/perp units with 18 decimals.
+/// Do not use USDC's 6-decimal scale here; that rounds tiny testnet bot
+/// deltas to zero and silently breaks openTaker.
 fn scale_perp_delta(delta: f64) -> Result<I256> {
-    let scaled = scale_to_6dec(delta)?;
-    // An i128 always fits in I256.
+    if !delta.is_finite() {
+        return Err(ValidationError::InvalidMargin {
+            reason: format!("perp_delta must be finite, got {delta}"),
+        }
+        .into());
+    }
+    let scaled = (delta * 1_000_000_000_000_000_000.0).round();
+    if scaled == 0.0 && delta != 0.0 {
+        return Err(ValidationError::InvalidMargin {
+            reason: format!("perp_delta {delta} rounds to zero at 18 decimals"),
+        }
+        .into());
+    }
+    let scaled = scaled as i128;
     Ok(I256::try_from(scaled).expect("i128 fits in I256"))
 }
 

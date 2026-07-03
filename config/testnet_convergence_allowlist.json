@@ -1,0 +1,58 @@
+{
+  "dry_run": true,
+  "will_send_tx": false,
+  "chain_id": 421614,
+  "purpose": "Generic Arbitrum Sepolia convergence candidates. Hormuz mirror markets are hard-excluded and must use scripts/hormuz_mirror_manifest.py plus a separate replay approval flow.",
+  "hard_excludes": [
+    {
+      "symbol": "HRMZ-TT",
+      "perp": "0xA77De9Df6e08BEB8f523153dD0110465190526E3",
+      "reason": "Mirrors mainnet Hormuz tonnage; exact replay only."
+    },
+    {
+      "symbol": "HRMZ-CT",
+      "perp": "0xd802ff15C9D828390dc155BA3908fCbe0E868E62",
+      "reason": "Mirrors mainnet Hormuz cargo count; exact replay only."
+    }
+  ],
+  "initial_allowlist": [
+    {
+      "symbol": "MCNT-OAK",
+      "perp": "0x07D340e33Cb6b73dDab3a53F4Af971921bb55E49",
+      "current_direction_hint": "SHORT",
+      "notes": "Liquid and closest to index; good first convergence validation."
+    },
+    {
+      "symbol": "MCNT-RDP",
+      "perp": "0xe149d179751b57C3b1f8D06c1B58d1ec7968366A",
+      "current_direction_hint": "SHORT",
+      "notes": "Liquid but larger gap; stepwise only after simulation."
+    },
+    {
+      "symbol": "MCNT-HOU",
+      "perp": "0x2975ff1307408a3c93606e517f9e02176d2ee289",
+      "current_direction_hint": "LONG",
+      "notes": "Thin liquidity; likely needs maker planning before taker."
+    },
+    {
+      "symbol": "CITI-NYC",
+      "perp": "0x6d4051ffb71f391a5b4d8643a29Ec6F66F67df50",
+      "current_direction_hint": "SHORT",
+      "notes": "Very thin/expensive; simulate before considering live."
+    }
+  ],
+  "blocked_until_manual_review": [
+    {
+      "symbol": "USFA",
+      "reason": "Current index appears pathological/tiny in read-only scan; do not converge blindly."
+    }
+  ],
+  "per_run_caps_for_future_live_approval": {
+    "requires_separate_approval": true,
+    "default_taker_margin_usdc": 5,
+    "one_transaction_at_a_time": true,
+    "require_eth_call_simulation": true,
+    "require_idempotency_state": true,
+    "stop_on_any_revert_or_unexpected_state": true
+  }
+}
