@@ -187,8 +187,8 @@ All math functions are pure, `O(1)`, and ported faithfully from PerpCity's Solid
 | Variable | Required | Description |
 |----------|----------|-------------|
 | `PERPCITY_PRIVATE_KEY` | Yes | Hex-encoded private key (with or without `0x` prefix) |
-| `PERPCITY_MANAGER` | Yes | PerpManager contract address |
-| `PERPCITY_PERP_ID` | Yes | bytes32 perp market identifier |
+| `PERPCITY_PERP` | Yes | The market's `Perp` contract address (each market is its own contract) |
+| `PERPCITY_USDC` | No | USDC token address (default: `ARBITRUM_SEPOLIA_USDC`) |
 | `RPC_URL` | No | RPC endpoint (default: `https://sepolia-rollup.arbitrum.io/rpc`) |
 | `RPC_URL_1`, `RPC_URL_2` | No | Multi-endpoint config for `hft_bot` example |
 
@@ -196,21 +196,17 @@ All math functions are pure, `O(1)`, and ported faithfully from PerpCity's Solid
 
 ### Deployments
 
-The `Deployments` struct holds contract addresses. For Arbitrum Sepolia:
+The `Deployments` struct holds the two contract addresses the client needs: the market's `Perp` contract and the USDC token. For Arbitrum Sepolia:
 
 ```rust
-let manager: Address = std::env::var("PERPCITY_MANAGER")?.parse()?;
+let perp: Address = std::env::var("PERPCITY_PERP")?.parse()?;
 
 let deployments = Deployments {
-    perp_manager: manager,
+    perp,
     usdc: ARBITRUM_SEPOLIA_USDC, // 0xBEF280BefeE2Cb28c20D1E4Cc1da999B4DA0f1fD (PerpCity test USDC, not Circle's)
-    fees_module: None,
-    margin_ratios_module: None,
-    lockup_period_module: None,
-    sqrt_price_impact_limit_module: None,
 };
 
-let client = PerpClient::new(transport, signer, deployments, 421614)?; // Arbitrum Sepolia
+let client = PerpClient::new_arbitrum_sepolia(transport, signer, deployments)?; // chain ID 421614
 ```
 
 For Arbitrum One (mainnet), use `PerpClient::new_arbitrum()` which sets chain ID 42161, and pass `ARBITRUM_USDC` — canonical Circle USDC on Arbitrum One (`0xaf88d065e77c8cC2239327C5EDb3A432268e5831`) — in `Deployments`.
