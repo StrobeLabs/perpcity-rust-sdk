@@ -22,8 +22,8 @@ cd perpcity-rust-sdk
 
 ```env
 PERPCITY_PRIVATE_KEY=your_hex_private_key
-PERPCITY_MANAGER=0x...   # PerpManager contract address
-PERPCITY_PERP_ID=0x...   # bytes32 perp market ID
+PERPCITY_PERP=0x...   # the market's Perp contract address
+PERPCITY_USDC=0x...   # optional, defaults to Arbitrum Sepolia test USDC
 ```
 
 2. Fund your wallet on Arbitrum Sepolia — you need a small amount of ETH for gas and some USDC for margin. The testnet USDC has a public `mint` function:
