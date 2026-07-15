@@ -22,8 +22,9 @@ cd perpcity-rust-sdk
 
 ```env
 PERPCITY_PRIVATE_KEY=your_hex_private_key
-PERPCITY_MANAGER=0x...   # PerpManager contract address
-PERPCITY_PERP_ID=0x...   # bytes32 perp market ID
+PERPCITY_PERP=0x...      # Perp market contract address
+PERPCITY_USDC=0x...      # optional; defaults to Arbitrum Sepolia test USDC
+RPC_URL=https://sepolia-rollup.arbitrum.io/rpc  # optional
 ```
 
 2. Fund your wallet on Arbitrum Sepolia — you need a small amount of ETH for gas and some USDC for margin. The testnet USDC has a public `mint` function:
@@ -79,20 +80,17 @@ client.ensure_approval(U256::MAX).await?;
 ### Trading
 
 ```rust
-// Open a 5x long with 10 USDC margin
-let pos_id = client.open_taker(perp_id, &OpenTakerParams {
-    is_long: true,
+// Open a long with 10 USDC margin and 1 perp of exposure.
+let open = client.open_taker(&OpenTakerParams {
     margin: 10.0,
-    leverage: 5.0,
-    unspecified_amount_limit: 0,
+    perp_delta: 1.0,
+    amt1_limit: 0,
 }, Urgency::Normal).await?;
 
 // Close it
-let result = client.close_position(pos_id, &CloseParams {
-    min_amt0_out: 0,
-    min_amt1_out: 0,
-    max_amt1_in: u128::MAX,
-}, Urgency::Normal).await?;
+let result = client
+    .close_taker(open.pos_id, open.perp_delta, Urgency::Normal)
+    .await?;
 ```
 
 Every write method takes an `Urgency` level that scales the EIP-1559 priority fee:
@@ -108,13 +106,13 @@ Every write method takes an `Urgency` level that scales the EIP-1559 priority fe
 
 ```rust
 // Snapshot — config + live data in 2 multicalls (2 CUs instead of 5+)
-let (config, snapshot) = client.get_perp_snapshot(perp_id).await?;
+let (config, snapshot) = client.get_perp_snapshot().await?;
 
 // Or individually
-let mark    = client.get_mark_price(perp_id).await?;    // f64 price
-let funding = client.get_funding_rate(perp_id).await?;  // daily rate
-let oi      = client.get_open_interest(perp_id).await?;  // long/short OI
-let live    = client.get_live_details(pos_id).await?;    // PnL, funding, liquidation
+let mark     = client.get_mark_price().await?;        // f64 price
+let funding  = client.get_funding_rate().await?;      // daily rate
+let oi       = client.get_open_interest().await?;      // long/short OI
+let position = client.get_position(open.pos_id).await?; // raw on-chain Position
 
 // Batch balances — N addresses in 1 multicall (1 CU instead of 2N)
 let (usdc, eth) = client.get_balances(address).await?;
@@ -187,8 +185,8 @@ All math functions are pure, `O(1)`, and ported faithfully from PerpCity's Solid
 | Variable | Required | Description |
 |----------|----------|-------------|
 | `PERPCITY_PRIVATE_KEY` | Yes | Hex-encoded private key (with or without `0x` prefix) |
-| `PERPCITY_MANAGER` | Yes | PerpManager contract address |
-| `PERPCITY_PERP_ID` | Yes | bytes32 perp market identifier |
+| `PERPCITY_PERP` | Yes | Address of the `Perp` market contract |
+| `PERPCITY_USDC` | No | USDC token address (defaults to Arbitrum Sepolia test USDC) |
 | `RPC_URL` | No | RPC endpoint (default: `https://sepolia-rollup.arbitrum.io/rpc`) |
 | `RPC_URL_1`, `RPC_URL_2` | No | Multi-endpoint config for `hft_bot` example |
 
@@ -199,18 +197,14 @@ All math functions are pure, `O(1)`, and ported faithfully from PerpCity's Solid
 The `Deployments` struct holds contract addresses. For Arbitrum Sepolia:
 
 ```rust
-let manager: Address = std::env::var("PERPCITY_MANAGER")?.parse()?;
+let perp: Address = std::env::var("PERPCITY_PERP")?.parse()?;
 
 let deployments = Deployments {
-    perp_manager: manager,
+    perp,
     usdc: ARBITRUM_SEPOLIA_USDC, // 0xBEF280BefeE2Cb28c20D1E4Cc1da999B4DA0f1fD (PerpCity test USDC, not Circle's)
-    fees_module: None,
-    margin_ratios_module: None,
-    lockup_period_module: None,
-    sqrt_price_impact_limit_module: None,
 };
 
-let client = PerpClient::new(transport, signer, deployments, 421614)?; // Arbitrum Sepolia
+let client = PerpClient::new_arbitrum_sepolia(transport, signer, deployments)?;
 ```
 
 For Arbitrum One (mainnet), use `PerpClient::new_arbitrum()` which sets chain ID 42161, and pass `ARBITRUM_USDC` — canonical Circle USDC on Arbitrum One (`0xaf88d065e77c8cC2239327C5EDb3A432268e5831`) — in `Deployments`.
