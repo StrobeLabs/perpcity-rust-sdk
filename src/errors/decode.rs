@@ -126,7 +126,8 @@ pub fn try_extract_revert(error: &str) -> Option<(String, String, Option<String>
         let start = idx + "data: \"".len();
         let end = error[start..].find('"').map(|i| start + i)?;
         &error[start..end]
-    } else if let Some(idx) = error.find("data: 0x") {
+    } else {
+        let idx = error.find("data: 0x")?;
         // Some RPC providers omit the quotes
         let start = idx + "data: ".len();
         let end = error[start..]
@@ -134,8 +135,6 @@ pub fn try_extract_revert(error: &str) -> Option<(String, String, Option<String>
             .map(|i| start + i)
             .unwrap_or(error.len());
         &error[start..end]
-    } else {
-        return None;
     };
 
     if data.len() < 10 {
