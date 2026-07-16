@@ -3,9 +3,9 @@
 use alloy::primitives::{Address, B256, Bytes, I256, U256};
 use alloy::sol_types::SolEvent;
 
-use crate::constants::{MIN_OPENING_MARGIN, SCALE_1E6, TICK_SPACING};
+use crate::constants::{MIN_OPENING_MARGIN, TICK_SPACING};
 use crate::contracts::{IERC20, Perp};
-use crate::convert::scale_to_6dec;
+use crate::convert::{scale_from_6dec, scale_to_6dec};
 use crate::errors::{ContractError, Result, ValidationError};
 use crate::feeds::{MarketEvent, decode_log};
 use crate::hft::gas::Urgency;
@@ -83,7 +83,7 @@ fn scale_perp_delta(delta: f64) -> Result<I256> {
 fn scale_opening_margin(margin: f64) -> std::result::Result<i128, ValidationError> {
     let scaled = scale_to_6dec(margin)?;
     if scaled < i128::from(MIN_OPENING_MARGIN) {
-        let minimum = f64::from(MIN_OPENING_MARGIN) / f64::from(SCALE_1E6);
+        let minimum = scale_from_6dec(i128::from(MIN_OPENING_MARGIN));
         return Err(ValidationError::InvalidMargin {
             reason: format!("margin must be at least {minimum} USDC, got {margin}"),
         });
