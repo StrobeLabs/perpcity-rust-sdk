@@ -3,7 +3,7 @@
 use alloy::primitives::{Address, B256, Bytes, I256, U256};
 use alloy::sol_types::SolEvent;
 
-use crate::constants::TICK_SPACING;
+use crate::constants::{MIN_OPENING_MARGIN, SCALE_1E6, TICK_SPACING};
 use crate::contracts::{IERC20, Perp};
 use crate::convert::scale_to_6dec;
 use crate::errors::{ContractError, Result, ValidationError};
@@ -76,6 +76,21 @@ fn scale_perp_delta(delta: f64) -> Result<I256> {
     Ok(I256::try_from(scaled).expect("i128 fits in I256"))
 }
 
+/// Scale and validate position margin against the protocol's opening minimum.
+///
+/// Checks the scaled margin parameter against [`MIN_OPENING_MARGIN`] and returns
+/// [`ValidationError::InvalidMargin`] when it is below the protocol minimum.
+fn scale_opening_margin(margin: f64) -> std::result::Result<i128, ValidationError> {
+    let scaled = scale_to_6dec(margin)?;
+    if scaled < i128::from(MIN_OPENING_MARGIN) {
+        let minimum = f64::from(MIN_OPENING_MARGIN) / f64::from(SCALE_1E6);
+        return Err(ValidationError::InvalidMargin {
+            reason: format!("margin must be at least {minimum} USDC, got {margin}"),
+        });
+    }
+    Ok(scaled)
+}
+
 impl PerpClient {
     // ── Position operations ──────────────────────────────────────────
 
@@ -87,13 +102,7 @@ impl PerpClient {
         params: &OpenTakerParams,
         urgency: Urgency,
     ) -> Result<OpenResult> {
-        let margin_scaled = scale_to_6dec(params.margin)?;
-        if margin_scaled <= 0 {
-            return Err(ValidationError::InvalidMargin {
-                reason: format!("margin must be positive, got {}", params.margin),
-            }
-            .into());
-        }
+        let margin_scaled = scale_opening_margin(params.margin)?;
 
         let perp_delta = scale_perp_delta(params.perp_delta)?;
 
@@ -147,13 +156,7 @@ impl PerpClient {
         params: &OpenMakerParams,
         urgency: Urgency,
     ) -> Result<OpenResult> {
-        let margin_scaled = scale_to_6dec(params.margin)?;
-        if margin_scaled <= 0 {
-            return Err(ValidationError::InvalidMargin {
-                reason: format!("margin must be positive, got {}", params.margin),
-            }
-            .into());
-        }
+        let margin_scaled = scale_opening_margin(params.margin)?;
 
         let tick_lower = align_tick_down(price_to_tick(params.price_lower)?, TICK_SPACING);
         let tick_upper = align_tick_up(price_to_tick(params.price_upper)?, TICK_SPACING);
@@ -429,5 +432,17 @@ impl PerpClient {
             .await?;
         tracing::debug!(tx_hash = %receipt.transaction_hash, "USDC transferred");
         Ok(receipt.transaction_hash)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::scale_opening_margin;
+
+    #[test]
+    fn opening_margin_enforces_protocol_minimum() {
+        assert!(scale_opening_margin(4.999_999).is_err());
+        assert_eq!(scale_opening_margin(5.0).unwrap(), 5_000_000);
+        assert_eq!(scale_opening_margin(5.000_001).unwrap(), 5_000_001);
     }
 }
