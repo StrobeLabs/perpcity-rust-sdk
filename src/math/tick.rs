@@ -111,7 +111,9 @@ pub fn get_sqrt_ratio_at_tick(tick: i32) -> Result<U256, ValidationError> {
         result = U256::MAX / result;
     }
 
-    Ok(result >> 32)
+    // Match Uniswap V4 TickMath: round up when reducing Q128.128 to Q128.96
+    // so getTickAtSqrtPrice remains consistent with this result.
+    Ok((result + U256::from(u32::MAX)) >> 32)
 }
 
 /// Compute (a × b) >> 128 using native u128 widening multiply.
@@ -517,6 +519,18 @@ mod tests {
         assert!(
             (max_price - 1e6).abs() / 1e6 < 0.01,
             "max_price={max_price}"
+        );
+    }
+
+    #[test]
+    fn protocol_tick_sqrt_prices_match_contract_tick_math() {
+        assert_eq!(
+            get_sqrt_ratio_at_tick(constants::MIN_TICK).unwrap(),
+            U256::from_str_radix("79156945126914824732836954", 10).unwrap()
+        );
+        assert_eq!(
+            get_sqrt_ratio_at_tick(constants::MAX_TICK).unwrap(),
+            U256::from_str_radix("79299443975792720780679863727831", 10).unwrap()
         );
     }
 }
