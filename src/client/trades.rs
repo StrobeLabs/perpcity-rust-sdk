@@ -3,7 +3,7 @@
 use alloy::primitives::{Address, B256, Bytes, I256, U256};
 use alloy::sol_types::SolEvent;
 
-use crate::constants::{MIN_OPENING_MARGIN, TICK_SPACING};
+use crate::constants::{MAX_TICK, MIN_OPENING_MARGIN, MIN_TICK, TICK_SPACING};
 use crate::contracts::{IERC20, Perp};
 use crate::convert::{scale_from_6dec, scale_to_6dec};
 use crate::errors::{ContractError, Result, ValidationError};
@@ -91,6 +91,24 @@ fn scale_opening_margin(margin: f64) -> std::result::Result<i128, ValidationErro
     Ok(scaled)
 }
 
+/// Convert maker prices to aligned ticks and enforce the protocol's maker band.
+fn maker_ticks_from_prices(
+    price_lower: f64,
+    price_upper: f64,
+) -> std::result::Result<(i32, i32), ValidationError> {
+    let tick_lower = align_tick_down(price_to_tick(price_lower)?, TICK_SPACING);
+    let tick_upper = align_tick_up(price_to_tick(price_upper)?, TICK_SPACING);
+
+    if tick_lower < MIN_TICK || tick_upper > MAX_TICK || tick_lower >= tick_upper {
+        return Err(ValidationError::InvalidTickRange {
+            lower: tick_lower,
+            upper: tick_upper,
+        });
+    }
+
+    Ok((tick_lower, tick_upper))
+}
+
 impl PerpClient {
     // ── Position operations ──────────────────────────────────────────
 
@@ -158,16 +176,8 @@ impl PerpClient {
     ) -> Result<OpenResult> {
         let margin_scaled = scale_opening_margin(params.margin)?;
 
-        let tick_lower = align_tick_down(price_to_tick(params.price_lower)?, TICK_SPACING);
-        let tick_upper = align_tick_up(price_to_tick(params.price_upper)?, TICK_SPACING);
-
-        if tick_lower >= tick_upper {
-            return Err(ValidationError::InvalidTickRange {
-                lower: tick_lower,
-                upper: tick_upper,
-            }
-            .into());
-        }
+        let (tick_lower, tick_upper) =
+            maker_ticks_from_prices(params.price_lower, params.price_upper)?;
 
         let wire_params = crate::contracts::OpenMakerParams {
             holder: self.address,
@@ -437,12 +447,50 @@ impl PerpClient {
 
 #[cfg(test)]
 mod tests {
-    use super::scale_opening_margin;
+    use super::{maker_ticks_from_prices, scale_opening_margin};
+    use crate::constants::{MAX_TICK, MIN_TICK, TICK_SPACING};
+    use crate::math::tick::tick_to_price;
 
     #[test]
     fn opening_margin_enforces_protocol_minimum() {
         assert!(scale_opening_margin(4.999_999).is_err());
         assert_eq!(scale_opening_margin(5.0).unwrap(), 5_000_000);
         assert_eq!(scale_opening_margin(5.000_001).unwrap(), 5_000_001);
+    }
+
+    #[test]
+    fn maker_tick_range_accepts_protocol_bounds() {
+        let ticks = maker_ticks_from_prices(
+            tick_to_price(MIN_TICK).unwrap(),
+            tick_to_price(MAX_TICK).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(ticks, (MIN_TICK, MAX_TICK));
+    }
+
+    #[test]
+    fn maker_starting_price_bounds_align_to_protocol_ticks() {
+        assert_eq!(
+            maker_ticks_from_prices(1e-6, 1e6).unwrap(),
+            (MIN_TICK, MAX_TICK)
+        );
+    }
+
+    #[test]
+    fn maker_tick_range_rejects_lower_bound_violation() {
+        let result = maker_ticks_from_prices(
+            tick_to_price(MIN_TICK - TICK_SPACING).unwrap(),
+            tick_to_price(0).unwrap(),
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn maker_tick_range_rejects_upper_bound_violation() {
+        let result = maker_ticks_from_prices(
+            tick_to_price(0).unwrap(),
+            tick_to_price(MAX_TICK + TICK_SPACING).unwrap(),
+        );
+        assert!(result.is_err());
     }
 }

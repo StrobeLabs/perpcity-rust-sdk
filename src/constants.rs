@@ -40,17 +40,17 @@ pub const MIN_OPENING_MARGIN: u32 = 5_000_000;
 /// Funding interval in seconds (1 day).
 pub const INTERVAL: u64 = 86_400;
 
-/// sqrt(0.001) * 2^96 — the minimum allowed sqrtPriceX96.
-pub const MIN_SQRT_PRICE_X96: U256 = uint!(2505414483750479311864138016_U256);
+/// sqrt(1e-6) * 2^96 — the minimum starting sqrtPriceX96 accepted by the factory.
+pub const MIN_SQRT_PRICE_X96: U256 = uint!(79228162514264337593543951_U256);
 
-/// sqrt(1000) * 2^96 — the maximum allowed sqrtPriceX96.
-pub const MAX_SQRT_PRICE_X96: U256 = uint!(2505414483750479311864138015696_U256);
+/// sqrt(1e6) * 2^96 — the maximum starting sqrtPriceX96 accepted by the factory.
+pub const MAX_SQRT_PRICE_X96: U256 = uint!(79228162514264337593543950336000_U256);
 
-/// Minimum tick (~= TickMath.getTickAtSqrtPrice(MIN_SQRT_PRICE_X96)).
-pub const MIN_TICK: i32 = -69_090;
+/// Minimum allowed maker tick, slightly below the factory's minimum starting price.
+pub const MIN_TICK: i32 = -138_180;
 
-/// Maximum tick (~= TickMath.getTickAtSqrtPrice(MAX_SQRT_PRICE_X96)).
-pub const MAX_TICK: i32 = 69_090;
+/// Maximum allowed maker tick, slightly above the factory's maximum starting price.
+pub const MAX_TICK: i32 = 138_180;
 
 /// Total supply of the internal accounting token: type(uint120).max.
 pub const ACCOUNTING_TOKEN_SUPPLY: U256 = U256::from_limbs([u64::MAX, u64::MAX >> 8, 0, 0]); // 2^120 - 1
@@ -125,13 +125,13 @@ mod tests {
 
     #[test]
     fn min_sqrt_price_x96_matches_contract() {
-        let expected = U256::from_str_radix("2505414483750479311864138016", 10).unwrap();
+        let expected = U256::from_str_radix("79228162514264337593543951", 10).unwrap();
         assert_eq!(MIN_SQRT_PRICE_X96, expected);
     }
 
     #[test]
     fn max_sqrt_price_x96_matches_contract() {
-        let expected = U256::from_str_radix("2505414483750479311864138015696", 10).unwrap();
+        let expected = U256::from_str_radix("79228162514264337593543950336000", 10).unwrap();
         assert_eq!(MAX_SQRT_PRICE_X96, expected);
     }
 }

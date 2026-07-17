@@ -504,14 +504,19 @@ mod tests {
 
     #[test]
     fn protocol_min_max_ticks_produce_valid_prices() {
-        // PerpCity uses ±69090 as its bounds.
+        // PerpCity uses ±138180 as its maker bounds, slightly wider than
+        // the factory's 1e-6..=1e6 starting-price range.
         let min_price = tick_to_price(constants::MIN_TICK).unwrap();
         let max_price = tick_to_price(constants::MAX_TICK).unwrap();
         assert!(min_price > 0.0);
         assert!(max_price > min_price);
-        // MIN_TICK ≈ -69090 → price ≈ 0.001
-        assert!((min_price - 0.001).abs() < 0.0005, "min_price={min_price}");
-        // MAX_TICK ≈ 69090 → price ≈ 1000
-        assert!((max_price - 1000.0).abs() < 1.0, "max_price={max_price}");
+        assert!(
+            (min_price - 1e-6).abs() / 1e-6 < 0.01,
+            "min_price={min_price}"
+        );
+        assert!(
+            (max_price - 1e6).abs() / 1e6 < 0.01,
+            "max_price={max_price}"
+        );
     }
 }
