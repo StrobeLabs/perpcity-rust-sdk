@@ -60,10 +60,8 @@ pub const MAX_PROTOCOL_FEE: u32 = 50_000;
 
 /// Maximum absolute error when decoding a Q96 fixed-point value to f64.
 ///
-/// The conversion `(value * 1e6) / Q96` uses integer division, which
-/// truncates the remainder. The truncation loses at most 1 unit in the
-/// intermediate integer, mapping to `1 / 1e6 = 0.000001` in the final
-/// f64. This bound holds regardless of price magnitude.
+/// Q96 decoding retains the integer and fractional components separately.
+/// This remains a conservative tolerance for callers comparing decoded prices.
 pub const Q96_PRECISION: f64 = 0.000001;
 
 /// ERC721 name for PerpCity position NFTs.

@@ -12,11 +12,11 @@
 //!
 //! Uniswap V4 prices are stored as `sqrtPriceX96 = sqrt(price) × 2^96`.
 //! The [`price_to_sqrt_price_x96`] / [`sqrt_price_x96_to_price`] pair
-//! handles this encoding, using a 6-decimal intermediate for precision.
+//! handles this encoding while retaining the Q96 fractional component.
 
 use alloy::primitives::U256;
 
-use crate::constants::Q96;
+use crate::constants::{Q96, Q96_U128};
 use crate::errors::ValidationError;
 
 // ── Module-level constants ─────────────────────────────────────────────
@@ -153,7 +153,7 @@ pub fn margin_ratio_to_leverage(margin_ratio: u32) -> Result<f64, ValidationErro
 /// This is the base decoder for all Q96-encoded values. The input is
 /// already a price (or index), not a sqrt price.
 ///
-/// Formula: `price = value × 1e6 / 2^96 / 1e6`
+/// Formula: `price = floor(value / 2^96) + (value mod 2^96) / 2^96`
 ///
 /// Used for beacon index values (`IndexUpdated.index`) and as the
 /// building block for [`sqrt_price_x96_to_price`].
@@ -179,16 +179,19 @@ pub fn price_x96_to_f64(value: U256) -> Result<f64, ValidationError> {
         });
     }
 
-    let intermediate = (value * BIGINT_1E6) / Q96;
+    let integer = value / Q96;
 
-    if intermediate > U256::from(MAX_SAFE_F64_INT) {
+    if integer > U256::from(MAX_SAFE_F64_INT) {
         return Err(ValidationError::Overflow {
-            context: "Q96 price exceeds safe f64 integer range after scaling".into(),
+            context: "Q96 price integer component exceeds safe f64 range".into(),
         });
     }
 
-    let int_val = intermediate.as_limbs()[0];
-    Ok(int_val as f64 / F64_1E6)
+    let remainder = value % Q96;
+    let limbs = remainder.as_limbs();
+    let remainder_u128 = u128::from(limbs[0]) | (u128::from(limbs[1]) << 64);
+
+    Ok(integer.as_limbs()[0] as f64 + remainder_u128 as f64 / Q96_U128 as f64)
 }
 
 // ── Price ↔ sqrtPriceX96 ──────────────────────────────────────────────
@@ -286,7 +289,7 @@ pub fn sqrt_price_x96_to_price(sqrt_price_x96: U256) -> Result<f64, ValidationEr
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::constants::{MAX_SQRT_PRICE_X96, Q96_PRECISION};
+    use crate::constants::{MAX_SQRT_PRICE_X96, MIN_SQRT_PRICE_X96, Q96_PRECISION};
 
     // ── scale_to_6dec ──────────────────────────────────────────────
 
@@ -625,6 +628,16 @@ mod tests {
     }
 
     #[test]
+    fn sqrt_price_x96_protocol_min() {
+        let price = sqrt_price_x96_to_price(MIN_SQRT_PRICE_X96).unwrap();
+        assert!(
+            (price - 1e-6).abs() < 1e-15,
+            "MIN_SQRT_PRICE_X96 gave price={price}, expected ≈1e-6"
+        );
+        assert!(price > 0.0);
+    }
+
+    #[test]
     fn sqrt_price_x96_protocol_max() {
         // MAX_SQRT_PRICE_X96 corresponds to price ≈ 1e6.
         let price = sqrt_price_x96_to_price(MAX_SQRT_PRICE_X96).unwrap();
@@ -638,9 +651,7 @@ mod tests {
 
     #[test]
     fn price_sqrt_price_x96_roundtrip() {
-        // Test a range of prices. The 6-decimal intermediate means we
-        // lose precision at around 1e-6 relative error.
-        for &price in &[0.01, 0.1, 0.5, 1.0, 2.0, 10.0, 100.0, 500.0, 1e6] {
+        for &price in &[1e-6, 0.01, 0.1, 0.5, 1.0, 2.0, 10.0, 100.0, 1e6] {
             let sqrt_px96 = price_to_sqrt_price_x96(price).unwrap();
             let recovered = sqrt_price_x96_to_price(sqrt_px96).unwrap();
             let rel_error = (recovered - price).abs() / price;
