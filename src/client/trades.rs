@@ -3,7 +3,7 @@
 use alloy::primitives::{Address, B256, Bytes, I256, U256};
 use alloy::sol_types::SolEvent;
 
-use crate::constants::{MIN_OPENING_MARGIN, TICK_SPACING};
+use crate::constants::{MAX_TICK, MIN_OPENING_MARGIN, MIN_TICK, TICK_SPACING};
 use crate::contracts::{IERC20, Perp};
 use crate::convert::{scale_from_6dec, scale_to_6dec};
 use crate::errors::{ContractError, Result, ValidationError};
@@ -161,7 +161,7 @@ impl PerpClient {
         let tick_lower = align_tick_down(price_to_tick(params.price_lower)?, TICK_SPACING);
         let tick_upper = align_tick_up(price_to_tick(params.price_upper)?, TICK_SPACING);
 
-        if tick_lower >= tick_upper {
+        if tick_lower < MIN_TICK || tick_upper > MAX_TICK || tick_lower >= tick_upper {
             return Err(ValidationError::InvalidTickRange {
                 lower: tick_lower,
                 upper: tick_upper,

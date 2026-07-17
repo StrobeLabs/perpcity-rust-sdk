@@ -286,7 +286,7 @@ pub fn sqrt_price_x96_to_price(sqrt_price_x96: U256) -> Result<f64, ValidationEr
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::constants::{MAX_SQRT_PRICE_X96, MIN_SQRT_PRICE_X96, Q96_PRECISION};
+    use crate::constants::{MAX_SQRT_PRICE_X96, Q96_PRECISION};
 
     // ── scale_to_6dec ──────────────────────────────────────────────
 
@@ -587,15 +587,15 @@ mod tests {
 
     #[test]
     fn price_very_small_works() {
-        // 0.001 is at the protocol minimum
-        let result = price_to_sqrt_price_x96(0.001);
+        // 1e-6 is the protocol's minimum starting price.
+        let result = price_to_sqrt_price_x96(1e-6);
         assert!(result.is_ok());
     }
 
     #[test]
-    fn price_1000_works() {
-        // 1000 is at the protocol maximum
-        let result = price_to_sqrt_price_x96(1000.0);
+    fn price_1e6_works() {
+        // 1e6 is the protocol's maximum starting price.
+        let result = price_to_sqrt_price_x96(1e6);
         assert!(result.is_ok());
     }
 
@@ -625,22 +625,12 @@ mod tests {
     }
 
     #[test]
-    fn sqrt_price_x96_protocol_min() {
-        // MIN_SQRT_PRICE_X96 corresponds to price ≈ 0.001
-        let price = sqrt_price_x96_to_price(MIN_SQRT_PRICE_X96).unwrap();
-        assert!(
-            (price - 0.001).abs() < Q96_PRECISION,
-            "MIN_SQRT_PRICE_X96 gave price={price}, expected ≈0.001"
-        );
-    }
-
-    #[test]
     fn sqrt_price_x96_protocol_max() {
-        // MAX_SQRT_PRICE_X96 corresponds to price ≈ 1000
+        // MAX_SQRT_PRICE_X96 corresponds to price ≈ 1e6.
         let price = sqrt_price_x96_to_price(MAX_SQRT_PRICE_X96).unwrap();
         assert!(
-            (price - 1000.0).abs() < Q96_PRECISION,
-            "MAX_SQRT_PRICE_X96 gave price={price}, expected ≈1000"
+            (price - 1e6).abs() < Q96_PRECISION,
+            "MAX_SQRT_PRICE_X96 gave price={price}, expected ≈1e6"
         );
     }
 
@@ -650,7 +640,7 @@ mod tests {
     fn price_sqrt_price_x96_roundtrip() {
         // Test a range of prices. The 6-decimal intermediate means we
         // lose precision at around 1e-6 relative error.
-        for &price in &[0.01, 0.1, 0.5, 1.0, 2.0, 10.0, 100.0, 500.0, 999.0] {
+        for &price in &[0.01, 0.1, 0.5, 1.0, 2.0, 10.0, 100.0, 500.0, 1e6] {
             let sqrt_px96 = price_to_sqrt_price_x96(price).unwrap();
             let recovered = sqrt_price_x96_to_price(sqrt_px96).unwrap();
             let rel_error = (recovered - price).abs() / price;
