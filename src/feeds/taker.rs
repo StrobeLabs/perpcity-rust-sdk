@@ -22,8 +22,8 @@ pub struct LiveTakerMarket {
 impl LiveTakerMarket {
     /// Create a detached cache from an already validated snapshot.
     ///
-    /// This is useful for tests, historical simulation, and legacy deployments
-    /// whose module bounds are reconstructed by an external checkpoint worker.
+    /// This is useful for tests, historical simulation, and externally
+    /// maintained snapshots.
     pub fn from_snapshot(snapshot: TakerMarketSnapshot) -> (Self, LiveTakerMarketPublisher) {
         let (tx, latest) = watch::channel(Arc::new(snapshot));
         (Self { latest }, LiveTakerMarketPublisher { tx })
@@ -66,7 +66,7 @@ impl LiveTakerMarket {
     }
 }
 
-/// Producer handle for externally maintained or legacy market snapshots.
+/// Producer handle for externally maintained market snapshots.
 #[derive(Debug, Clone)]
 pub struct LiveTakerMarketPublisher {
     tx: watch::Sender<Arc<TakerMarketSnapshot>>,

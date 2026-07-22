@@ -89,5 +89,5 @@ pub use math::tick::{
 
 #[doc(inline)]
 pub use math::swap::{
-    PriceImpactInputs, QuoteConstraints, QuoteLimit, TakerMarketSnapshot, TakerQuote, TickLiquidity,
+    QuoteConstraints, QuoteLimit, TakerMarketSnapshot, TakerQuote, TickLiquidity,
 };

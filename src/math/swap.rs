@@ -48,19 +48,6 @@ pub struct QuoteConstraints {
     pub max_perp: Option<u128>,
 }
 
-/// Inputs required by every conforming `IPriceImpact` module.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PriceImpactInputs {
-    /// Current AMM price in the protocol's Q96 price representation.
-    pub amm_price: U256,
-    /// Current oracle index price in Q96.
-    pub index_price: U256,
-    /// Lazily accrued AMM EMA in Q96.
-    pub ema_amm_price: U256,
-    /// Lazily accrued index EMA in Q96.
-    pub ema_index_price: U256,
-}
-
 impl Default for QuoteConstraints {
     fn default() -> Self {
         Self {

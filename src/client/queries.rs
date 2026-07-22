@@ -25,7 +25,8 @@ use crate::contracts::{
 use crate::convert::{margin_ratio_to_leverage, price_x96_to_f64, scale_from_6dec};
 use crate::errors::{ContractError, Result, ValidationError};
 use crate::hft::state_cache::{CachedBounds, CachedFees};
-use crate::math::swap::{PriceImpactInputs, TakerMarketSnapshot, TickLiquidity};
+use crate::math::ema::calculate_emas;
+use crate::math::swap::{TakerMarketSnapshot, TickLiquidity};
 use crate::types::{Bounds, Fees, OpenInterest, PerpData, PerpSnapshot};
 
 use super::{PerpClient, SCALE_F64, i24_to_i32, now_secs, u24_to_u32};
@@ -34,7 +35,7 @@ use super::{PerpClient, SCALE_F64, i24_to_i32, now_secs, u24_to_u32};
 const WAD_F64: f64 = 1e18;
 
 fn add_slot(slot: B256, offset: u64) -> B256 {
-    let value = U256::from_be_bytes(slot.0) + U256::from(offset);
+    let value = U256::from_be_bytes(slot.0).wrapping_add(U256::from(offset));
     B256::from(value.to_be_bytes::<32>())
 }
 
@@ -63,10 +64,12 @@ impl PerpClient {
     }
 
     /// Load an exact concentrated-liquidity snapshot at the latest canonical
-    /// block. New Perp versions provide authoritative live EMA/module bounds
-    /// through `previewTakerMarketState`. For v0.2.1 callers should use
-    /// [`Self::load_taker_market_snapshot_legacy`] with bounds reconstructed
-    /// from their indexer checkpoint.
+    /// block for the deployed Perp contract (`perpcity-contracts@4bbe554f`).
+    ///
+    /// The loader reads the stored EMA pair from its deployed storage slot,
+    /// advances it with the contract's exact arithmetic, and evaluates the
+    /// configured price-impact module. Every contract and PoolManager read is
+    /// pinned to the returned block hash.
     pub async fn load_taker_market_snapshot(
         &self,
         pool_manager: Address,
@@ -80,90 +83,57 @@ impl PerpClient {
             })?;
         let block_id = BlockId::hash(block.header.hash);
         let perp = Perp::new(self.deployments.perp, &self.provider);
-        let state = perp
-            .previewTakerMarketState()
+        // PerpStorage starts at slot 3 and `emas` is field slot 8 in the
+        // deployed layout. PricePair packs ammPrice in the low 128 bits and
+        // index in the high 128 bits.
+        const DEPLOYED_EMAS_SLOT: u64 = 11;
+        let stored_emas = self
+            .provider
+            .get_storage_at(self.deployments.perp, U256::from(DEPLOYED_EMAS_SLOT))
+            .block_id(block_id)
+            .await?;
+        let pool_state_call = perp.poolState().block(block_id);
+        let modules_call = perp.modules().block(block_id);
+        let rates_call = perp.rates().block(block_id);
+        let ema_window_call = perp.EMA_WINDOW().block(block_id);
+        let (state, modules, rates, ema_window) = tokio::try_join!(
+            pool_state_call.call(),
+            modules_call.call(),
+            rates_call.call(),
+            ema_window_call.call(),
+        )?;
+        let index = IBeacon::new(modules.beacon, &self.provider)
+            .index()
             .block(block_id)
             .call()
             .await?;
-        self.load_taker_book_at(
-            pool_manager,
-            block.header.hash,
-            block.header.number,
+        if state.ammPrice > U256::from(u128::MAX)
+            || index > U256::from(u128::MAX)
+            || ema_window > U256::from(u64::MAX)
+        {
+            return Err(ValidationError::Overflow {
+                context: "deployed EMA inputs".into(),
+            }
+            .into());
+        }
+        let stored_amm = (stored_emas & U256::from(u128::MAX)).to::<u128>();
+        let stored_index = (stored_emas >> 128usize).to::<u128>();
+        let (ema_amm, ema_index) = calculate_emas(
+            stored_amm,
+            stored_index,
+            state.ammPrice.to::<u128>(),
+            index.to::<u128>(),
+            rates.lastTouch.to::<u64>(),
             block.header.timestamp,
-            state.sqrtPrice.to::<U256>(),
-            i24_to_i32(state.tick),
-            state.liquidity,
-            state.sqrtMin,
-            state.sqrtMax,
-            crate::constants::MIN_SWAP_SQRT_PRICE_X96,
-            crate::constants::MAX_SWAP_SQRT_PRICE_X96,
-        )
-        .await
-    }
-
-    /// Load a v0.2.1 market snapshot using price-impact bounds obtained from a
-    /// block-pinned EMA/module checkpoint.
-    pub async fn load_taker_market_snapshot_legacy(
-        &self,
-        pool_manager: Address,
-        impact_sqrt_min_x96: U256,
-        impact_sqrt_max_x96: U256,
-    ) -> Result<TakerMarketSnapshot> {
-        let block = self
-            .provider
-            .get_block_by_number(BlockNumberOrTag::Latest)
-            .await?
-            .ok_or_else(|| ContractError::MulticallFailed {
-                reason: "latest block not found".into(),
-            })?;
-        let block_id = BlockId::hash(block.header.hash);
-        let perp = Perp::new(self.deployments.perp, &self.provider);
-        let state = perp.poolState().block(block_id).call().await?;
-        self.load_taker_book_at(
-            pool_manager,
-            block.header.hash,
-            block.header.number,
-            block.header.timestamp,
-            state.sqrtPrice.to::<U256>(),
-            i24_to_i32(state.tick),
-            state.liquidity,
-            impact_sqrt_min_x96,
-            impact_sqrt_max_x96,
-            crate::constants::LEGACY_MIN_SWAP_SQRT_PRICE_X96,
-            crate::constants::LEGACY_MAX_SWAP_SQRT_PRICE_X96,
-        )
-        .await
-    }
-
-    /// Load a legacy v0.2.1 snapshot and evaluate any conforming price-impact
-    /// module at the exact same block. Callers can reconstruct `inputs` from an
-    /// indexed EMA checkpoint plus [`crate::math::ema::calculate_emas`].
-    pub async fn load_taker_market_snapshot_legacy_from_ema(
-        &self,
-        pool_manager: Address,
-        price_impact_module: Address,
-        inputs: PriceImpactInputs,
-    ) -> Result<TakerMarketSnapshot> {
-        let block = self
-            .provider
-            .get_block_by_number(BlockNumberOrTag::Latest)
-            .await?
-            .ok_or_else(|| ContractError::MulticallFailed {
-                reason: "latest block not found".into(),
-            })?;
-        let block_id = BlockId::hash(block.header.hash);
-        let bounds = IPriceImpact::new(price_impact_module, &self.provider)
+            ema_window.to::<u64>(),
+        )?;
+        let bounds = IPriceImpact::new(modules.priceImpact, &self.provider)
             .sqrtPriceBounds(
-                inputs.amm_price,
-                inputs.index_price,
-                inputs.ema_amm_price,
-                inputs.ema_index_price,
+                state.ammPrice,
+                index,
+                U256::from(ema_amm),
+                U256::from(ema_index),
             )
-            .block(block_id)
-            .call()
-            .await?;
-        let state = Perp::new(self.deployments.perp, &self.provider)
-            .poolState()
             .block(block_id)
             .call()
             .await?;
@@ -177,8 +147,8 @@ impl PerpClient {
             state.liquidity,
             bounds.sqrtMin,
             bounds.sqrtMax,
-            crate::constants::LEGACY_MIN_SWAP_SQRT_PRICE_X96,
-            crate::constants::LEGACY_MAX_SWAP_SQRT_PRICE_X96,
+            crate::constants::MIN_SWAP_SQRT_PRICE_X96,
+            crate::constants::MAX_SWAP_SQRT_PRICE_X96,
         )
         .await
     }

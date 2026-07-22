@@ -1,10 +1,10 @@
 //! On-chain contract bindings generated via Alloy's `sol!` macro.
 //!
 //! Structs, events, errors, and function selectors are reconciled against the
-//! **deployed** `perpcity-contracts` release `v0.2.1` (the version live on
+//! **deployed** `perpcity-contracts` commit `4bbe554f` (the version live on
 //! Arbitrum), NOT `main` HEAD — HEAD has post-release work (e.g. `Position`
 //! gained `initMarginRatio` in #176, plus `lpFeeGrowth*` fields and the
-//! `HealthNotImproved` error) that is not yet on-chain. Source: tag `v0.2.1`
+//! `HealthNotImproved` error) that is not yet on-chain. Source: commit `4bbe554f`
 //! (`Perp.sol`, `libraries/Structs.sol`, `libraries/Events.sol`,
 //! `libraries/Errors.sol`, `interfaces/modules/*`).
 //!
@@ -380,22 +380,9 @@ sol! {
 
         function EMA_WINDOW() external view returns (uint256);
 
-        function PROTOCOL_VERSION() external view returns (uint32);
-
         /// Live Uniswap V4 pool state (slot0 + liquidity). `ammPrice` is scaled by 2^96.
         function poolState() external view returns (
             int24 tick, uint160 sqrtPrice, uint256 ammPrice, uint128 liquidity
-        );
-
-        function previewTakerMarketState() external view returns (
-            int24 tick,
-            uint160 sqrtPrice,
-            uint128 liquidity,
-            PricePair memory spots,
-            PricePair memory liveEmas,
-            address priceImpactModule,
-            uint256 sqrtMin,
-            uint256 sqrtMax
         );
 
         /// Module addresses (beacon, fees, funding, marginRatios, priceImpact, pricing).
