@@ -77,15 +77,46 @@ impl PerpCityError {
 
     /// Returns `true` if the error is likely transient and worth retrying
     /// (RPC errors, gas unavailable, etc.).
+    ///
+    /// `NonceDesynced` is transient by construction: it clears itself once
+    /// in-flight transactions drain and the next send resyncs from chain,
+    /// so callers should back off briefly rather than give up.
     pub fn is_transient(&self) -> bool {
         matches!(
             self,
             Self::Rpc(_)
                 | Self::Transaction(TransactionError::GasUnavailable { .. })
                 | Self::Transaction(TransactionError::ReceiptTimeout { .. })
+                | Self::Transaction(TransactionError::NonceDesynced { .. })
         )
     }
 }
 
 /// Convenience alias used throughout the SDK.
 pub type Result<T> = std::result::Result<T, PerpCityError>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Consumers key retry behaviour off this classification (backoff loops
+    /// treat transients as "retry politely"), so it is API surface, not an
+    /// implementation detail.
+    #[test]
+    fn desync_is_transient_and_reverts_are_not() {
+        let desynced: PerpCityError = TransactionError::NonceDesynced { in_flight: 2 }.into();
+        assert!(
+            desynced.is_transient(),
+            "desync clears itself after drain + resync; callers must retry, not give up"
+        );
+
+        let revert: PerpCityError = TransactionError::SimulationReverted {
+            error_name: "PriceImpactTooHigh".into(),
+            selector: "0xfb30d03a".into(),
+            revert_data: None,
+        }
+        .into();
+        assert!(!revert.is_transient(), "a contract revert is deterministic");
+        assert!(revert.is_simulation_revert());
+    }
+}

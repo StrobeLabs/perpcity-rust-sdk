@@ -78,6 +78,45 @@ impl<'a> TxBuilder<'a> {
     pub async fn send(self) -> Result<alloy::rpc::types::TransactionReceipt> {
         let now = super::now_ms();
 
+        // If a previous send left the nonce sequence in doubt (failed
+        // broadcast, receipt timeout), repair it before preparing anything
+        // new. The chain is the only authority on where the sequence stands:
+        // rewinding or reusing a doubtful nonce locally spins forever
+        // whenever the "failed" transaction actually landed. Resync is only
+        // safe once nothing holds a nonce, so while transactions are still
+        // in flight this fails fast with a transient error instead.
+        let needs_resync = {
+            let pipeline = self.client.pipeline.lock().unwrap();
+            if pipeline.is_desynced() {
+                if !pipeline.can_resync() {
+                    return Err(TransactionError::NonceDesynced {
+                        in_flight: pipeline.in_flight_count(),
+                    }
+                    .into());
+                }
+                true
+            } else {
+                false
+            }
+        };
+        if needs_resync {
+            // `pending` counts mempool transactions too, so a broadcast that
+            // reported failure but propagated anyway keeps its nonce — the
+            // resync steps past it instead of colliding with it.
+            let count = self
+                .client
+                .provider
+                .get_transaction_count(self.client.address)
+                .pending()
+                .await?;
+            let pipeline = self.client.pipeline.lock().unwrap();
+            // Re-check under the lock: another sender may have resynced (or
+            // started preparing) while we were fetching the count.
+            if pipeline.is_desynced() && pipeline.can_resync() {
+                pipeline.resync_nonce(count);
+            }
+        }
+
         // Simulate + resolve gas limit. Explicit gas_limit skips simulation.
         let resolved_gas_limit = match self.gas_limit {
             Some(0) => {
@@ -132,15 +171,35 @@ impl<'a> TxBuilder<'a> {
             .with_max_priority_fee_per_gas(prepared.gas_fees.max_priority_fee_per_gas as u128)
             .with_chain_id(self.client.chain_id);
 
-        // Sign and send
-        let tx_envelope =
-            tx.build(&self.client.wallet)
-                .await
-                .map_err(|e| TransactionError::SigningFailed {
+        // Sign. A failure here is provably local — nothing was broadcast —
+        // so the nonce can be handed straight back (a bare `?` would strand
+        // it: acquired in prepare, accounted for only by record_submission).
+        let tx_envelope = match tx.build(&self.client.wallet).await {
+            Ok(envelope) => envelope,
+            Err(e) => {
+                let pipeline = self.client.pipeline.lock().unwrap();
+                pipeline.abandon_prepared(prepared.nonce);
+                return Err(TransactionError::SigningFailed {
                     reason: format!("{e}"),
-                })?;
+                }
+                .into());
+            }
+        };
 
-        let pending = self.client.provider.send_tx_envelope(tx_envelope).await?;
+        // Broadcast. A failure here is NOT provably local: the transaction
+        // may never have left, may sit in the mempool, or may already be
+        // mined — and no local bookkeeping can tell which. Releasing or
+        // reusing the nonce guesses, and the wrong guess retries a consumed
+        // nonce forever. Flag the doubt instead; the next send resyncs from
+        // chain once nothing is in flight.
+        let pending = match self.client.provider.send_tx_envelope(tx_envelope).await {
+            Ok(pending) => pending,
+            Err(e) => {
+                let pipeline = self.client.pipeline.lock().unwrap();
+                pipeline.mark_desynced_prepared();
+                return Err(e.into());
+            }
+        };
         let tx_hash_b256 = *pending.tx_hash();
         let tx_hash_bytes: [u8; 32] = tx_hash_b256.into();
 
@@ -152,17 +211,24 @@ impl<'a> TxBuilder<'a> {
             pipeline.record_submission(tx_hash_bytes, prepared, now);
         }
 
-        // Wait for receipt
+        // Wait for receipt. A timeout does NOT mean the transaction died —
+        // it is broadcast and may still mine later, so its nonce must never
+        // be rewound or reused (`fail` would). Stop tracking it and flag the
+        // doubt; the next send resyncs from chain, which counts the
+        // transaction if and only if it is still live.
         let receipt = match self.client.poll_receipt(tx_hash_b256).await {
             Ok(receipt) => receipt,
             Err(e) => {
                 let mut pipeline = self.client.pipeline.lock().unwrap();
-                pipeline.fail(&tx_hash_bytes);
+                pipeline.resolve(&tx_hash_bytes);
+                pipeline.mark_desynced();
                 return Err(e);
             }
         };
 
-        // Confirm in pipeline
+        // Confirm in pipeline. This holds for reverted receipts too: a
+        // reverted transaction MINED, so its nonce is consumed exactly as if
+        // it had succeeded — never released.
         {
             let mut pipeline = self.client.pipeline.lock().unwrap();
             pipeline.resolve(&tx_hash_bytes);
@@ -171,8 +237,6 @@ impl<'a> TxBuilder<'a> {
         // Check if reverted
         if !receipt.status() {
             tracing::warn!(tx_hash = %tx_hash_b256, "tx reverted");
-            let mut pipeline = self.client.pipeline.lock().unwrap();
-            pipeline.fail(&tx_hash_bytes);
             return Err(TransactionError::Reverted {
                 reason: format!("transaction {} reverted", tx_hash_b256),
             }
