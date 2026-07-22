@@ -11,7 +11,9 @@
 pub mod block;
 pub mod events;
 pub mod market;
+pub mod taker;
 
 pub use block::BlockHeaderFeed;
 pub use events::{MarketEvent, decode_log};
 pub use market::MarketFeed;
+pub use taker::{LiveTakerMarket, LiveTakerMarketPublisher};

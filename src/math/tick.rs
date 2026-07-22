@@ -111,7 +111,38 @@ pub fn get_sqrt_ratio_at_tick(tick: i32) -> Result<U256, ValidationError> {
         result = U256::MAX / result;
     }
 
-    Ok(result >> 32)
+    // V4 rounds up when reducing Q128.128 to Q64.96 so the inverse
+    // getTickAtSqrtPrice relationship is stable at exact boundaries.
+    Ok((result + U256::from(u32::MAX)) >> 32)
+}
+
+/// Return the greatest tick whose encoded sqrt price is less than or equal to
+/// `sqrt_price_x96`.
+///
+/// This uses the canonical [`get_sqrt_ratio_at_tick`] implementation as the
+/// comparison oracle. The fixed 21-iteration binary search is inexpensive for
+/// off-chain quoting and, importantly, inherits exactly the same boundary
+/// rounding as the Solidity implementation.
+pub fn get_tick_at_sqrt_ratio(sqrt_price_x96: U256) -> Result<i32, ValidationError> {
+    let min = get_sqrt_ratio_at_tick(UNISWAP_MIN_TICK)?;
+    let max = get_sqrt_ratio_at_tick(UNISWAP_MAX_TICK)?;
+    if sqrt_price_x96 < min || sqrt_price_x96 >= max {
+        return Err(ValidationError::InvalidPrice {
+            reason: format!("sqrtPriceX96 {sqrt_price_x96} outside Uniswap bounds"),
+        });
+    }
+
+    let mut lo = UNISWAP_MIN_TICK;
+    let mut hi = UNISWAP_MAX_TICK;
+    while lo + 1 < hi {
+        let mid = lo + (hi - lo) / 2;
+        if get_sqrt_ratio_at_tick(mid)? <= sqrt_price_x96 {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    Ok(lo)
 }
 
 /// Compute (a × b) >> 128 using native u128 widening multiply.

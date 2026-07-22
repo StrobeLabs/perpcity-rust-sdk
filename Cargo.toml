@@ -2,7 +2,7 @@
 name = "perpcity-sdk"
 version = "0.2.1"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.91"
 description = "Rust SDK for the PerpCity perpetual futures protocol on Base L2"
 license = "MIT"
 readme = "README.md"
@@ -48,6 +48,9 @@ name = "market_maker"
 
 [[example]]
 name = "hft_bot"
+
+[[example]]
+name = "taker_price_impact"
 
 [[example]]
 name = "aws_kms_signer"

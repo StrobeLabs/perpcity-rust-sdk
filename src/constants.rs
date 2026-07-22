@@ -46,6 +46,19 @@ pub const MIN_SQRT_PRICE_X96: U256 = uint!(79228162514264337593543951_U256);
 /// sqrt(1e6) * 2^96 — the maximum starting sqrtPriceX96 accepted by the factory.
 pub const MAX_SQRT_PRICE_X96: U256 = uint!(79228162514264337593543950336000_U256);
 
+/// Minimum terminal swap price used by the current Perp contracts.
+pub const MIN_SWAP_SQRT_PRICE_X96: U256 = uint!(79156945126914824732836954_U256);
+
+/// Maximum terminal swap price used by the current Perp contracts.
+pub const MAX_SWAP_SQRT_PRICE_X96: U256 = uint!(79299443975792720780679863727830_U256);
+
+/// Uniswap V4's minimum usable swap limit, used by legacy v0.2.1 Perps.
+pub const LEGACY_MIN_SWAP_SQRT_PRICE_X96: U256 = uint!(4295128740_U256);
+
+/// Uniswap V4's maximum usable swap limit, used by legacy v0.2.1 Perps.
+pub const LEGACY_MAX_SWAP_SQRT_PRICE_X96: U256 =
+    uint!(1461446703485210103287273052203988822378723970341_U256);
+
 /// Minimum allowed maker tick, slightly below the factory's minimum starting price.
 pub const MIN_TICK: i32 = -138_180;
 

@@ -11,8 +11,8 @@ use crate::feeds::{MarketEvent, decode_log};
 use crate::hft::gas::Urgency;
 use crate::math::tick::{align_tick_down, align_tick_up, price_to_tick};
 use crate::types::{
-    AdjustMakerParams, AdjustMakerResult, AdjustTakerParams, AdjustTakerResult, OpenMakerParams,
-    OpenResult, OpenTakerParams,
+    AdjustMakerParams, AdjustMakerResult, AdjustTakerParams, AdjustTakerResult,
+    ExactAdjustTakerParams, ExactOpenTakerParams, OpenMakerParams, OpenResult, OpenTakerParams,
 };
 
 use super::{MAX_APPROVAL, PerpClient, i32_to_i24};
@@ -147,6 +147,46 @@ impl PerpClient {
         Ok(result)
     }
 
+    /// Open a taker position without converting through floating point.
+    pub async fn open_taker_exact(
+        &self,
+        params: &ExactOpenTakerParams,
+        urgency: Urgency,
+    ) -> Result<OpenResult> {
+        if params.margin < u128::from(MIN_OPENING_MARGIN) {
+            return Err(ValidationError::InvalidMargin {
+                reason: format!("margin must be at least {MIN_OPENING_MARGIN} atoms"),
+            }
+            .into());
+        }
+        let wire_params = crate::contracts::OpenTakerParams {
+            holder: self.address,
+            margin: params.margin,
+            perpDelta: I256::try_from(params.perp_delta).expect("i128 fits I256"),
+            amt1Limit: U256::from(params.amt1_limit),
+        };
+        let contract = Perp::new(self.deployments.perp, &self.provider);
+        let receipt = self
+            .tx(
+                self.deployments.perp,
+                contract.openTaker(wire_params).calldata().clone(),
+            )
+            .with_urgency(urgency)
+            .send()
+            .await?;
+        let pos_id = parse_minted_token_id(&receipt)?;
+        let (perp_delta, usd_delta) =
+            parse_taker_swap(&receipt).ok_or(ContractError::EventNotFound {
+                event_name: "TakerOpened".into(),
+            })?;
+        Ok(OpenResult {
+            tx_hash: receipt.transaction_hash,
+            pos_id,
+            perp_delta,
+            usd_delta,
+        })
+    }
+
     /// Open a maker (LP) position within a price range.
     ///
     /// Converts `price_lower`/`price_upper` to aligned ticks internally.
@@ -248,6 +288,38 @@ impl PerpClient {
         // margin-only adjust carries a zero-delta swap) or `TakerClosed` on a
         // full close. A missing one signals an ABI/decode problem, so fail
         // loudly rather than recording a bogus zero fill.
+        let (perp_delta, usd_delta) =
+            parse_taker_swap(&receipt).ok_or(ContractError::EventNotFound {
+                event_name: "TakerAdjusted/TakerClosed".into(),
+            })?;
+        Ok(AdjustTakerResult {
+            tx_hash: receipt.transaction_hash,
+            perp_delta,
+            usd_delta,
+        })
+    }
+
+    /// Adjust a taker position without converting through floating point.
+    pub async fn adjust_taker_exact(
+        &self,
+        params: &ExactAdjustTakerParams,
+        urgency: Urgency,
+    ) -> Result<AdjustTakerResult> {
+        let wire_params = crate::contracts::AdjustTakerParams {
+            posId: params.pos_id,
+            marginDelta: params.margin_delta,
+            perpDelta: I256::try_from(params.perp_delta).expect("i128 fits I256"),
+            amt1Limit: U256::from(params.amt1_limit),
+        };
+        let contract = Perp::new(self.deployments.perp, &self.provider);
+        let receipt = self
+            .tx(
+                self.deployments.perp,
+                contract.adjustTaker(wire_params).calldata().clone(),
+            )
+            .with_urgency(urgency)
+            .send()
+            .await?;
         let (perp_delta, usd_delta) =
             parse_taker_swap(&receipt).ok_or(ContractError::EventNotFound {
                 event_name: "TakerAdjusted/TakerClosed".into(),

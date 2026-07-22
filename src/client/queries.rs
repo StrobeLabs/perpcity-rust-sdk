@@ -10,20 +10,43 @@
 //! surface will return in a later stage (off-chain math or `eth_call`
 //! simulation).
 
-use alloy::primitives::{Address, U256};
+use std::collections::BTreeMap;
+
+use alloy::eips::{BlockId, BlockNumberOrTag};
+use alloy::primitives::{Address, B256, I256, U256, keccak256};
+use alloy::providers::Provider;
 use alloy::sol_types::{SolCall, SolValue};
 
 use crate::constants::MULTICALL3;
-use crate::contracts::{IBeacon, IERC20, IFees, IMarginRatios, IMulticall3, Perp, Position};
+use crate::contracts::{
+    IBeacon, IERC20, IFees, IMarginRatios, IMulticall3, IPoolManagerState, IPriceImpact, Perp,
+    Position,
+};
 use crate::convert::{margin_ratio_to_leverage, price_x96_to_f64, scale_from_6dec};
 use crate::errors::{ContractError, Result, ValidationError};
 use crate::hft::state_cache::{CachedBounds, CachedFees};
+use crate::math::swap::{PriceImpactInputs, TakerMarketSnapshot, TickLiquidity};
 use crate::types::{Bounds, Fees, OpenInterest, PerpData, PerpSnapshot};
 
 use super::{PerpClient, SCALE_F64, i24_to_i32, now_secs, u24_to_u32};
 
 /// Funding/utilization rates are scaled by 1e18 per day on-chain.
 const WAD_F64: f64 = 1e18;
+
+fn add_slot(slot: B256, offset: u64) -> B256 {
+    let value = U256::from_be_bytes(slot.0) + U256::from(offset);
+    B256::from(value.to_be_bytes::<32>())
+}
+
+fn mapping_slot_signed(key: i32, mapping_slot: B256) -> B256 {
+    let signed = I256::try_from(key)
+        .expect("i32 always fits I256")
+        .into_raw();
+    let mut encoded = [0u8; 64];
+    encoded[..32].copy_from_slice(&signed.to_be_bytes::<32>());
+    encoded[32..].copy_from_slice(mapping_slot.as_slice());
+    keccak256(encoded)
+}
 
 /// Convert an `int88` per-day funding rate (scaled by 1e18) to a human-readable
 /// fraction. An 88-bit signed value always fits in `i128`.
@@ -37,6 +60,242 @@ impl PerpClient {
     /// Cache key for this client's market: the `Perp` address left-padded to 32 bytes.
     fn market_key(&self) -> [u8; 32] {
         self.deployments.perp.into_word().0
+    }
+
+    /// Load an exact concentrated-liquidity snapshot at the latest canonical
+    /// block. New Perp versions provide authoritative live EMA/module bounds
+    /// through `previewTakerMarketState`. For v0.2.1 callers should use
+    /// [`Self::load_taker_market_snapshot_legacy`] with bounds reconstructed
+    /// from their indexer checkpoint.
+    pub async fn load_taker_market_snapshot(
+        &self,
+        pool_manager: Address,
+    ) -> Result<TakerMarketSnapshot> {
+        let block = self
+            .provider
+            .get_block_by_number(BlockNumberOrTag::Latest)
+            .await?
+            .ok_or_else(|| ContractError::MulticallFailed {
+                reason: "latest block not found".into(),
+            })?;
+        let block_id = BlockId::hash(block.header.hash);
+        let perp = Perp::new(self.deployments.perp, &self.provider);
+        let state = perp
+            .previewTakerMarketState()
+            .block(block_id)
+            .call()
+            .await?;
+        self.load_taker_book_at(
+            pool_manager,
+            block.header.hash,
+            block.header.number,
+            block.header.timestamp,
+            state.sqrtPrice.to::<U256>(),
+            i24_to_i32(state.tick),
+            state.liquidity,
+            state.sqrtMin,
+            state.sqrtMax,
+            crate::constants::MIN_SWAP_SQRT_PRICE_X96,
+            crate::constants::MAX_SWAP_SQRT_PRICE_X96,
+        )
+        .await
+    }
+
+    /// Load a v0.2.1 market snapshot using price-impact bounds obtained from a
+    /// block-pinned EMA/module checkpoint.
+    pub async fn load_taker_market_snapshot_legacy(
+        &self,
+        pool_manager: Address,
+        impact_sqrt_min_x96: U256,
+        impact_sqrt_max_x96: U256,
+    ) -> Result<TakerMarketSnapshot> {
+        let block = self
+            .provider
+            .get_block_by_number(BlockNumberOrTag::Latest)
+            .await?
+            .ok_or_else(|| ContractError::MulticallFailed {
+                reason: "latest block not found".into(),
+            })?;
+        let block_id = BlockId::hash(block.header.hash);
+        let perp = Perp::new(self.deployments.perp, &self.provider);
+        let state = perp.poolState().block(block_id).call().await?;
+        self.load_taker_book_at(
+            pool_manager,
+            block.header.hash,
+            block.header.number,
+            block.header.timestamp,
+            state.sqrtPrice.to::<U256>(),
+            i24_to_i32(state.tick),
+            state.liquidity,
+            impact_sqrt_min_x96,
+            impact_sqrt_max_x96,
+            crate::constants::LEGACY_MIN_SWAP_SQRT_PRICE_X96,
+            crate::constants::LEGACY_MAX_SWAP_SQRT_PRICE_X96,
+        )
+        .await
+    }
+
+    /// Load a legacy v0.2.1 snapshot and evaluate any conforming price-impact
+    /// module at the exact same block. Callers can reconstruct `inputs` from an
+    /// indexed EMA checkpoint plus [`crate::math::ema::calculate_emas`].
+    pub async fn load_taker_market_snapshot_legacy_from_ema(
+        &self,
+        pool_manager: Address,
+        price_impact_module: Address,
+        inputs: PriceImpactInputs,
+    ) -> Result<TakerMarketSnapshot> {
+        let block = self
+            .provider
+            .get_block_by_number(BlockNumberOrTag::Latest)
+            .await?
+            .ok_or_else(|| ContractError::MulticallFailed {
+                reason: "latest block not found".into(),
+            })?;
+        let block_id = BlockId::hash(block.header.hash);
+        let bounds = IPriceImpact::new(price_impact_module, &self.provider)
+            .sqrtPriceBounds(
+                inputs.amm_price,
+                inputs.index_price,
+                inputs.ema_amm_price,
+                inputs.ema_index_price,
+            )
+            .block(block_id)
+            .call()
+            .await?;
+        let state = Perp::new(self.deployments.perp, &self.provider)
+            .poolState()
+            .block(block_id)
+            .call()
+            .await?;
+        self.load_taker_book_at(
+            pool_manager,
+            block.header.hash,
+            block.header.number,
+            block.header.timestamp,
+            state.sqrtPrice.to::<U256>(),
+            i24_to_i32(state.tick),
+            state.liquidity,
+            bounds.sqrtMin,
+            bounds.sqrtMax,
+            crate::constants::LEGACY_MIN_SWAP_SQRT_PRICE_X96,
+            crate::constants::LEGACY_MAX_SWAP_SQRT_PRICE_X96,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn load_taker_book_at(
+        &self,
+        pool_manager: Address,
+        block_hash: B256,
+        block_number: u64,
+        block_timestamp: u64,
+        sqrt_price_x96: U256,
+        tick: i32,
+        liquidity: u128,
+        impact_sqrt_min_x96: U256,
+        impact_sqrt_max_x96: U256,
+        protocol_sqrt_min_x96: U256,
+        protocol_sqrt_max_x96: U256,
+    ) -> Result<TakerMarketSnapshot> {
+        let block_id = BlockId::hash(block_hash);
+        let perp = Perp::new(self.deployments.perp, &self.provider);
+        let pool_id = perp.POOL_ID().block(block_id).call().await?;
+        let pool_key = perp.poolKey().block(block_id).call().await?;
+        let spacing = i24_to_i32(pool_key.tickSpacing);
+        if spacing <= 0 {
+            return Err(ValidationError::InvalidConfig {
+                reason: format!("invalid tick spacing {spacing}"),
+            }
+            .into());
+        }
+
+        let state_slot = keccak256((pool_id, U256::from(6)).abi_encode());
+        let bitmap_base = add_slot(state_slot, 5);
+        let min_word = (-138_180i32).div_euclid(spacing).div_euclid(256);
+        let max_word = 138_180i32.div_euclid(spacing).div_euclid(256);
+        let bitmap_slots: Vec<B256> = (min_word..=max_word)
+            .map(|word| mapping_slot_signed(word, bitmap_base))
+            .collect();
+        let manager = IPoolManagerState::new(pool_manager, &self.provider);
+        let bitmaps = manager
+            .extsload_1(bitmap_slots)
+            .block(block_id)
+            .call()
+            .await?;
+
+        let mut initialized = Vec::new();
+        for (offset, bitmap) in bitmaps.into_iter().enumerate() {
+            let word = min_word + offset as i32;
+            let bits = U256::from_be_bytes(bitmap.0);
+            for bit in 0..256i32 {
+                if bits.bit(bit as usize) {
+                    let compressed = word * 256 + bit;
+                    let initialized_tick = compressed * spacing;
+                    if (-138_180..=138_180).contains(&initialized_tick) {
+                        initialized.push(initialized_tick);
+                    }
+                }
+            }
+        }
+
+        let ticks_base = add_slot(state_slot, 4);
+        let tick_slots: Vec<B256> = initialized
+            .iter()
+            .map(|&initialized_tick| mapping_slot_signed(initialized_tick, ticks_base))
+            .collect();
+        let tick_words = if tick_slots.is_empty() {
+            Vec::new()
+        } else {
+            manager
+                .extsload_1(tick_slots)
+                .block(block_id)
+                .call()
+                .await?
+        };
+        let mut ticks = BTreeMap::new();
+        for (initialized_tick, word) in initialized.into_iter().zip(tick_words) {
+            let raw = U256::from_be_bytes(word.0);
+            let gross = (raw & U256::from(u128::MAX)).to::<u128>();
+            let net_raw = (raw >> 128usize).to::<u128>();
+            let net = net_raw as i128;
+            ticks.insert(initialized_tick, TickLiquidity { gross, net });
+        }
+
+        let reconstructed = ticks
+            .range(..=tick)
+            .try_fold(0u128, |active, (_, info)| {
+                if info.net >= 0 {
+                    active.checked_add(info.net as u128)
+                } else {
+                    active.checked_sub(info.net.unsigned_abs())
+                }
+            })
+            .ok_or_else(|| ValidationError::Overflow {
+                context: "reconstructing active liquidity".into(),
+            })?;
+        if reconstructed != liquidity {
+            return Err(ContractError::MulticallFailed {
+                reason: format!(
+                    "tick snapshot liquidity mismatch: reconstructed {reconstructed}, pool {liquidity}"
+                ),
+            }
+            .into());
+        }
+
+        Ok(TakerMarketSnapshot {
+            block_number,
+            block_hash,
+            block_timestamp,
+            sqrt_price_x96,
+            tick,
+            liquidity,
+            ticks,
+            protocol_sqrt_min_x96,
+            protocol_sqrt_max_x96,
+            impact_sqrt_min_x96,
+            impact_sqrt_max_x96,
+        })
     }
 
     /// Get the full perp configuration, fees, and bounds for the market.

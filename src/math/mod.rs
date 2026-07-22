@@ -9,6 +9,8 @@
 //! | [`liquidity`] | Liquidity estimation for maker positions |
 //! | [`position`] | Entry price, size, value, leverage, liquidation price |
 
+pub mod ema;
 pub mod liquidity;
 pub mod position;
+pub mod swap;
 pub mod tick;

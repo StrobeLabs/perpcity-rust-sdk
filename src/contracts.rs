@@ -229,6 +229,32 @@ sol! {
             external view returns (uint256 sqrtMin, uint256 sqrtMax);
     }
 
+    /// Uniswap V4 PoolManager state/event surface used by the local quoter.
+    #[sol(rpc)]
+    interface IPoolManagerState {
+        event ModifyLiquidity(
+            bytes32 indexed id,
+            address indexed sender,
+            int24 tickLower,
+            int24 tickUpper,
+            int256 liquidityDelta,
+            bytes32 salt
+        );
+        event Swap(
+            bytes32 indexed id,
+            address indexed sender,
+            int128 amount0,
+            int128 amount1,
+            uint160 sqrtPriceX96,
+            uint128 liquidity,
+            int24 tick,
+            uint24 fee
+        );
+
+        function extsload(bytes32 slot) external view returns (bytes32 value);
+        function extsload(bytes32[] calldata slots) external view returns (bytes32[] memory values);
+    }
+
     // ═══════════════════════════════════════════════════════════════════
     //  Perp — individual perpetual market contract (no PerpManager)
     // ═══════════════════════════════════════════════════════════════════
@@ -350,9 +376,26 @@ sol! {
 
         function poolKey() external view returns (PoolKey memory);
 
+        function POOL_ID() external view returns (bytes32);
+
+        function EMA_WINDOW() external view returns (uint256);
+
+        function PROTOCOL_VERSION() external view returns (uint32);
+
         /// Live Uniswap V4 pool state (slot0 + liquidity). `ammPrice` is scaled by 2^96.
         function poolState() external view returns (
             int24 tick, uint160 sqrtPrice, uint256 ammPrice, uint128 liquidity
+        );
+
+        function previewTakerMarketState() external view returns (
+            int24 tick,
+            uint160 sqrtPrice,
+            uint128 liquidity,
+            PricePair memory spots,
+            PricePair memory liveEmas,
+            address priceImpactModule,
+            uint256 sqrtMin,
+            uint256 sqrtMax
         );
 
         /// Module addresses (beacon, fees, funding, marginRatios, priceImpact, pricing).

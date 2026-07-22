@@ -111,6 +111,17 @@ pub struct OpenTakerParams {
     pub amt1_limit: u128,
 }
 
+/// Exact wire-unit parameters for latency-sensitive taker opens.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct ExactOpenTakerParams {
+    /// Margin in USDC atoms (six decimals).
+    pub margin: u128,
+    /// Signed perp atoms (six decimals).
+    pub perp_delta: i128,
+    /// Directional token1 limit produced by [`crate::TakerQuote::amt1_limit`].
+    pub amt1_limit: u128,
+}
+
 /// Client-facing parameters for opening a maker (LP) position.
 ///
 /// The SDK converts these to contract types automatically:
@@ -146,6 +157,19 @@ pub struct AdjustTakerParams {
     /// Set to zero for margin-only adjustments.
     pub perp_delta: f64,
     /// Slippage protection: max amount of token1 (USDC). `0` = no limit.
+    pub amt1_limit: u128,
+}
+
+/// Exact wire-unit parameters for latency-sensitive taker adjustments.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct ExactAdjustTakerParams {
+    /// Position NFT token ID.
+    pub pos_id: U256,
+    /// Signed margin change in USDC atoms.
+    pub margin_delta: i128,
+    /// Signed perp atoms.
+    pub perp_delta: i128,
+    /// Directional token1 limit produced by [`crate::TakerQuote::amt1_limit`].
     pub amt1_limit: u128,
 }
 
