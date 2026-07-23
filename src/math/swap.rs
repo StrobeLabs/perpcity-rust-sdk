@@ -376,11 +376,13 @@ impl TakerMarketSnapshot {
             let start = sqrt;
             sqrt = sqrt_after;
 
+            let mut crossed_this_step = false;
             if sqrt == sqrt_next {
                 if let Some(info) = self.ticks.get(&next_tick) {
                     let net = if zero_for_one { -info.net } else { info.net };
                     liquidity = add_liquidity(liquidity, net)?;
                     crossed.push(next_tick);
+                    crossed_this_step = true;
                 }
                 tick = if zero_for_one {
                     next_tick - 1
@@ -390,7 +392,10 @@ impl TakerMarketSnapshot {
             } else if sqrt != start {
                 tick = get_tick_at_sqrt_ratio(sqrt)?;
             }
-            if used.is_zero() && other.is_zero() && sqrt == start {
+            // A zero-amount step that crossed a tick is progress (the price
+            // sat exactly on an initialized boundary); only a step that moved
+            // nothing AND crossed nothing means the book is exhausted.
+            if used.is_zero() && other.is_zero() && sqrt == start && !crossed_this_step {
                 break;
             }
         }
@@ -609,6 +614,73 @@ mod tests {
         let sell = market.quote_perp(-1_000_000).unwrap();
         assert!(buy.amt1_limit(25) >= buy.usd_delta.unsigned_abs());
         assert!(sell.amt1_limit(25) <= sell.usd_delta.unsigned_abs());
+    }
+
+    /// A book whose current price sits exactly on the initialized tick at 0:
+    /// −600 (+L), 0 (+M), 600 (−(L+M)).
+    fn boundary_book(tick: i32) -> TakerMarketSnapshot {
+        let l: u128 = 1_000_000_000_000;
+        let m: u128 = 500_000_000_000;
+        // Active liquidity is the sum of net for initialized ticks <= tick.
+        let liquidity = if tick >= 0 { l + m } else { l };
+        let mut market = TakerMarketSnapshot {
+            sqrt_price_x96: get_sqrt_ratio_at_tick(0).unwrap(),
+            tick,
+            liquidity,
+            ..Default::default()
+        };
+        market.ticks.insert(
+            -600,
+            TickLiquidity {
+                gross: l,
+                net: l as i128,
+            },
+        );
+        market.ticks.insert(
+            0,
+            TickLiquidity {
+                gross: m,
+                net: m as i128,
+            },
+        );
+        market.ticks.insert(
+            600,
+            TickLiquidity {
+                gross: l + m,
+                net: -((l + m) as i128),
+            },
+        );
+        market
+    }
+
+    #[test]
+    fn a_sell_from_a_price_exactly_on_a_tick_boundary_keeps_filling() {
+        // tick == 0 and sqrt == ratio(0): the first step crosses tick 0 with
+        // zero amounts. The swap must continue into the liquidity below
+        // instead of reporting the book exhausted.
+        let market = boundary_book(0);
+        let sell = market.quote_perp(-1_000_000).unwrap();
+        assert!(sell.fully_filled, "limit={:?}", sell.limit);
+        assert_eq!(sell.limit, QuoteLimit::Filled);
+        assert_eq!(sell.perp_delta, -1_000_000);
+        assert!(sell.usd_delta > 0);
+        assert_eq!(sell.ticks_crossed, vec![0]);
+        assert!(sell.sqrt_price_after_x96 < market.sqrt_price_x96);
+    }
+
+    #[test]
+    fn a_buy_from_a_price_exactly_on_a_tick_boundary_keeps_filling() {
+        // tick == −1 with sqrt == ratio(0): the state a sell leaves behind
+        // when it stops exactly on the boundary. A buy's first step crosses
+        // tick 0 upward with zero amounts and must keep going.
+        let market = boundary_book(-1);
+        let buy = market.quote_perp(1_000_000).unwrap();
+        assert!(buy.fully_filled, "limit={:?}", buy.limit);
+        assert_eq!(buy.limit, QuoteLimit::Filled);
+        assert_eq!(buy.perp_delta, 1_000_000);
+        assert!(buy.usd_delta < 0);
+        assert_eq!(buy.ticks_crossed, vec![0]);
+        assert!(buy.sqrt_price_after_x96 > market.sqrt_price_x96);
     }
 
     #[test]
