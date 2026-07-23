@@ -87,9 +87,11 @@ mod tests {
     fn publishes_complete_snapshots() {
         let first = TakerMarketSnapshot::default();
         let (market, publisher) = LiveTakerMarket::from_snapshot(first);
-        let mut second = TakerMarketSnapshot::default();
-        second.block_number = 2;
-        second.block_hash = B256::with_last_byte(2);
+        let second = TakerMarketSnapshot {
+            block_number: 2,
+            block_hash: B256::with_last_byte(2),
+            ..Default::default()
+        };
         publisher.publish(second);
         assert_eq!(market.latest().block_number, 2);
         assert!(market.is_current(B256::with_last_byte(2)));

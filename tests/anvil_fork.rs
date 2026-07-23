@@ -89,11 +89,10 @@ impl AnvilInstance {
                 }))
                 .send()
                 .await
+                && resp.status().is_success()
             {
-                if resp.status().is_success() {
-                    println!("Anvil ready at {}", instance.url);
-                    return instance;
-                }
+                println!("Anvil ready at {}", instance.url);
+                return instance;
             }
         }
         panic!("Anvil did not become ready within 15 seconds");

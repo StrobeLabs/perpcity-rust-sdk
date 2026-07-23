@@ -570,8 +570,10 @@ mod tests {
     use super::*;
 
     fn book() -> TakerMarketSnapshot {
-        let mut market = TakerMarketSnapshot::default();
-        market.liquidity = 1_000_000_000_000;
+        let mut market = TakerMarketSnapshot {
+            liquidity: 1_000_000_000_000,
+            ..Default::default()
+        };
         market.ticks.insert(
             -300,
             TickLiquidity {
