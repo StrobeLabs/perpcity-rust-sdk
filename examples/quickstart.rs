@@ -47,6 +47,7 @@ async fn main() -> Result<()> {
             .parse::<Address>()
             .unwrap(),
         usdc,
+        pool_manager: ARBITRUM_SEPOLIA_POOL_MANAGER,
     };
 
     let client = PerpClient::new_arbitrum_sepolia(transport, signer, deployments)?;

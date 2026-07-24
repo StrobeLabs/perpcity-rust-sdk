@@ -4,7 +4,6 @@
 //! export RPC_URL="https://sepolia-rollup.arbitrum.io/rpc"
 //! export PERPCITY_PRIVATE_KEY="0x..." # only supplies the client's address; no tx is sent
 //! export PERPCITY_PERP="0x..."
-//! export POOL_MANAGER="0x..."
 //! cargo run --release --example taker_price_impact
 //! ```
 
@@ -14,8 +13,8 @@ use alloy::primitives::{Address, U256};
 use alloy::signers::local::PrivateKeySigner;
 use perpcity_sdk::constants::TICK_SPACING;
 use perpcity_sdk::{
-    ARBITRUM_SEPOLIA_USDC, Deployments, HftTransport, PerpClient, QuoteConstraints,
-    TransportConfig, align_tick_down,
+    ARBITRUM_SEPOLIA_POOL_MANAGER, ARBITRUM_SEPOLIA_USDC, Deployments, HftTransport, PerpClient,
+    QuoteConstraints, TransportConfig, align_tick_down,
 };
 
 #[tokio::main]
@@ -27,7 +26,6 @@ async fn main() -> perpcity_sdk::Result<()> {
         .parse()
         .expect("invalid private key");
     let perp = address("PERPCITY_PERP");
-    let pool_manager = address("POOL_MANAGER");
     let transport = HftTransport::new(
         TransportConfig::builder()
             .shared_endpoint(&rpc_url)
@@ -39,12 +37,13 @@ async fn main() -> perpcity_sdk::Result<()> {
         Deployments {
             perp,
             usdc: ARBITRUM_SEPOLIA_USDC,
+            pool_manager: ARBITRUM_SEPOLIA_POOL_MANAGER,
         },
     )?;
 
     // Every field—including ticks and module bounds—comes from this block hash.
     // Once loaded, all calls below are synchronous and make no RPC requests.
-    let market = client.load_taker_market_snapshot(pool_manager).await?;
+    let market = client.load_taker_market_snapshot().await?;
     println!(
         "snapshot block {} ({})",
         market.block_number, market.block_hash

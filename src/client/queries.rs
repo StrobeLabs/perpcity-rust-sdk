@@ -121,10 +121,7 @@ impl PerpClient {
     /// advances it with the contract's exact arithmetic, and evaluates the
     /// configured price-impact module. Every contract and PoolManager read is
     /// pinned to the returned block hash.
-    pub async fn load_taker_market_snapshot(
-        &self,
-        pool_manager: Address,
-    ) -> Result<TakerMarketSnapshot> {
+    pub async fn load_taker_market_snapshot(&self) -> Result<TakerMarketSnapshot> {
         let immutables = *self.book_immutables().await?;
         let block = self
             .provider
@@ -201,17 +198,13 @@ impl PerpClient {
             impact_sqrt_min_x96: bounds.sqrtMin,
             impact_sqrt_max_x96: bounds.sqrtMax,
         };
-        self.fill_book(header, pool_manager).await
+        self.fill_book(header).await
     }
 
     /// Populate `snapshot.ticks` from the PoolManager's tick bitmap at the
     /// snapshot's block, then verify the reconstruction against the pool's
     /// reported active liquidity before returning it.
-    async fn fill_book(
-        &self,
-        mut snapshot: TakerMarketSnapshot,
-        pool_manager: Address,
-    ) -> Result<TakerMarketSnapshot> {
+    async fn fill_book(&self, mut snapshot: TakerMarketSnapshot) -> Result<TakerMarketSnapshot> {
         let block_id = BlockId::hash(snapshot.block_hash);
         let BookImmutables {
             pool_id,
@@ -226,7 +219,7 @@ impl PerpClient {
         let bitmap_slots: Vec<B256> = (min_word..=max_word)
             .map(|word| mapping_slot_signed(word, bitmap_base))
             .collect();
-        let manager = IPoolManagerState::new(pool_manager, &self.provider);
+        let manager = IPoolManagerState::new(self.deployments.pool_manager, &self.provider);
         let bitmaps = manager
             .extsload_1(bitmap_slots)
             .block(block_id)

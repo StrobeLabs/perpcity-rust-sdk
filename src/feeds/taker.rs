@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-use alloy::primitives::{Address, B256};
+use alloy::primitives::B256;
 use tokio::sync::watch;
 
 use crate::PerpClient;
@@ -31,12 +31,8 @@ impl LiveTakerMarket {
 
     /// Load immediately, then refresh atomically on every WebSocket `newHeads`
     /// notification. Failed refreshes leave the last good snapshot published.
-    pub async fn subscribe(
-        client: Arc<PerpClient>,
-        ws: &WsManager,
-        pool_manager: Address,
-    ) -> crate::Result<Self> {
-        let initial = client.load_taker_market_snapshot(pool_manager).await?;
+    pub async fn subscribe(client: Arc<PerpClient>, ws: &WsManager) -> crate::Result<Self> {
+        let initial = client.load_taker_market_snapshot().await?;
         let (market, publisher) = Self::from_snapshot(initial);
         let mut blocks = ws.subscribe_blocks().await?;
         tokio::spawn(async move {
@@ -53,7 +49,7 @@ impl LiveTakerMarket {
                         // canonical block regardless, so a backlog is purely
                         // redundant RPC work.
                         while blocks.try_recv().is_ok() {}
-                        match client.load_taker_market_snapshot(pool_manager).await {
+                        match client.load_taker_market_snapshot().await {
                             Ok(snapshot) => publisher.publish(snapshot),
                             Err(error) => {
                                 tracing::warn!(%error, "taker snapshot refresh failed");

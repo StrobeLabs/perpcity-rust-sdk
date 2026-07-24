@@ -216,6 +216,7 @@ fn deployments() -> Deployments {
     Deployments {
         perp: PERP,
         usdc: USDC,
+        pool_manager: perpcity_sdk::ARBITRUM_SEPOLIA_POOL_MANAGER,
     }
 }
 

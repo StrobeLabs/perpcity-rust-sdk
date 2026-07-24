@@ -24,6 +24,10 @@ pub struct Deployments {
     pub perp: Address,
     /// USDC token address.
     pub usdc: Address,
+    /// Uniswap V4 `PoolManager` the market's pool lives in — one canonical
+    /// address per chain (see `ARBITRUM_POOL_MANAGER` /
+    /// `ARBITRUM_SEPOLIA_POOL_MANAGER`).
+    pub pool_manager: Address,
 }
 
 /// Metadata about a perpetual market.
@@ -311,6 +315,7 @@ mod tests {
         let deployments = Deployments {
             perp: Address::ZERO,
             usdc: Address::ZERO,
+            pool_manager: Address::ZERO,
         };
         let json = serde_json::to_string(&deployments).unwrap();
         let recovered: Deployments = serde_json::from_str(&json).unwrap();
