@@ -65,17 +65,6 @@ fn parse_taker_swap(receipt: &alloy::rpc::types::TransactionReceipt) -> Option<(
     None
 }
 
-/// Scale an f64 perp delta to the accounting token's 6-decimal fixed point.
-///
-/// The perp token (Uniswap V4 `currency0`) is an `AccountingToken` with 6
-/// decimals — the same scaling as USD margin — so `perp_delta` uses `scale_to_6dec`,
-/// not 1e18.
-fn scale_perp_delta(delta: f64) -> Result<I256> {
-    let scaled = scale_to_6dec(delta)?;
-    // An i128 always fits in I256.
-    Ok(I256::try_from(scaled).expect("i128 fits in I256"))
-}
-
 /// Scale and validate position margin against the protocol's opening minimum.
 ///
 /// Checks the scaled margin parameter against [`MIN_OPENING_MARGIN`] and returns
@@ -96,55 +85,24 @@ impl PerpClient {
 
     /// Open a taker (long/short) position.
     ///
+    /// Scales the human-readable parameters to wire units and delegates to
+    /// [`Self::open_taker_exact`], which is the single submission path.
     /// Returns an [`OpenResult`] with the transaction hash and position ID.
     pub async fn open_taker(
         &self,
         params: &OpenTakerParams,
         urgency: Urgency,
     ) -> Result<OpenResult> {
-        let margin_scaled = scale_opening_margin(params.margin)?;
-
-        let perp_delta = scale_perp_delta(params.perp_delta)?;
-
-        let wire_params = crate::contracts::OpenTakerParams {
-            holder: self.address,
-            margin: margin_scaled as u128,
-            perpDelta: perp_delta,
-            amt1Limit: U256::from(params.amt1_limit),
+        let exact = ExactOpenTakerParams {
+            // scale_opening_margin returns >= MIN_OPENING_MARGIN, so the cast
+            // to unsigned cannot wrap.
+            margin: scale_opening_margin(params.margin)? as u128,
+            // The perp token (V4 `currency0`) is an AccountingToken with 6
+            // decimals — the same scaling as USD margin, not 1e18.
+            perp_delta: scale_to_6dec(params.perp_delta)?,
+            amt1_limit: params.amt1_limit,
         };
-
-        let contract = Perp::new(self.deployments.perp, &self.provider);
-        let calldata = contract.openTaker(wire_params).calldata().clone();
-
-        tracing::debug!(
-            margin = params.margin,
-            perp_delta = params.perp_delta,
-            ?urgency,
-            "opening taker position"
-        );
-
-        let receipt = self
-            .tx(self.deployments.perp, calldata)
-            .with_urgency(urgency)
-            .send()
-            .await?;
-
-        let pos_id = parse_minted_token_id(&receipt)?;
-        // A taker open always emits a decodable `TakerOpened`; a missing one
-        // signals an ABI/decode problem, so fail loudly rather than recording a
-        // bogus zero fill.
-        let (perp_delta, usd_delta) =
-            parse_taker_swap(&receipt).ok_or(ContractError::EventNotFound {
-                event_name: "TakerOpened".into(),
-            })?;
-        let result = OpenResult {
-            tx_hash: receipt.transaction_hash,
-            pos_id,
-            perp_delta,
-            usd_delta,
-        };
-        tracing::debug!(pos_id = %result.pos_id, "taker position opened");
-        Ok(result)
+        self.open_taker_exact(&exact, urgency).await
     }
 
     /// Open a taker position without converting through floating point.
@@ -166,6 +124,14 @@ impl PerpClient {
             amt1Limit: U256::from(params.amt1_limit),
         };
         let contract = Perp::new(self.deployments.perp, &self.provider);
+
+        tracing::debug!(
+            margin_atoms = params.margin,
+            perp_delta_atoms = params.perp_delta,
+            ?urgency,
+            "opening taker position"
+        );
+
         let receipt = self
             .tx(
                 self.deployments.perp,
@@ -175,10 +141,14 @@ impl PerpClient {
             .send()
             .await?;
         let pos_id = parse_minted_token_id(&receipt)?;
+        // A taker open always emits a decodable `TakerOpened`; a missing one
+        // signals an ABI/decode problem, so fail loudly rather than recording a
+        // bogus zero fill.
         let (perp_delta, usd_delta) =
             parse_taker_swap(&receipt).ok_or(ContractError::EventNotFound {
                 event_name: "TakerOpened".into(),
             })?;
+        tracing::debug!(pos_id = %pos_id, "taker position opened");
         Ok(OpenResult {
             tx_hash: receipt.transaction_hash,
             pos_id,
@@ -251,52 +221,21 @@ impl PerpClient {
     /// Adjust a taker position (margin, notional, or both).
     ///
     /// To close a position, pass `perp_delta` opposing the position's current delta.
+    ///
+    /// Scales the human-readable parameters to wire units and delegates to
+    /// [`Self::adjust_taker_exact`], which is the single submission path.
     pub async fn adjust_taker(
         &self,
         params: &AdjustTakerParams,
         urgency: Urgency,
     ) -> Result<AdjustTakerResult> {
-        let margin_delta = scale_to_6dec(params.margin_delta)?;
-        let perp_delta = scale_perp_delta(params.perp_delta)?;
-
-        let wire_params = crate::contracts::AdjustTakerParams {
-            posId: params.pos_id,
-            marginDelta: margin_delta,
-            perpDelta: perp_delta,
-            amt1Limit: U256::from(params.amt1_limit),
+        let exact = ExactAdjustTakerParams {
+            pos_id: params.pos_id,
+            margin_delta: scale_to_6dec(params.margin_delta)?,
+            perp_delta: scale_to_6dec(params.perp_delta)?,
+            amt1_limit: params.amt1_limit,
         };
-
-        tracing::debug!(
-            pos_id = %params.pos_id,
-            margin_delta = params.margin_delta,
-            perp_delta = params.perp_delta,
-            ?urgency,
-            "adjusting taker position"
-        );
-
-        let contract = Perp::new(self.deployments.perp, &self.provider);
-        let calldata = contract.adjustTaker(wire_params).calldata().clone();
-
-        let receipt = self
-            .tx(self.deployments.perp, calldata)
-            .with_urgency(urgency)
-            .send()
-            .await?;
-
-        tracing::debug!(pos_id = %params.pos_id, "taker position adjusted");
-        // Every taker adjust emits a decodable event — `TakerAdjusted` (a
-        // margin-only adjust carries a zero-delta swap) or `TakerClosed` on a
-        // full close. A missing one signals an ABI/decode problem, so fail
-        // loudly rather than recording a bogus zero fill.
-        let (perp_delta, usd_delta) =
-            parse_taker_swap(&receipt).ok_or(ContractError::EventNotFound {
-                event_name: "TakerAdjusted/TakerClosed".into(),
-            })?;
-        Ok(AdjustTakerResult {
-            tx_hash: receipt.transaction_hash,
-            perp_delta,
-            usd_delta,
-        })
+        self.adjust_taker_exact(&exact, urgency).await
     }
 
     /// Adjust a taker position without converting through floating point.
@@ -312,6 +251,15 @@ impl PerpClient {
             amt1Limit: U256::from(params.amt1_limit),
         };
         let contract = Perp::new(self.deployments.perp, &self.provider);
+
+        tracing::debug!(
+            pos_id = %params.pos_id,
+            margin_delta_atoms = params.margin_delta,
+            perp_delta_atoms = params.perp_delta,
+            ?urgency,
+            "adjusting taker position"
+        );
+
         let receipt = self
             .tx(
                 self.deployments.perp,
@@ -320,6 +268,12 @@ impl PerpClient {
             .with_urgency(urgency)
             .send()
             .await?;
+
+        tracing::debug!(pos_id = %params.pos_id, "taker position adjusted");
+        // Every taker adjust emits a decodable event — `TakerAdjusted` (a
+        // margin-only adjust carries a zero-delta swap) or `TakerClosed` on a
+        // full close. A missing one signals an ABI/decode problem, so fail
+        // loudly rather than recording a bogus zero fill.
         let (perp_delta, usd_delta) =
             parse_taker_swap(&receipt).ok_or(ContractError::EventNotFound {
                 event_name: "TakerAdjusted/TakerClosed".into(),
