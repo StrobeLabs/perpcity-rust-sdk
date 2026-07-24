@@ -229,28 +229,14 @@ sol! {
             external view returns (uint256 sqrtMin, uint256 sqrtMax);
     }
 
-    /// Uniswap V4 PoolManager state/event surface used by the local quoter.
+    /// Uniswap V4 PoolManager state surface used by the local quoter.
+    ///
+    /// Only `extsload` is declared: the quoter reconstructs the book from
+    /// block-pinned storage reads. The `ModifyLiquidity`/`Swap` events return
+    /// here with the PR that consumes them for incremental (event-sourced)
+    /// tick maintenance.
     #[sol(rpc)]
     interface IPoolManagerState {
-        event ModifyLiquidity(
-            bytes32 indexed id,
-            address indexed sender,
-            int24 tickLower,
-            int24 tickUpper,
-            int256 liquidityDelta,
-            bytes32 salt
-        );
-        event Swap(
-            bytes32 indexed id,
-            address indexed sender,
-            int128 amount0,
-            int128 amount1,
-            uint160 sqrtPriceX96,
-            uint128 liquidity,
-            int24 tick,
-            uint24 fee
-        );
-
         function extsload(bytes32 slot) external view returns (bytes32 value);
         function extsload(bytes32[] calldata slots) external view returns (bytes32[] memory values);
     }
