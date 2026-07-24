@@ -176,6 +176,9 @@ pub struct PerpClient {
     gas_limit_cache: Mutex<GasLimitCache>,
     /// Multi-layer state cache for on-chain reads.
     state_cache: Mutex<StateCache>,
+    /// Deployment-fixed Perp/pool values (pool id, tick spacing, EMA window),
+    /// fetched once on first taker book load.
+    book_immutables: tokio::sync::OnceCell<queries::BookImmutables>,
 }
 
 impl std::fmt::Debug for PerpClient {
@@ -229,6 +232,7 @@ impl PerpClient {
             fee_cache: Mutex::new(FeeCache::new(DEFAULT_GAS_TTL_MS, DEFAULT_PRIORITY_FEE)),
             gas_limit_cache: Mutex::new(GasLimitCache::new()),
             state_cache: Mutex::new(StateCache::new(StateCacheConfig::default())),
+            book_immutables: tokio::sync::OnceCell::new(),
         })
     }
 
