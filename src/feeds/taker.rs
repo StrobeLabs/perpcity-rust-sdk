@@ -40,10 +40,26 @@ impl LiveTakerMarket {
         let (market, publisher) = Self::from_snapshot(initial);
         let mut blocks = ws.subscribe_blocks().await?;
         tokio::spawn(async move {
-            while blocks.recv().await.is_some() {
-                match client.load_taker_market_snapshot(pool_manager).await {
-                    Ok(snapshot) => publisher.publish(snapshot),
-                    Err(error) => tracing::warn!(%error, "taker snapshot refresh failed"),
+            loop {
+                tokio::select! {
+                    // Wind down once every consumer handle is gone.
+                    _ = publisher.tx.closed() => break,
+                    head = blocks.recv() => {
+                        if head.is_none() {
+                            break;
+                        }
+                        // Coalesce queued heads: a reload can outlast several
+                        // block times, and the loader pins the latest
+                        // canonical block regardless, so a backlog is purely
+                        // redundant RPC work.
+                        while blocks.try_recv().is_ok() {}
+                        match client.load_taker_market_snapshot(pool_manager).await {
+                            Ok(snapshot) => publisher.publish(snapshot),
+                            Err(error) => {
+                                tracing::warn!(%error, "taker snapshot refresh failed");
+                            }
+                        }
+                    }
                 }
             }
         });
