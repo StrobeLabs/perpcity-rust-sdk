@@ -25,7 +25,7 @@ use crate::contracts::{
 use crate::convert::{margin_ratio_to_leverage, price_x96_to_f64, scale_from_6dec};
 use crate::errors::{ContractError, Result, ValidationError};
 use crate::hft::state_cache::{CachedBounds, CachedFees};
-use crate::math::ema::calculate_emas;
+use crate::math::ema::{PricePair, calculate_emas};
 use crate::math::swap::{TakerMarketSnapshot, TickLiquidity};
 use crate::types::{Bounds, Fees, OpenInterest, PerpData, PerpSnapshot};
 
@@ -116,13 +116,17 @@ impl PerpClient {
             }
             .into());
         }
-        let stored_amm = (stored_emas & U256::from(u128::MAX)).to::<u128>();
-        let stored_index = (stored_emas >> 128usize).to::<u128>();
-        let (ema_amm, ema_index) = calculate_emas(
-            stored_amm,
-            stored_index,
-            state.ammPrice.to::<u128>(),
-            index.to::<u128>(),
+        let stored = PricePair {
+            amm: (stored_emas & U256::from(u128::MAX)).to::<u128>(),
+            index: (stored_emas >> 128usize).to::<u128>(),
+        };
+        let spot = PricePair {
+            amm: state.ammPrice.to::<u128>(),
+            index: index.to::<u128>(),
+        };
+        let emas = calculate_emas(
+            stored,
+            spot,
             rates.lastTouch.to::<u64>(),
             block.header.timestamp,
             ema_window.to::<u64>(),
@@ -131,8 +135,8 @@ impl PerpClient {
             .sqrtPriceBounds(
                 state.ammPrice,
                 index,
-                U256::from(ema_amm),
-                U256::from(ema_index),
+                U256::from(emas.amm),
+                U256::from(emas.index),
             )
             .block(block_id)
             .call()

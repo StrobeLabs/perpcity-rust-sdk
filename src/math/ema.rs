@@ -3,13 +3,24 @@
 //! The decay factor uses Solady's `expWad`, matching the contract's rational
 //! approximation and integer rounding rather than a floating-point `exp`.
 
-use std::str::FromStr;
-
-use alloy::primitives::{I256, U256};
+use alloy::primitives::{I256, U256, uint};
 
 use crate::errors::ValidationError;
 
-const WAD: i128 = 1_000_000_000_000_000_000;
+const WAD_U256: U256 = uint!(1_000_000_000_000_000_000_U256);
+
+/// Solady's `expWad` power-of-two reassembly scale.
+const EXP_SCALE: U256 = uint!(3822833074963236453042738258902158003155416615667_U256);
+
+/// An `(amm, index)` price pair, mirroring the contract's `PricePair` struct
+/// (both prices scaled by 2^96).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PricePair {
+    /// AMM (pool) price observation or EMA.
+    pub amm: u128,
+    /// Beacon index observation or EMA.
+    pub index: u128,
+}
 
 fn i(value: i128) -> I256 {
     I256::try_from(value).expect("i128 fits I256")
@@ -77,30 +88,26 @@ pub fn exp_wad(mut x: I256) -> Result<U256, ValidationError> {
     let r_u = U256::try_from(r).map_err(|_| ValidationError::Overflow {
         context: "negative expWad approximation".into(),
     })?;
-    let scale = U256::from_str("3822833074963236453042738258902158003155416615667")
-        .expect("valid expWad scale");
     let k_i128 = i128::try_from(k).map_err(|_| ValidationError::Overflow {
         context: "expWad exponent".into(),
     })?;
     let shift = usize::try_from(195 - k_i128).map_err(|_| ValidationError::Overflow {
         context: "expWad shift".into(),
     })?;
-    Ok(r_u.wrapping_mul(scale) >> shift)
+    Ok(r_u.wrapping_mul(EXP_SCALE) >> shift)
 }
 
-/// Advance a stored `(amm, index)` EMA pair to `timestamp` using the supplied
-/// spot observations and the contract EMA window.
+/// Advance a stored EMA pair to `timestamp` using the supplied spot
+/// observations and the contract EMA window.
 pub fn calculate_emas(
-    stored_amm: u128,
-    stored_index: u128,
-    spot_amm: u128,
-    spot_index: u128,
+    stored: PricePair,
+    spot: PricePair,
     last_touch: u64,
     timestamp: u64,
     ema_window: u64,
-) -> Result<(u128, u128), ValidationError> {
+) -> Result<PricePair, ValidationError> {
     if timestamp <= last_touch {
-        return Ok((stored_amm, stored_index));
+        return Ok(stored);
     }
     if ema_window == 0 {
         return Err(ValidationError::InvalidConfig {
@@ -108,28 +115,32 @@ pub fn calculate_emas(
         });
     }
     let dt = timestamp - last_touch;
-    let ratio_wad = U256::from(dt)
-        .checked_mul(U256::from(WAD as u128))
-        .ok_or_else(|| ValidationError::Overflow {
-            context: "EMA dt".into(),
-        })?
-        / U256::from(ema_window);
+    let ratio_wad =
+        U256::from(dt)
+            .checked_mul(WAD_U256)
+            .ok_or_else(|| ValidationError::Overflow {
+                context: "EMA dt".into(),
+            })?
+            / U256::from(ema_window);
     let alpha = exp_wad(
         -I256::try_from(ratio_wad).map_err(|_| ValidationError::Overflow {
             context: "EMA alpha input".into(),
         })?,
     )?;
-    let one_minus = U256::from(WAD as u128) - alpha;
-    let amm = (U256::from(stored_amm) * alpha + U256::from(spot_amm) * one_minus)
-        / U256::from(WAD as u128);
-    let index = (U256::from(stored_index) * alpha + U256::from(spot_index) * one_minus)
-        / U256::from(WAD as u128);
-    Ok((amm.to::<u128>(), index.to::<u128>()))
+    let one_minus = WAD_U256 - alpha;
+    let amm = (U256::from(stored.amm) * alpha + U256::from(spot.amm) * one_minus) / WAD_U256;
+    let index = (U256::from(stored.index) * alpha + U256::from(spot.index) * one_minus) / WAD_U256;
+    Ok(PricePair {
+        amm: amm.to::<u128>(),
+        index: index.to::<u128>(),
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const WAD: i128 = 1_000_000_000_000_000_000;
 
     #[test]
     fn exp_matches_solady_vectors() {
@@ -146,9 +157,14 @@ mod tests {
 
     #[test]
     fn ema_stays_put_at_same_timestamp() {
-        assert_eq!(
-            calculate_emas(100, 200, 300, 400, 10, 10, 3600).unwrap(),
-            (100, 200)
-        );
+        let stored = PricePair {
+            amm: 100,
+            index: 200,
+        };
+        let spot = PricePair {
+            amm: 300,
+            index: 400,
+        };
+        assert_eq!(calculate_emas(stored, spot, 10, 10, 3600).unwrap(), stored);
     }
 }

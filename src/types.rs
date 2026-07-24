@@ -3,7 +3,12 @@
 //! These types use `f64` for human-readable values (prices, USDC amounts,
 //! leverage) and Alloy's [`Address`] / [`B256`] for on-chain identifiers.
 //! They are the public API surface — users construct these, and the SDK
-//! converts them to wire-format contract types internally.
+//! converts them to wire-format contract types internally. The `Exact*`
+//! variants carry wire units (atoms) directly for callers that must not
+//! round-trip through `f64`.
+//!
+//! Everything here is inert data. Types that carry behavior live with it in
+//! their domain module (e.g. the taker quoting types in [`crate::math::swap`]).
 //!
 //! All types implement [`Serialize`] and
 //! [`Deserialize`] for logging, dashboards, persistence,
