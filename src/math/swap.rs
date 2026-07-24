@@ -13,7 +13,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::constants::{MAX_SWAP_SQRT_PRICE_X96, MIN_SWAP_SQRT_PRICE_X96, Q96};
 use crate::errors::ValidationError;
-use crate::math::tick::{get_sqrt_ratio_at_tick, get_tick_at_sqrt_ratio};
+use crate::math::tick::{
+    UNISWAP_MAX_TICK, UNISWAP_MIN_TICK, get_sqrt_ratio_at_tick, get_tick_at_sqrt_ratio,
+};
 
 /// Liquidity stored at an initialized tick.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -24,10 +26,10 @@ pub struct TickLiquidity {
     pub net: i128,
 }
 
-/// Why a quote could not be executed exactly as requested.
+/// The constraint that stopped the quote.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum QuoteLimit {
-    /// The requested amount filled.
+    /// Nothing stopped it: the requested amount filled.
     Filled,
     /// The requested target price was reached.
     TargetPrice,
@@ -35,6 +37,8 @@ pub enum QuoteLimit {
     PriceImpact,
     /// The protocol terminal price was reached.
     TerminalPrice,
+    /// The caller's [`QuoteConstraints::max_perp`] cap bound the size.
+    MaxPerp,
     /// There was not enough initialized liquidity to fill the amount.
     InsufficientLiquidity,
 }
@@ -85,6 +89,9 @@ pub struct TakerMarketSnapshot {
 }
 
 impl Default for TakerMarketSnapshot {
+    /// Test and scaffolding convenience: the block fields and price are
+    /// placeholders, not a valid market. Real snapshots come from
+    /// `PerpClient::load_taker_market_snapshot`.
     fn default() -> Self {
         Self {
             block_number: 0,
@@ -138,13 +145,20 @@ impl TakerQuote {
     ///
     /// Buys return the maximum USD payment; sells return the minimum USD
     /// proceeds. `slippage_bps=25` corresponds to the Legion default of 0.25%.
+    /// `slippage_bps` is clamped to 10 000 (100%) so a sell can never
+    /// silently produce a zero minimum-proceeds limit from an oversized
+    /// cushion.
     pub fn amt1_limit(&self, slippage_bps: u32) -> u128 {
+        debug_assert!(
+            slippage_bps <= 10_000,
+            "slippage_bps {slippage_bps} exceeds 100%"
+        );
         let amount = self.usd_delta.unsigned_abs();
-        let bps = slippage_bps as u128;
+        let bps = (slippage_bps as u128).min(10_000);
         if self.perp_delta > 0 {
             amount.saturating_mul(10_000 + bps).saturating_add(9_999) / 10_000
         } else {
-            amount.saturating_mul(10_000u128.saturating_sub(bps)) / 10_000
+            amount.saturating_mul(10_000 - bps) / 10_000
         }
     }
 
@@ -153,6 +167,14 @@ impl TakerQuote {
         (self.perp_delta != 0)
             .then(|| self.usd_delta.unsigned_abs() as f64 / self.perp_delta.unsigned_abs() as f64)
     }
+}
+
+/// One swap step: the price reached, the exact-side amount consumed, and the
+/// other-side amount exchanged getting there.
+struct StepResult {
+    sqrt_after: U256,
+    used: U256,
+    other: U256,
 }
 
 #[derive(Debug)]
@@ -170,23 +192,15 @@ struct Simulation {
 impl TakerMarketSnapshot {
     /// Quote an exact signed perp delta using the snapshot's protocol price
     /// limits, then evaluate the resulting price against the module bounds.
+    ///
+    /// The simulation reproduces the contract's per-step rounding, with one
+    /// documented divergence: Uniswap V4 splits a price move at bitmap word
+    /// boundaries and rounds each segment, while this simulator steps directly
+    /// between initialized ticks and rounds once. When a segment with nonzero
+    /// liquidity spans multiple words, on-chain amounts can exceed the local
+    /// quote by a few atoms — covered by the [`TakerQuote::amt1_limit`]
+    /// cushion, but not byte-exact against receipts.
     pub fn quote_perp(&self, perp_delta: i128) -> Result<TakerQuote, ValidationError> {
-        if perp_delta == 0 {
-            return Ok(self.finish_quote(
-                perp_delta,
-                Simulation {
-                    perp_delta: 0,
-                    usd_delta: 0,
-                    sqrt_after: self.sqrt_price_x96,
-                    tick_after: self.tick,
-                    liquidity_after: self.liquidity,
-                    crossed: Vec::new(),
-                    fully_filled: true,
-                    hit_limit: false,
-                },
-                QuoteLimit::Filled,
-            ));
-        }
         let limit = if perp_delta < 0 {
             self.protocol_sqrt_min_x96
         } else {
@@ -258,7 +272,7 @@ impl TakerMarketSnapshot {
             }
         });
         if capped != capacity {
-            reason = QuoteLimit::Filled;
+            reason = QuoteLimit::MaxPerp;
         }
         let sim = self.simulate(capped, protocol_limit)?;
         Ok(self.finish_quote(capped, sim, reason))
@@ -271,8 +285,14 @@ impl TakerMarketSnapshot {
         upper: i32,
         delta: i128,
     ) -> Result<Self, ValidationError> {
-        if lower >= upper || delta == i128::MIN {
+        if lower >= upper {
             return Err(ValidationError::InvalidTickRange { lower, upper });
+        }
+        // i128::MIN has no negation, so its removal at `upper` would overflow.
+        if delta == i128::MIN {
+            return Err(ValidationError::Overflow {
+                context: "liquidity delta".into(),
+            });
         }
         let mut next = self.clone();
         apply_tick_delta(&mut next.ticks, lower, delta, delta)?;
@@ -328,7 +348,11 @@ impl TakerMarketSnapshot {
                     .next()
                     .map(|(&t, _)| t)
             };
-            let next_tick = next.unwrap_or(if zero_for_one { -887_272 } else { 887_272 });
+            let next_tick = next.unwrap_or(if zero_for_one {
+                UNISWAP_MIN_TICK
+            } else {
+                UNISWAP_MAX_TICK
+            });
             let sqrt_next = get_sqrt_ratio_at_tick(next_tick)?;
             let target = if zero_for_one {
                 sqrt_next.max(sqrt_limit)
@@ -336,39 +360,47 @@ impl TakerMarketSnapshot {
                 sqrt_next.min(sqrt_limit)
             };
 
-            let (sqrt_after, used, other) = if liquidity == 0 {
-                (target, U256::ZERO, U256::ZERO)
+            let StepResult {
+                sqrt_after,
+                used,
+                other,
+            } = if liquidity == 0 {
+                StepResult {
+                    sqrt_after: target,
+                    used: U256::ZERO,
+                    other: U256::ZERO,
+                }
             } else if zero_for_one {
                 let to_target = amount0_delta(target, sqrt, liquidity, true)?;
                 if remaining >= to_target {
-                    (
-                        target,
-                        to_target,
-                        amount1_delta(target, sqrt, liquidity, false)?,
-                    )
+                    StepResult {
+                        sqrt_after: target,
+                        used: to_target,
+                        other: amount1_delta(target, sqrt, liquidity, false)?,
+                    }
                 } else {
                     let after = next_sqrt_from_amount0(sqrt, liquidity, remaining, true)?;
-                    (
-                        after,
-                        remaining,
-                        amount1_delta(after, sqrt, liquidity, false)?,
-                    )
+                    StepResult {
+                        sqrt_after: after,
+                        used: remaining,
+                        other: amount1_delta(after, sqrt, liquidity, false)?,
+                    }
                 }
             } else {
                 let to_target = amount0_delta(sqrt, target, liquidity, false)?;
                 if remaining >= to_target {
-                    (
-                        target,
-                        to_target,
-                        amount1_delta(sqrt, target, liquidity, true)?,
-                    )
+                    StepResult {
+                        sqrt_after: target,
+                        used: to_target,
+                        other: amount1_delta(sqrt, target, liquidity, true)?,
+                    }
                 } else {
                     let after = next_sqrt_from_amount0(sqrt, liquidity, remaining, false)?;
-                    (
-                        after,
-                        remaining,
-                        amount1_delta(sqrt, after, liquidity, true)?,
-                    )
+                    StepResult {
+                        sqrt_after: after,
+                        used: remaining,
+                        other: amount1_delta(sqrt, after, liquidity, true)?,
+                    }
                 }
             };
             remaining -= used;
@@ -681,6 +713,35 @@ mod tests {
         assert!(buy.usd_delta < 0);
         assert_eq!(buy.ticks_crossed, vec![0]);
         assert!(buy.sqrt_price_after_x96 > market.sqrt_price_x96);
+    }
+
+    #[test]
+    fn a_binding_max_perp_cap_is_reported_as_max_perp() {
+        let market = book();
+        let uncapped = market
+            .quote_to_price(
+                get_sqrt_ratio_at_tick(100).unwrap(),
+                QuoteConstraints {
+                    enforce_price_impact: false,
+                    max_perp: None,
+                },
+            )
+            .unwrap();
+        assert!(uncapped.perp_delta > 1);
+
+        let cap = (uncapped.perp_delta / 2) as u128;
+        let capped = market
+            .quote_to_price(
+                get_sqrt_ratio_at_tick(100).unwrap(),
+                QuoteConstraints {
+                    enforce_price_impact: false,
+                    max_perp: Some(cap),
+                },
+            )
+            .unwrap();
+        assert_eq!(capped.limit, QuoteLimit::MaxPerp);
+        assert_eq!(capped.perp_delta, cap as i128);
+        assert!(capped.sqrt_price_after_x96 < uncapped.sqrt_price_after_x96);
     }
 
     #[test]

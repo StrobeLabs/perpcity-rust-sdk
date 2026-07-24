@@ -9,8 +9,8 @@ use alloy::primitives::{U256, uint};
 use crate::errors::ValidationError;
 
 /// Uniswap V4 absolute tick bounds.
-const UNISWAP_MIN_TICK: i32 = -887_272;
-const UNISWAP_MAX_TICK: i32 = 887_272;
+pub(crate) const UNISWAP_MIN_TICK: i32 = -887_272;
+pub(crate) const UNISWAP_MAX_TICK: i32 = 887_272;
 
 // ── Precomputed constants for O(1) float tick↔price conversion ──────
 // ln(1.0001) and its reciprocal, verified at compile time via unit test.
