@@ -13,7 +13,10 @@
 //! # Example
 //!
 //! ```rust,no_run
-//! use perpcity_sdk::{PerpClient, Deployments, HftTransport, TransportConfig, ARBITRUM_USDC};
+//! use perpcity_sdk::{
+//!     ARBITRUM_POOL_MANAGER, ARBITRUM_USDC, Deployments, HftTransport, PerpClient,
+//!     TransportConfig,
+//! };
 //! use alloy::primitives::address;
 //! use alloy::signers::local::PrivateKeySigner;
 //!
@@ -29,6 +32,7 @@
 //! let deployments = Deployments {
 //!     perp: address!("0000000000000000000000000000000000000001"), // the market's Perp contract
 //!     usdc: ARBITRUM_USDC,
+//!     pool_manager: ARBITRUM_POOL_MANAGER,
 //! };
 //!
 //! let client = PerpClient::new_arbitrum(transport, signer, deployments)?;
@@ -80,6 +84,19 @@ pub const ARBITRUM_SEPOLIA_USDC: Address = address!("BEF280BefeE2Cb28c20D1E4Cc1d
 /// `PerpFactory` on Arbitrum Sepolia (the deployment markets are created from).
 pub const ARBITRUM_SEPOLIA_PERP_FACTORY: Address =
     address!("a54F81e7BD5C0d52d6fdE2ba40d0B1123d53E7a7");
+
+/// Uniswap V4 `PoolManager` on Arbitrum One.
+///
+/// Matches the address compiled into the Perp contracts' `Constants.sol` for
+/// mainnet builds.
+pub const ARBITRUM_POOL_MANAGER: Address = address!("360E68faCcca8cA495c1B759Fd9EEe466db9FB32");
+
+/// Uniswap V4 `PoolManager` on Arbitrum Sepolia.
+///
+/// Matches the address compiled into the deployed Perp contracts
+/// (`Constants.sol` @ `perpcity-contracts@4bbe554f`).
+pub const ARBITRUM_SEPOLIA_POOL_MANAGER: Address =
+    address!("FB3e0C6F74eB1a21CC1Da29aeC80D2Dfe6C9a317");
 
 /// Default gas cache TTL: 2 seconds.
 const DEFAULT_GAS_TTL_MS: u64 = 2_000;
@@ -176,6 +193,9 @@ pub struct PerpClient {
     gas_limit_cache: Mutex<GasLimitCache>,
     /// Multi-layer state cache for on-chain reads.
     state_cache: Mutex<StateCache>,
+    /// Deployment-fixed Perp/pool values (pool id, tick spacing, EMA window),
+    /// fetched once on first taker book load.
+    book_immutables: tokio::sync::OnceCell<queries::BookImmutables>,
 }
 
 impl std::fmt::Debug for PerpClient {
@@ -229,6 +249,7 @@ impl PerpClient {
             fee_cache: Mutex::new(FeeCache::new(DEFAULT_GAS_TTL_MS, DEFAULT_PRIORITY_FEE)),
             gas_limit_cache: Mutex::new(GasLimitCache::new()),
             state_cache: Mutex::new(StateCache::new(StateCacheConfig::default())),
+            book_immutables: tokio::sync::OnceCell::new(),
         })
     }
 

@@ -46,6 +46,13 @@ pub const MIN_SQRT_PRICE_X96: U256 = uint!(79228162514264337593543951_U256);
 /// sqrt(1e6) * 2^96 — the maximum starting sqrtPriceX96 accepted by the factory.
 pub const MAX_SQRT_PRICE_X96: U256 = uint!(79228162514264337593543950336000_U256);
 
+/// Uniswap V4's minimum usable swap limit, used by deployed Perp contracts.
+pub const MIN_SWAP_SQRT_PRICE_X96: U256 = uint!(4295128740_U256);
+
+/// Uniswap V4's maximum usable swap limit, used by deployed Perp contracts.
+pub const MAX_SWAP_SQRT_PRICE_X96: U256 =
+    uint!(1461446703485210103287273052203988822378723970341_U256);
+
 /// Minimum allowed maker tick, slightly below the factory's minimum starting price.
 pub const MIN_TICK: i32 = -138_180;
 
@@ -133,5 +140,13 @@ mod tests {
     fn max_sqrt_price_x96_matches_contract() {
         let expected = U256::from_str_radix("79228162514264337593543950336000", 10).unwrap();
         assert_eq!(MAX_SQRT_PRICE_X96, expected);
+    }
+
+    #[test]
+    fn deployed_swap_limits_match_contract() {
+        assert_eq!(MIN_SWAP_SQRT_PRICE_X96, U256::from(4_295_128_740u64));
+        let max =
+            U256::from_str_radix("1461446703485210103287273052203988822378723970341", 10).unwrap();
+        assert_eq!(MAX_SWAP_SQRT_PRICE_X96, max);
     }
 }

@@ -35,8 +35,8 @@ use alloy::signers::local::PrivateKeySigner;
 use perpcity_sdk::math::liquidity::estimate_liquidity;
 use perpcity_sdk::math::tick::{align_tick_down, align_tick_up, price_to_tick};
 use perpcity_sdk::{
-    ARBITRUM_SEPOLIA_USDC, Deployments, HftTransport, OpenMakerParams, PerpClient, TransportConfig,
-    Urgency,
+    ARBITRUM_SEPOLIA_POOL_MANAGER, ARBITRUM_SEPOLIA_USDC, Deployments, HftTransport,
+    OpenMakerParams, PerpClient, TransportConfig, Urgency,
 };
 
 /// How far above/below the current price to set the range, as a fraction.
@@ -64,7 +64,11 @@ fn load_deployments() -> Deployments {
         .map(|s| s.parse::<Address>().expect("invalid PERPCITY_USDC address"))
         .unwrap_or(ARBITRUM_SEPOLIA_USDC);
 
-    Deployments { perp, usdc }
+    Deployments {
+        perp,
+        usdc,
+        pool_manager: ARBITRUM_SEPOLIA_POOL_MANAGER,
+    }
 }
 
 #[tokio::main]

@@ -11,8 +11,8 @@ use crate::feeds::{MarketEvent, decode_log};
 use crate::hft::gas::Urgency;
 use crate::math::tick::{align_tick_down, align_tick_up, price_to_tick};
 use crate::types::{
-    AdjustMakerParams, AdjustMakerResult, AdjustTakerParams, AdjustTakerResult, OpenMakerParams,
-    OpenResult, OpenTakerParams,
+    AdjustMakerParams, AdjustMakerResult, AdjustTakerParams, AdjustTakerResult,
+    ExactAdjustTakerParams, ExactOpenTakerParams, OpenMakerParams, OpenResult, OpenTakerParams,
 };
 
 use super::{MAX_APPROVAL, PerpClient, i32_to_i24};
@@ -65,17 +65,6 @@ fn parse_taker_swap(receipt: &alloy::rpc::types::TransactionReceipt) -> Option<(
     None
 }
 
-/// Scale an f64 perp delta to the accounting token's 6-decimal fixed point.
-///
-/// The perp token (Uniswap V4 `currency0`) is an `AccountingToken` with 6
-/// decimals — the same scaling as USD margin — so `perp_delta` uses `scale_to_6dec`,
-/// not 1e18.
-fn scale_perp_delta(delta: f64) -> Result<I256> {
-    let scaled = scale_to_6dec(delta)?;
-    // An i128 always fits in I256.
-    Ok(I256::try_from(scaled).expect("i128 fits in I256"))
-}
-
 /// Scale and validate position margin against the protocol's opening minimum.
 ///
 /// Checks the scaled margin parameter against [`MIN_OPENING_MARGIN`] and returns
@@ -96,39 +85,61 @@ impl PerpClient {
 
     /// Open a taker (long/short) position.
     ///
+    /// Scales the human-readable parameters to wire units and delegates to
+    /// [`Self::open_taker_exact`], which is the single submission path.
     /// Returns an [`OpenResult`] with the transaction hash and position ID.
     pub async fn open_taker(
         &self,
         params: &OpenTakerParams,
         urgency: Urgency,
     ) -> Result<OpenResult> {
-        let margin_scaled = scale_opening_margin(params.margin)?;
+        let exact = ExactOpenTakerParams {
+            // scale_opening_margin returns >= MIN_OPENING_MARGIN, so the cast
+            // to unsigned cannot wrap.
+            margin: scale_opening_margin(params.margin)? as u128,
+            // The perp token (V4 `currency0`) is an AccountingToken with 6
+            // decimals — the same scaling as USD margin, not 1e18.
+            perp_delta: scale_to_6dec(params.perp_delta)?,
+            amt1_limit: params.amt1_limit,
+        };
+        self.open_taker_exact(&exact, urgency).await
+    }
 
-        let perp_delta = scale_perp_delta(params.perp_delta)?;
-
+    /// Open a taker position without converting through floating point.
+    pub async fn open_taker_exact(
+        &self,
+        params: &ExactOpenTakerParams,
+        urgency: Urgency,
+    ) -> Result<OpenResult> {
+        if params.margin < u128::from(MIN_OPENING_MARGIN) {
+            return Err(ValidationError::InvalidMargin {
+                reason: format!("margin must be at least {MIN_OPENING_MARGIN} atoms"),
+            }
+            .into());
+        }
         let wire_params = crate::contracts::OpenTakerParams {
             holder: self.address,
-            margin: margin_scaled as u128,
-            perpDelta: perp_delta,
+            margin: params.margin,
+            perpDelta: I256::try_from(params.perp_delta).expect("i128 fits I256"),
             amt1Limit: U256::from(params.amt1_limit),
         };
-
         let contract = Perp::new(self.deployments.perp, &self.provider);
-        let calldata = contract.openTaker(wire_params).calldata().clone();
 
         tracing::debug!(
-            margin = params.margin,
-            perp_delta = params.perp_delta,
+            margin_atoms = params.margin,
+            perp_delta_atoms = params.perp_delta,
             ?urgency,
             "opening taker position"
         );
 
         let receipt = self
-            .tx(self.deployments.perp, calldata)
+            .tx(
+                self.deployments.perp,
+                contract.openTaker(wire_params).calldata().clone(),
+            )
             .with_urgency(urgency)
             .send()
             .await?;
-
         let pos_id = parse_minted_token_id(&receipt)?;
         // A taker open always emits a decodable `TakerOpened`; a missing one
         // signals an ABI/decode problem, so fail loudly rather than recording a
@@ -137,14 +148,13 @@ impl PerpClient {
             parse_taker_swap(&receipt).ok_or(ContractError::EventNotFound {
                 event_name: "TakerOpened".into(),
             })?;
-        let result = OpenResult {
+        tracing::debug!(pos_id = %pos_id, "taker position opened");
+        Ok(OpenResult {
             tx_hash: receipt.transaction_hash,
             pos_id,
             perp_delta,
             usd_delta,
-        };
-        tracing::debug!(pos_id = %result.pos_id, "taker position opened");
-        Ok(result)
+        })
     }
 
     /// Open a maker (LP) position within a price range.
@@ -211,34 +221,50 @@ impl PerpClient {
     /// Adjust a taker position (margin, notional, or both).
     ///
     /// To close a position, pass `perp_delta` opposing the position's current delta.
+    ///
+    /// Scales the human-readable parameters to wire units and delegates to
+    /// [`Self::adjust_taker_exact`], which is the single submission path.
     pub async fn adjust_taker(
         &self,
         params: &AdjustTakerParams,
         urgency: Urgency,
     ) -> Result<AdjustTakerResult> {
-        let margin_delta = scale_to_6dec(params.margin_delta)?;
-        let perp_delta = scale_perp_delta(params.perp_delta)?;
+        let exact = ExactAdjustTakerParams {
+            pos_id: params.pos_id,
+            margin_delta: scale_to_6dec(params.margin_delta)?,
+            perp_delta: scale_to_6dec(params.perp_delta)?,
+            amt1_limit: params.amt1_limit,
+        };
+        self.adjust_taker_exact(&exact, urgency).await
+    }
 
+    /// Adjust a taker position without converting through floating point.
+    pub async fn adjust_taker_exact(
+        &self,
+        params: &ExactAdjustTakerParams,
+        urgency: Urgency,
+    ) -> Result<AdjustTakerResult> {
         let wire_params = crate::contracts::AdjustTakerParams {
             posId: params.pos_id,
-            marginDelta: margin_delta,
-            perpDelta: perp_delta,
+            marginDelta: params.margin_delta,
+            perpDelta: I256::try_from(params.perp_delta).expect("i128 fits I256"),
             amt1Limit: U256::from(params.amt1_limit),
         };
+        let contract = Perp::new(self.deployments.perp, &self.provider);
 
         tracing::debug!(
             pos_id = %params.pos_id,
-            margin_delta = params.margin_delta,
-            perp_delta = params.perp_delta,
+            margin_delta_atoms = params.margin_delta,
+            perp_delta_atoms = params.perp_delta,
             ?urgency,
             "adjusting taker position"
         );
 
-        let contract = Perp::new(self.deployments.perp, &self.provider);
-        let calldata = contract.adjustTaker(wire_params).calldata().clone();
-
         let receipt = self
-            .tx(self.deployments.perp, calldata)
+            .tx(
+                self.deployments.perp,
+                contract.adjustTaker(wire_params).calldata().clone(),
+            )
             .with_urgency(urgency)
             .send()
             .await?;

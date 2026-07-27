@@ -511,10 +511,10 @@ impl Router {
         let dedicated = if is_write { &self.write } else { &self.read };
 
         // Try dedicated pool first
-        if !dedicated.is_empty() {
-            if let Some(idx) = dedicated.select(self.strategy, now_ms) {
-                return Some((dedicated, idx));
-            }
+        if !dedicated.is_empty()
+            && let Some(idx) = dedicated.select(self.strategy, now_ms)
+        {
+            return Some((dedicated, idx));
         }
 
         // Fall back to shared pool

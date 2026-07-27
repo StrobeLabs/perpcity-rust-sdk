@@ -3,7 +3,12 @@
 //! These types use `f64` for human-readable values (prices, USDC amounts,
 //! leverage) and Alloy's [`Address`] / [`B256`] for on-chain identifiers.
 //! They are the public API surface — users construct these, and the SDK
-//! converts them to wire-format contract types internally.
+//! converts them to wire-format contract types internally. The `Exact*`
+//! variants carry wire units (atoms) directly for callers that must not
+//! round-trip through `f64`.
+//!
+//! Everything here is inert data. Types that carry behavior live with it in
+//! their domain module (e.g. the taker quoting types in [`crate::math::swap`]).
 //!
 //! All types implement [`Serialize`] and
 //! [`Deserialize`] for logging, dashboards, persistence,
@@ -19,6 +24,10 @@ pub struct Deployments {
     pub perp: Address,
     /// USDC token address.
     pub usdc: Address,
+    /// Uniswap V4 `PoolManager` the market's pool lives in — one canonical
+    /// address per chain (see `ARBITRUM_POOL_MANAGER` /
+    /// `ARBITRUM_SEPOLIA_POOL_MANAGER`).
+    pub pool_manager: Address,
 }
 
 /// Metadata about a perpetual market.
@@ -111,6 +120,17 @@ pub struct OpenTakerParams {
     pub amt1_limit: u128,
 }
 
+/// Exact wire-unit parameters for latency-sensitive taker opens.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct ExactOpenTakerParams {
+    /// Margin in USDC atoms (six decimals).
+    pub margin: u128,
+    /// Signed perp atoms (six decimals).
+    pub perp_delta: i128,
+    /// Directional token1 limit produced by [`crate::TakerQuote::amt1_limit`].
+    pub amt1_limit: u128,
+}
+
 /// Client-facing parameters for opening a maker (LP) position.
 ///
 /// The SDK converts these to contract types automatically:
@@ -146,6 +166,19 @@ pub struct AdjustTakerParams {
     /// Set to zero for margin-only adjustments.
     pub perp_delta: f64,
     /// Slippage protection: max amount of token1 (USDC). `0` = no limit.
+    pub amt1_limit: u128,
+}
+
+/// Exact wire-unit parameters for latency-sensitive taker adjustments.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct ExactAdjustTakerParams {
+    /// Position NFT token ID.
+    pub pos_id: U256,
+    /// Signed margin change in USDC atoms.
+    pub margin_delta: i128,
+    /// Signed perp atoms.
+    pub perp_delta: i128,
+    /// Directional token1 limit produced by [`crate::TakerQuote::amt1_limit`].
     pub amt1_limit: u128,
 }
 
@@ -282,6 +315,7 @@ mod tests {
         let deployments = Deployments {
             perp: Address::ZERO,
             usdc: Address::ZERO,
+            pool_manager: Address::ZERO,
         };
         let json = serde_json::to_string(&deployments).unwrap();
         let recovered: Deployments = serde_json::from_str(&json).unwrap();

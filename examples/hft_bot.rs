@@ -42,8 +42,8 @@ use perpcity_sdk::hft::latency::LatencyTracker;
 use perpcity_sdk::hft::position_manager::{ManagedPosition, PositionManager, TriggerType};
 use perpcity_sdk::transport::config::Strategy;
 use perpcity_sdk::{
-    ARBITRUM_SEPOLIA_USDC, Deployments, HftTransport, OpenTakerParams, PerpClient, TransportConfig,
-    Urgency,
+    ARBITRUM_SEPOLIA_POOL_MANAGER, ARBITRUM_SEPOLIA_USDC, Deployments, HftTransport,
+    OpenTakerParams, PerpClient, TransportConfig, Urgency,
 };
 
 /// Number of blocks to run the HFT loop before exiting.
@@ -82,7 +82,11 @@ fn load_deployments() -> Deployments {
         .map(|s| s.parse::<Address>().expect("invalid PERPCITY_USDC address"))
         .unwrap_or(ARBITRUM_SEPOLIA_USDC);
 
-    Deployments { perp, usdc }
+    Deployments {
+        perp,
+        usdc,
+        pool_manager: ARBITRUM_SEPOLIA_POOL_MANAGER,
+    }
 }
 
 /// Simple momentum signal: compare current price to a moving average.

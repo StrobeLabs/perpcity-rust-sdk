@@ -48,20 +48,23 @@ pub mod types;
 
 #[doc(inline)]
 pub use client::{
-    ARBITRUM_CHAIN_ID, ARBITRUM_SEPOLIA_CHAIN_ID, ARBITRUM_SEPOLIA_PERP_FACTORY,
-    ARBITRUM_SEPOLIA_USDC, ARBITRUM_USDC, PerpClient, TxBuilder,
+    ARBITRUM_CHAIN_ID, ARBITRUM_POOL_MANAGER, ARBITRUM_SEPOLIA_CHAIN_ID,
+    ARBITRUM_SEPOLIA_PERP_FACTORY, ARBITRUM_SEPOLIA_POOL_MANAGER, ARBITRUM_SEPOLIA_USDC,
+    ARBITRUM_USDC, PerpClient, TxBuilder,
 };
 
 #[doc(inline)]
 pub use contracts::{
     AdjustMakerParams as ContractAdjustMakerParams, AdjustTakerParams as ContractAdjustTakerParams,
-    IBeacon, IERC20, IFees, IFunding, IMarginRatios, IMulticall3, IPriceImpact, IPricing, Modules,
-    OpenMakerParams as ContractOpenMakerParams, OpenTakerParams as ContractOpenTakerParams, Perp,
-    PerpFactory, PoolKey,
+    IBeacon, IERC20, IFees, IFunding, IMarginRatios, IMulticall3, IPoolManagerState, IPriceImpact,
+    IPricing, Modules, OpenMakerParams as ContractOpenMakerParams,
+    OpenTakerParams as ContractOpenTakerParams, Perp, PerpFactory, PoolKey,
 };
 
 #[doc(inline)]
-pub use feeds::{BlockHeaderFeed, MarketEvent, MarketFeed, decode_log};
+pub use feeds::{
+    BlockHeaderFeed, LiveTakerMarket, LiveTakerMarketPublisher, MarketEvent, MarketFeed, decode_log,
+};
 
 #[doc(inline)]
 pub use errors::{ContractError, PerpCityError, Result, TransactionError, ValidationError};
@@ -75,11 +78,17 @@ pub use transport::{config::TransportConfig, provider::HftTransport};
 #[doc(inline)]
 pub use types::{
     AdjustMakerParams, AdjustMakerResult, AdjustTakerParams, AdjustTakerResult, Bounds,
-    Deployments, Fees, OpenInterest, OpenMakerParams, OpenResult, OpenTakerParams, PerpData,
-    PerpSnapshot, PriceImpactPoint,
+    Deployments, ExactAdjustTakerParams, ExactOpenTakerParams, Fees, OpenInterest, OpenMakerParams,
+    OpenResult, OpenTakerParams, PerpData, PerpSnapshot, PriceImpactPoint,
 };
 
 #[doc(inline)]
 pub use math::tick::{
-    align_tick_down, align_tick_up, get_sqrt_ratio_at_tick, price_to_tick, tick_to_price,
+    align_tick_down, align_tick_up, get_sqrt_ratio_at_tick, get_tick_at_sqrt_ratio, price_to_tick,
+    tick_to_price,
+};
+
+#[doc(inline)]
+pub use math::swap::{
+    QuoteConstraints, QuoteLimit, TakerMarketSnapshot, TakerQuote, TickLiquidity,
 };

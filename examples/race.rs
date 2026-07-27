@@ -51,7 +51,11 @@ async fn main() -> Result<()> {
             .build()?,
     )?;
     let signer: PrivateKeySigner = private_key.parse().unwrap();
-    let deployments = Deployments { perp, usdc };
+    let deployments = Deployments {
+        perp,
+        usdc,
+        pool_manager: ARBITRUM_SEPOLIA_POOL_MANAGER,
+    };
     let client = PerpClient::new_arbitrum_sepolia(transport, signer, deployments)?;
     phase_times.push(("init", ms(t)));
 
