@@ -57,4 +57,18 @@ pub enum TransactionError {
         /// Maximum allowed.
         max: usize,
     },
+
+    /// The local nonce sequence no longer provably matches the chain — a
+    /// broadcast failed or a receipt timed out, leaving a nonce's fate
+    /// unknowable. Sends fail fast until in-flight work drains, then the
+    /// next send resyncs from the chain automatically.
+    ///
+    /// Transient by design (see `PerpCityError::is_transient`): the
+    /// condition clears itself, so callers should back off briefly and
+    /// retry rather than treat this as a dead client.
+    #[error("nonce desynced from chain ({in_flight} in flight); resyncs when drained")]
+    NonceDesynced {
+        /// Transactions still awaiting receipts, which block the resync.
+        in_flight: usize,
+    },
 }
