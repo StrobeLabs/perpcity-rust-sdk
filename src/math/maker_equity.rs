@@ -24,7 +24,7 @@
 //! [`swap`](crate::math::swap): a block-pinned [`MakerMarketSnapshot`] plus
 //! per-position [`MakerState`] rows. The chain-read layer that populates
 //! them (including the raw storage-slot reads, see
-//! [`storage`](crate::math::storage)) lives in the client:
+//! `math::storage`) lives in the client:
 //! [`PerpClient::read_maker_equities`](crate::client::PerpClient::read_maker_equities).
 
 use alloy::primitives::{I256, U256, U512};
@@ -546,7 +546,7 @@ impl MakerMarketSnapshot {
 /// Compute `feeGrowthInside1X128` for a band from the global growth and the
 /// two ticks' `feeGrowthOutside1X128`, per Uniswap's `getFeeGrowthInside`.
 /// Fee growth arithmetic wraps by design.
-pub fn fee_growth_inside1(
+pub(crate) fn fee_growth_inside1(
     global_x128: U256,
     outside_lower_x128: U256,
     outside_upper_x128: U256,

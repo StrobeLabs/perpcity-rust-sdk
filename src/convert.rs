@@ -324,7 +324,23 @@ pub fn sqrt_price_x96_to_price(sqrt_price_x96: U256) -> Result<f64, ValidationEr
 /// amount1)` = (perp, USD), each a signed `int128` in two's-complement.
 ///
 /// The packing is part of the contract ABI: the upper 128 bits hold
-/// `amount0` and the lower 128 bits hold `amount1`.
+/// `amount0` and the lower 128 bits hold `amount1`. The unpacking is
+/// lossless: each half is exactly 128 bits wide on-chain (`int128`), so
+/// reinterpreting the shifted/masked halves as two's-complement `i128`
+/// reproduces the values the contract packed — no truncation and no
+/// sign-extension ambiguity is possible.
+///
+/// # Examples
+///
+/// ```
+/// use alloy::primitives::I256;
+/// use perpcity_sdk::convert::unpack_balance_delta;
+///
+/// // amount0 = -2 (upper 128 bits), amount1 = 3 (lower 128 bits).
+/// let packed = (I256::try_from(-2).unwrap() << 128)
+///     | I256::try_from(3u8).unwrap();
+/// assert_eq!(unpack_balance_delta(packed), (-2, 3));
+/// ```
 pub fn unpack_balance_delta(delta: I256) -> (i128, i128) {
     let raw = delta.into_raw();
     // The shift/mask leave at most 128 significant bits, so the narrowing

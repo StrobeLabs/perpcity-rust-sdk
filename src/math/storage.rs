@@ -50,7 +50,7 @@ const TICK_FEE_GROWTH_OUTSIDE1_OFFSET: u8 = 2;
 const POSITION_FEE_GROWTH_INSIDE1_OFFSET: u8 = 2;
 
 /// Slot of `mapping[key]` for a mapping stored at `base`.
-pub fn mapping_slot(key: B256, base: U256) -> U256 {
+pub(crate) fn mapping_slot(key: B256, base: U256) -> U256 {
     let mut buf = [0u8; 64];
     buf[..32].copy_from_slice(key.as_slice());
     buf[32..].copy_from_slice(&base.to_be_bytes::<32>());
@@ -59,7 +59,7 @@ pub fn mapping_slot(key: B256, base: U256) -> U256 {
 
 /// Slot of `mapping[key]` for a signed integer key (two's-complement,
 /// sign-extended to 32 bytes).
-pub fn mapping_slot_signed(key: i32, base: U256) -> U256 {
+pub(crate) fn mapping_slot_signed(key: i32, base: U256) -> U256 {
     let key = I256::unchecked_from(key).into_raw();
     mapping_slot(B256::from(key), base)
 }
@@ -67,38 +67,38 @@ pub fn mapping_slot_signed(key: i32, base: U256) -> U256 {
 /// Slots of `s.ticks[tick]` (a `TickInfo`) on the Perp contract:
 /// `[cumlFundingOppX96, cumlFundingDivSqrtPOppX96]`, the struct's two
 /// consecutive words.
-pub fn perp_tick_funding_slots(tick: i32) -> [U256; 2] {
+pub(crate) fn perp_tick_funding_slots(tick: i32) -> [U256; 2] {
     let base = mapping_slot_signed(tick, U256::from(PERP_TICKS_SLOT));
     [base, base + U256::from(TICK_FUNDING_DIV_SQRT_P_OPP_OFFSET)]
 }
 
 /// Slot of the Perp's stored EMA `PricePair` (`s.emas`).
-pub fn perp_emas_slot() -> U256 {
+pub(crate) fn perp_emas_slot() -> U256 {
     U256::from(PERP_EMAS_SLOT)
 }
 
 /// Base slot of a pool's `Pool.State` inside the V4 PoolManager.
-pub fn pool_state_slot(pool_id: B256) -> U256 {
+pub(crate) fn pool_state_slot(pool_id: B256) -> U256 {
     mapping_slot(pool_id, U256::from(POOL_MANAGER_POOLS_SLOT))
 }
 
 /// Slot of a pool's `feeGrowthGlobal1X128`.
-pub fn v4_fee_growth_global1_slot(pool_id: B256) -> U256 {
+pub(crate) fn v4_fee_growth_global1_slot(pool_id: B256) -> U256 {
     pool_state_slot(pool_id) + U256::from(FEE_GROWTH_GLOBAL1_OFFSET)
 }
 
 /// Base slot of `state.ticks[tick]` inside a pool's state.
-pub fn v4_tick_slot(pool_id: B256, tick: i32) -> U256 {
+pub(crate) fn v4_tick_slot(pool_id: B256, tick: i32) -> U256 {
     mapping_slot_signed(tick, pool_state_slot(pool_id) + U256::from(TICKS_OFFSET))
 }
 
 /// Slot of a tick's `feeGrowthOutside1X128`.
-pub fn v4_tick_fee_growth_outside1_slot(pool_id: B256, tick: i32) -> U256 {
+pub(crate) fn v4_tick_fee_growth_outside1_slot(pool_id: B256, tick: i32) -> U256 {
     v4_tick_slot(pool_id, tick) + U256::from(TICK_FEE_GROWTH_OUTSIDE1_OFFSET)
 }
 
 /// Slot of `state.tickBitmap[word]` inside a pool's state.
-pub fn v4_tick_bitmap_slot(pool_id: B256, word: i32) -> U256 {
+pub(crate) fn v4_tick_bitmap_slot(pool_id: B256, word: i32) -> U256 {
     mapping_slot_signed(
         word,
         pool_state_slot(pool_id) + U256::from(TICK_BITMAP_OFFSET),
@@ -108,7 +108,7 @@ pub fn v4_tick_bitmap_slot(pool_id: B256, word: i32) -> U256 {
 /// Base slot of the V4 position keyed by `(owner, tickLower, tickUpper,
 /// salt)`. V4 hashes the packed key (ticks as 3-byte two's-complement)
 /// before the mapping lookup.
-pub fn v4_position_slot(
+pub(crate) fn v4_position_slot(
     pool_id: B256,
     owner: Address,
     tick_lower: i32,
@@ -127,7 +127,7 @@ pub fn v4_position_slot(
 }
 
 /// Slot of a V4 position's `feeGrowthInside1LastX128`.
-pub fn v4_position_fee_growth_inside1_slot(
+pub(crate) fn v4_position_fee_growth_inside1_slot(
     pool_id: B256,
     owner: Address,
     tick_lower: i32,

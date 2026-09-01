@@ -11,7 +11,7 @@
 //! | [`ema`] | Contract-exact EMA advancement (Solady `expWad` port) |
 //! | [`swap`] | Local V4 taker swap simulation over a block-pinned book |
 //! | [`maker_equity`] | Contract-exact maker settle preview over a block-pinned snapshot |
-//! | [`storage`] | Storage-slot math for reads with no contract getter |
+//! | `storage` (crate-internal) | Storage-slot math for reads with no contract getter |
 
 use alloy::primitives::B256;
 use serde::{Deserialize, Serialize};
@@ -21,7 +21,7 @@ pub(crate) mod fixed_point;
 pub mod liquidity;
 pub mod maker_equity;
 pub mod position;
-pub mod storage;
+pub(crate) mod storage;
 pub mod swap;
 pub mod tick;
 
