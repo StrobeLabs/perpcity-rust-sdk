@@ -19,6 +19,15 @@ use alloy::primitives::{Address, B256, I256, U256, keccak256};
 /// `PerpStorage.ticks` mapping slot: storage struct base 3 + field index 3.
 const PERP_TICKS_SLOT: u64 = 6;
 
+/// `PerpStorage.emas` slot: storage struct base 3 + field index 8 in the
+/// deployed layout. `PricePair` packs `ammPrice` in the low 128 bits and
+/// `index` in the high 128 bits.
+const PERP_EMAS_SLOT: u64 = 11;
+
+/// Offset of `cumlFundingDivSqrtPOppX96` — the second word of the Perp's
+/// two-word `TickInfo` struct — from the struct's base slot.
+const TICK_FUNDING_DIV_SQRT_P_OPP_OFFSET: u8 = 1;
+
 /// `PoolManager._pools` mapping slot.
 const POOL_MANAGER_POOLS_SLOT: u64 = 6;
 
@@ -56,10 +65,17 @@ pub fn mapping_slot_signed(key: i32, base: U256) -> U256 {
     mapping_slot(B256::from(key), base)
 }
 
-/// Base slot of `s.ticks[tick]` (a `TickInfo`) on the Perp contract. The
-/// struct's second field lives at the next slot.
-pub fn perp_tick_slot(tick: i32) -> U256 {
-    mapping_slot_signed(tick, U256::from(PERP_TICKS_SLOT))
+/// Slots of `s.ticks[tick]` (a `TickInfo`) on the Perp contract:
+/// `[cumlFundingOppX96, cumlFundingDivSqrtPOppX96]`, the struct's two
+/// consecutive words.
+pub fn perp_tick_funding_slots(tick: i32) -> [U256; 2] {
+    let base = mapping_slot_signed(tick, U256::from(PERP_TICKS_SLOT));
+    [base, base + U256::from(TICK_FUNDING_DIV_SQRT_P_OPP_OFFSET)]
+}
+
+/// Slot of the Perp's stored EMA `PricePair` (`s.emas`).
+pub fn perp_emas_slot() -> U256 {
+    U256::from(PERP_EMAS_SLOT)
 }
 
 /// Base slot of a pool's `Pool.State` inside the V4 PoolManager.

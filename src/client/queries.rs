@@ -41,8 +41,9 @@ use crate::math::maker_equity::{
     fee_growth_inside1,
 };
 use crate::math::storage::{
-    perp_tick_slot, v4_fee_growth_global1_slot, v4_position_fee_growth_inside1_slot,
-    v4_tick_bitmap_slot, v4_tick_fee_growth_outside1_slot, v4_tick_slot,
+    perp_emas_slot, perp_tick_funding_slots, v4_fee_growth_global1_slot,
+    v4_position_fee_growth_inside1_slot, v4_tick_bitmap_slot, v4_tick_fee_growth_outside1_slot,
+    v4_tick_slot,
 };
 use crate::math::swap::{TakerMarketSnapshot, TickLiquidity};
 use crate::math::tick::get_sqrt_ratio_at_tick;
@@ -338,13 +339,9 @@ impl PerpClient {
         let immutables = *self.book_immutables().await?;
         let (block, block_id) = self.lagged_snapshot_block().await?;
         let perp = Perp::new(self.deployments.perp, &self.provider);
-        // PerpStorage starts at slot 3 and `emas` is field slot 8 in the
-        // deployed layout. PricePair packs ammPrice in the low 128 bits and
-        // index in the high 128 bits.
-        const DEPLOYED_EMAS_SLOT: u64 = 11;
         let stored_emas = self
             .provider
-            .get_storage_at(self.deployments.perp, U256::from(DEPLOYED_EMAS_SLOT))
+            .get_storage_at(self.deployments.perp, perp_emas_slot())
             .block_id(block_id)
             .await?;
         let pool_state_call = perp.poolState().block(block_id);
@@ -1253,10 +1250,7 @@ impl PerpClient {
         if !self.get_proof_unsupported.load(Ordering::Relaxed) {
             let keys: Vec<B256> = ticks
                 .iter()
-                .flat_map(|&tick| {
-                    let slot = perp_tick_slot(tick);
-                    [B256::from(slot), B256::from(slot + U256::ONE)]
-                })
+                .flat_map(|&tick| perp_tick_funding_slots(tick).map(B256::from))
                 .collect();
             match self
                 .provider
@@ -1272,10 +1266,9 @@ impl PerpClient {
                         .collect();
                     let mut funding = BTreeMap::new();
                     for &tick in ticks {
-                        let slot = perp_tick_slot(tick);
+                        let [slot_opp, slot_div] = perp_tick_funding_slots(tick);
                         let word = |slot: U256| values.get(&B256::from(slot)).copied();
-                        let (Some(opp), Some(div_sqrt_p_opp)) =
-                            (word(slot), word(slot + U256::ONE))
+                        let (Some(opp), Some(div_sqrt_p_opp)) = (word(slot_opp), word(slot_div))
                         else {
                             return Err(ContractError::StorageReadFailed {
                                 context: format!(
@@ -1317,7 +1310,7 @@ impl PerpClient {
         // so every tick's slot pair runs concurrently (bounded so a large
         // ladder cannot flood the endpoint).
         let tick_reads = ticks.iter().map(|&tick| {
-            let slot = perp_tick_slot(tick);
+            let [slot_opp, slot_div] = perp_tick_funding_slots(tick);
             let read = |slot: U256| {
                 self.provider
                     .get_storage_at(perp_addr, slot)
@@ -1325,7 +1318,7 @@ impl PerpClient {
                     .into_future()
             };
             async move {
-                let funding = tokio::try_join!(read(slot), read(slot + U256::ONE)).map(
+                let funding = tokio::try_join!(read(slot_opp), read(slot_div)).map(
                     |(opp, div_sqrt_p_opp)| TickFunding {
                         cuml_funding_opp_x96: I256::from_raw(opp),
                         cuml_funding_div_sqrt_p_opp_x96: I256::from_raw(div_sqrt_p_opp),
