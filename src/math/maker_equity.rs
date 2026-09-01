@@ -23,7 +23,7 @@
 //! per-position [`MakerState`] rows. The chain-read layer that populates
 //! them (including the raw storage-slot reads, see
 //! [`storage`](crate::math::storage)) lives in the client:
-//! `PerpClient::read_maker_equities`.
+//! [`PerpClient::read_maker_equities`](crate::client::PerpClient::read_maker_equities).
 
 use alloy::primitives::{B256, I256, U256, U512};
 

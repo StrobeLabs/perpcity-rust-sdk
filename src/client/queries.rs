@@ -829,7 +829,80 @@ impl PerpClient {
             return Ok(Vec::new());
         }
         let perp_addr = self.deployments.perp;
+        let (market, pool_id, block_id) = self.load_maker_market_snapshot(mark_price_x96).await?;
 
+        // ── Position rows: one multicall, degrading per position ────
+        let row_call = |calldata: Vec<u8>| IMulticall3::Call3 {
+            target: perp_addr,
+            allowFailure: true,
+            callData: calldata.into(),
+        };
+        let calls = pos_ids
+            .iter()
+            .flat_map(|&pos_id| {
+                [
+                    row_call(Perp::positionsCall { posId: pos_id }.abi_encode()),
+                    row_call(Perp::makerDetailsCall { posId: pos_id }.abi_encode()),
+                ]
+            })
+            .collect();
+        let multicall = IMulticall3::new(MULTICALL3, &self.provider);
+        let rows = multicall.aggregate3(calls).block(block_id).call().await?;
+        if rows.len() != 2 * pos_ids.len() {
+            return Err(ContractError::MulticallFailed {
+                reason: format!(
+                    "maker equity row multicall returned {} results, expected {}",
+                    rows.len(),
+                    2 * pos_ids.len()
+                ),
+            }
+            .into());
+        }
+
+        let mut outcomes = Vec::with_capacity(pos_ids.len());
+        let mut pending = Vec::new();
+        for (row, &pos_id) in rows.chunks_exact(2).zip(pos_ids) {
+            outcomes.push(match decode_maker_row(pos_id, &row[0], &row[1]) {
+                Ok(None) => MakerRowOutcome::Skipped,
+                Ok(Some(maker)) => {
+                    pending.push(maker);
+                    MakerRowOutcome::Pending
+                }
+                Err(e) => {
+                    tracing::warn!(%pos_id, error = %e, "maker equity: position row failed");
+                    MakerRowOutcome::Failed(e)
+                }
+            });
+        }
+
+        let mut equities = self
+            .read_pending_maker_equities(&market, pool_id, block_id, &pending)
+            .await?
+            .into_iter();
+        let mut out = Vec::with_capacity(pos_ids.len());
+        for (&pos_id, outcome) in pos_ids.iter().zip(outcomes) {
+            match outcome {
+                MakerRowOutcome::Skipped => {}
+                MakerRowOutcome::Failed(e) => out.push((pos_id, Err(e))),
+                MakerRowOutcome::Pending => out.push((
+                    pos_id,
+                    equities.next().expect("one equity per pending position"),
+                )),
+            }
+        }
+        Ok(out)
+    }
+
+    /// Resolve the safe lagged block and load + accrue the market-wide
+    /// snapshot for [`Self::read_maker_equities`] in one multicall.
+    ///
+    /// Returns the accrued snapshot, the pool id, and the block id every
+    /// later read must pin to.
+    async fn load_maker_market_snapshot(
+        &self,
+        mark_price_x96: U256,
+    ) -> Result<(MakerMarketSnapshot, B256, BlockId)> {
+        let perp_addr = self.deployments.perp;
         let block_number = self
             .provider
             .get_block_number()
@@ -850,12 +923,13 @@ impl PerpClient {
             None => (BlockId::number(block_number), B256::ZERO, now_secs()),
         };
 
-        // ── Market-wide state: one multicall ────────────────────────
         let market_call = |calldata: Vec<u8>| IMulticall3::Call3 {
             target: perp_addr,
             allowFailure: false,
             callData: calldata.into(),
         };
+
+        // ── Position rows: one multicall, degrading per position ────
         let calls = vec![
             market_call(Perp::cumulativesCall {}.abi_encode()),
             market_call(Perp::ratesCall {}.abi_encode()),
@@ -931,66 +1005,7 @@ impl PerpClient {
             cap_long: capacity.long,
             cap_short: capacity.short,
         })?;
-
-        // ── Position rows: one multicall, degrading per position ────
-        let row_call = |calldata: Vec<u8>| IMulticall3::Call3 {
-            target: perp_addr,
-            allowFailure: true,
-            callData: calldata.into(),
-        };
-        let calls = pos_ids
-            .iter()
-            .flat_map(|&pos_id| {
-                [
-                    row_call(Perp::positionsCall { posId: pos_id }.abi_encode()),
-                    row_call(Perp::makerDetailsCall { posId: pos_id }.abi_encode()),
-                ]
-            })
-            .collect();
-        let rows = multicall.aggregate3(calls).block(block_id).call().await?;
-        if rows.len() != 2 * pos_ids.len() {
-            return Err(ContractError::MulticallFailed {
-                reason: format!(
-                    "maker equity row multicall returned {} results, expected {}",
-                    rows.len(),
-                    2 * pos_ids.len()
-                ),
-            }
-            .into());
-        }
-
-        let mut outcomes = Vec::with_capacity(pos_ids.len());
-        let mut pending = Vec::new();
-        for (row, &pos_id) in rows.chunks_exact(2).zip(pos_ids) {
-            outcomes.push(match decode_maker_row(pos_id, &row[0], &row[1]) {
-                Ok(None) => MakerRowOutcome::Skipped,
-                Ok(Some(maker)) => {
-                    pending.push(maker);
-                    MakerRowOutcome::Pending
-                }
-                Err(e) => {
-                    tracing::warn!(%pos_id, error = %e, "maker equity: position row failed");
-                    MakerRowOutcome::Failed(e)
-                }
-            });
-        }
-
-        let mut equities = self
-            .read_pending_maker_equities(&market, pool_id, block_id, &pending)
-            .await?
-            .into_iter();
-        let mut out = Vec::with_capacity(pos_ids.len());
-        for (&pos_id, outcome) in pos_ids.iter().zip(outcomes) {
-            match outcome {
-                MakerRowOutcome::Skipped => {}
-                MakerRowOutcome::Failed(e) => out.push((pos_id, Err(e))),
-                MakerRowOutcome::Pending => out.push((
-                    pos_id,
-                    equities.next().expect("one equity per pending position"),
-                )),
-            }
-        }
-        Ok(out)
+        Ok((market, pool_id, block_id))
     }
 
     /// Slot reads and math for the surviving positions of
