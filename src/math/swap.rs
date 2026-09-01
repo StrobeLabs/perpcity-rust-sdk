@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::constants::{MAX_SWAP_SQRT_PRICE_X96, MIN_SWAP_SQRT_PRICE_X96, Q96};
 use crate::errors::ValidationError;
+use crate::math::fixed_point::{mul_div, u512_to_u256};
 use crate::math::tick::{
     UNISWAP_MAX_TICK, UNISWAP_MIN_TICK, get_sqrt_ratio_at_tick, get_tick_at_sqrt_ratio,
 };
@@ -493,7 +494,9 @@ fn add_liquidity(liquidity: u128, delta: i128) -> Result<u128, ValidationError> 
     })
 }
 
-fn amount0_delta(
+/// Uniswap `SqrtPriceMath.getAmount0Delta`: token0 owed between two sqrt
+/// prices for `liquidity`, with Solidity-compatible rounding.
+pub(crate) fn amount0_delta(
     a: U256,
     b: U256,
     liquidity: u128,
@@ -511,7 +514,9 @@ fn amount0_delta(
     Ok(div(first, lower, round_up))
 }
 
-fn amount1_delta(
+/// Uniswap `SqrtPriceMath.getAmount1Delta`: token1 owed between two sqrt
+/// prices for `liquidity`, with Solidity-compatible rounding.
+pub(crate) fn amount1_delta(
     a: U256,
     b: U256,
     liquidity: u128,
@@ -551,21 +556,6 @@ fn next_sqrt_from_amount0(
     u512_to_u256(value)
 }
 
-fn mul_div(a: U256, b: U256, d: U256, round_up: bool) -> Result<U256, ValidationError> {
-    if d.is_zero() {
-        return Err(ValidationError::Overflow {
-            context: "division by zero".into(),
-        });
-    }
-    let product: U512 = a.widening_mul(b);
-    let divisor = U512::from(d);
-    let mut q = product / divisor;
-    if round_up && product % divisor != U512::ZERO {
-        q += U512::ONE;
-    }
-    u512_to_u256(q)
-}
-
 fn div(value: U256, denominator: U256, round_up: bool) -> U256 {
     let q = value / denominator;
     if round_up && value % denominator != U256::ZERO {
@@ -582,15 +572,6 @@ fn div_ceil_512(value: U512, denominator: U512) -> U512 {
     } else {
         q + U512::ONE
     }
-}
-
-fn u512_to_u256(value: U512) -> Result<U256, ValidationError> {
-    if value > U512::from(U256::MAX) {
-        return Err(ValidationError::Overflow {
-            context: "U512 to U256".into(),
-        });
-    }
-    Ok(value.to::<U256>())
 }
 
 fn u256_to_i128(value: U256) -> Result<i128, ValidationError> {

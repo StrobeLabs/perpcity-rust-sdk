@@ -33,6 +33,8 @@
 //! that populates it lives in the client: `PerpClient::read_maker_equities`.
 
 use crate::constants::{INTERVAL, Q96, WAD};
+use crate::math::fixed_point::{mul_div, s_full_mul_div};
+use crate::math::swap::{amount0_delta, amount1_delta};
 use crate::math::tick::get_sqrt_ratio_at_tick;
 use alloy::primitives::{B256, I256, U256, U512, keccak256};
 
@@ -41,38 +43,15 @@ const PERP_TICKS_SLOT: u64 = 6;
 /// `PoolManager._pools` mapping slot.
 const POOL_MANAGER_POOLS_SLOT: u64 = 6;
 
-/// `floor(a × b / d)` in 512-bit intermediate precision (`FullMath.mulDiv`).
+/// `floor(a × b / d)`: the canonical [`mul_div`], with the fallibility
+/// unwrapped locally — error propagation lands in a later commit.
 fn full_mul_div(a: U256, b: U256, d: U256) -> U256 {
-    let wide = U512::from(a) * U512::from(b) / U512::from(d);
-    U256::from(wide)
+    mul_div(a, b, d, false).expect("mul-div fits U256")
 }
 
-/// The contract's `SignedFixedPointMathLib.sFullMulDiv`: magnitude-truncated
-/// signed mul-div, with the (quirky, sign-independent) `+1` when `roundUp`
-/// is set and the division has a remainder. Ported faithfully.
-fn s_full_mul_div(a: I256, b: I256, d: U256, round_up: bool) -> I256 {
-    let (ua, ub) = (a.unsigned_abs(), b.unsigned_abs());
-    let negative = (a.is_negative() && b > I256::ZERO) || (a > I256::ZERO && b.is_negative());
-    let abs_result = I256::try_from(full_mul_div(ua, ub, d)).expect("mul-div fits i256");
-    let mut result = if negative { -abs_result } else { abs_result };
-    if round_up {
-        let rem = U512::from(ua) * U512::from(ub) % U512::from(d);
-        if rem != U512::ZERO {
-            result += I256::ONE;
-        }
-    }
-    result
-}
-
-/// Uniswap `getAmount0ForLiquidity` (token0 owed above the current price).
-fn amount0_for_liquidity(sqrt_a: U256, sqrt_b: U256, liquidity: u128) -> U256 {
-    let (sa, sb) = if sqrt_a <= sqrt_b {
-        (sqrt_a, sqrt_b)
-    } else {
-        (sqrt_b, sqrt_a)
-    };
-    let numerator = U256::from(liquidity) << 96;
-    full_mul_div(numerator, sb - sa, sb) / sa
+/// The contract's `sFullMulDiv` via the canonical signed implementation.
+fn s_full_mul_div_infallible(a: I256, b: I256, d: U256, round_up: bool) -> I256 {
+    s_full_mul_div(a, b, d, round_up).expect("signed mul-div fits I256")
 }
 
 /// Uniswap `getAmountsForLiquidity` with the price clamped into the range.
@@ -88,8 +67,8 @@ fn amounts_for_liquidity(
         (sqrt_b, sqrt_a)
     };
     let sp = sqrt_p.clamp(sa, sb);
-    let amount0 = amount0_for_liquidity(sp, sb, liquidity);
-    let amount1 = full_mul_div(U256::from(liquidity), sp - sa, Q96);
+    let amount0 = amount0_delta(sp, sb, liquidity, false).expect("liquidity amounts fit");
+    let amount1 = amount1_delta(sa, sp, liquidity, false).expect("liquidity amounts fit");
     (amount0, amount1)
 }
 
@@ -207,14 +186,14 @@ pub fn accrue_cumulatives(market: &mut MarketState, accrual: &AccrualInputs) {
         return;
     }
     let dt_days = U256::from(dt) * Q96 / U256::from(INTERVAL);
-    let funding_accrued = s_full_mul_div(
+    let funding_accrued = s_full_mul_div_infallible(
         I256::try_from(accrual.funding_per_day_wad).expect("rate fits"),
         I256::try_from(dt_days).expect("dt_days fits"),
         WAD,
         false,
     );
     market.funding_x96 += funding_accrued;
-    market.funding_div_sqrt_p_x96 += s_full_mul_div(
+    market.funding_div_sqrt_p_x96 += s_full_mul_div_infallible(
         funding_accrued,
         I256::try_from(Q96).expect("Q96 fits I256"),
         market.sqrt_amm_price_x96,
@@ -291,19 +270,23 @@ pub fn compute_maker_equity(market: &MarketState, maker: &MakerState) -> MakerEq
     let (mf_below, mf_within, mf_div_sqrt_within) = maker_cuml_funding(market, maker);
 
     // ── makerFeesAccrued ────────────────────────────────────────────
-    let base_funding = s_full_mul_div(
+    let base_funding = s_full_mul_div_infallible(
         I256::try_from(maker.delta_amount0).expect("amount0 fits"),
         market.funding_x96 - maker.last_cuml_funding_x96,
         Q96,
         true,
     );
-    let perp_below =
-        I256::try_from(amount0_for_liquidity(sqrt_l, sqrt_u, maker.liquidity)).expect("fits");
-    let funding_below = s_full_mul_div(perp_below, mf_below - maker.last_below_x96, Q96, true);
+    let perp_below = I256::try_from(
+        amount0_delta(sqrt_l, sqrt_u, maker.liquidity, false).expect("liquidity amounts fit"),
+    )
+    .expect("fits");
+    let funding_below =
+        s_full_mul_div_infallible(perp_below, mf_below - maker.last_below_x96, Q96, true);
     let div_amm = mf_div_sqrt_within - maker.last_div_sqrt_within_x96;
     let d_within = mf_within - maker.last_within_x96;
-    let div_upper = s_full_mul_div(d_within, I256::try_from(Q96).expect("fits"), sqrt_u, false);
-    let funding_within = s_full_mul_div(
+    let div_upper =
+        s_full_mul_div_infallible(d_within, I256::try_from(Q96).expect("fits"), sqrt_u, false);
+    let funding_within = s_full_mul_div_infallible(
         I256::try_from(maker.liquidity).expect("liquidity fits"),
         div_amm - div_upper,
         Q96,
@@ -541,19 +524,6 @@ mod tests {
         assert!((fresh.funding - stale.funding) < 5.0, "dt is ~1.6h");
         // Utilization also accrues.
         assert!(fresh.short_util_earnings >= stale.short_util_earnings);
-    }
-
-    #[test]
-    fn s_full_mul_div_matches_contract_semantics() {
-        let q = U256::from(100u8);
-        let big = |v: i64| I256::try_from(v).unwrap();
-        assert_eq!(s_full_mul_div(big(7), big(10), q, false), big(0));
-        assert_eq!(s_full_mul_div(big(7), big(10), q, true), big(1));
-        assert_eq!(s_full_mul_div(big(-7), big(10), q, false), big(0));
-        // The contract's roundUp adds +1 regardless of sign.
-        assert_eq!(s_full_mul_div(big(-7), big(10), q, true), big(1));
-        assert_eq!(s_full_mul_div(big(-70), big(10), q, false), big(-7));
-        assert_eq!(s_full_mul_div(big(-70), big(10), q, true), big(-7));
     }
 
     #[test]

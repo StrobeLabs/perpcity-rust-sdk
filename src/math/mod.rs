@@ -13,6 +13,7 @@
 //! | [`maker_equity`] | Contract-exact maker settle preview over a block-pinned snapshot |
 
 pub mod ema;
+pub(crate) mod fixed_point;
 pub mod liquidity;
 pub mod maker_equity;
 pub mod position;
