@@ -590,19 +590,12 @@ async fn maker_equities_via_batched_reads() {
     let client = PerpClient::new(transport, signer, deployments(), CHAIN_ID).unwrap();
 
     // 3. Empty input short-circuits without touching the chain.
-    let mark = client.get_mark_price().await.unwrap();
-    assert!(
-        client
-            .get_maker_equities(&[], mark)
-            .await
-            .unwrap()
-            .is_empty()
-    );
+    assert!(client.get_maker_equities(&[]).await.unwrap().is_empty());
 
     // 4. Preview a range of position ids. CITI-NYC has live maker liquidity,
     //    so at least one open maker position must exist among the early ids.
     let pos_ids: Vec<U256> = (1u64..=20).map(U256::from).collect();
-    let equities = client.get_maker_equities(&pos_ids, mark).await.unwrap();
+    let equities = client.get_maker_equities(&pos_ids).await.unwrap();
 
     // Non-maker ids are omitted, order follows the input, and every
     // returned id was requested.

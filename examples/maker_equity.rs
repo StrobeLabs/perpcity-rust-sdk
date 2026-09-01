@@ -51,8 +51,7 @@ async fn main() -> perpcity_sdk::Result<()> {
     // One batched, block-pinned read: the settle preview each open maker in
     // `pos_ids` would receive if it were touched now. Taker/burned ids are
     // omitted; a single bad position degrades alone.
-    let mark = client.get_mark_price().await?;
-    let equities = client.get_maker_equities(&pos_ids, mark).await?;
+    let equities = client.get_maker_equities(&pos_ids).await?;
     for (pos_id, breakdown) in &equities {
         match breakdown {
             Ok(b) => println!(

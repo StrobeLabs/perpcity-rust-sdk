@@ -20,7 +20,7 @@ use futures_util::stream::{self, StreamExt};
 
 use crate::constants::MULTICALL3;
 use crate::contracts::{IMulticall3, IPoolManagerState, Maker, Perp, Position};
-use crate::convert::{price_f64_to_x96, unpack_balance_delta};
+use crate::convert::unpack_balance_delta;
 use crate::errors::{ContractError, PerpCityError, Result, ValidationError};
 use crate::math::maker_equity::{
     AccrualInputs, AccruedMakerSnapshot, MakerEquityBreakdown, MakerMarketSnapshot, MakerState,
@@ -239,20 +239,48 @@ impl PerpClient {
     /// roughly 500 ids, chunk the calls (each chunk still pins its own
     /// block) to stay inside RPC response-size and calldata limits.
     ///
-    /// `mark_price` is the caller's current mark (snapshot / market-data
-    /// cache); it prices `valPnl` and the accrual replay. It must be a
-    /// positive finite number.
+    /// The mark that prices `valPnl` and the accrual replay is read from
+    /// `poolState().ammPrice` inside the same pinned multicall — exact X96,
+    /// no float round-trip, and never a different block than the rest of
+    /// the snapshot. For what-if pricing at a caller-chosen mark, use
+    /// [`Self::get_maker_equities_at_mark`].
     pub async fn get_maker_equities(
         &self,
         pos_ids: &[U256],
-        mark_price: f64,
     ) -> Result<Vec<(U256, Result<MakerEquityBreakdown>)>> {
-        let mark_price_x96 = price_f64_to_x96(mark_price)?;
+        self.get_maker_equities_inner(pos_ids, None).await
+    }
+
+    /// [`Self::get_maker_equities`] priced at a caller-supplied mark
+    /// (exact X96) instead of the pinned `poolState().ammPrice` — what-if
+    /// pricing for stress marks or off-snapshot scenarios. All chain state
+    /// is still read at the pinned block; only the pricing input changes.
+    pub async fn get_maker_equities_at_mark(
+        &self,
+        pos_ids: &[U256],
+        mark_price_x96: U256,
+    ) -> Result<Vec<(U256, Result<MakerEquityBreakdown>)>> {
+        if mark_price_x96.is_zero() {
+            return Err(ValidationError::InvalidPrice {
+                reason: "mark_price_x96 must be non-zero".into(),
+            }
+            .into());
+        }
+        self.get_maker_equities_inner(pos_ids, Some(mark_price_x96))
+            .await
+    }
+
+    async fn get_maker_equities_inner(
+        &self,
+        pos_ids: &[U256],
+        mark_override_x96: Option<U256>,
+    ) -> Result<Vec<(U256, Result<MakerEquityBreakdown>)>> {
         if pos_ids.is_empty() {
             return Ok(Vec::new());
         }
         let perp_addr = self.deployments.perp;
-        let (market, pool_id, block_id) = self.load_maker_market_snapshot(mark_price_x96).await?;
+        let (market, pool_id, block_id) =
+            self.load_maker_market_snapshot(mark_override_x96).await?;
 
         // ── Position rows: one multicall, degrading per position ────
         let row_call = |calldata: Vec<u8>| IMulticall3::Call3 {
@@ -310,11 +338,13 @@ impl PerpClient {
     /// Resolve the safe lagged block and load + accrue the market-wide
     /// snapshot for [`Self::get_maker_equities`] in one multicall.
     ///
-    /// Returns the accrued snapshot, the pool id, and the block id every
-    /// later read must pin to.
+    /// The mark comes from the multicall's own `poolState().ammPrice`
+    /// unless `mark_override_x96` pins a what-if mark. Returns the accrued
+    /// snapshot, the pool id, and the block id every later read must pin
+    /// to.
     async fn load_maker_market_snapshot(
         &self,
-        mark_price_x96: U256,
+        mark_override_x96: Option<U256>,
     ) -> Result<(AccruedMakerSnapshot, B256, BlockId)> {
         let perp_addr = self.deployments.perp;
         // A lagging replica may briefly miss the pinned header. That is a
@@ -394,7 +424,7 @@ impl PerpClient {
             short_util_earnings_x96: cumls.shortUtilEarningsX96,
             tick: i24_to_i32(pool_state.tick),
             sqrt_price_x96: pool_state.sqrtPrice.to::<U256>(),
-            mark_price_x96,
+            mark_price_x96: mark_override_x96.unwrap_or(pool_state.ammPrice),
         }
         .accrued(&AccrualInputs {
             funding_per_day_wad: i128::try_from(rates.fundingPerDay)
