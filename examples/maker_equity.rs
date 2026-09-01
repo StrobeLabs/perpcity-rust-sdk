@@ -60,7 +60,7 @@ async fn main() -> perpcity_sdk::Result<()> {
                  funding={:+.6} util={:+.6} lp_fees={:+.6} pnl={:+.6}",
                 b.equity(),
                 b.settled_margin(),
-                b.funding_usd(),
+                b.funding_owed_usd(),
                 b.long_util_earnings_usd() + b.short_util_earnings_usd(),
                 b.lp_fees_usd(),
                 b.unrealized_pnl_usd(),
