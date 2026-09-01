@@ -81,6 +81,12 @@ impl PerpCityError {
     /// `NonceDesynced` is transient by construction: it clears itself once
     /// in-flight transactions drain and the next send resyncs from chain,
     /// so callers should back off briefly rather than give up.
+    ///
+    /// `BlockUnavailable` (a lagging replica briefly missing the pinned
+    /// header) and `StorageReadFailed` with a transport `source` are
+    /// stale-replica / network conditions — retryable. A
+    /// `StorageReadFailed` without a source means the response had an
+    /// unexpected shape, which retrying will not fix.
     pub fn is_transient(&self) -> bool {
         matches!(
             self,
@@ -88,6 +94,11 @@ impl PerpCityError {
                 | Self::Transaction(TransactionError::GasUnavailable { .. })
                 | Self::Transaction(TransactionError::ReceiptTimeout { .. })
                 | Self::Transaction(TransactionError::NonceDesynced { .. })
+                | Self::Contract(ContractError::BlockUnavailable { .. })
+                | Self::Contract(ContractError::StorageReadFailed {
+                    source: Some(_),
+                    ..
+                })
         )
     }
 }
@@ -118,5 +129,36 @@ mod tests {
         .into();
         assert!(!revert.is_transient(), "a contract revert is deterministic");
         assert!(revert.is_simulation_revert());
+    }
+
+    /// The read-path errors documented as retryable must classify as
+    /// transient, and a malformed-response storage failure (no transport
+    /// source) must not.
+    #[test]
+    fn stale_replica_read_failures_are_transient() {
+        let unavailable: PerpCityError = ContractError::BlockUnavailable { number: 1 }.into();
+        assert!(
+            unavailable.is_transient(),
+            "a lagging replica missing the pinned header clears on retry"
+        );
+
+        let transport: PerpCityError = ContractError::StorageReadFailed {
+            context: "tick 60 funding".into(),
+            source: Some(std::sync::Arc::new(
+                alloy::transports::TransportErrorKind::custom_str("replica dropped the read"),
+            )),
+        }
+        .into();
+        assert!(transport.is_transient(), "transport-caused reads retry");
+
+        let malformed: PerpCityError = ContractError::StorageReadFailed {
+            context: "extsload word count".into(),
+            source: None,
+        }
+        .into();
+        assert!(
+            !malformed.is_transient(),
+            "an unexpected response shape does not fix itself"
+        );
     }
 }
