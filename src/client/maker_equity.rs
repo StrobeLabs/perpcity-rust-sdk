@@ -252,7 +252,7 @@ fn split_maker_rows(
             Ok(None) => {}
             Ok(Some(maker)) => pending.push(maker),
             Err(e) => {
-                tracing::warn!(%pos_id, error = %e, "maker equity: position row failed");
+                tracing::debug!(%pos_id, error = %e, "maker equity: position row failed");
                 failed.push((input_index, pos_id, e));
             }
         }
@@ -598,7 +598,7 @@ impl PerpClient {
                     fee_growth_inside1_last_x128: fg1_inside_last,
                 };
                 market.maker_equity(&state).map_err(|e| {
-                    tracing::warn!(
+                    tracing::debug!(
                         pos_id = %maker.pos_id, error = %e,
                         "maker equity: settle math failed"
                     );
@@ -725,7 +725,7 @@ impl PerpClient {
                     funding.insert(tick, Ok(read));
                 }
                 Err(e) => {
-                    tracing::warn!(tick, error = %e, "maker equity: tick funding read failed");
+                    tracing::debug!(tick, error = %e, "maker equity: tick funding read failed");
                     funding.insert(tick, Err(Arc::new(e)));
                 }
             }
