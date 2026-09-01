@@ -42,7 +42,6 @@ pub mod convert;
 pub mod errors;
 pub mod feeds;
 pub mod hft;
-pub mod maker_equity;
 pub mod math;
 pub mod transport;
 pub mod types;
@@ -71,7 +70,9 @@ pub use feeds::{
 pub use errors::{ContractError, PerpCityError, Result, TransactionError, ValidationError};
 
 #[doc(inline)]
-pub use maker_equity::{MakerEquityBreakdown, read_maker_equities};
+pub use math::maker_equity::{
+    AccrualInputs, MakerEquityBreakdown, MakerState, MarketState, TickFunding,
+};
 
 #[doc(inline)]
 pub use hft::gas::{GasLimits, Urgency};

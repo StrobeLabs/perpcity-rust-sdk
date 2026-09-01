@@ -13,7 +13,7 @@
 use std::collections::BTreeMap;
 
 use alloy::eips::{BlockId, BlockNumberOrTag};
-use alloy::primitives::{Address, B256, U256, keccak256};
+use alloy::primitives::{Address, B256, I256, U256, keccak256};
 use alloy::providers::Provider;
 use alloy::sol_types::{SolCall, SolValue};
 
@@ -24,10 +24,17 @@ use crate::contracts::{
     IBeacon, IERC20, IFees, IMarginRatios, IMulticall3, IPoolManagerState, IPriceImpact, Perp,
     Position,
 };
-use crate::convert::{margin_ratio_to_leverage, price_x96_to_f64, scale_from_6dec};
+use crate::convert::{
+    margin_ratio_to_leverage, price_x96_to_f64, scale_from_6dec, unpack_balance_delta,
+};
 use crate::errors::{ContractError, Result, ValidationError};
 use crate::hft::state_cache::{CachedBounds, CachedFees};
 use crate::math::ema::{PricePair, calculate_emas};
+use crate::math::maker_equity::{
+    AccrualInputs, MakerEquityBreakdown, MakerState, MarketState, TickFunding, accrue_cumulatives,
+    compute_maker_equity, fee_growth_inside1, mapping_slot, perp_tick_slot, pool_state_slot,
+    signed_key, v4_position_slot, v4_tick_slot,
+};
 use crate::math::swap::{TakerMarketSnapshot, TickLiquidity};
 use crate::types::{Bounds, Fees, OpenInterest, PerpData, PerpSnapshot};
 
@@ -54,13 +61,21 @@ fn add_slot(slot: B256, offset: u64) -> B256 {
     B256::from(value.to_be_bytes::<32>())
 }
 
-fn mapping_slot_signed(key: i32, mapping_slot: B256) -> B256 {
-    // One keccak-layout implementation crate-wide (see `maker_equity`).
-    let slot = crate::maker_equity::mapping_slot(
-        crate::maker_equity::signed_key(key),
-        U256::from_be_bytes(mapping_slot.0),
-    );
+fn mapping_slot_signed(key: i32, base: B256) -> B256 {
+    // One keccak-layout implementation crate-wide (math::maker_equity).
+    let slot = mapping_slot(signed_key(key), U256::from_be_bytes(base.0));
     B256::from(slot.to_be_bytes::<32>())
+}
+
+/// Convert an f64 mark price to X96 for the maker-equity reader.
+fn f64_to_x96(value: f64) -> U256 {
+    if value <= 0.0 {
+        return U256::ZERO;
+    }
+    // Two-step conversion keeps the full f64 mantissa: value × 2^48 fits in
+    // u128 for any real price, then shift the rest.
+    let hi = (value * (1u64 << 48) as f64) as u128;
+    U256::from(hi) << (96 - 48)
 }
 
 /// Convert an `int88` per-day funding rate (scaled by 1e18) to a human-readable
@@ -738,6 +753,163 @@ impl PerpClient {
 
         tracing::debug!("perp snapshot fetched via multicall");
         Ok((perp_data, snapshot))
+    }
+
+    // ── Maker equity (block-pinned batch read) ──────────────────────
+
+    /// Read everything needed and compute the equity breakdown for each maker
+    /// position in `pos_ids`, all pinned to one block. Non-maker ids (zero
+    /// liquidity — takers or deleted positions) are omitted from the result.
+    ///
+    /// `mark_price` is the caller's current mark (snapshot / market-data
+    /// cache); it prices `valPnl` and the accrual replay.
+    pub async fn read_maker_equities(
+        &self,
+        pos_ids: &[U256],
+        mark_price: f64,
+    ) -> Result<Vec<(U256, MakerEquityBreakdown)>> {
+        if pos_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let provider = &self.provider;
+        let deployments = &self.deployments;
+        let perp = Perp::new(deployments.perp, provider);
+
+        // Pin a few blocks back: on load-balanced RPC endpoints the newest
+        // block's state may not be materialized on every replica yet, and
+        // Arbitrum produces ~4 blocks/s so the lag is under two seconds.
+        let block_number = provider.get_block_number().await?.saturating_sub(8);
+        let block_id = BlockId::from(block_number);
+        let now = provider
+            .get_block_by_number(block_number.into())
+            .await?
+            .map(|b| b.header.timestamp)
+            .unwrap_or_else(|| {
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs()
+            });
+
+        let cumls = perp.cumulatives().block(block_id).call().await?;
+        let rates = perp.rates().block(block_id).call().await?;
+        let pool_state = perp.poolState().block(block_id).call().await?;
+        let capacity = perp.capacity().block(block_id).call().await?;
+        let oi = perp.openInterest().block(block_id).call().await?;
+        let pool_id = perp.POOL_ID().block(block_id).call().await?;
+
+        let mut market = MarketState {
+            funding_x96: cumls.fundingX96,
+            funding_div_sqrt_p_x96: cumls.fundingDivSqrtPX96,
+            long_util_earnings_x96: cumls.longUtilEarningsX96,
+            short_util_earnings_x96: cumls.shortUtilEarningsX96,
+            current_tick: i24_to_i32(pool_state.tick),
+            sqrt_amm_price_x96: pool_state.sqrtPrice.to::<U256>(),
+            mark_price_x96: f64_to_x96(mark_price),
+        };
+        accrue_cumulatives(
+            &mut market,
+            &AccrualInputs {
+                funding_per_day_wad: i128::try_from(rates.fundingPerDay).unwrap_or(0),
+                long_util_fee_per_day_wad: rates.longUtilFeePerDay,
+                short_util_fee_per_day_wad: rates.shortUtilFeePerDay,
+                last_touch: rates.lastTouch.to::<u64>(),
+                now,
+                oi_long: oi.long,
+                oi_short: oi.short,
+                cap_long: capacity.long,
+                cap_short: capacity.short,
+            },
+        );
+
+        let fg1_global = provider
+            .get_storage_at(
+                deployments.pool_manager,
+                pool_state_slot(pool_id) + U256::from(2u8),
+            )
+            .block_id(block_id)
+            .await?;
+
+        let read_slot =
+            |addr: Address, slot: U256| provider.get_storage_at(addr, slot).block_id(block_id);
+        let as_i256 = I256::from_raw;
+
+        let mut out = Vec::with_capacity(pos_ids.len());
+        for &pos_id in pos_ids {
+            let pos = perp.positions(pos_id).block(block_id).call().await?;
+            let details = perp.makerDetails(pos_id).block(block_id).call().await?;
+            if details.liquidity == 0 {
+                continue;
+            }
+            let (tick_lower, tick_upper) =
+                (i24_to_i32(details.tickLower), i24_to_i32(details.tickUpper));
+
+            let tl_slot = perp_tick_slot(tick_lower);
+            let tu_slot = perp_tick_slot(tick_upper);
+            let tick_lower_funding = TickFunding {
+                cuml_funding_opp_x96: as_i256(read_slot(deployments.perp, tl_slot).await?),
+                cuml_funding_div_sqrt_p_opp_x96: as_i256(
+                    read_slot(deployments.perp, tl_slot + U256::ONE).await?,
+                ),
+            };
+            let tick_upper_funding = TickFunding {
+                cuml_funding_opp_x96: as_i256(read_slot(deployments.perp, tu_slot).await?),
+                cuml_funding_div_sqrt_p_opp_x96: as_i256(
+                    read_slot(deployments.perp, tu_slot + U256::ONE).await?,
+                ),
+            };
+
+            let fg1_out_lower = read_slot(
+                deployments.pool_manager,
+                v4_tick_slot(pool_id, tick_lower) + U256::from(2u8),
+            )
+            .await?;
+            let fg1_out_upper = read_slot(
+                deployments.pool_manager,
+                v4_tick_slot(pool_id, tick_upper) + U256::from(2u8),
+            )
+            .await?;
+            let position_slot = v4_position_slot(
+                pool_id,
+                deployments.perp,
+                tick_lower,
+                tick_upper,
+                B256::from(pos_id),
+            );
+            let fg1_inside_last =
+                read_slot(deployments.pool_manager, position_slot + U256::from(2u8)).await?;
+
+            let (amount0, amount1) = unpack_balance_delta(pos.delta);
+            let maker = MakerState {
+                margin_6dec: pos.margin,
+                delta_amount0: amount0,
+                delta_amount1: amount1,
+                last_cuml_funding_x96: pos.lastCumlFundingX96,
+                tick_lower,
+                tick_upper,
+                liquidity: details.liquidity,
+                last_long_util_earnings_x96: details.lastLongUtilEarningsX96,
+                last_short_util_earnings_x96: details.lastShortUtilEarningsX96,
+                cap_long_6dec: details.capacity.long,
+                cap_short_6dec: details.capacity.short,
+                last_below_x96: details.lastCumlFunding.belowX96,
+                last_within_x96: details.lastCumlFunding.withinX96,
+                last_div_sqrt_within_x96: details.lastCumlFunding.divSqrtPriceWithinX96,
+                tick_lower_funding,
+                tick_upper_funding,
+                fee_growth_inside1_x128: fee_growth_inside1(
+                    fg1_global,
+                    fg1_out_lower,
+                    fg1_out_upper,
+                    tick_lower,
+                    tick_upper,
+                    market.current_tick,
+                ),
+                fee_growth_inside1_last_x128: fg1_inside_last,
+            };
+            out.push((pos_id, compute_maker_equity(&market, &maker)));
+        }
+        Ok(out)
     }
 
     // ── Cache helpers ───────────────────────────────────────────────
