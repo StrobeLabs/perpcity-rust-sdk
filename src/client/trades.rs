@@ -446,14 +446,24 @@ impl PerpClient {
         &self,
         pos_id: U256,
         fee_recipient: Address,
+        urgency: Urgency,
     ) -> Result<alloy::rpc::types::TransactionReceipt> {
         let calldata = Perp::liquidateMakerCall {
             posId: pos_id,
             liquidationFeeRecipient: fee_recipient,
         }
         .abi_encode();
+
+        tracing::debug!(
+            pos_id = %pos_id,
+            %fee_recipient,
+            ?urgency,
+            "liquidating maker position"
+        );
+
         self.tx(self.deployments.perp, calldata.into())
             .with_gas_limit(GasLimits::LIQUIDATE)
+            .with_urgency(urgency)
             .send()
             .await
     }
@@ -485,14 +495,24 @@ impl PerpClient {
         &self,
         pos_id: U256,
         fee_recipient: Address,
+        urgency: Urgency,
     ) -> Result<alloy::rpc::types::TransactionReceipt> {
         let calldata = Perp::liquidateTakerCall {
             posId: pos_id,
             liquidationFeeRecipient: fee_recipient,
         }
         .abi_encode();
+
+        tracing::debug!(
+            pos_id = %pos_id,
+            %fee_recipient,
+            ?urgency,
+            "liquidating taker position"
+        );
+
         self.tx(self.deployments.perp, calldata.into())
             .with_gas_limit(GasLimits::LIQUIDATE)
+            .with_urgency(urgency)
             .send()
             .await
     }
