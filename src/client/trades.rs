@@ -8,7 +8,7 @@ use crate::contracts::{IERC20, Perp};
 use crate::convert::{scale_from_6dec, scale_to_6dec};
 use crate::errors::{ContractError, Result, ValidationError};
 use crate::feeds::{MarketEvent, decode_log};
-use crate::hft::gas::Urgency;
+use crate::hft::gas::{GasLimits, Urgency};
 use crate::math::tick::{align_tick_down, align_tick_up, price_to_tick};
 use crate::types::{
     AdjustMakerParams, AdjustMakerResult, AdjustTakerParams, AdjustTakerResult,
@@ -16,9 +16,6 @@ use crate::types::{
 };
 
 use super::{MAX_APPROVAL, PerpClient, i32_to_i24};
-
-/// Fixed gas limit for liquidation sends — see the liquidate methods.
-const LIQUIDATE_GAS_LIMIT: u64 = 3_000_000;
 
 /// Extract the minted token ID from an ERC721 `Transfer(address(0), to, tokenId)` event.
 ///
@@ -424,10 +421,12 @@ impl PerpClient {
     /// Liquidate an unhealthy maker position (always the full position on
     /// the deployed contracts). The liquidation fee goes to `fee_recipient`.
     ///
-    /// Sends with a fixed gas limit instead of estimating: Arbitrum
-    /// liquidations have gone out-of-gas where `eth_call` passed, so
-    /// simulate first ([`Self::simulate_liquidate_maker`]) and bound the
-    /// send.
+    /// Sends with the fixed [`GasLimits::LIQUIDATE`] bound instead of
+    /// estimating: Arbitrum liquidations have gone out-of-gas where the gas
+    /// estimate passed. The pre-broadcast simulation still runs, so a
+    /// would-be revert surfaces as a decoded
+    /// [`TransactionError::SimulationReverted`](crate::errors::TransactionError::SimulationReverted)
+    /// instead of a burned transaction.
     pub async fn liquidate_maker(
         &self,
         pos_id: U256,
@@ -439,7 +438,7 @@ impl PerpClient {
         }
         .abi_encode();
         self.tx(self.deployments.perp, calldata.into())
-            .with_gas_limit(LIQUIDATE_GAS_LIMIT)
+            .with_gas_limit(GasLimits::LIQUIDATE)
             .send()
             .await
     }
@@ -470,7 +469,7 @@ impl PerpClient {
         }
         .abi_encode();
         self.tx(self.deployments.perp, calldata.into())
-            .with_gas_limit(LIQUIDATE_GAS_LIMIT)
+            .with_gas_limit(GasLimits::LIQUIDATE)
             .send()
             .await
     }

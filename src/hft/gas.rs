@@ -46,6 +46,10 @@ impl GasLimits {
     pub const ADJUST_NOTIONAL: u64 = 500_000;
     /// Adjust position margin (add/remove collateral).
     pub const ADJUST_MARGIN: u64 = 500_000;
+    /// Liquidate a maker or taker position. Deliberately generous: Arbitrum
+    /// liquidations have run out of gas where `eth_estimateGas` passed, so
+    /// the liquidation paths pin this bound instead of estimating.
+    pub const LIQUIDATE: u64 = 3_000_000;
     /// ERC-20 `transfer` call.
     pub const TRANSFER: u64 = 65_000;
 }
@@ -393,6 +397,8 @@ mod tests {
         assert!(GasLimits::CLOSE_POSITION > 100_000 && GasLimits::CLOSE_POSITION < 2_000_000);
         // Maker is more expensive than taker (more Uniswap V4 work)
         assert!(GasLimits::OPEN_MAKER > GasLimits::OPEN_TAKER);
+        // Liquidations get the most headroom (close swap + settle + fees).
+        assert!(GasLimits::LIQUIDATE > GasLimits::OPEN_MAKER);
     }
 
     // ── GasLimitCache tests ───────────────────────────────────────

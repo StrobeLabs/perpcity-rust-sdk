@@ -39,7 +39,7 @@ const RECEIPT_POLL_INTERVAL: Duration = Duration::from_secs(2);
 /// Builder for constructing and sending transactions.
 ///
 /// Created via [`PerpClient::tx`]. Defaults: `value = 0`,
-/// `gas_limit = None` (triggers simulation), `urgency = Normal`.
+/// `gas_limit = None` (estimated at send), `urgency = Normal`.
 #[derive(Debug)]
 pub struct TxBuilder<'a> {
     client: &'a PerpClient,
@@ -57,7 +57,13 @@ impl<'a> TxBuilder<'a> {
         self
     }
 
-    /// Set an explicit gas limit, skipping simulation.
+    /// Set an explicit gas limit, skipping gas estimation.
+    ///
+    /// The transaction is still simulated via `eth_call` before broadcast,
+    /// so a would-be revert surfaces as a decoded
+    /// [`TransactionError::SimulationReverted`] instead of a mined failure.
+    /// Use this when the estimate cannot be trusted (e.g. liquidations that
+    /// have gone out-of-gas on Arbitrum where the estimate passed).
     pub fn with_gas_limit(mut self, gas_limit: u64) -> Self {
         self.gas_limit = Some(gas_limit);
         self
@@ -71,10 +77,11 @@ impl<'a> TxBuilder<'a> {
 
     /// Simulate, sign, broadcast, and wait for the transaction receipt.
     ///
-    /// When `gas_limit` is `None` (the default), the transaction is
-    /// simulated before broadcast via `eth_call` or `eth_estimateGas`.
-    /// An explicit `gas_limit` skips simulation (used for simple
-    /// transfers that can't revert from contract logic).
+    /// Every send is simulated before broadcast. When `gas_limit` is `None`
+    /// (the default), `eth_estimateGas` (or a cached estimate plus an
+    /// `eth_call` preflight) provides both the limit and the simulation. An
+    /// explicit `gas_limit` skips only the estimation — the `eth_call`
+    /// preflight still runs so reverts decode into typed errors.
     pub async fn send(self) -> Result<alloy::rpc::types::TransactionReceipt> {
         let now = super::now_ms();
 
@@ -117,7 +124,9 @@ impl<'a> TxBuilder<'a> {
             }
         }
 
-        // Simulate + resolve gas limit. Explicit gas_limit skips simulation.
+        // Simulate + resolve gas limit. An explicit gas_limit skips only the
+        // estimation: the preflight still runs so a would-be revert is
+        // decoded before broadcast instead of burning the pinned gas.
         let resolved_gas_limit = match self.gas_limit {
             Some(0) => {
                 return Err(ValidationError::InvalidConfig {
@@ -125,7 +134,12 @@ impl<'a> TxBuilder<'a> {
                 }
                 .into());
             }
-            Some(limit) => limit,
+            Some(limit) => {
+                self.client
+                    .preflight_call(self.to, &self.calldata, self.value)
+                    .await?;
+                limit
+            }
             None => {
                 self.client
                     .simulate(self.to, &self.calldata, self.value, now)
@@ -260,7 +274,7 @@ impl PerpClient {
     /// Start building a transaction.
     ///
     /// Returns a [`TxBuilder`] with defaults: `value = 0`,
-    /// `gas_limit = None` (triggers simulation), `urgency = Normal`.
+    /// `gas_limit = None` (estimated at send), `urgency = Normal`.
     pub fn tx(&self, to: Address, calldata: Bytes) -> TxBuilder<'_> {
         TxBuilder {
             client: self,
