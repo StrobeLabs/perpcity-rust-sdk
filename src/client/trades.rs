@@ -65,6 +65,54 @@ fn parse_taker_swap(receipt: &alloy::rpc::types::TransactionReceipt) -> Option<(
     None
 }
 
+/// Which side of the book a liquidation targets. The two contract entry
+/// points are twins; only the encoded call differs.
+#[derive(Debug, Clone, Copy)]
+enum Side {
+    Maker,
+    Taker,
+}
+
+impl Side {
+    fn liquidation_calldata(self, pos_id: U256, fee_recipient: Address) -> Bytes {
+        match self {
+            Self::Maker => Perp::liquidateMakerCall {
+                posId: pos_id,
+                liquidationFeeRecipient: fee_recipient,
+            }
+            .abi_encode()
+            .into(),
+            Self::Taker => Perp::liquidateTakerCall {
+                posId: pos_id,
+                liquidationFeeRecipient: fee_recipient,
+            }
+            .abi_encode()
+            .into(),
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Maker => "maker",
+            Self::Taker => "taker",
+        }
+    }
+}
+
+/// Reject `Address::ZERO` as a liquidation fee recipient: the contract
+/// transfers the fee wherever it is told, so the zero address silently
+/// burns the caller's liquidation reward. Always a caller bug.
+fn validate_fee_recipient(fee_recipient: Address) -> std::result::Result<(), ValidationError> {
+    if fee_recipient == Address::ZERO {
+        return Err(ValidationError::InvalidConfig {
+            reason: "liquidation fee_recipient must not be the zero address \
+                     (the fee would be burned)"
+                .into(),
+        });
+    }
+    Ok(())
+}
+
 /// Scale and validate position margin against the protocol's opening minimum.
 ///
 /// Checks the scaled margin parameter against [`MIN_OPENING_MARGIN`] and returns
@@ -398,20 +446,6 @@ impl PerpClient {
 
     // ── Liquidations (permissionless) ───────────────────────────────
 
-    /// Reject `Address::ZERO` as a liquidation fee recipient: the contract
-    /// transfers the fee wherever it is told, so the zero address silently
-    /// burns the caller's liquidation reward. Always a caller bug.
-    fn validate_fee_recipient(fee_recipient: Address) -> std::result::Result<(), ValidationError> {
-        if fee_recipient == Address::ZERO {
-            return Err(ValidationError::InvalidConfig {
-                reason: "liquidation fee_recipient must not be the zero address \
-                         (the fee would be burned)"
-                    .into(),
-            });
-        }
-        Ok(())
-    }
-
     /// Check whether `pos_id` is liquidatable right now, via `eth_call`.
     ///
     /// The contract is the health oracle: `Ok` means the liquidation would
@@ -424,28 +458,14 @@ impl PerpClient {
     /// ([`GasUnavailable`](crate::errors::TransactionError::GasUnavailable),
     /// transient — keep liquidating). The simulation runs from this client's
     /// address and is capped at [`GasLimits::LIQUIDATE`], exactly like the
-    /// send. Gate [`Self::liquidate_maker`] on this to avoid burning gas on
-    /// reverts.
+    /// send.
     pub async fn simulate_liquidate_maker(
         &self,
         pos_id: U256,
         fee_recipient: Address,
     ) -> Result<()> {
-        Self::validate_fee_recipient(fee_recipient)?;
-        let calldata: Bytes = Perp::liquidateMakerCall {
-            posId: pos_id,
-            liquidationFeeRecipient: fee_recipient,
-        }
-        .abi_encode()
-        .into();
-        self.preflight_call(
-            self.deployments.perp,
-            &calldata,
-            0,
-            Some(GasLimits::LIQUIDATE),
-        )
-        .await?;
-        Ok(())
+        self.simulate_liquidation(Side::Maker, pos_id, fee_recipient)
+            .await
     }
 
     /// Liquidate an unhealthy maker position (always the full position on
@@ -463,24 +483,7 @@ impl PerpClient {
         fee_recipient: Address,
         urgency: Urgency,
     ) -> Result<alloy::rpc::types::TransactionReceipt> {
-        Self::validate_fee_recipient(fee_recipient)?;
-        let calldata = Perp::liquidateMakerCall {
-            posId: pos_id,
-            liquidationFeeRecipient: fee_recipient,
-        }
-        .abi_encode();
-
-        tracing::debug!(
-            pos_id = %pos_id,
-            %fee_recipient,
-            ?urgency,
-            "liquidating maker position"
-        );
-
-        self.tx(self.deployments.perp, calldata.into())
-            .with_gas_limit(GasLimits::LIQUIDATE)
-            .with_urgency(urgency)
-            .send()
+        self.send_liquidation(Side::Maker, pos_id, fee_recipient, urgency)
             .await
     }
 
@@ -490,13 +493,32 @@ impl PerpClient {
         pos_id: U256,
         fee_recipient: Address,
     ) -> Result<()> {
-        Self::validate_fee_recipient(fee_recipient)?;
-        let calldata: Bytes = Perp::liquidateTakerCall {
-            posId: pos_id,
-            liquidationFeeRecipient: fee_recipient,
-        }
-        .abi_encode()
-        .into();
+        self.simulate_liquidation(Side::Taker, pos_id, fee_recipient)
+            .await
+    }
+
+    /// Taker-side twin of [`Self::liquidate_maker`].
+    pub async fn liquidate_taker(
+        &self,
+        pos_id: U256,
+        fee_recipient: Address,
+        urgency: Urgency,
+    ) -> Result<alloy::rpc::types::TransactionReceipt> {
+        self.send_liquidation(Side::Taker, pos_id, fee_recipient, urgency)
+            .await
+    }
+
+    /// Shared `eth_call` health probe behind the four public liquidation
+    /// methods: validates the fee recipient, encodes the side's call, and
+    /// preflights at the pinned [`GasLimits::LIQUIDATE`] cap.
+    async fn simulate_liquidation(
+        &self,
+        side: Side,
+        pos_id: U256,
+        fee_recipient: Address,
+    ) -> Result<()> {
+        validate_fee_recipient(fee_recipient)?;
+        let calldata = side.liquidation_calldata(pos_id, fee_recipient);
         self.preflight_call(
             self.deployments.perp,
             &calldata,
@@ -507,32 +529,40 @@ impl PerpClient {
         Ok(())
     }
 
-    /// Taker-side twin of [`Self::liquidate_maker`].
-    pub async fn liquidate_taker(
+    /// Shared send path behind the public liquidation methods: fixed
+    /// [`GasLimits::LIQUIDATE`] bound, preflighted at that limit before
+    /// broadcast.
+    async fn send_liquidation(
         &self,
+        side: Side,
         pos_id: U256,
         fee_recipient: Address,
         urgency: Urgency,
     ) -> Result<alloy::rpc::types::TransactionReceipt> {
-        Self::validate_fee_recipient(fee_recipient)?;
-        let calldata = Perp::liquidateTakerCall {
-            posId: pos_id,
-            liquidationFeeRecipient: fee_recipient,
-        }
-        .abi_encode();
+        validate_fee_recipient(fee_recipient)?;
+        let calldata = side.liquidation_calldata(pos_id, fee_recipient);
 
         tracing::debug!(
             pos_id = %pos_id,
             %fee_recipient,
+            side = side.label(),
             ?urgency,
-            "liquidating taker position"
+            "liquidating position"
         );
 
-        self.tx(self.deployments.perp, calldata.into())
+        let receipt = self
+            .tx(self.deployments.perp, calldata)
             .with_gas_limit(GasLimits::LIQUIDATE)
             .with_urgency(urgency)
             .send()
-            .await
+            .await?;
+        tracing::debug!(
+            pos_id = %pos_id,
+            tx_hash = %receipt.transaction_hash,
+            side = side.label(),
+            "position liquidated"
+        );
+        Ok(receipt)
     }
 
     // ── Approval + transfers ────────────────────────────────────────
