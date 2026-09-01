@@ -341,6 +341,23 @@ mod tests {
     use super::*;
     use crate::constants::{MAX_SQRT_PRICE_X96, Q96_PRECISION};
 
+    // ── price_f64_to_x96 ───────────────────────────────────────────
+
+    /// The Q96 conversion is only exact below 2^80: the mantissa trick
+    /// shifts by 48 bits twice, so prices at or past the bound must be
+    /// rejected, and the largest representable prices must still convert.
+    #[test]
+    fn price_f64_to_x96_enforces_the_2_pow_80_bound() {
+        let bound = (1u128 << 80) as f64;
+        assert!(price_f64_to_x96(bound).is_err());
+        assert!(price_f64_to_x96(bound * 2.0).is_err());
+        assert!(price_f64_to_x96(f64::MAX).is_err());
+
+        let just_under = bound * (1.0 - f64::EPSILON);
+        let converted = price_f64_to_x96(just_under).unwrap();
+        assert!(converted > U256::ZERO);
+    }
+
     // ── scale_to_6dec ──────────────────────────────────────────────
 
     #[test]

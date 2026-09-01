@@ -789,6 +789,56 @@ mod tests {
         assert!(market.maker_equity(&maker).is_err());
     }
 
+    /// `makerCumlFunding` branch checks with hand-computed values. The
+    /// golden vector only exercises the below-range branch (current tick
+    /// under both band ticks); these pin the other placements against the
+    /// contract's formulas:
+    ///
+    /// - `current >= tick`: the tick's checkpoint IS the below-side value;
+    /// - `current < tick`: below-side = market cumulative − checkpoint.
+    #[test]
+    fn maker_cuml_funding_branches_match_the_contract() {
+        let i = |v: i64| I256::try_from(v).unwrap();
+        let market_at = |tick: i32| MakerMarketSnapshot {
+            block: BlockContext::default(),
+            funding_x96: i(1000),
+            funding_div_sqrt_p_x96: i(500),
+            long_util_earnings_x96: U256::ZERO,
+            short_util_earnings_x96: U256::ZERO,
+            tick,
+            sqrt_price_x96: Q96,
+            mark_price_x96: Q96,
+        };
+        let (_, _, mut maker) = golden_market_and_maker();
+        maker.tick_lower = 0;
+        maker.tick_upper = 100;
+        maker.tick_lower_funding = TickFunding {
+            cuml_funding_opp_x96: i(30),
+            cuml_funding_div_sqrt_p_opp_x96: i(7),
+        };
+        maker.tick_upper_funding = TickFunding {
+            cuml_funding_opp_x96: i(20),
+            cuml_funding_div_sqrt_p_opp_x96: i(3),
+        };
+
+        // Above range: both checkpoints are already below-side values.
+        // (below, within, divWithin) = (Lo, Uo − Lo, Ud − Ld).
+        assert_eq!(
+            market_at(150).maker_cuml_funding(&maker).unwrap(),
+            (i(30), i(-10), i(-4))
+        );
+        // Inside range: the upper tick flips to (F − Uo, D − Ud).
+        assert_eq!(
+            market_at(50).maker_cuml_funding(&maker).unwrap(),
+            (i(30), i(1000 - 20 - 30), i(500 - 3 - 7))
+        );
+        // Below range: both flip — within collapses to checkpoint deltas.
+        assert_eq!(
+            market_at(-50).maker_cuml_funding(&maker).unwrap(),
+            (i(1000 - 30), i(10), i(4))
+        );
+    }
+
     #[test]
     fn mis_ordered_ticks_are_rejected() {
         let (market, _, mut maker) = golden_market_and_maker();
