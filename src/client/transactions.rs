@@ -407,9 +407,26 @@ impl PerpClient {
             // Cap the preflight at the cached limit the transaction will be
             // sent with, so a stale (too-small) cached estimate surfaces as
             // a failed preflight rather than an on-chain out-of-gas.
-            self.preflight_call(to, calldata, value, Some(limit))
-                .await?;
-            return Ok(limit);
+            match self.preflight_call(to, calldata, value, Some(limit)).await {
+                Ok(()) => return Ok(limit),
+                Err(revert @ TransactionError::SimulationReverted { .. }) => {
+                    return Err(revert.into());
+                }
+                Err(error) => {
+                    // No contract revert, yet the call failed inside the
+                    // cached limit: the estimate has gone stale (a bigger
+                    // trade crossing more ticks, say). Evict it and fall
+                    // through to a fresh estimate instead of failing every
+                    // send for this selector until the TTL expires.
+                    tracing::debug!(
+                        selector = %alloy::primitives::hex::encode(selector),
+                        limit,
+                        %error,
+                        "cached gas limit failed preflight; re-estimating"
+                    );
+                    self.gas_limit_cache.lock().unwrap().invalidate(&selector);
+                }
+            }
         }
 
         // Cache miss — call eth_estimateGas

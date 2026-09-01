@@ -127,6 +127,13 @@ impl GasLimitCache {
         );
     }
 
+    /// Drop a cached estimate so the next send re-estimates. Used when a
+    /// preflight capped at the cached limit fails without a contract
+    /// revert — the estimate has gone stale (too small), not the call.
+    pub fn invalidate(&mut self, selector: &Selector) {
+        self.estimates.remove(selector);
+    }
+
     /// Override the TTL.
     pub fn set_ttl(&mut self, ttl_ms: u64) {
         self.ttl_ms = ttl_ms;
@@ -429,5 +436,16 @@ mod tests {
 
         assert_eq!(cache.get(&open, 0), Some(600_000));
         assert_eq!(cache.get(&close, 0), Some(960_000));
+    }
+
+    #[test]
+    fn estimate_cache_invalidate_forces_a_miss() {
+        let mut cache = GasLimitCache::new();
+        let selector = [0xAA, 0xBB, 0xCC, 0xDD];
+        cache.put(selector, 500_000, 0);
+        assert!(cache.get(&selector, 0).is_some());
+
+        cache.invalidate(&selector);
+        assert!(cache.get(&selector, 0).is_none());
     }
 }
