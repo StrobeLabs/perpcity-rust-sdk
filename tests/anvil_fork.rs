@@ -17,8 +17,8 @@ use alloy::sol;
 use alloy::sol_types::SolCall;
 
 use perpcity_sdk::{
-    AdjustTakerParams, Deployments, HftTransport, OpenTakerParams, PerpClient, TransportConfig,
-    Urgency,
+    AdjustTakerParams, Deployments, HftTransport, MakerEquityKind, OpenTakerParams, PerpClient,
+    TransportConfig, Urgency,
 };
 
 sol! {
@@ -597,34 +597,35 @@ async fn maker_equities_via_batched_reads() {
     let pos_ids: Vec<U256> = (1u64..=20).map(U256::from).collect();
     let equities = client.get_maker_equities(&pos_ids).await.unwrap();
 
-    // Non-maker ids are omitted, order follows the input, and every
-    // returned id was requested.
-    assert!(equities.len() <= pos_ids.len());
-    let returned: Vec<U256> = equities.iter().map(|(id, _)| *id).collect();
-    let mut sorted = returned.clone();
-    sorted.sort();
-    assert_eq!(returned, sorted, "results keep input order");
-    for id in &returned {
-        assert!(pos_ids.contains(id));
+    // One outcome per input id, in input order.
+    assert_eq!(equities.len(), pos_ids.len());
+    for (outcome, &requested) in equities.iter().zip(&pos_ids) {
+        assert_eq!(outcome.pos_id, requested, "outcomes keep input order");
     }
 
-    let mut open_makers = 0;
-    for (pos_id, equity) in &equities {
-        let b = equity
-            .as_ref()
-            .unwrap_or_else(|e| panic!("pos {pos_id} degraded: {e}"));
-        open_makers += 1;
-        println!(
-            "pos {pos_id}: margin={:.6} funding={:+.6} lp={:+.6} pnl={:+.6} equity={:+.6}",
-            b.margin_usd(),
-            b.funding_owed_usd(),
-            b.lp_fees_usd(),
-            b.unrealized_pnl_usd(),
-            b.equity(),
-        );
-        assert!(b.margin_atoms() >= 0, "settled margin is stored unsigned");
-        assert!(b.equity().is_finite());
+    for outcome in &equities {
+        let pos_id = outcome.pos_id;
+        match &outcome.kind {
+            MakerEquityKind::Computed(b) => {
+                println!(
+                    "pos {pos_id}: margin={:.6} funding={:+.6} lp={:+.6} pnl={:+.6} equity={:+.6}",
+                    b.margin_usd(),
+                    b.funding_owed_usd(),
+                    b.lp_fees_usd(),
+                    b.unrealized_pnl_usd(),
+                    b.equity(),
+                );
+                assert!(b.margin_atoms() >= 0, "settled margin is stored unsigned");
+                assert!(b.equity().is_finite());
+            }
+            MakerEquityKind::NotAMaker => {}
+            MakerEquityKind::Failed(e) => panic!("pos {pos_id} degraded: {e}"),
+        }
     }
+    let open_makers = equities
+        .iter()
+        .filter(|o| matches!(o.kind, MakerEquityKind::Computed(_)))
+        .count();
     assert!(
         open_makers > 0,
         "expected at least one open maker among ids 1..=20"

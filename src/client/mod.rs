@@ -45,6 +45,7 @@ mod queries;
 mod trades;
 mod transactions;
 
+pub use maker_equity::{MAX_MAKER_EQUITY_BATCH, MakerEquityKind, MakerEquityOutcome};
 pub use transactions::TxBuilder;
 
 use std::sync::Mutex;

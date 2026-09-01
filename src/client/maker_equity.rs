@@ -42,6 +42,39 @@ const TICK_READ_CONCURRENCY: usize = 16;
 /// transport error that failed every position referencing the tick.
 type TickFundingRead = std::result::Result<TickFunding, std::sync::Arc<TransportError>>;
 
+/// Maximum position ids per RPC batch inside a maker-equity read.
+///
+/// [`PerpClient::get_maker_equities`] chunks larger inputs internally at
+/// this size (every chunk still pins to the one shared block), keeping
+/// each row multicall and slot read inside RPC response-size and calldata
+/// limits. Exposed so callers sizing their own sweeps can align with it.
+pub const MAX_MAKER_EQUITY_BATCH: usize = 500;
+
+/// The batch outcome for one requested position id: every id passed to
+/// [`PerpClient::get_maker_equities`] comes back as exactly one of these,
+/// in input order.
+#[derive(Debug)]
+pub struct MakerEquityOutcome {
+    /// The requested position id.
+    pub pos_id: U256,
+    /// What the read produced for it.
+    pub kind: MakerEquityKind,
+}
+
+/// What a maker-equity batch read produced for one position id.
+#[derive(Debug)]
+pub enum MakerEquityKind {
+    /// An open maker position, with its settle preview.
+    Computed(MakerEquityBreakdown),
+    /// Zero liquidity at the pinned block: a taker, a burned position, or
+    /// a never-minted id. Nothing to compute — not an error.
+    NotAMaker,
+    /// This position's reads, decoding, or settle math failed; the rest of
+    /// the batch is unaffected. Retry exactly when
+    /// [`PerpCityError::is_transient`] says so.
+    Failed(PerpCityError),
+}
+
 /// A maker position that survived the row-read phase and awaits slot reads.
 struct PendingMaker {
     /// Index into the caller's `pos_ids`, so per-position results can be
@@ -221,33 +254,33 @@ impl PerpClient {
     /// Read chain state and compute the settle-preview equity for each maker
     /// position in `pos_ids`, all pinned to one block.
     ///
+    /// Returns exactly one [`MakerEquityOutcome`] per input id, in input
+    /// order: [`Computed`](MakerEquityKind::Computed) for an open maker,
+    /// [`NotAMaker`](MakerEquityKind::NotAMaker) for zero-liquidity ids
+    /// (takers, burned, never minted), and
+    /// [`Failed`](MakerEquityKind::Failed) when that one position's reads,
+    /// decoding, or settle math failed — the rest of the batch is
+    /// unaffected. Market-wide read failures still fail the whole call.
+    ///
+    /// A `Failed` outcome is worth retrying exactly when its error's
+    /// [`PerpCityError::is_transient`] is true (a lagging replica or a
+    /// dropped storage read); decode and settle-math failures are
+    /// deterministic and will not clear on retry.
+    ///
     /// Reads are batched: one Multicall3 round trip for the market-wide
-    /// state, one for all position/maker rows, one PoolManager `extsload`
+    /// state, one for the position/maker rows, one PoolManager `extsload`
     /// for the V4 fee-growth slots (distinct band ticks read once), and one
     /// `eth_getProof` for the distinct Perp tick-funding slots (with an
     /// `eth_getStorageAt` fallback on endpoints without `eth_getProof`).
-    ///
-    /// Failures degrade per position: a position whose reads, decoding, or
-    /// math fail is returned with an `Err` (and logged) instead of
-    /// discarding the batch. Market-wide read failures still fail the whole
-    /// call. Non-maker ids (zero liquidity — takers or deleted positions)
-    /// are omitted from the output.
-    ///
-    /// Cost grows linearly with `pos_ids`: two multicall subcalls, one
-    /// extsload word, and up to two tick-funding slots per position. All
-    /// four round trips comfortably carry a few hundred positions; above
-    /// roughly 500 ids, chunk the calls (each chunk still pins its own
-    /// block) to stay inside RPC response-size and calldata limits.
+    /// Inputs larger than [`MAX_MAKER_EQUITY_BATCH`] are chunked internally,
+    /// every chunk pinned to the same block.
     ///
     /// The mark that prices `valPnl` and the accrual replay is read from
     /// `poolState().ammPrice` inside the same pinned multicall — exact X96,
     /// no float round-trip, and never a different block than the rest of
     /// the snapshot. For what-if pricing at a caller-chosen mark, use
     /// [`Self::get_maker_equities_at_mark`].
-    pub async fn get_maker_equities(
-        &self,
-        pos_ids: &[U256],
-    ) -> Result<Vec<(U256, Result<MakerEquityBreakdown>)>> {
+    pub async fn get_maker_equities(&self, pos_ids: &[U256]) -> Result<Vec<MakerEquityOutcome>> {
         self.get_maker_equities_inner(pos_ids, None).await
     }
 
@@ -259,7 +292,7 @@ impl PerpClient {
         &self,
         pos_ids: &[U256],
         mark_price_x96: U256,
-    ) -> Result<Vec<(U256, Result<MakerEquityBreakdown>)>> {
+    ) -> Result<Vec<MakerEquityOutcome>> {
         if mark_price_x96.is_zero() {
             return Err(ValidationError::InvalidPrice {
                 reason: "mark_price_x96 must be non-zero".into(),
@@ -274,13 +307,44 @@ impl PerpClient {
         &self,
         pos_ids: &[U256],
         mark_override_x96: Option<U256>,
-    ) -> Result<Vec<(U256, Result<MakerEquityBreakdown>)>> {
+    ) -> Result<Vec<MakerEquityOutcome>> {
         if pos_ids.is_empty() {
             return Ok(Vec::new());
         }
-        let perp_addr = self.deployments.perp;
         let (market, pool_id, block_id) =
             self.load_maker_market_snapshot(mark_override_x96).await?;
+
+        let mut kinds = Vec::with_capacity(pos_ids.len());
+        for chunk in pos_ids.chunks(MAX_MAKER_EQUITY_BATCH) {
+            kinds.extend(
+                self.get_chunk_equity_kinds(&market, pool_id, block_id, chunk)
+                    .await?,
+            );
+        }
+
+        tracing::debug!(
+            count = pos_ids.len(),
+            block = market.snapshot().block.number,
+            "maker equities read"
+        );
+        Ok(pos_ids
+            .iter()
+            .zip(kinds)
+            .map(|(&pos_id, kind)| MakerEquityOutcome { pos_id, kind })
+            .collect())
+    }
+
+    /// One chunk of the batch: the row multicall plus the slot reads and
+    /// math for its surviving positions, producing one
+    /// [`MakerEquityKind`] per chunk id by input index.
+    async fn get_chunk_equity_kinds(
+        &self,
+        market: &AccruedMakerSnapshot,
+        pool_id: B256,
+        block_id: BlockId,
+        pos_ids: &[U256],
+    ) -> Result<Vec<MakerEquityKind>> {
+        let perp_addr = self.deployments.perp;
 
         // ── Position rows: one multicall, degrading per position ────
         let row_call = |calldata: Vec<u8>| IMulticall3::Call3 {
@@ -311,28 +375,24 @@ impl PerpClient {
         }
 
         let (pending, failed) = split_maker_rows(pos_ids, &rows);
-
-        // Merge by input index: `get_pending_maker_equities` returns one
-        // result per pending position (it maps over `pending`), so the zip
-        // is structurally exhaustive — no positional counter to get wrong.
         let equities = self
-            .get_pending_maker_equities(&market, pool_id, block_id, &pending)
+            .get_pending_maker_equities(market, pool_id, block_id, &pending)
             .await?;
-        let mut out: Vec<(usize, U256, Result<MakerEquityBreakdown>)> = pending
-            .iter()
-            .zip(equities)
-            .map(|(maker, equity)| (maker.input_index, maker.pos_id, equity))
-            .collect();
-        out.extend(
-            failed
-                .into_iter()
-                .map(|(input_index, pos_id, e)| (input_index, pos_id, Err(e))),
-        );
-        out.sort_by_key(|&(input_index, ..)| input_index);
-        Ok(out
-            .into_iter()
-            .map(|(_, pos_id, equity)| (pos_id, equity))
-            .collect())
+
+        // Fill by input index: ids that produced neither a pending maker
+        // nor a failure were zero-liquidity rows.
+        let mut kinds: Vec<MakerEquityKind> =
+            pos_ids.iter().map(|_| MakerEquityKind::NotAMaker).collect();
+        for (maker, equity) in pending.iter().zip(equities) {
+            kinds[maker.input_index] = match equity {
+                Ok(breakdown) => MakerEquityKind::Computed(breakdown),
+                Err(e) => MakerEquityKind::Failed(e),
+            };
+        }
+        for (input_index, _, e) in failed {
+            kinds[input_index] = MakerEquityKind::Failed(e);
+        }
+        Ok(kinds)
     }
 
     /// Resolve the safe lagged block and load + accrue the market-wide
@@ -616,24 +676,30 @@ impl PerpClient {
         // Fallback: all reads are pinned to the same block and independent,
         // so every tick's slot pair runs concurrently (bounded so a large
         // ladder cannot flood the endpoint).
-        let tick_reads = ticks.iter().map(|&tick| {
-            let [slot_opp, slot_div] = perp_tick_funding_slots(tick);
-            let read = |slot: U256| {
-                self.provider
-                    .get_storage_at(perp_addr, slot)
-                    .block_id(block_id)
-                    .into_future()
-            };
-            async move {
-                let funding = tokio::try_join!(read(slot_opp), read(slot_div)).map(
-                    |(opp, div_sqrt_p_opp)| TickFunding {
-                        cuml_funding_opp_x96: I256::from_raw(opp),
-                        cuml_funding_div_sqrt_p_opp_x96: I256::from_raw(div_sqrt_p_opp),
-                    },
-                );
-                (tick, funding)
-            }
-        });
+        // Collected into a Vec first so the returned future's Send bound is
+        // provable from the concrete future type, not the borrowing
+        // iterator adapter.
+        let tick_reads: Vec<_> = ticks
+            .iter()
+            .map(|&tick| {
+                let [slot_opp, slot_div] = perp_tick_funding_slots(tick);
+                let read = |slot: U256| {
+                    self.provider
+                        .get_storage_at(perp_addr, slot)
+                        .block_id(block_id)
+                        .into_future()
+                };
+                async move {
+                    let funding = tokio::try_join!(read(slot_opp), read(slot_div)).map(
+                        |(opp, div_sqrt_p_opp)| TickFunding {
+                            cuml_funding_opp_x96: I256::from_raw(opp),
+                            cuml_funding_div_sqrt_p_opp_x96: I256::from_raw(div_sqrt_p_opp),
+                        },
+                    );
+                    (tick, funding)
+                }
+            })
+            .collect();
         let reads: Vec<_> = stream::iter(tick_reads)
             .buffered(TICK_READ_CONCURRENCY)
             .collect()
@@ -838,5 +904,38 @@ mod tests {
             ),
             "{err}"
         );
+    }
+
+    /// The batch read must stay usable from spawned tasks: its future is
+    /// Send. Compile-time regression test — no RPC is made (PerpClient::new
+    /// performs no network calls and the future is never polled).
+    #[test]
+    fn get_maker_equities_future_is_send() {
+        fn require_send<T: Send>(_: &T) {}
+
+        let transport = crate::transport::provider::HftTransport::new(
+            crate::transport::config::TransportConfig::builder()
+                .shared_endpoint("http://127.0.0.1:1")
+                .build()
+                .unwrap(),
+        )
+        .unwrap();
+        let signer = alloy::signers::local::PrivateKeySigner::random();
+        let client = PerpClient::new(
+            transport,
+            signer,
+            crate::types::Deployments {
+                perp: Address::repeat_byte(1),
+                usdc: Address::repeat_byte(2),
+                pool_manager: Address::repeat_byte(3),
+            },
+            super::super::ARBITRUM_SEPOLIA_CHAIN_ID,
+        )
+        .unwrap();
+
+        let ids = [U256::ONE];
+        let fut = client.get_maker_equities(&ids);
+        require_send(&fut);
+        drop(fut);
     }
 }

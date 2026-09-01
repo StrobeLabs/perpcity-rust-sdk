@@ -130,9 +130,12 @@ LP fees, and inventory PnL, in exact 6-decimal atoms (validated against a
 real on-chain liquidation settle):
 
 ```rust
-for (pos_id, breakdown) in client.get_maker_equities(&pos_ids).await? {
-    if let Ok(b) = breakdown {
-        println!("pos {pos_id}: equity {:.6} (accrued {:+.6})", b.equity(), b.accrued_income());
+for outcome in client.get_maker_equities(&pos_ids).await? {
+    if let MakerEquityKind::Computed(b) = outcome.kind {
+        println!(
+            "pos {}: equity {:.6} (accrued {:+.6})",
+            outcome.pos_id, b.equity(), b.accrued_income(),
+        );
     }
 }
 

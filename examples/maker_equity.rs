@@ -14,8 +14,8 @@ use std::env;
 use alloy::primitives::{Address, U256};
 use alloy::signers::local::PrivateKeySigner;
 use perpcity_sdk::{
-    ARBITRUM_SEPOLIA_POOL_MANAGER, ARBITRUM_SEPOLIA_USDC, Deployments, HftTransport, PerpCityError,
-    PerpClient, TransactionError, TransportConfig, Urgency,
+    ARBITRUM_SEPOLIA_POOL_MANAGER, ARBITRUM_SEPOLIA_USDC, Deployments, HftTransport,
+    MakerEquityKind, PerpCityError, PerpClient, TransactionError, TransportConfig, Urgency,
 };
 
 #[tokio::main]
@@ -52,9 +52,10 @@ async fn main() -> perpcity_sdk::Result<()> {
     // `pos_ids` would receive if it were touched now. Taker/burned ids are
     // omitted; a single bad position degrades alone.
     let equities = client.get_maker_equities(&pos_ids).await?;
-    for (pos_id, breakdown) in &equities {
-        match breakdown {
-            Ok(b) => println!(
+    for outcome in &equities {
+        let pos_id = outcome.pos_id;
+        match &outcome.kind {
+            MakerEquityKind::Computed(b) => println!(
                 "pos {pos_id}: equity={:+.6} settled_margin={:+.6} \
                  funding={:+.6} util={:+.6} lp_fees={:+.6} pnl={:+.6}",
                 b.equity(),
@@ -64,7 +65,8 @@ async fn main() -> perpcity_sdk::Result<()> {
                 b.lp_fees_usd(),
                 b.unrealized_pnl_usd(),
             ),
-            Err(e) => println!("pos {pos_id}: read failed: {e}"),
+            MakerEquityKind::NotAMaker => println!("pos {pos_id}: not an open maker"),
+            MakerEquityKind::Failed(e) => println!("pos {pos_id}: read failed: {e}"),
         }
     }
 
@@ -74,15 +76,13 @@ async fn main() -> perpcity_sdk::Result<()> {
     // NotLiquidatable later, drop NonMakerPosition, keep going on
     // transients.
     let fee_recipient = client.address();
-    for (pos_id, _) in &equities {
-        match client
-            .simulate_liquidate_maker(*pos_id, fee_recipient)
-            .await
-        {
+    for outcome in &equities {
+        let pos_id = outcome.pos_id;
+        match client.simulate_liquidate_maker(pos_id, fee_recipient).await {
             Ok(()) => {
                 println!("pos {pos_id}: LIQUIDATABLE — sending");
                 let receipt = client
-                    .liquidate_maker(*pos_id, fee_recipient, Urgency::Critical)
+                    .liquidate_maker(pos_id, fee_recipient, Urgency::Critical)
                     .await?;
                 println!("pos {pos_id}: liquidated in {}", receipt.transaction_hash);
             }
