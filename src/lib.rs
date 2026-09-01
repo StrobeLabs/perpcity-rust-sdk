@@ -71,7 +71,7 @@ pub use errors::{ContractError, PerpCityError, Result, TransactionError, Validat
 
 #[doc(inline)]
 pub use math::maker_equity::{
-    AccrualInputs, MakerEquityBreakdown, MakerState, MarketState, TickFunding,
+    AccrualInputs, MakerEquityBreakdown, MakerMarketSnapshot, MakerState, TickFunding,
 };
 
 #[doc(inline)]

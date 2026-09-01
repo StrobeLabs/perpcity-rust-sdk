@@ -31,8 +31,8 @@ use crate::errors::{ContractError, Result, ValidationError};
 use crate::hft::state_cache::{CachedBounds, CachedFees};
 use crate::math::ema::{PricePair, calculate_emas};
 use crate::math::maker_equity::{
-    AccrualInputs, MakerEquityBreakdown, MakerState, MarketState, TickFunding, accrue_cumulatives,
-    compute_maker_equity, fee_growth_inside1,
+    AccrualInputs, MakerEquityBreakdown, MakerMarketSnapshot, MakerState, TickFunding,
+    fee_growth_inside1,
 };
 use crate::math::storage::{
     perp_tick_slot, v4_fee_growth_global1_slot, v4_position_fee_growth_inside1_slot,
@@ -768,17 +768,17 @@ impl PerpClient {
         // block's state may not be materialized on every replica yet, and
         // Arbitrum produces ~4 blocks/s so the lag is under two seconds.
         let block_number = provider.get_block_number().await?.saturating_sub(8);
-        let block_id = BlockId::from(block_number);
-        let now = provider
-            .get_block_by_number(block_number.into())
-            .await?
-            .map(|b| b.header.timestamp)
-            .unwrap_or_else(|| {
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs()
-            });
+        // A lagging replica may briefly miss the pinned header; fall back to
+        // the local clock for the accrual replay and pin by number.
+        let (block_id, block_hash, block_timestamp) =
+            match provider.get_block_by_number(block_number.into()).await? {
+                Some(block) => (
+                    BlockId::hash(block.header.hash),
+                    block.header.hash,
+                    block.header.timestamp,
+                ),
+                None => (BlockId::number(block_number), B256::ZERO, now_secs()),
+            };
 
         let cumls = perp.cumulatives().block(block_id).call().await?;
         let rates = perp.rates().block(block_id).call().await?;
@@ -787,7 +787,10 @@ impl PerpClient {
         let oi = perp.openInterest().block(block_id).call().await?;
         let pool_id = perp.POOL_ID().block(block_id).call().await?;
 
-        let mut market = MarketState {
+        let mut market = MakerMarketSnapshot {
+            block_number,
+            block_hash,
+            block_timestamp,
             funding_x96: cumls.fundingX96,
             funding_div_sqrt_p_x96: cumls.fundingDivSqrtPX96,
             long_util_earnings_x96: cumls.longUtilEarningsX96,
@@ -796,20 +799,17 @@ impl PerpClient {
             sqrt_amm_price_x96: pool_state.sqrtPrice.to::<U256>(),
             mark_price_x96: f64_to_x96(mark_price),
         };
-        accrue_cumulatives(
-            &mut market,
-            &AccrualInputs {
-                funding_per_day_wad: i128::try_from(rates.fundingPerDay).unwrap_or(0),
-                long_util_fee_per_day_wad: rates.longUtilFeePerDay,
-                short_util_fee_per_day_wad: rates.shortUtilFeePerDay,
-                last_touch: rates.lastTouch.to::<u64>(),
-                now,
-                oi_long: oi.long,
-                oi_short: oi.short,
-                cap_long: capacity.long,
-                cap_short: capacity.short,
-            },
-        );
+        market.accrue(&AccrualInputs {
+            funding_per_day_wad: i128::try_from(rates.fundingPerDay).unwrap_or(0),
+            long_util_fee_per_day_wad: rates.longUtilFeePerDay,
+            short_util_fee_per_day_wad: rates.shortUtilFeePerDay,
+            last_touch: rates.lastTouch.to::<u64>(),
+            now: block_timestamp,
+            oi_long: oi.long,
+            oi_short: oi.short,
+            cap_long: capacity.long,
+            cap_short: capacity.short,
+        });
 
         let fg1_global = provider
             .get_storage_at(
@@ -898,7 +898,7 @@ impl PerpClient {
                 ),
                 fee_growth_inside1_last_x128: fg1_inside_last,
             };
-            out.push((pos_id, compute_maker_equity(&market, &maker)));
+            out.push((pos_id, market.maker_equity(&maker)));
         }
         Ok(out)
     }
