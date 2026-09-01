@@ -47,7 +47,7 @@ pub struct TickFunding {
 /// Block-pinned market-wide inputs shared by every position's computation.
 ///
 /// The funding/earnings cumulatives are stored on chain as of the market's
-/// last touch; call [`Self::accrue`] to replay them to the snapshot's
+/// last touch; call [`Self::accrued`] to replay them to the snapshot's
 /// timestamp before computing equities.
 #[derive(Debug, Clone, Copy)]
 pub struct MakerMarketSnapshot {
@@ -215,15 +215,19 @@ impl MakerEquityBreakdown {
 }
 
 impl MakerMarketSnapshot {
-    /// Replay `PerpLogic.accrue` from `lastTouch` to `now`, advancing the
-    /// cumulatives in place. Mirrors the contract exactly, using
-    /// [`Self::mark_price_x96`] for the utilization leg (the contract
+    /// Replay `PerpLogic.accrue` from `lastTouch` to `now`, returning the
+    /// snapshot with its cumulatives advanced. Mirrors the contract exactly,
+    /// using [`Self::mark_price_x96`] for the utilization leg (the contract
     /// recomputes the mark inside `accrue`; passing the current mark keeps
     /// the replay within micro-dollars).
-    pub fn accrue(&mut self, accrual: &AccrualInputs) -> Result<(), ValidationError> {
+    ///
+    /// Consumes `self`: the replay is not idempotent (each application adds
+    /// another rate × dt), so the un-accrued snapshot is given up rather
+    /// than left around to be accrued twice.
+    pub fn accrued(mut self, accrual: &AccrualInputs) -> Result<Self, ValidationError> {
         let dt = accrual.now.saturating_sub(accrual.last_touch);
         if dt == 0 {
-            return Ok(());
+            return Ok(self);
         }
         let dt_days = U256::from(dt)
             .checked_mul(Q96)
@@ -290,7 +294,7 @@ impl MakerMarketSnapshot {
                 "accrued short utilization cumulative",
             )?;
         }
-        Ok(())
+        Ok(self)
     }
 
     /// Compute the full settle preview for one maker position.
@@ -645,7 +649,7 @@ mod tests {
     #[test]
     fn golden_vector_reproduces_pos54_liquidation_settle() {
         let (mut market, accrual, maker) = golden_market_and_maker();
-        market.accrue(&accrual).unwrap();
+        market = market.accrued(&accrual).unwrap();
         let b = market.maker_equity(&maker).unwrap();
 
         // The funding replay lands within one atom of the event's exact
@@ -682,9 +686,9 @@ mod tests {
     /// magnitude.
     #[test]
     fn accrual_replay_moves_funding_forward() {
-        let (mut market, accrual, maker) = golden_market_and_maker();
+        let (market, accrual, maker) = golden_market_and_maker();
         let stale = market.maker_equity(&maker).unwrap();
-        market.accrue(&accrual).unwrap();
+        let market = market.accrued(&accrual).unwrap();
         let fresh = market.maker_equity(&maker).unwrap();
         assert!(
             fresh.funding_atoms > stale.funding_atoms,
@@ -706,7 +710,7 @@ mod tests {
     #[test]
     fn val_pnl_is_a_signed_sum_over_mixed_sign_deltas() {
         let (mut market, accrual, mut maker) = golden_market_and_maker();
-        market.accrue(&accrual).unwrap();
+        market = market.accrued(&accrual).unwrap();
 
         // With zero deltas, unrealized PnL is exactly the band's liquidity
         // value priced at the mark.
@@ -742,7 +746,7 @@ mod tests {
     #[test]
     fn checkpoint_ahead_of_market_cumulative_is_an_error_not_a_number() {
         let (mut market, accrual, mut maker) = golden_market_and_maker();
-        market.accrue(&accrual).unwrap();
+        market = market.accrued(&accrual).unwrap();
         maker.last_long_util_earnings_x96 = market.long_util_earnings_x96 + U256::from(1u8);
         let err = market.maker_equity(&maker).unwrap_err();
         assert!(matches!(err, ValidationError::Overflow { .. }), "{err}");

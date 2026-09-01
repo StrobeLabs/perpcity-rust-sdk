@@ -982,7 +982,7 @@ impl PerpClient {
         let pool_id = Perp::POOL_IDCall::abi_decode_returns(&results[5].returnData)
             .map_err(|e| decode_err("POOL_ID", e))?;
 
-        let mut market = MakerMarketSnapshot {
+        let market = MakerMarketSnapshot {
             block_number,
             block_hash,
             block_timestamp,
@@ -993,8 +993,8 @@ impl PerpClient {
             current_tick: i24_to_i32(pool_state.tick),
             sqrt_amm_price_x96: pool_state.sqrtPrice.to::<U256>(),
             mark_price_x96,
-        };
-        market.accrue(&AccrualInputs {
+        }
+        .accrued(&AccrualInputs {
             funding_per_day_wad: i128::try_from(rates.fundingPerDay).unwrap_or(0),
             long_util_fee_per_day_wad: rates.longUtilFeePerDay,
             short_util_fee_per_day_wad: rates.shortUtilFeePerDay,
