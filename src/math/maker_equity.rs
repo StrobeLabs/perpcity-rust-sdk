@@ -32,21 +32,14 @@
 //! This module is pure math over pre-fetched inputs. The chain-read layer
 //! that populates it lives in the client: `PerpClient::read_maker_equities`.
 
+use crate::constants::{INTERVAL, Q96, WAD};
 use crate::math::tick::get_sqrt_ratio_at_tick;
 use alloy::primitives::{B256, I256, U256, U512, keccak256};
 
-const Q96_SHIFT: usize = 96;
-const Q128_SHIFT: usize = 128;
-const ONE_DAY: u64 = 86_400;
-const WAD: u64 = 1_000_000_000_000_000_000;
 /// `PerpStorage.ticks` mapping slot (base 3 + field index 3).
 const PERP_TICKS_SLOT: u64 = 6;
 /// `PoolManager._pools` mapping slot.
 const POOL_MANAGER_POOLS_SLOT: u64 = 6;
-
-fn q96() -> U256 {
-    U256::from(1u8) << Q96_SHIFT
-}
 
 /// `floor(a × b / d)` in 512-bit intermediate precision (`FullMath.mulDiv`).
 fn full_mul_div(a: U256, b: U256, d: U256) -> U256 {
@@ -78,7 +71,7 @@ fn amount0_for_liquidity(sqrt_a: U256, sqrt_b: U256, liquidity: u128) -> U256 {
     } else {
         (sqrt_b, sqrt_a)
     };
-    let numerator = U256::from(liquidity) << Q96_SHIFT;
+    let numerator = U256::from(liquidity) << 96;
     full_mul_div(numerator, sb - sa, sb) / sa
 }
 
@@ -96,7 +89,7 @@ fn amounts_for_liquidity(
     };
     let sp = sqrt_p.clamp(sa, sb);
     let amount0 = amount0_for_liquidity(sp, sb, liquidity);
-    let amount1 = full_mul_div(U256::from(liquidity), sp - sa, q96());
+    let amount1 = full_mul_div(U256::from(liquidity), sp - sa, Q96);
     (amount0, amount1)
 }
 
@@ -213,31 +206,31 @@ pub fn accrue_cumulatives(market: &mut MarketState, accrual: &AccrualInputs) {
     if dt == 0 {
         return;
     }
-    let dt_days = U256::from(dt) * q96() / U256::from(ONE_DAY);
+    let dt_days = U256::from(dt) * Q96 / U256::from(INTERVAL);
     let funding_accrued = s_full_mul_div(
         I256::try_from(accrual.funding_per_day_wad).expect("rate fits"),
         I256::try_from(dt_days).expect("dt_days fits"),
-        U256::from(WAD),
+        WAD,
         false,
     );
     market.funding_x96 += funding_accrued;
     market.funding_div_sqrt_p_x96 += s_full_mul_div(
         funding_accrued,
-        I256::try_from(q96()).expect("q96 fits"),
+        I256::try_from(Q96).expect("Q96 fits I256"),
         market.sqrt_amm_price_x96,
         false,
     );
 
-    let dt_days_mult_mark = full_mul_div(dt_days, market.mark_price_x96, q96());
+    let dt_days_mult_mark = full_mul_div(dt_days, market.mark_price_x96, Q96);
     let lu_accrued = full_mul_div(
         U256::from(accrual.long_util_fee_per_day_wad),
         dt_days_mult_mark,
-        U256::from(WAD),
+        WAD,
     );
     let su_accrued = full_mul_div(
         U256::from(accrual.short_util_fee_per_day_wad),
         dt_days_mult_mark,
-        U256::from(WAD),
+        WAD,
     );
     if accrual.cap_long != 0 {
         market.long_util_earnings_x96 += full_mul_div(
@@ -301,24 +294,19 @@ pub fn compute_maker_equity(market: &MarketState, maker: &MakerState) -> MakerEq
     let base_funding = s_full_mul_div(
         I256::try_from(maker.delta_amount0).expect("amount0 fits"),
         market.funding_x96 - maker.last_cuml_funding_x96,
-        q96(),
+        Q96,
         true,
     );
     let perp_below =
         I256::try_from(amount0_for_liquidity(sqrt_l, sqrt_u, maker.liquidity)).expect("fits");
-    let funding_below = s_full_mul_div(perp_below, mf_below - maker.last_below_x96, q96(), true);
+    let funding_below = s_full_mul_div(perp_below, mf_below - maker.last_below_x96, Q96, true);
     let div_amm = mf_div_sqrt_within - maker.last_div_sqrt_within_x96;
     let d_within = mf_within - maker.last_within_x96;
-    let div_upper = s_full_mul_div(
-        d_within,
-        I256::try_from(q96()).expect("fits"),
-        sqrt_u,
-        false,
-    );
+    let div_upper = s_full_mul_div(d_within, I256::try_from(Q96).expect("fits"), sqrt_u, false);
     let funding_within = s_full_mul_div(
         I256::try_from(maker.liquidity).expect("liquidity fits"),
         div_amm - div_upper,
-        q96(),
+        Q96,
         true,
     );
     let funding = base_funding + funding_below + funding_within;
@@ -326,12 +314,12 @@ pub fn compute_maker_equity(market: &MarketState, maker: &MakerState) -> MakerEq
     let long_util = full_mul_div(
         U256::from(maker.cap_long_6dec),
         market.long_util_earnings_x96 - maker.last_long_util_earnings_x96,
-        q96(),
+        Q96,
     );
     let short_util = full_mul_div(
         U256::from(maker.cap_short_6dec),
         market.short_util_earnings_x96 - maker.last_short_util_earnings_x96,
-        q96(),
+        Q96,
     );
 
     // ── V4 LP fees: liquidity × Δ feeGrowthInside1 / 2^128 ──────────
@@ -339,17 +327,17 @@ pub fn compute_maker_equity(market: &MarketState, maker: &MakerState) -> MakerEq
     let fee_growth_delta = maker
         .fee_growth_inside1_x128
         .wrapping_sub(maker.fee_growth_inside1_last_x128);
-    let lp_fees = (U512::from(maker.liquidity) * U512::from(fee_growth_delta)) >> Q128_SHIFT;
+    let lp_fees = (U512::from(maker.liquidity) * U512::from(fee_growth_delta)) >> 128;
     let lp_fees = U256::from(lp_fees);
 
     // ── valPnl (maker overload) ─────────────────────────────────────
     let (perps, usd) =
         amounts_for_liquidity(market.sqrt_amm_price_x96, sqrt_l, sqrt_u, maker.liquidity);
-    let liquidity_val = full_mul_div(perps, market.mark_price_x96, q96()) + usd;
+    let liquidity_val = full_mul_div(perps, market.mark_price_x96, Q96) + usd;
     let pos_val = full_mul_div(
         U256::from(maker.delta_amount0.unsigned_abs()),
         market.mark_price_x96,
-        q96(),
+        Q96,
     ) + U256::from(maker.delta_amount1.unsigned_abs());
     let unrealized =
         I256::try_from(liquidity_val).expect("fits") - I256::try_from(pos_val).expect("fits");
