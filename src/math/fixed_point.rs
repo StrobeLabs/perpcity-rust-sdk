@@ -3,7 +3,8 @@
 //! [`mul_div`] mirrors the contracts' `FullMath.mulDiv`: the product is
 //! computed in 512 bits so `a × b / d` cannot overflow before the division.
 //! [`s_full_mul_div`] mirrors `SignedFixedPointMathLib.sFullMulDiv`,
-//! including its sign-independent rounding step.
+//! including its round-toward-positive-infinity step that only increments
+//! non-negative results.
 
 use alloy::primitives::{I256, U256, U512};
 
@@ -33,8 +34,21 @@ pub(crate) fn mul_div(a: U256, b: U256, d: U256, round_up: bool) -> Result<U256,
 
 /// The contracts' `sFullMulDiv`: signed mul-div with the magnitude truncated
 /// toward zero. When `round_up` is set and the division has a remainder, the
-/// result is incremented by one **regardless of sign** — that quirk is part
-/// of the contract semantics and is ported faithfully.
+/// result is incremented by one **only when it is not negative** — rounding
+/// toward positive infinity increments only non-exact non-negative results,
+/// while negative results stay truncated toward zero. This mirrors the
+/// deployed `SignedFixedPointMathLib.sFullMulDiv`
+/// (`perpcity-contracts@4bbe554f`):
+///
+/// ```solidity
+/// result = negative ? -absResult : absResult;
+/// // Rounding toward positive infinity increments only non-exact
+/// // positive results.
+/// if (roundUp && !negative) {
+///     bool hasRemainder = mulmod(unsignedA, unsignedB, denominator) != 0;
+///     result += SafeCastLib.toInt256(hasRemainder ? 1 : 0);
+/// }
+/// ```
 ///
 /// # Errors
 ///
@@ -53,7 +67,7 @@ pub(crate) fn s_full_mul_div(
             context: "signed mul-div magnitude exceeds I256".into(),
         })?;
     let mut result = if negative { -magnitude } else { magnitude };
-    if round_up && ua.widening_mul(ub) % U512::from(d) != U512::ZERO {
+    if round_up && !negative && ua.widening_mul(ub) % U512::from(d) != U512::ZERO {
         result += I256::ONE;
     }
     Ok(result)
@@ -81,10 +95,13 @@ mod tests {
         assert_eq!(smd(big(7), big(10), false), big(0));
         assert_eq!(smd(big(7), big(10), true), big(1));
         assert_eq!(smd(big(-7), big(10), false), big(0));
-        // The contract's roundUp adds +1 regardless of sign.
-        assert_eq!(smd(big(-7), big(10), true), big(1));
+        // The contract's roundUp guards on `!negative`: a negative non-exact
+        // result stays truncated toward zero instead of gaining +1.
+        assert_eq!(smd(big(-7), big(10), true), big(0));
         assert_eq!(smd(big(-70), big(10), false), big(-7));
         assert_eq!(smd(big(-70), big(10), true), big(-7));
+        assert_eq!(smd(big(-75), big(10), true), big(-7));
+        assert_eq!(smd(big(75), big(10), true), big(8));
     }
 
     #[test]
