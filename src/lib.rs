@@ -58,7 +58,7 @@ pub use contracts::{
     AdjustMakerParams as ContractAdjustMakerParams, AdjustTakerParams as ContractAdjustTakerParams,
     IBeacon, IERC20, IFees, IFunding, IMarginRatios, IMulticall3, IPoolManagerState, IPriceImpact,
     IPricing, Modules, OpenMakerParams as ContractOpenMakerParams,
-    OpenTakerParams as ContractOpenTakerParams, Perp, PerpFactory, PoolKey,
+    OpenTakerParams as ContractOpenTakerParams, Perp, PerpDeployedEvents, PerpFactory, PoolKey,
 };
 
 #[doc(inline)]
