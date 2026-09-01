@@ -45,8 +45,9 @@ impl LiveTakerMarket {
                             break;
                         }
                         // Coalesce queued heads: a reload can outlast several
-                        // block times, and the loader pins the latest
-                        // canonical block regardless, so a backlog is purely
+                        // block times, and the loader resolves its own
+                        // pinned block (`SNAPSHOT_BLOCK_LAG` behind the
+                        // head) regardless, so a backlog is purely
                         // redundant RPC work.
                         while blocks.try_recv().is_ok() {}
                         match client.load_taker_market_snapshot().await {
@@ -72,7 +73,10 @@ impl LiveTakerMarket {
         self.latest.clone()
     }
 
-    /// Whether `block_hash` is still the quoteable head in this cache.
+    /// Whether `block_hash` is the block the cache's current snapshot is
+    /// pinned to. That block sits `SNAPSHOT_BLOCK_LAG` behind the chain
+    /// head (see [`crate::constants::SNAPSHOT_BLOCK_LAG`]), so compare
+    /// against a snapshot's `block.hash`, never against a `newHeads` hash.
     pub fn is_current(&self, block_hash: B256) -> bool {
         self.latest.borrow().block.hash == block_hash
     }

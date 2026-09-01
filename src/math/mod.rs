@@ -31,6 +31,11 @@ pub mod tick;
 /// [`maker_equity::MakerMarketSnapshot`]: every field in a snapshot comes
 /// from this one block, and chain reads derived from the snapshot pin to
 /// [`Self::hash`].
+///
+/// The client's snapshot loaders pin this block
+/// [`SNAPSHOT_BLOCK_LAG`](crate::constants::SNAPSHOT_BLOCK_LAG) behind the
+/// chain head, so [`Self::hash`] is generally not the newest head and
+/// [`Self::timestamp`] trails wall-clock time by the lag.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BlockContext {
     /// Block number.
