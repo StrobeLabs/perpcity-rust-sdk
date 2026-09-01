@@ -41,4 +41,19 @@ pub enum ContractError {
         /// The block number whose header was requested.
         number: u64,
     },
+
+    /// A raw storage read (`eth_getProof`, `eth_getStorageAt`, `extsload`)
+    /// failed or returned an unexpected shape.
+    ///
+    /// The transport error, when one exists, is preserved as the source
+    /// (behind an `Arc` so a single failed read shared by several positions
+    /// keeps its cause on every affected result).
+    #[error("storage read failed: {context}")]
+    StorageReadFailed {
+        /// What was being read.
+        context: String,
+        /// The underlying transport error, if the failure came from RPC.
+        #[source]
+        source: Option<std::sync::Arc<alloy::transports::TransportError>>,
+    },
 }

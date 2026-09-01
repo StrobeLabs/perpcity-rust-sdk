@@ -196,6 +196,10 @@ pub struct PerpClient {
     /// Deployment-fixed Perp/pool values (pool id, tick spacing, EMA window),
     /// fetched once on first taker book load.
     book_immutables: tokio::sync::OnceCell<queries::BookImmutables>,
+    /// Latched when the endpoint rejects `eth_getProof` as an unknown
+    /// method, so maker-equity reads skip the probe and go straight to the
+    /// `eth_getStorageAt` fallback.
+    get_proof_unsupported: std::sync::atomic::AtomicBool,
 }
 
 impl std::fmt::Debug for PerpClient {
@@ -250,6 +254,7 @@ impl PerpClient {
             gas_limit_cache: Mutex::new(GasLimitCache::new()),
             state_cache: Mutex::new(StateCache::new(StateCacheConfig::default())),
             book_immutables: tokio::sync::OnceCell::new(),
+            get_proof_unsupported: std::sync::atomic::AtomicBool::new(false),
         })
     }
 

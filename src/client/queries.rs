@@ -17,7 +17,8 @@ use alloy::eips::{BlockId, BlockNumberOrTag};
 use alloy::primitives::{Address, B256, I256, U256};
 use alloy::providers::Provider;
 use alloy::sol_types::{SolCall, SolValue};
-use futures_util::future::join_all;
+use alloy::transports::TransportError;
+use futures_util::stream::{self, StreamExt};
 
 use crate::constants::{
     MAX_SWAP_SQRT_PRICE_X96, MAX_TICK, MIN_SWAP_SQRT_PRICE_X96, MIN_TICK, MULTICALL3,
@@ -76,6 +77,14 @@ fn funding_per_day_to_f64(rate: alloy::primitives::Signed<88, 2>) -> f64 {
 /// the lag stays under two seconds.
 const MAKER_EQUITY_BLOCK_LAG: u64 = 8;
 
+/// Concurrency bound for the `eth_getStorageAt` fallback when the endpoint
+/// does not serve `eth_getProof`.
+const TICK_READ_CONCURRENCY: usize = 16;
+
+/// Outcome of one tick's funding read: the two decoded words, or the shared
+/// transport error that failed every position referencing the tick.
+type TickFundingRead = std::result::Result<TickFunding, std::sync::Arc<TransportError>>;
+
 /// A maker position that survived the row-read phase and awaits slot reads.
 struct PendingMaker {
     /// Index into the caller's `pos_ids`, so per-position results can be
@@ -125,6 +134,104 @@ fn decode_maker_row(
         tick_lower,
         tick_upper,
     }))
+}
+
+/// Layout of the single PoolManager `extsload` batch over the V4 fee-growth
+/// state for a set of maker positions: word 0 is the pool's
+/// `feeGrowthGlobal1X128`, followed by one `feeGrowthOutside1X128` word per
+/// DISTINCT band tick (positions in a maker ladder share boundaries, so a
+/// shared tick is read once), then one `feeGrowthInside1LastX128` word per
+/// position.
+struct FeeGrowthLayout {
+    slots: Vec<B256>,
+    /// Word index of each distinct tick's outside-growth slot.
+    tick_word: BTreeMap<i32, usize>,
+    /// Word index of the first per-position inside-growth slot.
+    first_inside_word: usize,
+}
+
+impl FeeGrowthLayout {
+    fn new(pool_id: B256, perp: Address, pending: &[PendingMaker]) -> Self {
+        let ticks: BTreeSet<i32> = pending
+            .iter()
+            .flat_map(|maker| [maker.tick_lower, maker.tick_upper])
+            .collect();
+        let mut slots = Vec::with_capacity(1 + ticks.len() + pending.len());
+        slots.push(B256::from(v4_fee_growth_global1_slot(pool_id)));
+        let mut tick_word = BTreeMap::new();
+        for tick in ticks {
+            tick_word.insert(tick, slots.len());
+            slots.push(B256::from(v4_tick_fee_growth_outside1_slot(pool_id, tick)));
+        }
+        let first_inside_word = slots.len();
+        for maker in pending {
+            slots.push(B256::from(v4_position_fee_growth_inside1_slot(
+                pool_id,
+                perp,
+                maker.tick_lower,
+                maker.tick_upper,
+                B256::from(maker.pos_id),
+            )));
+        }
+        Self {
+            slots,
+            tick_word,
+            first_inside_word,
+        }
+    }
+
+    fn word_count(&self) -> usize {
+        self.slots.len()
+    }
+
+    fn global(&self, words: &[B256]) -> U256 {
+        U256::from_be_bytes(words[0].0)
+    }
+
+    /// `feeGrowthOutside1X128` of `tick`. The tick must be a band boundary
+    /// of one of the positions the layout was built from.
+    fn outside(&self, words: &[B256], tick: i32) -> U256 {
+        U256::from_be_bytes(words[self.tick_word[&tick]].0)
+    }
+
+    /// `feeGrowthInside1LastX128` of the `position`-th pending position.
+    fn inside_last(&self, words: &[B256], position: usize) -> U256 {
+        U256::from_be_bytes(words[self.first_inside_word + position].0)
+    }
+}
+
+/// Resolve one band tick's funding read for a position. A failed (or
+/// absent) tick read converts into the typed storage error handed to every
+/// position referencing that tick — and only those positions.
+fn tick_funding_for(funding: &BTreeMap<i32, TickFundingRead>, tick: i32) -> Result<TickFunding> {
+    match funding.get(&tick) {
+        Some(Ok(funding)) => Ok(*funding),
+        Some(Err(e)) => Err(ContractError::StorageReadFailed {
+            context: format!("tick {tick} funding"),
+            source: Some(std::sync::Arc::clone(e)),
+        }
+        .into()),
+        None => Err(ContractError::StorageReadFailed {
+            context: format!("tick {tick} funding missing from batch"),
+            source: None,
+        }
+        .into()),
+    }
+}
+
+/// Whether a transport error means the RPC method itself is not available
+/// on the endpoint, as opposed to the call failing.
+fn method_unsupported(e: &alloy::transports::TransportError) -> bool {
+    const METHOD_NOT_FOUND: i64 = -32601;
+    e.as_error_resp().is_some_and(|resp| {
+        resp.code == METHOD_NOT_FOUND || {
+            let message = resp.message.to_lowercase();
+            message.contains("not supported")
+                || message.contains("unsupported")
+                || message.contains("method not found")
+                || message.contains("does not exist")
+        }
+    })
 }
 
 /// Split the row-multicall results into positions awaiting slot reads and
@@ -827,14 +934,21 @@ impl PerpClient {
     ///
     /// Reads are batched: one Multicall3 round trip for the market-wide
     /// state, one for all position/maker rows, one PoolManager `extsload`
-    /// for the V4 fee-growth slots, and concurrent `eth_getStorageAt` reads
-    /// for the distinct Perp tick-funding slots.
+    /// for the V4 fee-growth slots (distinct band ticks read once), and one
+    /// `eth_getProof` for the distinct Perp tick-funding slots (with an
+    /// `eth_getStorageAt` fallback on endpoints without `eth_getProof`).
     ///
     /// Failures degrade per position: a position whose reads, decoding, or
     /// math fail is returned with an `Err` (and logged) instead of
     /// discarding the batch. Market-wide read failures still fail the whole
     /// call. Non-maker ids (zero liquidity — takers or deleted positions)
     /// are omitted from the output.
+    ///
+    /// Cost grows linearly with `pos_ids`: two multicall subcalls, one
+    /// extsload word, and up to two tick-funding slots per position. All
+    /// four round trips comfortably carry a few hundred positions; above
+    /// roughly 500 ids, chunk the calls (each chunk still pins its own
+    /// block) to stay inside RPC response-size and calldata limits.
     ///
     /// `mark_price` is the caller's current mark (snapshot / market-data
     /// cache); it prices `valPnl` and the accrual replay. It must be a
@@ -1024,8 +1138,9 @@ impl PerpClient {
 
     /// Slot reads and math for the surviving positions of
     /// [`Self::read_maker_equities`]: one `extsload` batch for the V4
-    /// fee-growth slots, then the Perp tick-funding slots concurrently
-    /// (deduplicated across positions), degrading per position on failure.
+    /// fee-growth slots (distinct band ticks read once), one `eth_getProof`
+    /// batch for the Perp tick-funding slots (also deduplicated), degrading
+    /// per position on failure.
     async fn read_pending_maker_equities(
         &self,
         market: &MakerMarketSnapshot,
@@ -1036,92 +1151,35 @@ impl PerpClient {
         if pending.is_empty() {
             return Ok(Vec::new());
         }
-        let perp_addr = self.deployments.perp;
 
-        let mut slots = Vec::with_capacity(1 + 3 * pending.len());
-        slots.push(B256::from(v4_fee_growth_global1_slot(pool_id)));
-        for maker in pending {
-            slots.push(B256::from(v4_tick_fee_growth_outside1_slot(
-                pool_id,
-                maker.tick_lower,
-            )));
-            slots.push(B256::from(v4_tick_fee_growth_outside1_slot(
-                pool_id,
-                maker.tick_upper,
-            )));
-            slots.push(B256::from(v4_position_fee_growth_inside1_slot(
-                pool_id,
-                perp_addr,
-                maker.tick_lower,
-                maker.tick_upper,
-                B256::from(maker.pos_id),
-            )));
-        }
-        let expected = slots.len();
+        let layout = FeeGrowthLayout::new(pool_id, self.deployments.perp, pending);
         let manager = IPoolManagerState::new(self.deployments.pool_manager, &self.provider);
-        let words = manager.extsload_1(slots).block(block_id).call().await?;
-        if words.len() != expected {
-            return Err(ContractError::MulticallFailed {
-                reason: format!(
-                    "maker equity extsload returned {} words, expected {expected}",
-                    words.len()
+        let words = manager
+            .extsload_1(layout.slots.clone())
+            .block(block_id)
+            .call()
+            .await?;
+        if words.len() != layout.word_count() {
+            return Err(ContractError::StorageReadFailed {
+                context: format!(
+                    "maker equity extsload returned {} words, expected {}",
+                    words.len(),
+                    layout.word_count()
                 ),
+                source: None,
             }
             .into());
         }
-        let fg1_global = U256::from_be_bytes(words[0].0);
+        let fg1_global = layout.global(&words);
 
         // Positions share band boundaries (a maker ladder reuses each inner
         // tick twice), so read each distinct tick's two funding words once.
-        // All reads are pinned to the same block and independent — every
-        // tick's pair runs concurrently. A failed tick read degrades only
-        // the positions that reference it.
         let ticks: BTreeSet<i32> = pending
             .iter()
             .flat_map(|maker| [maker.tick_lower, maker.tick_upper])
             .collect();
-        let tick_reads = ticks.into_iter().map(|tick| {
-            let slot = perp_tick_slot(tick);
-            let read = |slot: U256| {
-                self.provider
-                    .get_storage_at(perp_addr, slot)
-                    .block_id(block_id)
-                    .into_future()
-            };
-            async move {
-                let funding = tokio::try_join!(read(slot), read(slot + U256::ONE)).map(
-                    |(opp, div_sqrt_p_opp)| TickFunding {
-                        cuml_funding_opp_x96: I256::from_raw(opp),
-                        cuml_funding_div_sqrt_p_opp_x96: I256::from_raw(div_sqrt_p_opp),
-                    },
-                );
-                (tick, funding)
-            }
-        });
-        let mut tick_funding = BTreeMap::new();
-        let mut tick_errors = BTreeMap::new();
-        for (tick, funding) in join_all(tick_reads).await {
-            match funding {
-                Ok(funding) => {
-                    tick_funding.insert(tick, funding);
-                }
-                Err(e) => {
-                    tracing::warn!(tick, error = %e, "maker equity: tick funding read failed");
-                    tick_errors.insert(tick, e.to_string());
-                }
-            }
-        }
-        let funding_for = |tick: i32| -> Result<TickFunding> {
-            tick_funding.get(&tick).copied().ok_or_else(|| {
-                ContractError::MulticallFailed {
-                    reason: format!(
-                        "tick {tick} funding read failed: {}",
-                        tick_errors.get(&tick).map_or("missing", String::as_str)
-                    ),
-                }
-                .into()
-            })
-        };
+        let tick_funding = self.read_tick_funding(block_id, &ticks).await?;
+        let funding_for = |tick: i32| tick_funding_for(&tick_funding, tick);
 
         let equities = pending
             .iter()
@@ -1129,9 +1187,9 @@ impl PerpClient {
             .map(|(i, maker)| {
                 let tick_lower_funding = funding_for(maker.tick_lower)?;
                 let tick_upper_funding = funding_for(maker.tick_upper)?;
-                let fg1_out_lower = U256::from_be_bytes(words[1 + 3 * i].0);
-                let fg1_out_upper = U256::from_be_bytes(words[2 + 3 * i].0);
-                let fg1_inside_last = U256::from_be_bytes(words[3 + 3 * i].0);
+                let fg1_out_lower = layout.outside(&words, maker.tick_lower);
+                let fg1_out_upper = layout.outside(&words, maker.tick_upper);
+                let fg1_inside_last = layout.inside_last(&words, i);
                 let (delta_amount0, delta_amount1) = unpack_balance_delta(maker.position.delta);
                 let state = MakerState {
                     margin_6dec: maker.position.margin,
@@ -1170,6 +1228,128 @@ impl PerpClient {
             })
             .collect();
         Ok(equities)
+    }
+
+    /// Read each distinct tick's two funding words from the Perp contract,
+    /// pinned to `block_id`.
+    ///
+    /// Primary path: one `eth_getProof` request over all slots —
+    /// `storageProof[i].value` carries the storage words, the request takes
+    /// a block id so the batch stays pinned, and Arbitrum Nitro serves it.
+    /// An endpoint that does not support `eth_getProof` is remembered (the
+    /// probe is not repeated) and the read falls back to concurrent
+    /// `eth_getStorageAt` with bounded concurrency, where a failed tick
+    /// read degrades only the positions referencing that tick.
+    async fn read_tick_funding(
+        &self,
+        block_id: BlockId,
+        ticks: &BTreeSet<i32>,
+    ) -> Result<BTreeMap<i32, TickFundingRead>> {
+        use std::sync::Arc;
+        use std::sync::atomic::Ordering;
+
+        let perp_addr = self.deployments.perp;
+        if !self.get_proof_unsupported.load(Ordering::Relaxed) {
+            let keys: Vec<B256> = ticks
+                .iter()
+                .flat_map(|&tick| {
+                    let slot = perp_tick_slot(tick);
+                    [B256::from(slot), B256::from(slot + U256::ONE)]
+                })
+                .collect();
+            match self
+                .provider
+                .get_proof(perp_addr, keys)
+                .block_id(block_id)
+                .await
+            {
+                Ok(proof) => {
+                    let values: BTreeMap<B256, U256> = proof
+                        .storage_proof
+                        .iter()
+                        .map(|entry| (entry.key.as_b256(), entry.value))
+                        .collect();
+                    let mut funding = BTreeMap::new();
+                    for &tick in ticks {
+                        let slot = perp_tick_slot(tick);
+                        let word = |slot: U256| values.get(&B256::from(slot)).copied();
+                        let (Some(opp), Some(div_sqrt_p_opp)) =
+                            (word(slot), word(slot + U256::ONE))
+                        else {
+                            return Err(ContractError::StorageReadFailed {
+                                context: format!(
+                                    "eth_getProof response missing tick {tick} storage slots"
+                                ),
+                                source: None,
+                            }
+                            .into());
+                        };
+                        funding.insert(
+                            tick,
+                            Ok(TickFunding {
+                                cuml_funding_opp_x96: I256::from_raw(opp),
+                                cuml_funding_div_sqrt_p_opp_x96: I256::from_raw(div_sqrt_p_opp),
+                            }),
+                        );
+                    }
+                    return Ok(funding);
+                }
+                Err(e) if method_unsupported(&e) => {
+                    tracing::debug!(
+                        error = %e,
+                        "eth_getProof unsupported by endpoint; \
+                         falling back to eth_getStorageAt"
+                    );
+                    self.get_proof_unsupported.store(true, Ordering::Relaxed);
+                }
+                Err(e) => {
+                    return Err(ContractError::StorageReadFailed {
+                        context: "tick funding eth_getProof".into(),
+                        source: Some(Arc::new(e)),
+                    }
+                    .into());
+                }
+            }
+        }
+
+        // Fallback: all reads are pinned to the same block and independent,
+        // so every tick's slot pair runs concurrently (bounded so a large
+        // ladder cannot flood the endpoint).
+        let tick_reads = ticks.iter().map(|&tick| {
+            let slot = perp_tick_slot(tick);
+            let read = |slot: U256| {
+                self.provider
+                    .get_storage_at(perp_addr, slot)
+                    .block_id(block_id)
+                    .into_future()
+            };
+            async move {
+                let funding = tokio::try_join!(read(slot), read(slot + U256::ONE)).map(
+                    |(opp, div_sqrt_p_opp)| TickFunding {
+                        cuml_funding_opp_x96: I256::from_raw(opp),
+                        cuml_funding_div_sqrt_p_opp_x96: I256::from_raw(div_sqrt_p_opp),
+                    },
+                );
+                (tick, funding)
+            }
+        });
+        let reads: Vec<_> = stream::iter(tick_reads)
+            .buffered(TICK_READ_CONCURRENCY)
+            .collect()
+            .await;
+        let mut funding = BTreeMap::new();
+        for (tick, read) in reads {
+            match read {
+                Ok(read) => {
+                    funding.insert(tick, Ok(read));
+                }
+                Err(e) => {
+                    tracing::warn!(tick, error = %e, "maker equity: tick funding read failed");
+                    funding.insert(tick, Err(Arc::new(e)));
+                }
+            }
+        }
+        Ok(funding)
     }
 
     // ── Cache helpers ───────────────────────────────────────────────
@@ -1333,5 +1513,122 @@ mod tests {
         assert_eq!(failed.len(), 1);
         assert_eq!(failed[0].0, 1);
         assert_eq!(failed[0].1, U256::from(22u8));
+    }
+
+    fn pending_maker(input_index: usize, pos_id: u8, lower: i32, upper: i32) -> PendingMaker {
+        PendingMaker {
+            input_index,
+            pos_id: U256::from(pos_id),
+            position: Position {
+                delta: I256::ZERO,
+                margin: 0,
+                liqMarginRatio: alloy::primitives::Uint::<24, 1>::ZERO,
+                backstopMarginRatio: alloy::primitives::Uint::<24, 1>::ZERO,
+                lastCumlFundingX96: I256::ZERO,
+            },
+            details: Maker {
+                tickLower: alloy::primitives::Signed::<24, 1>::try_from(lower).unwrap(),
+                tickUpper: alloy::primitives::Signed::<24, 1>::try_from(upper).unwrap(),
+                liquidity: 1,
+                lastLongUtilEarningsX96: U256::ZERO,
+                lastShortUtilEarningsX96: U256::ZERO,
+                capacity: Capacity { long: 0, short: 0 },
+                lastCumlFunding: MakerFunding {
+                    belowX96: I256::ZERO,
+                    withinX96: I256::ZERO,
+                    divSqrtPriceWithinX96: I256::ZERO,
+                },
+            },
+            tick_lower: lower,
+            tick_upper: upper,
+        }
+    }
+
+    /// The extsload layout must read each DISTINCT band tick once — a maker
+    /// ladder shares its inner boundaries — and index every word back to the
+    /// right slot. Locks the `1 + n_ticks + n_positions` word arithmetic.
+    #[test]
+    fn fee_growth_layout_dedups_ticks_and_indexes_words() {
+        let pool_id = B256::repeat_byte(0xAB);
+        let perp = Address::repeat_byte(0xCD);
+        // A ladder: three positions, four distinct ticks (60 and 120 shared).
+        let pending = [
+            pending_maker(0, 1, -60, 60),
+            pending_maker(1, 2, 60, 120),
+            pending_maker(2, 3, 120, 180),
+        ];
+        let layout = FeeGrowthLayout::new(pool_id, perp, &pending);
+
+        // 1 global + 4 distinct ticks + 3 positions.
+        assert_eq!(layout.word_count(), 8);
+        assert_eq!(
+            layout.slots[0],
+            B256::from(v4_fee_growth_global1_slot(pool_id))
+        );
+        for tick in [-60, 60, 120, 180] {
+            assert_eq!(
+                layout.slots[layout.tick_word[&tick]],
+                B256::from(v4_tick_fee_growth_outside1_slot(pool_id, tick)),
+                "outside slot for tick {tick}"
+            );
+        }
+        for (i, maker) in pending.iter().enumerate() {
+            assert_eq!(
+                layout.slots[layout.first_inside_word + i],
+                B256::from(v4_position_fee_growth_inside1_slot(
+                    pool_id,
+                    perp,
+                    maker.tick_lower,
+                    maker.tick_upper,
+                    B256::from(maker.pos_id),
+                )),
+                "inside slot for position {i}"
+            );
+        }
+
+        // Word extraction follows the same indices.
+        let words: Vec<B256> = (0u8..8).map(B256::repeat_byte).collect();
+        assert_eq!(layout.global(&words), U256::from_be_bytes(words[0].0));
+        assert_eq!(
+            layout.outside(&words, 60),
+            U256::from_be_bytes(words[layout.tick_word[&60]].0)
+        );
+        assert_eq!(
+            layout.inside_last(&words, 2),
+            U256::from_be_bytes(words[layout.first_inside_word + 2].0)
+        );
+    }
+
+    /// A failed tick read must fail exactly the positions referencing that
+    /// tick: both neighbours of a shared failed boundary degrade, while a
+    /// position whose band avoids it computes normally.
+    #[test]
+    fn failed_tick_read_degrades_only_referencing_positions() {
+        let shared_error = std::sync::Arc::new(alloy::transports::TransportErrorKind::custom_str(
+            "replica dropped the read",
+        ));
+        let funding: BTreeMap<i32, TickFundingRead> = BTreeMap::from([
+            (-60, Ok(TickFunding::default())),
+            (60, Err(std::sync::Arc::clone(&shared_error))),
+            (120, Ok(TickFunding::default())),
+            (180, Ok(TickFunding::default())),
+        ]);
+
+        // Bands (-60,60) and (60,120) reference the failed tick; (120,180)
+        // does not.
+        assert!(tick_funding_for(&funding, -60).is_ok());
+        assert!(tick_funding_for(&funding, 120).is_ok());
+        assert!(tick_funding_for(&funding, 180).is_ok());
+        let err = tick_funding_for(&funding, 60).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                PerpCityError::Contract(ContractError::StorageReadFailed {
+                    source: Some(_),
+                    ..
+                })
+            ),
+            "{err}"
+        );
     }
 }
