@@ -809,7 +809,7 @@ impl PerpClient {
             oi_short: oi.short,
             cap_long: capacity.long,
             cap_short: capacity.short,
-        });
+        })?;
 
         let fg1_global = provider
             .get_storage_at(
@@ -898,7 +898,7 @@ impl PerpClient {
                 ),
                 fee_growth_inside1_last_x128: fg1_inside_last,
             };
-            out.push((pos_id, market.maker_equity(&maker)));
+            out.push((pos_id, market.maker_equity(&maker)?));
         }
         Ok(out)
     }

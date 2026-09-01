@@ -12,11 +12,11 @@
 //!   PoolManager's fee-growth accounting),
 //! - inventory PnL (`valPnl`) and the resulting equity.
 //!
-//! All arithmetic is X96/X128 integer math (`U256`/`I256`), transcribed
-//! 1:1 from the Solidity, converted to f64 USD only at the boundary. The
-//! whole computation is validated end-to-end against a real on-chain
-//! settle: the golden test reproduces the `MakerConverted` event of the
-//! CHINA-PC pos-54 liquidation from pre-liquidation chain state.
+//! All arithmetic is X96/X128 integer math (`U256`/`I256`), transcribed 1:1
+//! from the Solidity and converted to f64 USD only at the boundary. The
+//! computation is validated end-to-end against a real on-chain settle: the
+//! golden test reproduces the `MakerConverted` event of the CHINA-PC pos-54
+//! liquidation from pre-liquidation chain state.
 //!
 //! This module is pure math over pre-fetched inputs, mirroring
 //! [`swap`](crate::math::swap): a block-pinned [`MakerMarketSnapshot`] plus
@@ -25,40 +25,13 @@
 //! [`storage`](crate::math::storage)) lives in the client:
 //! `PerpClient::read_maker_equities`.
 
-use crate::constants::{INTERVAL, Q96, WAD};
-use crate::math::fixed_point::{mul_div, s_full_mul_div};
-use crate::math::swap::{amount0_delta, amount1_delta};
-use crate::math::tick::get_sqrt_ratio_at_tick;
 use alloy::primitives::{B256, I256, U256, U512};
 
-/// `floor(a × b / d)`: the canonical [`mul_div`], with the fallibility
-/// unwrapped locally — error propagation lands in a later commit.
-fn full_mul_div(a: U256, b: U256, d: U256) -> U256 {
-    mul_div(a, b, d, false).expect("mul-div fits U256")
-}
-
-/// The contract's `sFullMulDiv` via the canonical signed implementation.
-fn s_full_mul_div_infallible(a: I256, b: I256, d: U256, round_up: bool) -> I256 {
-    s_full_mul_div(a, b, d, round_up).expect("signed mul-div fits I256")
-}
-
-/// Uniswap `getAmountsForLiquidity` with the price clamped into the range.
-fn amounts_for_liquidity(
-    sqrt_p: U256,
-    sqrt_a: U256,
-    sqrt_b: U256,
-    liquidity: u128,
-) -> (U256, U256) {
-    let (sa, sb) = if sqrt_a <= sqrt_b {
-        (sqrt_a, sqrt_b)
-    } else {
-        (sqrt_b, sqrt_a)
-    };
-    let sp = sqrt_p.clamp(sa, sb);
-    let amount0 = amount0_delta(sp, sb, liquidity, false).expect("liquidity amounts fit");
-    let amount1 = amount1_delta(sa, sp, liquidity, false).expect("liquidity amounts fit");
-    (amount0, amount1)
-}
+use crate::constants::{INTERVAL, Q96, WAD};
+use crate::errors::ValidationError;
+use crate::math::fixed_point::{mul_div, s_full_mul_div, u512_to_u256};
+use crate::math::swap::{amount0_delta, amount1_delta};
+use crate::math::tick::get_sqrt_ratio_at_tick;
 
 /// One `TickInfo` from the Perp's tick funding mapping.
 #[derive(Debug, Clone, Copy, Default)]
@@ -185,129 +158,135 @@ impl MakerMarketSnapshot {
     /// [`Self::mark_price_x96`] for the utilization leg (the contract
     /// recomputes the mark inside `accrue`; passing the current mark keeps
     /// the replay within micro-dollars).
-    pub fn accrue(&mut self, accrual: &AccrualInputs) {
+    pub fn accrue(&mut self, accrual: &AccrualInputs) -> Result<(), ValidationError> {
         let dt = accrual.now.saturating_sub(accrual.last_touch);
         if dt == 0 {
-            return;
+            return Ok(());
         }
         let dt_days = U256::from(dt) * Q96 / U256::from(INTERVAL);
-        let funding_accrued = s_full_mul_div_infallible(
-            I256::try_from(accrual.funding_per_day_wad).expect("rate fits"),
-            I256::try_from(dt_days).expect("dt_days fits"),
+        let funding_accrued = s_full_mul_div(
+            I256::try_from(accrual.funding_per_day_wad).expect("i128 fits I256"),
+            to_i256(dt_days)?,
             WAD,
             false,
-        );
+        )?;
         self.funding_x96 += funding_accrued;
-        self.funding_div_sqrt_p_x96 += s_full_mul_div_infallible(
+        self.funding_div_sqrt_p_x96 += s_full_mul_div(
             funding_accrued,
             I256::from_raw(Q96),
             self.sqrt_amm_price_x96,
             false,
-        );
+        )?;
 
-        let dt_days_mult_mark = full_mul_div(dt_days, self.mark_price_x96, Q96);
-        let lu_accrued = full_mul_div(
+        let dt_days_mult_mark = mul_div(dt_days, self.mark_price_x96, Q96, false)?;
+        let lu_accrued = mul_div(
             U256::from(accrual.long_util_fee_per_day_wad),
             dt_days_mult_mark,
             WAD,
-        );
-        let su_accrued = full_mul_div(
+            false,
+        )?;
+        let su_accrued = mul_div(
             U256::from(accrual.short_util_fee_per_day_wad),
             dt_days_mult_mark,
             WAD,
-        );
+            false,
+        )?;
         if accrual.cap_long != 0 {
-            self.long_util_earnings_x96 += full_mul_div(
+            self.long_util_earnings_x96 += mul_div(
                 lu_accrued,
                 U256::from(accrual.oi_long),
                 U256::from(accrual.cap_long),
-            );
+                false,
+            )?;
         }
         if accrual.cap_short != 0 {
-            self.short_util_earnings_x96 += full_mul_div(
+            self.short_util_earnings_x96 += mul_div(
                 su_accrued,
                 U256::from(accrual.oi_short),
                 U256::from(accrual.cap_short),
-            );
+                false,
+            )?;
         }
+        Ok(())
     }
 
     /// Compute the full settle preview for one maker position.
-    pub fn maker_equity(&self, maker: &MakerState) -> MakerEquityBreakdown {
-        let sqrt_l = get_sqrt_ratio_at_tick(maker.tick_lower).expect("valid tick");
-        let sqrt_u = get_sqrt_ratio_at_tick(maker.tick_upper).expect("valid tick");
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ValidationError::InvalidTickRange`] for out-of-range ticks
+    /// and [`ValidationError::Overflow`] if an intermediate exceeds its
+    /// integer domain — both indicate corrupt inputs, since chain-consistent
+    /// state stays in range.
+    pub fn maker_equity(
+        &self,
+        maker: &MakerState,
+    ) -> Result<MakerEquityBreakdown, ValidationError> {
+        let sqrt_l = get_sqrt_ratio_at_tick(maker.tick_lower)?;
+        let sqrt_u = get_sqrt_ratio_at_tick(maker.tick_upper)?;
         let (mf_below, mf_within, mf_div_sqrt_within) = self.maker_cuml_funding(maker);
 
         // ── makerFeesAccrued ────────────────────────────────────────────
-        let base_funding = s_full_mul_div_infallible(
-            I256::try_from(maker.delta_amount0).expect("amount0 fits"),
+        let base_funding = s_full_mul_div(
+            I256::try_from(maker.delta_amount0).expect("i128 fits I256"),
             self.funding_x96 - maker.last_cuml_funding_x96,
             Q96,
             true,
-        );
-        let perp_below = I256::try_from(
-            amount0_delta(sqrt_l, sqrt_u, maker.liquidity, false).expect("liquidity amounts fit"),
-        )
-        .expect("fits");
-        let funding_below =
-            s_full_mul_div_infallible(perp_below, mf_below - maker.last_below_x96, Q96, true);
+        )?;
+        let perp_below = to_i256(amount0_delta(sqrt_l, sqrt_u, maker.liquidity, false)?)?;
+        let funding_below = s_full_mul_div(perp_below, mf_below - maker.last_below_x96, Q96, true)?;
         let div_amm = mf_div_sqrt_within - maker.last_div_sqrt_within_x96;
         let d_within = mf_within - maker.last_within_x96;
-        let div_upper = s_full_mul_div_infallible(d_within, I256::from_raw(Q96), sqrt_u, false);
-        let funding_within = s_full_mul_div_infallible(
-            I256::try_from(maker.liquidity).expect("liquidity fits"),
+        let div_upper = s_full_mul_div(d_within, I256::from_raw(Q96), sqrt_u, false)?;
+        let funding_within = s_full_mul_div(
+            I256::try_from(maker.liquidity).expect("u128 fits I256"),
             div_amm - div_upper,
             Q96,
             true,
-        );
+        )?;
         let funding = base_funding + funding_below + funding_within;
 
-        let long_util = full_mul_div(
+        let long_util = mul_div(
             U256::from(maker.cap_long_6dec),
             self.long_util_earnings_x96 - maker.last_long_util_earnings_x96,
             Q96,
-        );
-        let short_util = full_mul_div(
+            false,
+        )?;
+        let short_util = mul_div(
             U256::from(maker.cap_short_6dec),
             self.short_util_earnings_x96 - maker.last_short_util_earnings_x96,
             Q96,
-        );
+            false,
+        )?;
 
         // ── V4 LP fees: liquidity × Δ feeGrowthInside1 / 2^128 ──────────
         // Fee growth deltas wrap by design in Uniswap; wrapping_sub matches.
         let fee_growth_delta = maker
             .fee_growth_inside1_x128
             .wrapping_sub(maker.fee_growth_inside1_last_x128);
-        let lp_fees = (U512::from(maker.liquidity) * U512::from(fee_growth_delta)) >> 128;
-        let lp_fees = U256::from(lp_fees);
+        let lp_fees =
+            u512_to_u256((U512::from(maker.liquidity) * U512::from(fee_growth_delta)) >> 128)?;
 
         // ── valPnl (maker overload) ─────────────────────────────────────
         let (perps, usd) =
-            amounts_for_liquidity(self.sqrt_amm_price_x96, sqrt_l, sqrt_u, maker.liquidity);
-        let liquidity_val = full_mul_div(perps, self.mark_price_x96, Q96) + usd;
-        let pos_val = full_mul_div(
+            amounts_for_liquidity(self.sqrt_amm_price_x96, sqrt_l, sqrt_u, maker.liquidity)?;
+        let liquidity_val = mul_div(perps, self.mark_price_x96, Q96, false)? + usd;
+        let pos_val = mul_div(
             U256::from(maker.delta_amount0.unsigned_abs()),
             self.mark_price_x96,
             Q96,
-        ) + U256::from(maker.delta_amount1.unsigned_abs());
-        let unrealized =
-            I256::try_from(liquidity_val).expect("fits") - I256::try_from(pos_val).expect("fits");
+            false,
+        )? + U256::from(maker.delta_amount1.unsigned_abs());
+        let unrealized = to_i256(liquidity_val)? - to_i256(pos_val)?;
 
-        let usd6 =
-            |v: U256| u64::try_from(v.min(U256::from(u64::MAX))).unwrap_or(u64::MAX) as f64 / 1e6;
-        let usd6_i = |v: I256| {
-            let neg = v.is_negative();
-            let m = usd6(v.unsigned_abs());
-            if neg { -m } else { m }
-        };
-        MakerEquityBreakdown {
+        Ok(MakerEquityBreakdown {
             margin: maker.margin_6dec as f64 / 1e6,
-            funding: usd6_i(funding),
+            funding: usd6_signed(funding),
             long_util_earnings: usd6(long_util),
             short_util_earnings: usd6(short_util),
             lp_fees: usd6(lp_fees),
-            unrealized_pnl: usd6_i(unrealized),
-        }
+            unrealized_pnl: usd6_signed(unrealized),
+        })
     }
 
     /// `PerpLogic.makerCumlFunding`: assemble the band's cumulative funding
@@ -369,6 +348,44 @@ pub fn fee_growth_inside1(
         global_x128.wrapping_sub(outside_upper_x128)
     };
     global_x128.wrapping_sub(below).wrapping_sub(above)
+}
+
+/// Uniswap `getAmountsForLiquidity` with the price clamped into the range.
+fn amounts_for_liquidity(
+    sqrt_p: U256,
+    sqrt_a: U256,
+    sqrt_b: U256,
+    liquidity: u128,
+) -> Result<(U256, U256), ValidationError> {
+    let (sa, sb) = if sqrt_a <= sqrt_b {
+        (sqrt_a, sqrt_b)
+    } else {
+        (sqrt_b, sqrt_a)
+    };
+    let sp = sqrt_p.clamp(sa, sb);
+    let amount0 = amount0_delta(sp, sb, liquidity, false)?;
+    let amount1 = amount1_delta(sa, sp, liquidity, false)?;
+    Ok((amount0, amount1))
+}
+
+fn to_i256(v: U256) -> Result<I256, ValidationError> {
+    I256::try_from(v).map_err(|_| ValidationError::Overflow {
+        context: "value exceeds I256".into(),
+    })
+}
+
+/// 6-decimal USD atoms to f64, saturating at `u64::MAX` atoms.
+fn usd6(v: U256) -> f64 {
+    v.min(U256::from(u64::MAX)).to::<u64>() as f64 / 1e6
+}
+
+fn usd6_signed(v: I256) -> f64 {
+    let magnitude = usd6(v.unsigned_abs());
+    if v.is_negative() {
+        -magnitude
+    } else {
+        magnitude
+    }
 }
 
 #[cfg(test)]
@@ -444,8 +461,8 @@ mod tests {
     #[test]
     fn golden_vector_reproduces_pos54_liquidation_settle() {
         let (mut market, accrual, maker) = golden_market_and_maker();
-        market.accrue(&accrual);
-        let b = market.maker_equity(&maker);
+        market.accrue(&accrual).unwrap();
+        let b = market.maker_equity(&maker).unwrap();
 
         assert!(
             (b.funding - 209.633223).abs() < 1e-4,
@@ -481,13 +498,20 @@ mod tests {
     #[test]
     fn accrual_replay_moves_funding_forward() {
         let (mut market, accrual, maker) = golden_market_and_maker();
-        let stale = market.maker_equity(&maker);
-        market.accrue(&accrual);
-        let fresh = market.maker_equity(&maker);
+        let stale = market.maker_equity(&maker).unwrap();
+        market.accrue(&accrual).unwrap();
+        let fresh = market.maker_equity(&maker).unwrap();
         assert!(fresh.funding > stale.funding, "funding accrues over dt");
         assert!((fresh.funding - stale.funding) < 5.0, "dt is ~1.6h");
         // Utilization also accrues.
         assert!(fresh.short_util_earnings >= stale.short_util_earnings);
+    }
+
+    #[test]
+    fn out_of_range_ticks_surface_as_errors_not_panics() {
+        let (market, _, mut maker) = golden_market_and_maker();
+        maker.tick_upper = 1_000_000; // beyond the Uniswap tick domain
+        assert!(market.maker_equity(&maker).is_err());
     }
 
     #[test]
