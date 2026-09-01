@@ -18,30 +18,18 @@
 //! settle: the golden test reproduces the `MakerConverted` event of the
 //! CHINA-PC pos-54 liquidation from pre-liquidation chain state.
 //!
-//! Two reads have no contract getter and go through raw storage slots, both
-//! verified against live chain data:
-//! - `s.ticks[tick]` on the Perp: mapping at slot 6 (`PerpStorage` starts at
-//!   slot 3; `positions`/`makers`/`takers` precede `ticks`). Cross-checked by
-//!   the SDK's production-verified `emas` slot 11.
-//! - The V4 `PoolManager` pool state at `keccak(poolId, 6)`: global fee
-//!   growth (+2), per-tick fee growth outside (ticks mapping at +4, member
-//!   +2), and per-position fee growth checkpoints (positions mapping at +6,
-//!   member +2). Only `token1` (USDC) fee growth matters — the pool is
-//!   fee-0 and taker fees arrive as `donate`s in USDC.
-//!
-//! This module is pure math over pre-fetched inputs. The chain-read layer
-//! that populates it lives in the client: `PerpClient::read_maker_equities`.
+//! This module is pure math over pre-fetched inputs, mirroring
+//! [`swap`](crate::math::swap): a block-pinned [`MarketState`] plus
+//! per-position [`MakerState`] rows. The chain-read layer that populates
+//! them (including the raw storage-slot reads, see
+//! [`storage`](crate::math::storage)) lives in the client:
+//! `PerpClient::read_maker_equities`.
 
 use crate::constants::{INTERVAL, Q96, WAD};
 use crate::math::fixed_point::{mul_div, s_full_mul_div};
 use crate::math::swap::{amount0_delta, amount1_delta};
 use crate::math::tick::get_sqrt_ratio_at_tick;
-use alloy::primitives::{B256, I256, U256, U512, keccak256};
-
-/// `PerpStorage.ticks` mapping slot (base 3 + field index 3).
-const PERP_TICKS_SLOT: u64 = 6;
-/// `PoolManager._pools` mapping slot.
-const POOL_MANAGER_POOLS_SLOT: u64 = 6;
+use alloy::primitives::{I256, U256, U512};
 
 /// `floor(a × b / d)`: the canonical [`mul_div`], with the fallibility
 /// unwrapped locally — error propagation lands in a later commit.
@@ -342,51 +330,6 @@ pub fn compute_maker_equity(market: &MarketState, maker: &MakerState) -> MakerEq
     }
 }
 
-// ── Storage-slot helpers ────────────────────────────────────────────
-
-pub(crate) fn mapping_slot(key: B256, slot: U256) -> U256 {
-    let mut buf = [0u8; 64];
-    buf[..32].copy_from_slice(key.as_slice());
-    buf[32..].copy_from_slice(&slot.to_be_bytes::<32>());
-    U256::from_be_bytes(keccak256(buf).0)
-}
-
-pub(crate) fn signed_key(tick: i32) -> B256 {
-    B256::from(I256::try_from(tick).expect("tick fits").into_raw())
-}
-
-/// Slot of `s.ticks[tick]` on the Perp contract.
-pub fn perp_tick_slot(tick: i32) -> U256 {
-    mapping_slot(signed_key(tick), U256::from(PERP_TICKS_SLOT))
-}
-
-/// Base slot of the pool's `Pool.State` inside the PoolManager.
-pub fn pool_state_slot(pool_id: B256) -> U256 {
-    mapping_slot(pool_id, U256::from(POOL_MANAGER_POOLS_SLOT))
-}
-
-/// Slot of `state.ticks[tick]` inside the pool state (fee growth at +2).
-pub fn v4_tick_slot(pool_id: B256, tick: i32) -> U256 {
-    mapping_slot(signed_key(tick), pool_state_slot(pool_id) + U256::from(4u8))
-}
-
-/// Slot of the V4 position keyed by `(owner, tickLower, tickUpper, salt)`.
-pub fn v4_position_slot(
-    pool_id: B256,
-    owner: alloy::primitives::Address,
-    tick_lower: i32,
-    tick_upper: i32,
-    salt: B256,
-) -> U256 {
-    let mut packed = Vec::with_capacity(20 + 3 + 3 + 32);
-    packed.extend_from_slice(owner.as_slice());
-    packed.extend_from_slice(&tick_lower.to_be_bytes()[1..]);
-    packed.extend_from_slice(&tick_upper.to_be_bytes()[1..]);
-    packed.extend_from_slice(salt.as_slice());
-    let key = keccak256(&packed);
-    mapping_slot(key, pool_state_slot(pool_id) + U256::from(6u8))
-}
-
 /// Compute `feeGrowthInside1X128` for a band from the global growth and the
 /// two ticks' `feeGrowthOutside1X128`, per Uniswap's `getFeeGrowthInside`.
 pub fn fee_growth_inside1(
@@ -546,16 +489,5 @@ mod tests {
             fee_growth_inside1(g, ol, ou, -10, 10, 20),
             U256::from(50u64).wrapping_sub(U256::from(100u64))
         );
-    }
-
-    #[test]
-    fn v4_position_slot_packs_signed_ticks() {
-        // Just shape checks: negative ticks must pack as 3-byte two's
-        // complement, and different salts must land on different slots.
-        let pool = B256::repeat_byte(1);
-        let owner = alloy::primitives::Address::repeat_byte(2);
-        let a = v4_position_slot(pool, owner, -60, 60, B256::from(U256::from(1u8)));
-        let b = v4_position_slot(pool, owner, -60, 60, B256::from(U256::from(2u8)));
-        assert_ne!(a, b);
     }
 }

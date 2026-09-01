@@ -13,7 +13,7 @@
 use std::collections::BTreeMap;
 
 use alloy::eips::{BlockId, BlockNumberOrTag};
-use alloy::primitives::{Address, B256, I256, U256, keccak256};
+use alloy::primitives::{Address, B256, I256, U256};
 use alloy::providers::Provider;
 use alloy::sol_types::{SolCall, SolValue};
 
@@ -32,8 +32,11 @@ use crate::hft::state_cache::{CachedBounds, CachedFees};
 use crate::math::ema::{PricePair, calculate_emas};
 use crate::math::maker_equity::{
     AccrualInputs, MakerEquityBreakdown, MakerState, MarketState, TickFunding, accrue_cumulatives,
-    compute_maker_equity, fee_growth_inside1, mapping_slot, perp_tick_slot, pool_state_slot,
-    signed_key, v4_position_slot, v4_tick_slot,
+    compute_maker_equity, fee_growth_inside1,
+};
+use crate::math::storage::{
+    perp_tick_slot, v4_fee_growth_global1_slot, v4_position_fee_growth_inside1_slot,
+    v4_tick_bitmap_slot, v4_tick_fee_growth_outside1_slot, v4_tick_slot,
 };
 use crate::math::swap::{TakerMarketSnapshot, TickLiquidity};
 use crate::types::{Bounds, Fees, OpenInterest, PerpData, PerpSnapshot};
@@ -54,17 +57,6 @@ pub(super) struct BookImmutables {
     tick_spacing: i32,
     /// Contract `EMA_WINDOW` decay constant, in seconds.
     ema_window: u64,
-}
-
-fn add_slot(slot: B256, offset: u64) -> B256 {
-    let value = U256::from_be_bytes(slot.0).wrapping_add(U256::from(offset));
-    B256::from(value.to_be_bytes::<32>())
-}
-
-fn mapping_slot_signed(key: i32, base: B256) -> B256 {
-    // One keccak-layout implementation crate-wide (math::maker_equity).
-    let slot = mapping_slot(signed_key(key), U256::from_be_bytes(base.0));
-    B256::from(slot.to_be_bytes::<32>())
 }
 
 /// Convert an f64 mark price to X96 for the maker-equity reader.
@@ -226,12 +218,10 @@ impl PerpClient {
             ..
         } = *self.book_immutables().await?;
 
-        let state_slot = keccak256((pool_id, U256::from(6)).abi_encode());
-        let bitmap_base = add_slot(state_slot, 5);
         let min_word = MIN_TICK.div_euclid(spacing).div_euclid(256);
         let max_word = MAX_TICK.div_euclid(spacing).div_euclid(256);
         let bitmap_slots: Vec<B256> = (min_word..=max_word)
-            .map(|word| mapping_slot_signed(word, bitmap_base))
+            .map(|word| B256::from(v4_tick_bitmap_slot(pool_id, word)))
             .collect();
         let manager = IPoolManagerState::new(self.deployments.pool_manager, &self.provider);
         let bitmaps = manager
@@ -255,10 +245,9 @@ impl PerpClient {
             }
         }
 
-        let ticks_base = add_slot(state_slot, 4);
         let tick_slots: Vec<B256> = initialized
             .iter()
-            .map(|&initialized_tick| mapping_slot_signed(initialized_tick, ticks_base))
+            .map(|&initialized_tick| B256::from(v4_tick_slot(pool_id, initialized_tick)))
             .collect();
         let tick_words = if tick_slots.is_empty() {
             Vec::new()
@@ -825,7 +814,7 @@ impl PerpClient {
         let fg1_global = provider
             .get_storage_at(
                 deployments.pool_manager,
-                pool_state_slot(pool_id) + U256::from(2u8),
+                v4_fee_growth_global1_slot(pool_id),
             )
             .block_id(block_id)
             .await?;
@@ -861,23 +850,25 @@ impl PerpClient {
 
             let fg1_out_lower = read_slot(
                 deployments.pool_manager,
-                v4_tick_slot(pool_id, tick_lower) + U256::from(2u8),
+                v4_tick_fee_growth_outside1_slot(pool_id, tick_lower),
             )
             .await?;
             let fg1_out_upper = read_slot(
                 deployments.pool_manager,
-                v4_tick_slot(pool_id, tick_upper) + U256::from(2u8),
+                v4_tick_fee_growth_outside1_slot(pool_id, tick_upper),
             )
             .await?;
-            let position_slot = v4_position_slot(
-                pool_id,
-                deployments.perp,
-                tick_lower,
-                tick_upper,
-                B256::from(pos_id),
-            );
-            let fg1_inside_last =
-                read_slot(deployments.pool_manager, position_slot + U256::from(2u8)).await?;
+            let fg1_inside_last = read_slot(
+                deployments.pool_manager,
+                v4_position_fee_growth_inside1_slot(
+                    pool_id,
+                    deployments.perp,
+                    tick_lower,
+                    tick_upper,
+                    B256::from(pos_id),
+                ),
+            )
+            .await?;
 
             let (amount0, amount1) = unpack_balance_delta(pos.delta);
             let maker = MakerState {
