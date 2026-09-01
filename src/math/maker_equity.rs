@@ -34,7 +34,9 @@ use crate::constants::{INTERVAL, Q96, WAD};
 use crate::convert::scale_from_6dec;
 use crate::errors::ValidationError;
 use crate::math::BlockContext;
-use crate::math::fixed_point::{Rounding, mul_div, s_full_mul_div, u512_to_u256};
+use crate::math::fixed_point::{
+    Rounding, add_i, add_u, mul_div, s_full_mul_div, sub_i, sub_u, to_i256, u512_to_u256,
+};
 use crate::math::liquidity::amounts_for_liquidity;
 use crate::math::swap::amount0_delta;
 use crate::math::tick::get_sqrt_ratio_at_tick;
@@ -278,8 +280,8 @@ impl MakerMarketSnapshot {
             })?
             / U256::from(INTERVAL);
         let funding_accrued = s_full_mul_div(
-            I256::try_from(accrual.funding_per_day_wad).expect("i128 fits I256"),
-            to_i256(dt_days)?,
+            I256::unchecked_from(accrual.funding_per_day_wad),
+            to_i256(dt_days, "accrual dt in days")?,
             WAD,
             Rounding::TowardZero,
         )?;
@@ -363,7 +365,7 @@ impl MakerMarketSnapshot {
 
         // ── makerFeesAccrued ────────────────────────────────────────────
         let base_funding = s_full_mul_div(
-            I256::try_from(maker.delta_amount0).expect("i128 fits I256"),
+            I256::unchecked_from(maker.delta_amount0),
             sub_i(
                 self.funding_x96,
                 maker.last_cuml_funding_x96,
@@ -372,12 +374,10 @@ impl MakerMarketSnapshot {
             Q96,
             Rounding::Up,
         )?;
-        let perp_below = to_i256(amount0_delta(
-            sqrt_l,
-            sqrt_u,
-            maker.liquidity,
-            Rounding::TowardZero,
-        )?)?;
+        let perp_below = to_i256(
+            amount0_delta(sqrt_l, sqrt_u, maker.liquidity, Rounding::TowardZero)?,
+            "band perp amount",
+        )?;
         let funding_below = s_full_mul_div(
             perp_below,
             sub_i(mf_below, maker.last_below_x96, "below-band funding delta")?,
@@ -397,7 +397,7 @@ impl MakerMarketSnapshot {
         let div_upper =
             s_full_mul_div(d_within, I256::from_raw(Q96), sqrt_u, Rounding::TowardZero)?;
         let funding_within = s_full_mul_div(
-            I256::try_from(maker.liquidity).expect("u128 fits I256"),
+            I256::unchecked_from(maker.liquidity),
             sub_i(div_amm, div_upper, "within-band funding components")?,
             Q96,
             Rounding::Up,
@@ -453,22 +453,32 @@ impl MakerMarketSnapshot {
         )?;
         let residual_val = add_i(
             s_full_mul_div(
-                I256::try_from(maker.delta_amount0).expect("i128 fits I256"),
-                to_i256(self.mark_price_x96)?,
+                I256::unchecked_from(maker.delta_amount0),
+                to_i256(self.mark_price_x96, "mark price")?,
                 Q96,
                 Rounding::TowardZero,
             )?,
-            I256::try_from(maker.delta_amount1).expect("i128 fits I256"),
+            I256::unchecked_from(maker.delta_amount1),
             "deposit residual value",
         )?;
-        let unrealized = add_i(to_i256(liquidity_val)?, residual_val, "unrealized PnL")?;
+        let unrealized = add_i(
+            to_i256(liquidity_val, "band liquidity value")?,
+            residual_val,
+            "unrealized PnL",
+        )?;
 
         Ok(MakerEquityBreakdown {
-            margin_atoms: atoms(to_i256(U256::from(maker.margin_6dec))?, "margin")?,
+            margin_atoms: atoms(to_i256(U256::from(maker.margin_6dec), "margin")?, "margin")?,
             funding_atoms: atoms(funding, "accrued funding")?,
-            long_util_earnings_atoms: atoms(to_i256(long_util)?, "long utilization earnings")?,
-            short_util_earnings_atoms: atoms(to_i256(short_util)?, "short utilization earnings")?,
-            lp_fees_atoms: atoms(to_i256(lp_fees)?, "LP fees")?,
+            long_util_earnings_atoms: atoms(
+                to_i256(long_util, "long utilization earnings")?,
+                "long utilization earnings",
+            )?,
+            short_util_earnings_atoms: atoms(
+                to_i256(short_util, "short utilization earnings")?,
+                "short utilization earnings",
+            )?,
+            lp_fees_atoms: atoms(to_i256(lp_fees, "LP fees")?, "LP fees")?,
             unrealized_pnl_atoms: atoms(unrealized, "unrealized PnL")?,
         })
     }
@@ -555,42 +565,6 @@ pub fn fee_growth_inside1(
         global_x128.wrapping_sub(outside_upper_x128)
     };
     global_x128.wrapping_sub(below).wrapping_sub(above)
-}
-
-fn to_i256(v: U256) -> Result<I256, ValidationError> {
-    I256::try_from(v).map_err(|_| ValidationError::Overflow {
-        context: "value exceeds I256".into(),
-    })
-}
-
-// Chain-derived values must never wrap silently: alloy's `Signed` only
-// debug-asserts on overflow and ruint's `Sub` wraps in release, so every
-// add/sub on snapshot inputs goes through these checked helpers. An `Err`
-// means corrupt or mutually inconsistent inputs (e.g. a position checkpoint
-// ahead of the market cumulative), not a value to propagate.
-
-fn add_i(a: I256, b: I256, context: &'static str) -> Result<I256, ValidationError> {
-    a.checked_add(b).ok_or(ValidationError::Overflow {
-        context: context.into(),
-    })
-}
-
-fn sub_i(a: I256, b: I256, context: &'static str) -> Result<I256, ValidationError> {
-    a.checked_sub(b).ok_or(ValidationError::Overflow {
-        context: context.into(),
-    })
-}
-
-fn add_u(a: U256, b: U256, context: &'static str) -> Result<U256, ValidationError> {
-    a.checked_add(b).ok_or(ValidationError::Overflow {
-        context: context.into(),
-    })
-}
-
-fn sub_u(a: U256, b: U256, context: &'static str) -> Result<U256, ValidationError> {
-    a.checked_sub(b).ok_or(ValidationError::Overflow {
-        context: context.into(),
-    })
 }
 
 /// Maximum settle-component magnitude accepted into a breakdown: 2^124

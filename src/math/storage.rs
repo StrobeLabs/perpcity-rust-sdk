@@ -60,8 +60,7 @@ pub fn mapping_slot(key: B256, base: U256) -> U256 {
 /// Slot of `mapping[key]` for a signed integer key (two's-complement,
 /// sign-extended to 32 bytes).
 pub fn mapping_slot_signed(key: i32, base: U256) -> U256 {
-    // i32 always fits I256.
-    let key = I256::try_from(key).expect("i32 fits I256").into_raw();
+    let key = I256::unchecked_from(key).into_raw();
     mapping_slot(B256::from(key), base)
 }
 

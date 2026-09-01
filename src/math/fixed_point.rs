@@ -89,6 +89,48 @@ pub(crate) fn s_full_mul_div(
     Ok(if negative { -magnitude } else { magnitude })
 }
 
+/// Reinterpret an unsigned 256-bit value as signed, erroring when the
+/// value exceeds `I256::MAX`.
+pub(crate) fn to_i256(v: U256, context: &'static str) -> Result<I256, ValidationError> {
+    I256::try_from(v).map_err(|_| ValidationError::Overflow {
+        context: context.into(),
+    })
+}
+
+// Chain-derived values must never wrap silently: alloy's `Signed` only
+// debug-asserts on overflow and ruint's `Sub` wraps in release, so every
+// add/sub on snapshot inputs goes through these checked helpers. An `Err`
+// means corrupt or mutually inconsistent inputs (e.g. a position checkpoint
+// ahead of the market cumulative), not a value to propagate.
+
+/// Checked signed addition.
+pub(crate) fn add_i(a: I256, b: I256, context: &'static str) -> Result<I256, ValidationError> {
+    a.checked_add(b).ok_or(ValidationError::Overflow {
+        context: context.into(),
+    })
+}
+
+/// Checked signed subtraction.
+pub(crate) fn sub_i(a: I256, b: I256, context: &'static str) -> Result<I256, ValidationError> {
+    a.checked_sub(b).ok_or(ValidationError::Overflow {
+        context: context.into(),
+    })
+}
+
+/// Checked unsigned addition.
+pub(crate) fn add_u(a: U256, b: U256, context: &'static str) -> Result<U256, ValidationError> {
+    a.checked_add(b).ok_or(ValidationError::Overflow {
+        context: context.into(),
+    })
+}
+
+/// Checked unsigned subtraction.
+pub(crate) fn sub_u(a: U256, b: U256, context: &'static str) -> Result<U256, ValidationError> {
+    a.checked_sub(b).ok_or(ValidationError::Overflow {
+        context: context.into(),
+    })
+}
+
 /// Narrow a 512-bit value to `U256`, erroring instead of truncating.
 pub(crate) fn u512_to_u256(value: U512) -> Result<U256, ValidationError> {
     if value > U512::from(U256::MAX) {
