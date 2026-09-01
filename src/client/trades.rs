@@ -401,20 +401,35 @@ impl PerpClient {
     /// Check whether `pos_id` is liquidatable right now, via `eth_call`.
     ///
     /// The contract is the health oracle: `Ok` means the liquidation would
-    /// execute; a typed revert (`NotLiquidatable`, `NonMakerPosition`, a
-    /// utilization gate from capacity pinned under live OI, …) means not —
-    /// or not yet. Gate [`Self::liquidate_maker`] on this to avoid burning
-    /// gas on reverts.
+    /// execute; a contract revert (`NotLiquidatable` — retry later;
+    /// `NonMakerPosition` — drop the id; a utilization gate from capacity
+    /// pinned under live OI, …) surfaces as
+    /// [`TransactionError::SimulationReverted`](crate::errors::TransactionError::SimulationReverted)
+    /// with the decoded error name, so callers can tell "not yet" from
+    /// "never" from a transport failure
+    /// ([`GasUnavailable`](crate::errors::TransactionError::GasUnavailable),
+    /// transient — keep liquidating). The simulation runs from this client's
+    /// address and is capped at [`GasLimits::LIQUIDATE`], exactly like the
+    /// send. Gate [`Self::liquidate_maker`] on this to avoid burning gas on
+    /// reverts.
     pub async fn simulate_liquidate_maker(
         &self,
         pos_id: U256,
         fee_recipient: Address,
     ) -> Result<()> {
-        let contract = Perp::new(self.deployments.perp, &self.provider);
-        contract
-            .liquidateMaker(pos_id, fee_recipient)
-            .call()
-            .await?;
+        let calldata: Bytes = Perp::liquidateMakerCall {
+            posId: pos_id,
+            liquidationFeeRecipient: fee_recipient,
+        }
+        .abi_encode()
+        .into();
+        self.preflight_call(
+            self.deployments.perp,
+            &calldata,
+            0,
+            Some(GasLimits::LIQUIDATE),
+        )
+        .await?;
         Ok(())
     }
 
@@ -449,11 +464,19 @@ impl PerpClient {
         pos_id: U256,
         fee_recipient: Address,
     ) -> Result<()> {
-        let contract = Perp::new(self.deployments.perp, &self.provider);
-        contract
-            .liquidateTaker(pos_id, fee_recipient)
-            .call()
-            .await?;
+        let calldata: Bytes = Perp::liquidateTakerCall {
+            posId: pos_id,
+            liquidationFeeRecipient: fee_recipient,
+        }
+        .abi_encode()
+        .into();
+        self.preflight_call(
+            self.deployments.perp,
+            &calldata,
+            0,
+            Some(GasLimits::LIQUIDATE),
+        )
+        .await?;
         Ok(())
     }
 
