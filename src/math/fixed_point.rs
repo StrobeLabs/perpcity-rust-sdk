@@ -60,17 +60,14 @@ pub(crate) fn s_full_mul_div(
     d: U256,
     round_up: bool,
 ) -> Result<I256, ValidationError> {
-    let (ua, ub) = (a.unsigned_abs(), b.unsigned_abs());
     let negative = (a.is_negative() && b > I256::ZERO) || (a > I256::ZERO && b.is_negative());
-    let magnitude =
-        I256::try_from(mul_div(ua, ub, d, false)?).map_err(|_| ValidationError::Overflow {
-            context: "signed mul-div magnitude exceeds I256".into(),
-        })?;
-    let mut result = if negative { -magnitude } else { magnitude };
-    if round_up && !negative && ua.widening_mul(ub) % U512::from(d) != U512::ZERO {
-        result += I256::ONE;
-    }
-    Ok(result)
+    // The contract's "+1 on a remainder, non-negative results only" is
+    // exactly `mulDiv`'s own round-up applied to the magnitude.
+    let magnitude = mul_div(a.unsigned_abs(), b.unsigned_abs(), d, round_up && !negative)?;
+    let magnitude = I256::try_from(magnitude).map_err(|_| ValidationError::Overflow {
+        context: "signed mul-div magnitude exceeds I256".into(),
+    })?;
+    Ok(if negative { -magnitude } else { magnitude })
 }
 
 /// Narrow a 512-bit value to `U256`, erroring instead of truncating.
