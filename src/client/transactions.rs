@@ -135,8 +135,10 @@ impl<'a> TxBuilder<'a> {
                 .into());
             }
             Some(limit) => {
+                // Preflight at the pinned limit itself: a call that runs out
+                // of gas at this limit must fail here, not on-chain.
                 self.client
-                    .preflight_call(self.to, &self.calldata, self.value)
+                    .preflight_call(self.to, &self.calldata, self.value, Some(limit))
                     .await?;
                 limit
             }
@@ -268,6 +270,27 @@ impl<'a> TxBuilder<'a> {
     }
 }
 
+/// Build the preflight `eth_call` request. Kept as a pure function so the
+/// request shape — in particular that a pinned gas limit is carried onto
+/// the simulation — is unit-testable without a provider.
+fn preflight_request(
+    from: Address,
+    to: Address,
+    calldata: &Bytes,
+    value: u128,
+    gas_limit: Option<u64>,
+) -> TransactionRequest {
+    let tx = TransactionRequest::default()
+        .with_from(from)
+        .with_to(to)
+        .with_input(calldata.clone())
+        .with_value(U256::from(value));
+    match gas_limit {
+        Some(limit) => tx.with_gas_limit(limit),
+        None => tx,
+    }
+}
+
 // ── PerpClient transaction methods ──────────────────────────────────
 
 impl PerpClient {
@@ -317,17 +340,22 @@ impl PerpClient {
     }
 
     /// Run an `eth_call` simulation to verify a transaction won't revert.
-    async fn preflight_call(
+    ///
+    /// When `gas_limit` is set, the simulation is capped at exactly the
+    /// limit the transaction will broadcast with, so an execution that
+    /// cannot finish inside a pinned limit fails preflight instead of
+    /// burning the gas on-chain — the one failure a fixed limit like
+    /// [`GasLimits::LIQUIDATE`](crate::hft::gas::GasLimits::LIQUIDATE)
+    /// exists to prevent. Without a limit the node simulates with its
+    /// default gas cap.
+    pub(super) async fn preflight_call(
         &self,
         to: Address,
         calldata: &Bytes,
         value: u128,
+        gas_limit: Option<u64>,
     ) -> std::result::Result<(), TransactionError> {
-        let tx = TransactionRequest::default()
-            .with_from(self.address)
-            .with_to(to)
-            .with_input(calldata.clone())
-            .with_value(U256::from(value));
+        let tx = preflight_request(self.address, to, calldata, value, gas_limit);
 
         self.provider.call(tx).await.map_err(|e| {
             let error_str = e.to_string();
@@ -376,7 +404,11 @@ impl PerpClient {
         };
         if let Some(limit) = cached_limit {
             tracing::trace!(selector = %alloy::primitives::hex::encode(selector), limit, "gas estimate cache hit");
-            self.preflight_call(to, calldata, value).await?;
+            // Cap the preflight at the cached limit the transaction will be
+            // sent with, so a stale (too-small) cached estimate surfaces as
+            // a failed preflight rather than an on-chain out-of-gas.
+            self.preflight_call(to, calldata, value, Some(limit))
+                .await?;
             return Ok(limit);
         }
 
@@ -428,5 +460,30 @@ impl PerpClient {
                 .into()
             }
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The explicit-limit path exists for operations (liquidations) where
+    /// `eth_estimateGas` has passed while the real execution ran out of gas.
+    /// The preflight can only catch that failure if the simulation is capped
+    /// at the pinned limit — an uncapped `eth_call` runs under the node's
+    /// default gas cap and succeeds where the pinned limit would OOG.
+    #[test]
+    fn preflight_request_pins_the_explicit_gas_limit() {
+        let from = Address::repeat_byte(1);
+        let to = Address::repeat_byte(2);
+        let calldata = Bytes::from_static(&[0xde, 0xad, 0xbe, 0xef]);
+
+        let pinned = preflight_request(from, to, &calldata, 7, Some(3_000_000));
+        assert_eq!(pinned.gas, Some(3_000_000));
+        assert_eq!(pinned.from, Some(from));
+        assert_eq!(pinned.value, Some(U256::from(7u8)));
+
+        let unpinned = preflight_request(from, to, &calldata, 0, None);
+        assert_eq!(unpinned.gas, None, "no limit means the node default cap");
     }
 }
