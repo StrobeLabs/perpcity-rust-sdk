@@ -446,19 +446,33 @@ impl PerpClient {
 
     // ── Liquidations (permissionless) ───────────────────────────────
 
-    /// Check whether `pos_id` is liquidatable right now, via `eth_call`.
+    /// Check whether a maker `pos_id` is liquidatable right now, via
+    /// `eth_call` — the batch/scanner probe.
     ///
-    /// The contract is the health oracle: `Ok` means the liquidation would
-    /// execute; a contract revert (`NotLiquidatable` — retry later;
-    /// `NonMakerPosition` — drop the id; a utilization gate from capacity
-    /// pinned under live OI, …) surfaces as
-    /// [`TransactionError::SimulationReverted`](crate::errors::TransactionError::SimulationReverted)
-    /// with the decoded error name, so callers can tell "not yet" from
-    /// "never" from a transport failure
-    /// ([`GasUnavailable`](crate::errors::TransactionError::GasUnavailable),
-    /// transient — keep liquidating). The simulation runs from this client's
-    /// address and is capped at [`GasLimits::LIQUIDATE`], exactly like the
-    /// send.
+    /// Use this to sweep candidate ids WITHOUT racing: the contract is the
+    /// health oracle, and `Ok` means the liquidation would execute. When a
+    /// position looks liquidatable and latency matters, call
+    /// [`Self::liquidate_maker`] directly instead of chaining
+    /// simulate-then-send — the send runs its own preflight, so the extra
+    /// serial `eth_call` only costs time in the race.
+    ///
+    /// A contract revert surfaces as
+    /// [`TransactionError::SimulationReverted`](crate::errors::TransactionError::SimulationReverted);
+    /// triage it typed via
+    /// [`TransactionError::is_revert`](crate::errors::TransactionError::is_revert):
+    ///
+    /// - `err.is_revert::<Perp::NotLiquidatable>()` — healthy right now;
+    ///   retry the id later.
+    /// - `err.is_revert::<Perp::NonMakerPosition>()` — a taker or burned
+    ///   id on the maker path; drop it (or route it to the taker twin).
+    /// - other reverts (a utilization gate from capacity pinned under live
+    ///   OI, …) — inspect `error_name`.
+    /// - transport failures
+    ///   ([`GasUnavailable`](crate::errors::TransactionError::GasUnavailable),
+    ///   transient) — keep liquidating.
+    ///
+    /// The simulation runs from this client's address and is capped at
+    /// [`GasLimits::LIQUIDATE`], exactly like the send.
     pub async fn simulate_liquidate_maker(
         &self,
         pos_id: U256,
@@ -471,12 +485,17 @@ impl PerpClient {
     /// Liquidate an unhealthy maker position (always the full position on
     /// the deployed contracts). The liquidation fee goes to `fee_recipient`.
     ///
+    /// Safe to call directly in the liquidation race — no prior
+    /// [`Self::simulate_liquidate_maker`] needed: every send preflights at
+    /// the pinned limit before broadcast, so a position that turns out
+    /// healthy (or was already liquidated by a competitor) surfaces as a
+    /// decoded
+    /// [`TransactionError::SimulationReverted`](crate::errors::TransactionError::SimulationReverted)
+    /// without burning gas. Reserve the simulate twin for scanning.
+    ///
     /// Sends with the fixed [`GasLimits::LIQUIDATE`] bound instead of
     /// estimating: Arbitrum liquidations have gone out-of-gas where the gas
-    /// estimate passed. The pre-broadcast simulation still runs, so a
-    /// would-be revert surfaces as a decoded
-    /// [`TransactionError::SimulationReverted`](crate::errors::TransactionError::SimulationReverted)
-    /// instead of a burned transaction.
+    /// estimate passed.
     pub async fn liquidate_maker(
         &self,
         pos_id: U256,
@@ -487,7 +506,17 @@ impl PerpClient {
             .await
     }
 
-    /// Taker-side twin of [`Self::simulate_liquidate_maker`].
+    /// Check whether a taker `pos_id` is liquidatable right now, via
+    /// `eth_call` — the batch/scanner probe for the taker book.
+    ///
+    /// Identical contract semantics to
+    /// [`Self::simulate_liquidate_maker`], including the typed-revert
+    /// triage via
+    /// [`TransactionError::is_revert`](crate::errors::TransactionError::is_revert)
+    /// — except the "wrong book" revert here is `Perp::NonTakerPosition`
+    /// (drop the id, or route it to the maker twin). As on the maker side,
+    /// prefer calling [`Self::liquidate_taker`] directly when racing; this
+    /// probe is for sweeps.
     pub async fn simulate_liquidate_taker(
         &self,
         pos_id: U256,
@@ -497,7 +526,14 @@ impl PerpClient {
             .await
     }
 
-    /// Taker-side twin of [`Self::liquidate_maker`].
+    /// Liquidate an unhealthy taker position (always the full position on
+    /// the deployed contracts). The liquidation fee goes to `fee_recipient`.
+    ///
+    /// Safe to call directly in the race, exactly like
+    /// [`Self::liquidate_maker`]: the send preflights at the pinned
+    /// [`GasLimits::LIQUIDATE`] bound, so a would-be revert decodes into
+    /// [`TransactionError::SimulationReverted`](crate::errors::TransactionError::SimulationReverted)
+    /// instead of burning gas on-chain.
     pub async fn liquidate_taker(
         &self,
         pos_id: U256,
