@@ -28,6 +28,7 @@
 //! [`PerpClient::read_maker_equities`](crate::client::PerpClient::read_maker_equities).
 
 use alloy::primitives::{I256, U256, U512};
+use serde::{Deserialize, Serialize};
 
 use crate::constants::{INTERVAL, Q96, WAD};
 use crate::convert::scale_from_6dec;
@@ -38,7 +39,7 @@ use crate::math::swap::{amount0_delta, amount1_delta};
 use crate::math::tick::get_sqrt_ratio_at_tick;
 
 /// One `TickInfo` from the Perp's tick funding mapping.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[allow(missing_docs)] // raw chain inputs, named after the contract fields
 pub struct TickFunding {
     pub cuml_funding_opp_x96: I256,
@@ -50,7 +51,7 @@ pub struct TickFunding {
 /// The funding/earnings cumulatives are stored on chain as of the market's
 /// last touch; call [`Self::accrued`] to replay them to the snapshot's
 /// timestamp before computing equities.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MakerMarketSnapshot {
     /// Block containing all state in this snapshot.
     pub block: BlockContext,
@@ -72,7 +73,7 @@ pub struct MakerMarketSnapshot {
 
 /// Raw rates + accrual context for replaying `accrue()` from `lastTouch` to
 /// `now`: the on-chain cumulatives are only current as of the last touch.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[allow(missing_docs)] // raw chain inputs, named after the contract fields
 pub struct AccrualInputs {
     pub funding_per_day_wad: i128,
@@ -88,7 +89,7 @@ pub struct AccrualInputs {
 
 /// Per-position inputs: the position row, maker row, its band's tick funding
 /// checkpoints, and the V4 fee-growth state for its liquidity position.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[allow(missing_docs)] // raw chain inputs, named after the contract fields
 pub struct MakerState {
     pub margin_6dec: u128,
@@ -123,7 +124,7 @@ pub struct MakerState {
 /// the protocol's 2^120-atom accounting supply), so the derived sums
 /// ([`Self::settled_margin_atoms`], [`Self::equity_atoms`],
 /// [`Self::accrued_income_atoms`]) can never overflow `i128`.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MakerEquityBreakdown {
     /// Last-settled margin (`positions(id).margin`), in atoms.
     pub margin_atoms: i128,
