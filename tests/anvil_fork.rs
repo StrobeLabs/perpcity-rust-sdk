@@ -593,7 +593,7 @@ async fn maker_equities_via_batched_reads() {
     let mark = client.get_mark_price().await.unwrap();
     assert!(
         client
-            .read_maker_equities(&[], mark)
+            .get_maker_equities(&[], mark)
             .await
             .unwrap()
             .is_empty()
@@ -602,7 +602,7 @@ async fn maker_equities_via_batched_reads() {
     // 4. Preview a range of position ids. CITI-NYC has live maker liquidity,
     //    so at least one open maker position must exist among the early ids.
     let pos_ids: Vec<U256> = (1u64..=20).map(U256::from).collect();
-    let equities = client.read_maker_equities(&pos_ids, mark).await.unwrap();
+    let equities = client.get_maker_equities(&pos_ids, mark).await.unwrap();
 
     // Non-maker ids are omitted, order follows the input, and every
     // returned id was requested.

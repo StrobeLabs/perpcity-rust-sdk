@@ -54,7 +54,7 @@ All examples load configuration from `.env` automatically via `dotenvy`.
 | **market_maker** | `cargo run --example market_maker` | LP position: calculate tick range around mark, estimate liquidity, open maker position. *Note: makers are currently subject to a 7-day lockup, so this example shouldn't run.* |
 | **hft_bot** | `cargo run --example hft_bot` | Full trading loop: multi-endpoint transport, momentum strategy, position manager with SL/TP/trailing stop, latency stats. |
 | **taker_price_impact** | `cargo run --example taker_price_impact` | Local, exact taker quoting over a block-pinned liquidity book: price impact, target-price sizing, hypothetical liquidity. |
-| **maker_equity** | `cargo run --example maker_equity` | Batched maker settle previews (`read_maker_equities`) plus a liquidation gated on the contract's own health check. |
+| **maker_equity** | `cargo run --example maker_equity` | Batched maker settle previews (`get_maker_equities`) plus a liquidation gated on the contract's own health check. |
 
 ## API Overview
 
@@ -123,7 +123,7 @@ let all = client.get_balances_batch(&addresses).await?;
 
 ### Maker Equity and Liquidations
 
-`read_maker_equities` computes, off-chain and pinned to one block, exactly
+`get_maker_equities` computes, off-chain and pinned to one block, exactly
 what the contract would settle for each open maker position if it were
 touched now — margin, accrued funding, utilization earnings, uncollected V4
 LP fees, and inventory PnL, in exact 6-decimal atoms (validated against a
@@ -131,7 +131,7 @@ real on-chain liquidation settle):
 
 ```rust
 let mark = client.get_mark_price().await?;
-for (pos_id, breakdown) in client.read_maker_equities(&pos_ids, mark).await? {
+for (pos_id, breakdown) in client.get_maker_equities(&pos_ids, mark).await? {
     if let Ok(b) = breakdown {
         println!("pos {pos_id}: equity {:.6} (accrued {:+.6})", b.equity(), b.accrued_income());
     }

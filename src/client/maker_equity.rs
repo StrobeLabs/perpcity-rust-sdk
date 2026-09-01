@@ -242,7 +242,7 @@ impl PerpClient {
     /// `mark_price` is the caller's current mark (snapshot / market-data
     /// cache); it prices `valPnl` and the accrual replay. It must be a
     /// positive finite number.
-    pub async fn read_maker_equities(
+    pub async fn get_maker_equities(
         &self,
         pos_ids: &[U256],
         mark_price: f64,
@@ -284,11 +284,11 @@ impl PerpClient {
 
         let (pending, failed) = split_maker_rows(pos_ids, &rows);
 
-        // Merge by input index: `read_pending_maker_equities` returns one
+        // Merge by input index: `get_pending_maker_equities` returns one
         // result per pending position (it maps over `pending`), so the zip
         // is structurally exhaustive — no positional counter to get wrong.
         let equities = self
-            .read_pending_maker_equities(&market, pool_id, block_id, &pending)
+            .get_pending_maker_equities(&market, pool_id, block_id, &pending)
             .await?;
         let mut out: Vec<(usize, U256, Result<MakerEquityBreakdown>)> = pending
             .iter()
@@ -308,7 +308,7 @@ impl PerpClient {
     }
 
     /// Resolve the safe lagged block and load + accrue the market-wide
-    /// snapshot for [`Self::read_maker_equities`] in one multicall.
+    /// snapshot for [`Self::get_maker_equities`] in one multicall.
     ///
     /// Returns the accrued snapshot, the pool id, and the block id every
     /// later read must pin to.
@@ -412,11 +412,11 @@ impl PerpClient {
     }
 
     /// Slot reads and math for the surviving positions of
-    /// [`Self::read_maker_equities`]: one `extsload` batch for the V4
+    /// [`Self::get_maker_equities`]: one `extsload` batch for the V4
     /// fee-growth slots (distinct band ticks read once), one `eth_getProof`
     /// batch for the Perp tick-funding slots (also deduplicated), degrading
     /// per position on failure.
-    async fn read_pending_maker_equities(
+    async fn get_pending_maker_equities(
         &self,
         market: &AccruedMakerSnapshot,
         pool_id: B256,
@@ -453,7 +453,7 @@ impl PerpClient {
             .iter()
             .flat_map(|maker| [maker.tick_lower, maker.tick_upper])
             .collect();
-        let tick_funding = self.read_tick_funding(block_id, &ticks).await?;
+        let tick_funding = self.get_tick_funding(block_id, &ticks).await?;
         let funding_for = |tick: i32| tick_funding_for(&tick_funding, tick);
 
         let equities = pending
@@ -515,7 +515,7 @@ impl PerpClient {
     /// probe is not repeated) and the read falls back to concurrent
     /// `eth_getStorageAt` with bounded concurrency, where a failed tick
     /// read degrades only the positions referencing that tick.
-    async fn read_tick_funding(
+    async fn get_tick_funding(
         &self,
         block_id: BlockId,
         ticks: &BTreeSet<i32>,
