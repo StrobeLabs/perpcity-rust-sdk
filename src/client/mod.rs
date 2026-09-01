@@ -40,6 +40,7 @@
 //! # }
 //! ```
 
+mod maker_equity;
 mod queries;
 mod trades;
 mod transactions;
