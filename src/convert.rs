@@ -247,7 +247,7 @@ pub fn price_f64_to_x96(price: f64) -> Result<U256, ValidationError> {
 /// ```
 /// # use perpcity_sdk::convert::price_to_sqrt_price_x96;
 /// # use perpcity_sdk::constants::Q96;
-/// # use alloy::primitives::{I256, U256};
+/// # use alloy::primitives::U256;
 /// let result = price_to_sqrt_price_x96(1.0).unwrap();
 /// // For price=1.0, sqrtPriceX96 ≈ Q96
 /// let diff = result.abs_diff(Q96);
@@ -318,7 +318,7 @@ pub fn sqrt_price_x96_to_price(sqrt_price_x96: U256) -> Result<f64, ValidationEr
     price_x96_to_f64(price_x96)
 }
 
-// ── Tests ──────────────────────────────────────────────────────────────
+// ── BalanceDelta unpacking ─────────────────────────────────────────────
 
 /// Unpack a Uniswap V4 `BalanceDelta` (packed `int256`) into `(amount0,
 /// amount1)` = (perp, USD), each a signed `int128` in two's-complement.
@@ -331,6 +331,8 @@ pub fn unpack_balance_delta(delta: I256) -> (i128, i128) {
     let amount1 = i128::from_be_bytes(bytes[16..32].try_into().unwrap());
     (amount0, amount1)
 }
+
+// ── Tests ──────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
