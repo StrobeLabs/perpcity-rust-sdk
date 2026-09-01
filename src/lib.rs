@@ -74,7 +74,8 @@ pub use math::BlockContext;
 
 #[doc(inline)]
 pub use math::maker_equity::{
-    AccrualInputs, MakerEquityBreakdown, MakerMarketSnapshot, MakerState, TickFunding,
+    AccrualInputs, AccruedMakerSnapshot, MakerEquityBreakdown, MakerMarketSnapshot, MakerState,
+    TickFunding,
 };
 
 #[doc(inline)]

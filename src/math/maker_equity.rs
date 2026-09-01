@@ -110,7 +110,7 @@ pub struct AccrualInputs {
 /// checkpoints, and the V4 fee-growth state for its liquidity position.
 /// Fields named after the contract's.
 ///
-/// `tick_lower < tick_upper` is required; [`MakerMarketSnapshot::maker_equity`]
+/// `tick_lower < tick_upper` is required; [`AccruedMakerSnapshot::maker_equity`]
 /// validates the ordering (and the Uniswap tick domain) before computing.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MakerState {
@@ -329,19 +329,32 @@ impl MakerEquityBreakdown {
 }
 
 impl MakerMarketSnapshot {
-    /// Replay `PerpLogic.accrue` from `lastTouch` to `now`, returning the
-    /// snapshot with its cumulatives advanced. Mirrors the contract exactly,
-    /// using [`Self::mark_price_x96`] for the utilization leg (the contract
-    /// recomputes the mark inside `accrue`; passing the current mark keeps
-    /// the replay within micro-dollars).
+    /// Replay `PerpLogic.accrue` from `lastTouch` to the accrual target,
+    /// returning an [`AccruedMakerSnapshot`] with the cumulatives advanced.
+    /// Mirrors the contract exactly, using [`Self::mark_price_x96`] for the
+    /// utilization leg (the contract recomputes the mark inside `accrue`;
+    /// passing the current mark keeps the replay within micro-dollars).
     ///
-    /// Consumes `self`: the replay is not idempotent (each application adds
-    /// another rate × dt), so the un-accrued snapshot is given up rather
-    /// than left around to be accrued twice.
-    pub fn accrued(mut self, accrual: &AccrualInputs) -> Result<Self, ValidationError> {
+    /// Consumes `self` and returns a distinct type: the replay is not
+    /// idempotent (each application adds another rate × dt), and equities
+    /// computed from an un-accrued snapshot would silently be stale to the
+    /// market's last touch — so [`AccruedMakerSnapshot::maker_equity`] is
+    /// only reachable through this replay.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ValidationError::Overflow`] when a replayed cumulative
+    /// exceeds its integer domain — chain-consistent rates over a sane dt
+    /// stay far in range, so an error indicates corrupt inputs (e.g. a
+    /// wall-clock timestamp fed as the accrual target against a stale
+    /// `last_touch`).
+    pub fn accrued(
+        mut self,
+        accrual: &AccrualInputs,
+    ) -> Result<AccruedMakerSnapshot, ValidationError> {
         let dt = accrual.now.saturating_sub(accrual.last_touch);
         if dt == 0 {
-            return Ok(self);
+            return Ok(AccruedMakerSnapshot(self));
         }
         let dt_days = U256::from(dt)
             .checked_mul(Q96)
@@ -408,7 +421,25 @@ impl MakerMarketSnapshot {
                 "accrued short utilization cumulative",
             )?;
         }
-        Ok(self)
+        Ok(AccruedMakerSnapshot(self))
+    }
+}
+
+/// A [`MakerMarketSnapshot`] whose cumulatives have been replayed to the
+/// snapshot block's timestamp via [`MakerMarketSnapshot::accrued`].
+///
+/// This is the only type that can compute equities: making the accrual a
+/// type-state means a stale, un-accrued snapshot cannot silently price a
+/// settle preview.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccruedMakerSnapshot(MakerMarketSnapshot);
+
+impl AccruedMakerSnapshot {
+    /// The underlying snapshot (block context, prices, replayed
+    /// cumulatives). Read-only: mutating access would break the accrual
+    /// type-state.
+    pub fn snapshot(&self) -> &MakerMarketSnapshot {
+        &self.0
     }
 
     /// Compute the full settle preview for one maker position.
@@ -431,13 +462,13 @@ impl MakerMarketSnapshot {
         }
         let sqrt_l = get_sqrt_ratio_at_tick(maker.tick_lower)?;
         let sqrt_u = get_sqrt_ratio_at_tick(maker.tick_upper)?;
-        let (mf_below, mf_within, mf_div_sqrt_within) = self.maker_cuml_funding(maker)?;
+        let (mf_below, mf_within, mf_div_sqrt_within) = self.0.maker_cuml_funding(maker)?;
 
         // ── makerFeesAccrued ────────────────────────────────────────────
         let base_funding = s_full_mul_div(
             I256::unchecked_from(maker.delta_amount0),
             sub_i(
-                self.funding_x96,
+                self.0.funding_x96,
                 maker.last_cuml_funding_x96,
                 "funding cumulative delta",
             )?,
@@ -481,7 +512,7 @@ impl MakerMarketSnapshot {
         let long_util = mul_div(
             U256::from(maker.cap_long_6dec),
             sub_u(
-                self.long_util_earnings_x96,
+                self.0.long_util_earnings_x96,
                 maker.last_long_util_earnings_x96,
                 "long utilization checkpoint ahead of market cumulative",
             )?,
@@ -491,7 +522,7 @@ impl MakerMarketSnapshot {
         let short_util = mul_div(
             U256::from(maker.cap_short_6dec),
             sub_u(
-                self.short_util_earnings_x96,
+                self.0.short_util_earnings_x96,
                 maker.last_short_util_earnings_x96,
                 "short utilization checkpoint ahead of market cumulative",
             )?,
@@ -515,16 +546,16 @@ impl MakerMarketSnapshot {
         // (For an open maker both deltas are usually negative — owed to the
         // pool — but a mixed-sign delta must not collapse to magnitudes.)
         let (perps, usd) =
-            amounts_for_liquidity(self.sqrt_price_x96, sqrt_l, sqrt_u, maker.liquidity)?;
+            amounts_for_liquidity(self.0.sqrt_price_x96, sqrt_l, sqrt_u, maker.liquidity)?;
         let liquidity_val = add_u(
-            mul_div(perps, self.mark_price_x96, Q96, Rounding::TowardZero)?,
+            mul_div(perps, self.0.mark_price_x96, Q96, Rounding::TowardZero)?,
             usd,
             "band liquidity value",
         )?;
         let residual_val = add_i(
             s_full_mul_div(
                 I256::unchecked_from(maker.delta_amount0),
-                to_i256(self.mark_price_x96, "mark price")?,
+                to_i256(self.0.mark_price_x96, "mark price")?,
                 Q96,
                 Rounding::TowardZero,
             )?,
@@ -552,7 +583,9 @@ impl MakerMarketSnapshot {
             unrealized_pnl_atoms: atoms(unrealized, "unrealized PnL")?,
         })
     }
+}
 
+impl MakerMarketSnapshot {
     /// `PerpLogic.makerCumlFunding`: assemble the band's cumulative funding
     /// (below / within / within-div-sqrtP) from the two ticks' opposite-side
     /// checkpoints, branching on which side of each tick the current tick is.
@@ -738,8 +771,8 @@ mod tests {
 
     #[test]
     fn golden_vector_reproduces_pos54_liquidation_settle() {
-        let (mut market, accrual, maker) = golden_market_and_maker();
-        market = market.accrued(&accrual).unwrap();
+        let (market, accrual, maker) = golden_market_and_maker();
+        let market = market.accrued(&accrual).unwrap();
         let b = market.maker_equity(&maker).unwrap();
 
         // The funding replay lands within one atom of the event's exact
@@ -777,9 +810,22 @@ mod tests {
     #[test]
     fn accrual_replay_moves_funding_forward() {
         let (market, accrual, maker) = golden_market_and_maker();
-        let stale = market.maker_equity(&maker).unwrap();
-        let market = market.accrued(&accrual).unwrap();
-        let fresh = market.maker_equity(&maker).unwrap();
+        // A dt-0 replay (accrue exactly to last_touch) leaves the
+        // cumulatives stale — the only way to see the pre-replay numbers.
+        let stale_accrual = AccrualInputs {
+            now: accrual.last_touch,
+            ..accrual
+        };
+        let stale = market
+            .accrued(&stale_accrual)
+            .unwrap()
+            .maker_equity(&maker)
+            .unwrap();
+        let fresh = market
+            .accrued(&accrual)
+            .unwrap()
+            .maker_equity(&maker)
+            .unwrap();
         assert!(
             fresh.funding_owed_atoms() > stale.funding_owed_atoms(),
             "funding accrues over dt"
@@ -799,8 +845,8 @@ mod tests {
     /// 110 USD).
     #[test]
     fn val_pnl_is_a_signed_sum_over_mixed_sign_deltas() {
-        let (mut market, accrual, mut maker) = golden_market_and_maker();
-        market = market.accrued(&accrual).unwrap();
+        let (market, accrual, mut maker) = golden_market_and_maker();
+        let market = market.accrued(&accrual).unwrap();
 
         // With zero deltas, unrealized PnL is exactly the band's liquidity
         // value priced at the mark.
@@ -812,7 +858,7 @@ mod tests {
         maker.delta_amount1 = 55_000_000; // +55 USD
         let b = market.maker_equity(&maker).unwrap();
 
-        let mark = crate::convert::price_x96_to_f64(market.mark_price_x96).unwrap();
+        let mark = crate::convert::price_x96_to_f64(market.snapshot().mark_price_x96).unwrap();
         let expected = liquidity_val + (-30.0 * mark + 55.0);
         assert!(
             (b.unrealized_pnl_usd() - expected).abs() < 1e-3,
@@ -823,9 +869,15 @@ mod tests {
 
     #[test]
     fn out_of_range_ticks_surface_as_errors_not_panics() {
-        let (market, _, mut maker) = golden_market_and_maker();
+        let (market, accrual, mut maker) = golden_market_and_maker();
         maker.tick_upper = 1_000_000; // beyond the Uniswap tick domain
-        assert!(market.maker_equity(&maker).is_err());
+        assert!(
+            market
+                .accrued(&accrual)
+                .unwrap()
+                .maker_equity(&maker)
+                .is_err()
+        );
     }
 
     /// `makerCumlFunding` branch checks with hand-computed values. The
@@ -880,10 +932,10 @@ mod tests {
 
     #[test]
     fn mis_ordered_ticks_are_rejected() {
-        let (market, _, mut maker) = golden_market_and_maker();
+        let (market, accrual, mut maker) = golden_market_and_maker();
         std::mem::swap(&mut maker.tick_lower, &mut maker.tick_upper);
         assert!(matches!(
-            market.maker_equity(&maker),
+            market.accrued(&accrual).unwrap().maker_equity(&maker),
             Err(ValidationError::InvalidTickRange { .. })
         ));
     }
@@ -895,9 +947,10 @@ mod tests {
     /// delta instead.
     #[test]
     fn checkpoint_ahead_of_market_cumulative_is_an_error_not_a_number() {
-        let (mut market, accrual, mut maker) = golden_market_and_maker();
-        market = market.accrued(&accrual).unwrap();
-        maker.last_long_util_earnings_x96 = market.long_util_earnings_x96 + U256::from(1u8);
+        let (market, accrual, mut maker) = golden_market_and_maker();
+        let market = market.accrued(&accrual).unwrap();
+        maker.last_long_util_earnings_x96 =
+            market.snapshot().long_util_earnings_x96 + U256::from(1u8);
         let err = market.maker_equity(&maker).unwrap_err();
         assert!(matches!(err, ValidationError::Overflow { .. }), "{err}");
     }
@@ -907,8 +960,8 @@ mod tests {
     /// deserialization instead of poisoning the derived sums.
     #[test]
     fn breakdown_deserialization_enforces_the_component_bound() {
-        let (mut market, accrual, maker) = golden_market_and_maker();
-        market = market.accrued(&accrual).unwrap();
+        let (market, accrual, maker) = golden_market_and_maker();
+        let market = market.accrued(&accrual).unwrap();
         let b = market.maker_equity(&maker).unwrap();
 
         let json = serde_json::to_string(&b).unwrap();

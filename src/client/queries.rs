@@ -37,8 +37,8 @@ use crate::hft::state_cache::{CachedBounds, CachedFees};
 use crate::math::BlockContext;
 use crate::math::ema::{PricePair, calculate_emas};
 use crate::math::maker_equity::{
-    AccrualInputs, MakerEquityBreakdown, MakerMarketSnapshot, MakerState, TickFunding,
-    fee_growth_inside1,
+    AccrualInputs, AccruedMakerSnapshot, MakerEquityBreakdown, MakerMarketSnapshot, MakerState,
+    TickFunding, fee_growth_inside1,
 };
 use crate::math::storage::{
     perp_emas_slot, perp_tick_funding_slots, v4_fee_growth_global1_slot,
@@ -1038,7 +1038,7 @@ impl PerpClient {
     async fn load_maker_market_snapshot(
         &self,
         mark_price_x96: U256,
-    ) -> Result<(MakerMarketSnapshot, B256, BlockId)> {
+    ) -> Result<(AccruedMakerSnapshot, B256, BlockId)> {
         let perp_addr = self.deployments.perp;
         // A lagging replica may briefly miss the pinned header. That is a
         // failed read, not a degraded one: pinning by bare number would drop
@@ -1141,7 +1141,7 @@ impl PerpClient {
     /// per position on failure.
     async fn read_pending_maker_equities(
         &self,
-        market: &MakerMarketSnapshot,
+        market: &AccruedMakerSnapshot,
         pool_id: B256,
         block_id: BlockId,
         pending: &[PendingMaker],
@@ -1212,7 +1212,7 @@ impl PerpClient {
                         fg1_out_upper,
                         maker.tick_lower,
                         maker.tick_upper,
-                        market.tick,
+                        market.snapshot().tick,
                     ),
                     fee_growth_inside1_last_x128: fg1_inside_last,
                 };
