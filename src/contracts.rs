@@ -8,6 +8,12 @@
 //! (`Perp.sol`, `libraries/Structs.sol`, `libraries/Events.sol`,
 //! `libraries/Errors.sol`, `interfaces/modules/*`).
 //!
+//! Caveat (verified against live Arbitrum logs 2026-09-01): the deployed
+//! bytecode predates `4bbe554f` for maker closes — live perps emit the
+//! pre-#171 `MakerClosed`/`MakerConverted` shapes with `liqFee`/`isLiquidation`
+//! tails and no `MakerLiquidated` event. `PerpDeployedEvents` below declares
+//! those shapes so `decode_log` recognizes both eras.
+//!
 //! Architecture: `PerpFactory` creates `Perp` contracts. There is no
 //! `PerpManager` — each market is its own `Perp` contract (ERC721 for position
 //! NFTs), identified by its contract address. Positions are keyed by `posId`
@@ -406,6 +412,47 @@ sol! {
     }
 
     // ═══════════════════════════════════════════════════════════════════
+    //  Deployed-era events (pre-partial-liquidation contracts)
+    // ═══════════════════════════════════════════════════════════════════
+
+    /// Maker close/convert events as emitted by the Perp contracts currently
+    /// live on Arbitrum, which predate partial liquidations
+    /// (perpcity-contracts #171).
+    ///
+    /// On that era there is no `MakerLiquidated` event; a maker liquidation
+    /// emits `MakerConverted` (and the residual taker close emits
+    /// `TakerClosed`) with a `liqFee` amount and `isLiquidation = true`.
+    /// The `#171`-and-later contracts dropped both tail fields (moving
+    /// liquidations to dedicated events), which changes the event signature
+    /// hash — so both eras must be declared for `decode_log` to recognize
+    /// maker settles from live markets. (`Perp::TakerClosed` above already
+    /// carries the deployed-era tails, so takers need no legacy variant.)
+    ///
+    /// Verified against mainnet logs 2026-09-01: all four live Arbitrum perps
+    /// emit these shapes (e.g. HORMUZ-TRAFFIC `0x137E…5b17`, CHINA-PC
+    /// `0x796f…8ed0`).
+    interface PerpDeployedEvents {
+        event MakerConverted(
+            uint256 posId,
+            int256 funding,
+            uint256 longUtilFees,
+            uint256 shortUtilFees,
+            uint256 lpFees,
+            uint256 liqFee,
+            bool isLiquidation
+        );
+        event MakerClosed(
+            uint256 posId,
+            int256 funding,
+            uint256 longUtilFees,
+            uint256 shortUtilFees,
+            uint256 lpFees,
+            uint256 liqFee,
+            bool isLiquidation
+        );
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
     //  PerpFactory — creates Perp contracts
     // ═══════════════════════════════════════════════════════════════════
 
@@ -692,6 +739,29 @@ mod abi_lock {
         assert_eq!(
             Perp::TakerLiquidated::SIGNATURE,
             "TakerLiquidated(uint256,uint128,uint256)"
+        );
+        // Deployed-era maker closes (pre-#171): topic0 values verified against
+        // live Arbitrum logs 2026-09-01 (CHINA-PC maker liquidations emitted
+        // MakerConverted with these hashes).
+        assert_eq!(
+            PerpDeployedEvents::MakerConverted::SIGNATURE,
+            "MakerConverted(uint256,int256,uint256,uint256,uint256,uint256,bool)"
+        );
+        assert_eq!(
+            PerpDeployedEvents::MakerConverted::SIGNATURE_HASH,
+            alloy::primitives::b256!(
+                "8d8df09df1280157a012f3f883267724105b6d76650a4f9ff07413e4741711e8"
+            )
+        );
+        assert_eq!(
+            PerpDeployedEvents::MakerClosed::SIGNATURE,
+            "MakerClosed(uint256,int256,uint256,uint256,uint256,uint256,bool)"
+        );
+        assert_eq!(
+            PerpDeployedEvents::MakerClosed::SIGNATURE_HASH,
+            alloy::primitives::b256!(
+                "752da4d171cb6563c169a325eca86c5e7f5b62e9da232b1f737cafebc6830b7e"
+            )
         );
         assert_eq!(
             Perp::TakerBackstopped::SIGNATURE,

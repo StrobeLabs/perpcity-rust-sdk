@@ -45,7 +45,7 @@ use alloy::rpc::types::Log;
 use alloy::sol_types::SolEvent;
 use serde::{Deserialize, Serialize};
 
-use crate::contracts::{IBeacon, Perp, SwapResult};
+use crate::contracts::{IBeacon, Perp, PerpDeployedEvents, SwapResult};
 use crate::convert::{price_x96_to_f64, scale_from_6dec};
 
 /// Funding/utilization rates are scaled by 1e18 per day on-chain.
@@ -270,6 +270,25 @@ pub fn decode_log(log: &Log) -> Option<MarketEvent> {
         })
     } else if topic0 == Perp::MakerClosed::SIGNATURE_HASH {
         let d = decode_raw::<Perp::MakerClosed>(log)?;
+        Some(MarketEvent::MakerClosed {
+            pos_id: d.posId,
+            settle: maker_settle(d.funding, d.longUtilFees, d.shortUtilFees, d.lpFees)?,
+        })
+
+    // ── Deployed-era (pre-#171) maker close/convert shapes ───────────
+    // The live Arbitrum perps emit maker closes with `liqFee`/
+    // `isLiquidation` tails (there is no MakerLiquidated event on that
+    // era), which changes topic0. Decode them into the same variants; the
+    // tail fields are dropped — a liquidation surfaces as a close with its
+    // settle.
+    } else if topic0 == PerpDeployedEvents::MakerConverted::SIGNATURE_HASH {
+        let d = decode_raw::<PerpDeployedEvents::MakerConverted>(log)?;
+        Some(MarketEvent::MakerConverted {
+            pos_id: d.posId,
+            settle: maker_settle(d.funding, d.longUtilFees, d.shortUtilFees, d.lpFees)?,
+        })
+    } else if topic0 == PerpDeployedEvents::MakerClosed::SIGNATURE_HASH {
+        let d = decode_raw::<PerpDeployedEvents::MakerClosed>(log)?;
         Some(MarketEvent::MakerClosed {
             pos_id: d.posId,
             settle: maker_settle(d.funding, d.longUtilFees, d.shortUtilFees, d.lpFees)?,
@@ -622,6 +641,74 @@ mod tests {
                 assert!((index - 100.0).abs() < Q96_PRECISION);
             }
             _ => panic!("expected IndexUpdated"),
+        }
+    }
+
+    #[test]
+    fn decode_deployed_era_maker_closed_event() {
+        let event = PerpDeployedEvents::MakerClosed {
+            posId: U256::from(9u64),
+            funding: I256::try_from(2_000_000i64).unwrap(),
+            longUtilFees: U256::from(500_000u64),
+            shortUtilFees: U256::from(250_000u64),
+            lpFees: U256::from(1_500_000u64),
+            liqFee: U256::from(0u64),
+            isLiquidation: false,
+        };
+        let log = make_log(&event, Address::ZERO);
+        match decode_log(&log).expect("should decode deployed-era MakerClosed") {
+            MarketEvent::MakerClosed { pos_id, settle } => {
+                assert_eq!(pos_id, U256::from(9u64));
+                assert!((settle.funding - 2.0).abs() < 1e-9);
+                assert!((settle.long_util_fees - 0.5).abs() < 1e-9);
+                assert!((settle.short_util_fees - 0.25).abs() < 1e-9);
+                assert!((settle.lp_fees - 1.5).abs() < 1e-9);
+            }
+            other => panic!("expected MakerClosed, got {other:?}"),
+        }
+    }
+
+    /// Golden vector: a real `MakerConverted` log from Arbitrum mainnet
+    /// (CHINA-PC perp `0x796f…8ed0`, maker liquidation of position 54, tx
+    /// `0x4d1fa289fbbe…`, 2026-09-01). Locks the decoder to the shape the
+    /// deployed contracts actually emit.
+    #[test]
+    fn decode_deployed_era_maker_converted_golden_vector() {
+        let topic0 = B256::from(alloy::primitives::b256!(
+            "8d8df09df1280157a012f3f883267724105b6d76650a4f9ff07413e4741711e8"
+        ));
+        let data = alloy::hex::decode(concat!(
+            "0000000000000000000000000000000000000000000000000000000000000036",
+            "000000000000000000000000000000000000000000000000000000000c7ebfc7",
+            "0000000000000000000000000000000000000000000000000000000000069a5f",
+            "000000000000000000000000000000000000000000000000000000000177d5c2",
+            "000000000000000000000000000000000000000000000000000000000075d578",
+            "000000000000000000000000000000000000000000000000000000000015696a",
+            "0000000000000000000000000000000000000000000000000000000000000001",
+        ))
+        .unwrap();
+        let log = RpcLog {
+            inner: alloy::primitives::Log {
+                address: Address::ZERO,
+                data: LogData::new_unchecked(vec![topic0], data.into()),
+            },
+            block_hash: None,
+            block_number: None,
+            block_timestamp: None,
+            transaction_hash: None,
+            transaction_index: None,
+            log_index: None,
+            removed: false,
+        };
+        match decode_log(&log).expect("should decode mainnet MakerConverted") {
+            MarketEvent::MakerConverted { pos_id, settle } => {
+                assert_eq!(pos_id, U256::from(54u64));
+                assert!((settle.funding - 209.633223).abs() < 1e-9);
+                assert!((settle.long_util_fees - 0.432735).abs() < 1e-9);
+                assert!((settle.short_util_fees - 24.630722).abs() < 1e-9);
+                assert!((settle.lp_fees - 7.722360).abs() < 1e-9);
+            }
+            other => panic!("expected MakerConverted, got {other:?}"),
         }
     }
 
