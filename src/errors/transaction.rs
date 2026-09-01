@@ -5,6 +5,7 @@ use thiserror::Error;
 /// Errors arising from the transaction lifecycle: simulation, signing,
 /// broadcasting, receipt polling, and gas resolution.
 #[derive(Error, Debug)]
+#[non_exhaustive]
 pub enum TransactionError {
     /// Pre-flight simulation (`eth_estimateGas` or `eth_call`) detected a
     /// contract revert. The transaction was **not** broadcast — no gas was

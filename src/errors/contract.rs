@@ -5,6 +5,7 @@ use thiserror::Error;
 
 /// Errors from querying on-chain protocol state.
 #[derive(Error, Debug)]
+#[non_exhaustive]
 pub enum ContractError {
     /// The position does not exist on-chain.
     #[error("position not found: id={pos_id}")]
