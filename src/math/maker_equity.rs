@@ -13,7 +13,9 @@
 //! - inventory PnL (`valPnl`) and the resulting equity.
 //!
 //! All arithmetic is X96/X128 integer math (`U256`/`I256`), transcribed 1:1
-//! from the Solidity and converted to f64 USD only at the boundary. The
+//! from the Solidity. The resulting [`MakerEquityBreakdown`] carries exact
+//! signed 6-decimal USDC atoms — the units the contract settles in — and
+//! converts to f64 USD only in its accessors. The
 //! computation is validated end-to-end against a real on-chain settle: the
 //! golden test reproduces the `MakerConverted` event of the CHINA-PC pos-54
 //! liquidation from pre-liquidation chain state.
@@ -28,6 +30,7 @@
 use alloy::primitives::{B256, I256, U256, U512};
 
 use crate::constants::{INTERVAL, Q96, WAD};
+use crate::convert::scale_from_6dec;
 use crate::errors::ValidationError;
 use crate::math::fixed_point::{mul_div, s_full_mul_div, u512_to_u256};
 use crate::math::swap::{amount0_delta, amount1_delta};
@@ -114,41 +117,100 @@ pub struct MakerState {
     pub fee_growth_inside1_last_x128: U256,
 }
 
-/// What the contract would settle if the position were touched now, in USD.
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
+/// What the contract would settle if the position were touched now.
+///
+/// The primary representation is exact signed 6-decimal USDC atoms —
+/// the integer units the contract settles in. The `*_usd` accessors
+/// convert to `f64` at the display boundary.
+///
+/// Every component is bounded to ±2^124 atoms at construction (far beyond
+/// the protocol's 2^120-atom accounting supply), so the derived sums
+/// ([`Self::settled_margin_atoms`], [`Self::equity_atoms`],
+/// [`Self::accrued_income_atoms`]) can never overflow `i128`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct MakerEquityBreakdown {
-    /// Last-settled margin (`positions(id).margin`).
-    pub margin: f64,
-    /// Accrued funding since the last settle (positive = position pays).
-    pub funding: f64,
-    /// Accrued utilization earnings, long side.
-    pub long_util_earnings: f64,
-    /// Accrued utilization earnings, short side.
-    pub short_util_earnings: f64,
-    /// Uncollected V4 LP fees (donated taker fees).
-    pub lp_fees: f64,
-    /// `valPnl`: current band value minus the recorded deposit value, both
-    /// priced at the mark.
-    pub unrealized_pnl: f64,
+    /// Last-settled margin (`positions(id).margin`), in atoms.
+    pub margin_atoms: i128,
+    /// Accrued funding atoms since the last settle (positive = position
+    /// pays).
+    pub funding_atoms: i128,
+    /// Accrued utilization earnings atoms, long side.
+    pub long_util_earnings_atoms: i128,
+    /// Accrued utilization earnings atoms, short side.
+    pub short_util_earnings_atoms: i128,
+    /// Uncollected V4 LP fee atoms (donated taker fees).
+    pub lp_fees_atoms: i128,
+    /// `valPnl` atoms: current band value minus the recorded deposit value,
+    /// both priced at the mark.
+    pub unrealized_pnl_atoms: i128,
 }
 
 impl MakerEquityBreakdown {
-    /// Margin as the contract would settle it now.
+    /// Last-settled margin in USD.
+    pub fn margin_usd(&self) -> f64 {
+        scale_from_6dec(self.margin_atoms)
+    }
+
+    /// Accrued funding in USD (positive = position pays).
+    pub fn funding_usd(&self) -> f64 {
+        scale_from_6dec(self.funding_atoms)
+    }
+
+    /// Accrued long utilization earnings in USD.
+    pub fn long_util_earnings_usd(&self) -> f64 {
+        scale_from_6dec(self.long_util_earnings_atoms)
+    }
+
+    /// Accrued short utilization earnings in USD.
+    pub fn short_util_earnings_usd(&self) -> f64 {
+        scale_from_6dec(self.short_util_earnings_atoms)
+    }
+
+    /// Uncollected V4 LP fees in USD.
+    pub fn lp_fees_usd(&self) -> f64 {
+        scale_from_6dec(self.lp_fees_atoms)
+    }
+
+    /// Unrealized inventory PnL in USD.
+    pub fn unrealized_pnl_usd(&self) -> f64 {
+        scale_from_6dec(self.unrealized_pnl_atoms)
+    }
+
+    /// Margin atoms as the contract would settle them now.
+    pub fn settled_margin_atoms(&self) -> i128 {
+        self.margin_atoms - self.funding_atoms
+            + self.long_util_earnings_atoms
+            + self.short_util_earnings_atoms
+            + self.lp_fees_atoms
+    }
+
+    /// Margin as the contract would settle it now, in USD.
     pub fn settled_margin(&self) -> f64 {
-        self.margin - self.funding
-            + self.long_util_earnings
-            + self.short_util_earnings
-            + self.lp_fees
+        scale_from_6dec(self.settled_margin_atoms())
     }
 
-    /// Settled margin plus inventory PnL — the position's live equity.
+    /// Settled margin plus inventory PnL — the position's live equity, in
+    /// atoms.
+    pub fn equity_atoms(&self) -> i128 {
+        self.settled_margin_atoms() + self.unrealized_pnl_atoms
+    }
+
+    /// Settled margin plus inventory PnL — the position's live equity, in
+    /// USD.
     pub fn equity(&self) -> f64 {
-        self.settled_margin() + self.unrealized_pnl
+        scale_from_6dec(self.equity_atoms())
     }
 
-    /// Accrued income alone (what the position earned since its last settle).
+    /// Accrued income atoms alone (what the position earned since its last
+    /// settle).
+    pub fn accrued_income_atoms(&self) -> i128 {
+        self.long_util_earnings_atoms + self.short_util_earnings_atoms + self.lp_fees_atoms
+            - self.funding_atoms
+    }
+
+    /// Accrued income alone, in USD.
     pub fn accrued_income(&self) -> f64 {
-        self.long_util_earnings + self.short_util_earnings + self.lp_fees - self.funding
+        scale_from_6dec(self.accrued_income_atoms())
     }
 }
 
@@ -344,12 +406,12 @@ impl MakerMarketSnapshot {
         let unrealized = add_i(to_i256(liquidity_val)?, residual_val, "unrealized PnL")?;
 
         Ok(MakerEquityBreakdown {
-            margin: maker.margin_6dec as f64 / 1e6,
-            funding: usd6_signed(funding),
-            long_util_earnings: usd6(long_util),
-            short_util_earnings: usd6(short_util),
-            lp_fees: usd6(lp_fees),
-            unrealized_pnl: usd6_signed(unrealized),
+            margin_atoms: atoms(to_i256(U256::from(maker.margin_6dec))?, "margin")?,
+            funding_atoms: atoms(funding, "accrued funding")?,
+            long_util_earnings_atoms: atoms(to_i256(long_util)?, "long utilization earnings")?,
+            short_util_earnings_atoms: atoms(to_i256(short_util)?, "short utilization earnings")?,
+            lp_fees_atoms: atoms(to_i256(lp_fees)?, "LP fees")?,
+            unrealized_pnl_atoms: atoms(unrealized, "unrealized PnL")?,
         })
     }
 
@@ -491,18 +553,23 @@ fn sub_u(a: U256, b: U256, context: &'static str) -> Result<U256, ValidationErro
     })
 }
 
-/// 6-decimal USD atoms to f64, saturating at `u64::MAX` atoms.
-fn usd6(v: U256) -> f64 {
-    v.min(U256::from(u64::MAX)).to::<u64>() as f64 / 1e6
-}
+/// Maximum settle-component magnitude accepted into a breakdown: 2^124
+/// atoms, comfortably past the protocol's 2^120-atom accounting supply.
+/// Bounding here makes the breakdown's i128 component sums provably
+/// overflow-free.
+const MAX_COMPONENT_ATOMS: i128 = 1 << 124;
 
-fn usd6_signed(v: I256) -> f64 {
-    let magnitude = usd6(v.unsigned_abs());
-    if v.is_negative() {
-        -magnitude
-    } else {
-        magnitude
-    }
+/// Narrow a settle component to 6-decimal atoms, erroring — never
+/// saturating — when the value exceeds [`MAX_COMPONENT_ATOMS`]. Chain-
+/// consistent state stays far inside the bound; exceeding it means corrupt
+/// inputs.
+fn atoms(v: I256, context: &'static str) -> Result<i128, ValidationError> {
+    i128::try_from(v)
+        .ok()
+        .filter(|a| a.unsigned_abs() <= MAX_COMPONENT_ATOMS as u128)
+        .ok_or(ValidationError::Overflow {
+            context: context.into(),
+        })
 }
 
 #[cfg(test)]
@@ -581,32 +648,33 @@ mod tests {
         market.accrue(&accrual).unwrap();
         let b = market.maker_equity(&maker).unwrap();
 
+        // The funding replay lands within one atom of the event's exact
+        // 209_633_223 (the settle's own rounding happens at a different
+        // cumulative granularity); the short-util leg is priced with the
+        // caller's mark instead of the mark `accrue` recomputes, costing a
+        // few atoms over the 5775s window. The unreplayed legs are exact.
         assert!(
-            (b.funding - 209.633223).abs() < 1e-4,
+            (b.funding_atoms - 209_633_223).abs() <= 1,
             "funding {}",
-            b.funding
+            b.funding_atoms
         );
+        assert_eq!(b.long_util_earnings_atoms, 432_735);
         assert!(
-            (b.long_util_earnings - 0.432735).abs() < 1e-4,
-            "long util {}",
-            b.long_util_earnings
-        );
-        assert!(
-            (b.short_util_earnings - 24.630722).abs() < 1e-3,
+            (b.short_util_earnings_atoms - 24_630_722).abs() <= 10,
             "short util {}",
-            b.short_util_earnings
+            b.short_util_earnings_atoms
         );
-        assert!((b.lp_fees - 7.722360).abs() < 1e-5, "lp {}", b.lp_fees);
+        assert_eq!(b.lp_fees_atoms, 7_722_360, "lp {}", b.lp_fees_usd());
 
         // The position was fee-insolvent (the contracts#292 wedge): equity
         // deeply negative, dominated by accrued funding + inventory loss.
-        assert!((b.margin - 143.730198).abs() < 1e-9);
+        assert_eq!(b.margin_atoms, 143_730_198);
         assert!(
             b.equity() < -80.0 && b.equity() > -110.0,
             "equity {}",
             b.equity()
         );
-        assert!(b.accrued_income() < 0.0);
+        assert!(b.accrued_income_atoms() < 0);
     }
 
     /// Without the accrual replay the funding is stale to lastTouch — the
@@ -618,10 +686,16 @@ mod tests {
         let stale = market.maker_equity(&maker).unwrap();
         market.accrue(&accrual).unwrap();
         let fresh = market.maker_equity(&maker).unwrap();
-        assert!(fresh.funding > stale.funding, "funding accrues over dt");
-        assert!((fresh.funding - stale.funding) < 5.0, "dt is ~1.6h");
+        assert!(
+            fresh.funding_atoms > stale.funding_atoms,
+            "funding accrues over dt"
+        );
+        assert!(
+            fresh.funding_atoms - stale.funding_atoms < 5_000_000,
+            "dt is ~1.6h"
+        );
         // Utilization also accrues.
-        assert!(fresh.short_util_earnings >= stale.short_util_earnings);
+        assert!(fresh.short_util_earnings_atoms >= stale.short_util_earnings_atoms);
     }
 
     /// `valPnl` is a SIGNED sum (`liquidityVal + delta0·mark/Q96 + delta1`),
@@ -638,7 +712,7 @@ mod tests {
         // value priced at the mark.
         maker.delta_amount0 = 0;
         maker.delta_amount1 = 0;
-        let liquidity_val = market.maker_equity(&maker).unwrap().unrealized_pnl;
+        let liquidity_val = market.maker_equity(&maker).unwrap().unrealized_pnl_usd();
 
         maker.delta_amount0 = -30_000_000; // −30 perp
         maker.delta_amount1 = 55_000_000; // +55 USD
@@ -647,9 +721,9 @@ mod tests {
         let mark = crate::convert::price_x96_to_f64(market.mark_price_x96).unwrap();
         let expected = liquidity_val + (-30.0 * mark + 55.0);
         assert!(
-            (b.unrealized_pnl - expected).abs() < 1e-3,
+            (b.unrealized_pnl_usd() - expected).abs() < 1e-3,
             "unrealized {} expected {expected}",
-            b.unrealized_pnl
+            b.unrealized_pnl_usd()
         );
     }
 
