@@ -38,11 +38,16 @@ use crate::math::fixed_point::{mul_div, s_full_mul_div, u512_to_u256};
 use crate::math::swap::{amount0_delta, amount1_delta};
 use crate::math::tick::get_sqrt_ratio_at_tick;
 
-/// One `TickInfo` from the Perp's tick funding mapping.
+/// One `TickInfo` from the Perp's tick funding mapping (`s.ticks[tick]`),
+/// fields named after the contract's.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[allow(missing_docs)] // raw chain inputs, named after the contract fields
 pub struct TickFunding {
+    /// `TickInfo.cumlFundingOppX96`: cumulative funding checkpointed on the
+    /// opposite side of the tick (X96), signed.
     pub cuml_funding_opp_x96: I256,
+    /// `TickInfo.cumlFundingDivSqrtPOppX96`: cumulative funding divided by
+    /// sqrt price, checkpointed on the opposite side of the tick (X96),
+    /// signed.
     pub cuml_funding_div_sqrt_p_opp_x96: I256,
 }
 
@@ -73,44 +78,83 @@ pub struct MakerMarketSnapshot {
 
 /// Raw rates + accrual context for replaying `accrue()` from `lastTouch` to
 /// `now`: the on-chain cumulatives are only current as of the last touch.
+/// Fields named after the contract's.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[allow(missing_docs)] // raw chain inputs, named after the contract fields
 pub struct AccrualInputs {
+    /// `rates().fundingPerDay` (int88): daily funding rate scaled by 1e18.
     pub funding_per_day_wad: i128,
+    /// `rates().longUtilFeePerDay`: daily long-utilization fee rate scaled
+    /// by 1e18.
     pub long_util_fee_per_day_wad: u64,
+    /// `rates().shortUtilFeePerDay`: daily short-utilization fee rate
+    /// scaled by 1e18.
     pub short_util_fee_per_day_wad: u64,
+    /// `rates().lastTouch`: timestamp the cumulatives were last advanced.
     pub last_touch: u64,
+    /// Timestamp to accrue to — the snapshot block's timestamp.
     pub now: u64,
+    /// `openInterest().long`, 6-decimal perp atoms.
     pub oi_long: u128,
+    /// `openInterest().short`, 6-decimal perp atoms.
     pub oi_short: u128,
+    /// `capacity().long`, 6-decimal perp atoms.
     pub cap_long: u128,
+    /// `capacity().short`, 6-decimal perp atoms.
     pub cap_short: u128,
 }
 
 /// Per-position inputs: the position row, maker row, its band's tick funding
 /// checkpoints, and the V4 fee-growth state for its liquidity position.
+/// Fields named after the contract's.
+///
+/// `tick_lower < tick_upper` is required; [`MakerMarketSnapshot::maker_equity`]
+/// validates the ordering (and the Uniswap tick domain) before computing.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[allow(missing_docs)] // raw chain inputs, named after the contract fields
 pub struct MakerState {
+    /// `positions(id).margin`: last-settled margin, 6-decimal USDC atoms.
     pub margin_6dec: u128,
+    /// `positions(id).delta` amount0 (perp atoms), unpacked from the packed
+    /// `BalanceDelta`. Negative = owed to the pool.
     pub delta_amount0: i128,
+    /// `positions(id).delta` amount1 (USD atoms), unpacked from the packed
+    /// `BalanceDelta`. Negative = owed to the pool.
     pub delta_amount1: i128,
+    /// `positions(id).lastCumlFundingX96`: market funding cumulative at the
+    /// position's last settle.
     pub last_cuml_funding_x96: I256,
+    /// `makerDetails(id).tickLower`: band lower tick.
     pub tick_lower: i32,
+    /// `makerDetails(id).tickUpper`: band upper tick.
     pub tick_upper: i32,
+    /// `makerDetails(id).liquidity`: V4 liquidity in the band.
     pub liquidity: u128,
+    /// `makerDetails(id).lastLongUtilEarningsX96`: long utilization
+    /// earnings cumulative at the last settle.
     pub last_long_util_earnings_x96: U256,
+    /// `makerDetails(id).lastShortUtilEarningsX96`: short utilization
+    /// earnings cumulative at the last settle.
     pub last_short_util_earnings_x96: U256,
+    /// `makerDetails(id).capacity.long`, 6-decimal perp atoms.
     pub cap_long_6dec: u128,
+    /// `makerDetails(id).capacity.short`, 6-decimal perp atoms.
     pub cap_short_6dec: u128,
+    /// `makerDetails(id).lastCumlFunding.belowX96`: below-band funding
+    /// cumulative at the last settle.
     pub last_below_x96: I256,
+    /// `makerDetails(id).lastCumlFunding.withinX96`: within-band funding
+    /// cumulative at the last settle.
     pub last_within_x96: I256,
+    /// `makerDetails(id).lastCumlFunding.divSqrtPriceWithinX96`:
+    /// within-band funding/sqrtP cumulative at the last settle.
     pub last_div_sqrt_within_x96: I256,
+    /// `ticks[tickLower]`: the lower tick's live funding checkpoints.
     pub tick_lower_funding: TickFunding,
+    /// `ticks[tickUpper]`: the upper tick's live funding checkpoints.
     pub tick_upper_funding: TickFunding,
-    /// V4 fee growth of token1 inside the band, now and at the position's
-    /// last checkpoint (X128).
+    /// V4 `feeGrowthInside1X128` of the band now (X128; wraps by design).
     pub fee_growth_inside1_x128: U256,
+    /// V4 `feeGrowthInside1LastX128` at the position's last checkpoint
+    /// (X128; wraps by design).
     pub fee_growth_inside1_last_x128: U256,
 }
 
@@ -298,14 +342,20 @@ impl MakerMarketSnapshot {
     ///
     /// # Errors
     ///
-    /// Returns [`ValidationError::InvalidTickRange`] for out-of-range ticks
-    /// and [`ValidationError::Overflow`] if an intermediate exceeds its
-    /// integer domain — both indicate corrupt inputs, since chain-consistent
-    /// state stays in range.
+    /// Returns [`ValidationError::InvalidTickRange`] for out-of-range or
+    /// mis-ordered ticks and [`ValidationError::Overflow`] if an
+    /// intermediate exceeds its integer domain — both indicate corrupt
+    /// inputs, since chain-consistent state stays in range.
     pub fn maker_equity(
         &self,
         maker: &MakerState,
     ) -> Result<MakerEquityBreakdown, ValidationError> {
+        if maker.tick_lower >= maker.tick_upper {
+            return Err(ValidationError::InvalidTickRange {
+                lower: maker.tick_lower,
+                upper: maker.tick_upper,
+            });
+        }
         let sqrt_l = get_sqrt_ratio_at_tick(maker.tick_lower)?;
         let sqrt_u = get_sqrt_ratio_at_tick(maker.tick_upper)?;
         let (mf_below, mf_within, mf_div_sqrt_within) = self.maker_cuml_funding(maker)?;
@@ -737,6 +787,16 @@ mod tests {
         let (market, _, mut maker) = golden_market_and_maker();
         maker.tick_upper = 1_000_000; // beyond the Uniswap tick domain
         assert!(market.maker_equity(&maker).is_err());
+    }
+
+    #[test]
+    fn mis_ordered_ticks_are_rejected() {
+        let (market, _, mut maker) = golden_market_and_maker();
+        std::mem::swap(&mut maker.tick_lower, &mut maker.tick_upper);
+        assert!(matches!(
+            market.maker_equity(&maker),
+            Err(ValidationError::InvalidTickRange { .. })
+        ));
     }
 
     /// A position checkpoint AHEAD of the market cumulative is mutually
