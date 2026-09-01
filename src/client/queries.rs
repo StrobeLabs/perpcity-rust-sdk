@@ -239,8 +239,11 @@ fn split_maker_rows(
 ) -> (Vec<PendingMaker>, Vec<(usize, U256, PerpCityError)>) {
     let mut pending = Vec::new();
     let mut failed = Vec::new();
-    for (input_index, (row, &pos_id)) in rows.chunks_exact(2).zip(pos_ids).enumerate() {
-        match decode_maker_row(input_index, pos_id, &row[0], &row[1]) {
+    let (row_pairs, _) = rows.as_chunks::<2>();
+    for (input_index, ([position_row, details_row], &pos_id)) in
+        row_pairs.iter().zip(pos_ids).enumerate()
+    {
+        match decode_maker_row(input_index, pos_id, position_row, details_row) {
             Ok(None) => {}
             Ok(Some(maker)) => pending.push(maker),
             Err(e) => {
