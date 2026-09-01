@@ -47,6 +47,7 @@ mod transactions;
 pub use transactions::TxBuilder;
 
 use std::sync::Mutex;
+use std::sync::atomic::AtomicBool;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use alloy::network::{Ethereum, EthereumWallet, TxSigner};
@@ -199,7 +200,7 @@ pub struct PerpClient {
     /// Latched when the endpoint rejects `eth_getProof` as an unknown
     /// method, so maker-equity reads skip the probe and go straight to the
     /// `eth_getStorageAt` fallback.
-    get_proof_unsupported: std::sync::atomic::AtomicBool,
+    get_proof_unsupported: AtomicBool,
 }
 
 impl std::fmt::Debug for PerpClient {
@@ -254,7 +255,7 @@ impl PerpClient {
             gas_limit_cache: Mutex::new(GasLimitCache::new()),
             state_cache: Mutex::new(StateCache::new(StateCacheConfig::default())),
             book_immutables: tokio::sync::OnceCell::new(),
-            get_proof_unsupported: std::sync::atomic::AtomicBool::new(false),
+            get_proof_unsupported: AtomicBool::new(false),
         })
     }
 

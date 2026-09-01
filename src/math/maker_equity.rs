@@ -34,7 +34,7 @@ use crate::constants::{INTERVAL, Q96, WAD};
 use crate::convert::scale_from_6dec;
 use crate::errors::ValidationError;
 use crate::math::BlockContext;
-use crate::math::fixed_point::{mul_div, s_full_mul_div, u512_to_u256};
+use crate::math::fixed_point::{Rounding, mul_div, s_full_mul_div, u512_to_u256};
 use crate::math::swap::{amount0_delta, amount1_delta};
 use crate::math::tick::get_sqrt_ratio_at_tick;
 
@@ -280,7 +280,7 @@ impl MakerMarketSnapshot {
             I256::try_from(accrual.funding_per_day_wad).expect("i128 fits I256"),
             to_i256(dt_days)?,
             WAD,
-            false,
+            Rounding::TowardZero,
         )?;
         self.funding_x96 = add_i(
             self.funding_x96,
@@ -293,23 +293,23 @@ impl MakerMarketSnapshot {
                 funding_accrued,
                 I256::from_raw(Q96),
                 self.sqrt_price_x96,
-                false,
+                Rounding::TowardZero,
             )?,
             "accrued funding/sqrtP cumulative",
         )?;
 
-        let dt_days_mult_mark = mul_div(dt_days, self.mark_price_x96, Q96, false)?;
+        let dt_days_mult_mark = mul_div(dt_days, self.mark_price_x96, Q96, Rounding::TowardZero)?;
         let lu_accrued = mul_div(
             U256::from(accrual.long_util_fee_per_day_wad),
             dt_days_mult_mark,
             WAD,
-            false,
+            Rounding::TowardZero,
         )?;
         let su_accrued = mul_div(
             U256::from(accrual.short_util_fee_per_day_wad),
             dt_days_mult_mark,
             WAD,
-            false,
+            Rounding::TowardZero,
         )?;
         if accrual.cap_long != 0 {
             self.long_util_earnings_x96 = add_u(
@@ -318,7 +318,7 @@ impl MakerMarketSnapshot {
                     lu_accrued,
                     U256::from(accrual.oi_long),
                     U256::from(accrual.cap_long),
-                    false,
+                    Rounding::TowardZero,
                 )?,
                 "accrued long utilization cumulative",
             )?;
@@ -330,7 +330,7 @@ impl MakerMarketSnapshot {
                     su_accrued,
                     U256::from(accrual.oi_short),
                     U256::from(accrual.cap_short),
-                    false,
+                    Rounding::TowardZero,
                 )?,
                 "accrued short utilization cumulative",
             )?;
@@ -369,14 +369,19 @@ impl MakerMarketSnapshot {
                 "funding cumulative delta",
             )?,
             Q96,
-            true,
+            Rounding::Up,
         )?;
-        let perp_below = to_i256(amount0_delta(sqrt_l, sqrt_u, maker.liquidity, false)?)?;
+        let perp_below = to_i256(amount0_delta(
+            sqrt_l,
+            sqrt_u,
+            maker.liquidity,
+            Rounding::TowardZero,
+        )?)?;
         let funding_below = s_full_mul_div(
             perp_below,
             sub_i(mf_below, maker.last_below_x96, "below-band funding delta")?,
             Q96,
-            true,
+            Rounding::Up,
         )?;
         let div_amm = sub_i(
             mf_div_sqrt_within,
@@ -388,12 +393,13 @@ impl MakerMarketSnapshot {
             maker.last_within_x96,
             "within-band funding delta",
         )?;
-        let div_upper = s_full_mul_div(d_within, I256::from_raw(Q96), sqrt_u, false)?;
+        let div_upper =
+            s_full_mul_div(d_within, I256::from_raw(Q96), sqrt_u, Rounding::TowardZero)?;
         let funding_within = s_full_mul_div(
             I256::try_from(maker.liquidity).expect("u128 fits I256"),
             sub_i(div_amm, div_upper, "within-band funding components")?,
             Q96,
-            true,
+            Rounding::Up,
         )?;
         let funding = add_i(
             add_i(base_funding, funding_below, "accrued funding")?,
@@ -409,7 +415,7 @@ impl MakerMarketSnapshot {
                 "long utilization checkpoint ahead of market cumulative",
             )?,
             Q96,
-            false,
+            Rounding::TowardZero,
         )?;
         let short_util = mul_div(
             U256::from(maker.cap_short_6dec),
@@ -419,7 +425,7 @@ impl MakerMarketSnapshot {
                 "short utilization checkpoint ahead of market cumulative",
             )?,
             Q96,
-            false,
+            Rounding::TowardZero,
         )?;
 
         // ── V4 LP fees: liquidity × Δ feeGrowthInside1 / 2^128 ──────────
@@ -440,7 +446,7 @@ impl MakerMarketSnapshot {
         let (perps, usd) =
             amounts_for_liquidity(self.sqrt_price_x96, sqrt_l, sqrt_u, maker.liquidity)?;
         let liquidity_val = add_u(
-            mul_div(perps, self.mark_price_x96, Q96, false)?,
+            mul_div(perps, self.mark_price_x96, Q96, Rounding::TowardZero)?,
             usd,
             "band liquidity value",
         )?;
@@ -449,7 +455,7 @@ impl MakerMarketSnapshot {
                 I256::try_from(maker.delta_amount0).expect("i128 fits I256"),
                 to_i256(self.mark_price_x96)?,
                 Q96,
-                false,
+                Rounding::TowardZero,
             )?,
             I256::try_from(maker.delta_amount1).expect("i128 fits I256"),
             "deposit residual value",
@@ -563,8 +569,8 @@ fn amounts_for_liquidity(
         (sqrt_b, sqrt_a)
     };
     let sp = sqrt_p.clamp(sa, sb);
-    let amount0 = amount0_delta(sp, sb, liquidity, false)?;
-    let amount1 = amount1_delta(sa, sp, liquidity, false)?;
+    let amount0 = amount0_delta(sp, sb, liquidity, Rounding::TowardZero)?;
+    let amount1 = amount1_delta(sa, sp, liquidity, Rounding::TowardZero)?;
     Ok((amount0, amount1))
 }
 

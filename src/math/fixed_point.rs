@@ -10,14 +10,27 @@ use alloy::primitives::{I256, U256, U512};
 
 use crate::errors::ValidationError;
 
-/// `a × b / d` with a 512-bit intermediate product, rounding up when
-/// `round_up` is set and the division has a remainder.
+/// How an inexact division resolves its remainder.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Rounding {
+    /// Truncate toward zero (Solidity's default division).
+    TowardZero,
+    /// Round away from zero when the division has a remainder.
+    Up,
+}
+
+/// `a × b / d` with a 512-bit intermediate product.
 ///
 /// # Errors
 ///
 /// Returns [`ValidationError::Overflow`] when `d` is zero or the quotient
 /// exceeds `U256`.
-pub(crate) fn mul_div(a: U256, b: U256, d: U256, round_up: bool) -> Result<U256, ValidationError> {
+pub(crate) fn mul_div(
+    a: U256,
+    b: U256,
+    d: U256,
+    rounding: Rounding,
+) -> Result<U256, ValidationError> {
     if d.is_zero() {
         return Err(ValidationError::Overflow {
             context: "division by zero".into(),
@@ -26,19 +39,18 @@ pub(crate) fn mul_div(a: U256, b: U256, d: U256, round_up: bool) -> Result<U256,
     let product: U512 = a.widening_mul(b);
     let divisor = U512::from(d);
     let mut q = product / divisor;
-    if round_up && product % divisor != U512::ZERO {
+    if rounding == Rounding::Up && product % divisor != U512::ZERO {
         q += U512::ONE;
     }
     u512_to_u256(q)
 }
 
 /// The contracts' `sFullMulDiv`: signed mul-div with the magnitude truncated
-/// toward zero. When `round_up` is set and the division has a remainder, the
-/// result is incremented by one **only when it is not negative** — rounding
-/// toward positive infinity increments only non-exact non-negative results,
-/// while negative results stay truncated toward zero. This mirrors the
-/// deployed `SignedFixedPointMathLib.sFullMulDiv`
-/// (`perpcity-contracts@4bbe554f`):
+/// toward zero. Under [`Rounding::Up`] a result with a remainder is
+/// incremented by one **only when it is not negative** — rounding toward
+/// positive infinity increments only non-exact non-negative results, while
+/// negative results stay truncated toward zero. This mirrors the deployed
+/// `SignedFixedPointMathLib.sFullMulDiv` (`perpcity-contracts@4bbe554f`):
 ///
 /// ```solidity
 /// result = negative ? -absResult : absResult;
@@ -58,12 +70,19 @@ pub(crate) fn s_full_mul_div(
     a: I256,
     b: I256,
     d: U256,
-    round_up: bool,
+    rounding: Rounding,
 ) -> Result<I256, ValidationError> {
-    let negative = (a.is_negative() && b > I256::ZERO) || (a > I256::ZERO && b.is_negative());
+    let negative = a.is_negative() != b.is_negative();
     // The contract's "+1 on a remainder, non-negative results only" is
-    // exactly `mulDiv`'s own round-up applied to the magnitude.
-    let magnitude = mul_div(a.unsigned_abs(), b.unsigned_abs(), d, round_up && !negative)?;
+    // exactly `mulDiv`'s own round-up applied to the magnitude. A zero
+    // operand makes `negative` irrelevant: the magnitude is exactly zero
+    // either way.
+    let magnitude_rounding = if rounding == Rounding::Up && !negative {
+        Rounding::Up
+    } else {
+        Rounding::TowardZero
+    };
+    let magnitude = mul_div(a.unsigned_abs(), b.unsigned_abs(), d, magnitude_rounding)?;
     let magnitude = I256::try_from(magnitude).map_err(|_| ValidationError::Overflow {
         context: "signed mul-div magnitude exceeds I256".into(),
     })?;
@@ -89,21 +108,21 @@ mod tests {
         let q = U256::from(100u8);
         let big = |v: i64| I256::try_from(v).unwrap();
         let smd = |a, b, r| s_full_mul_div(a, b, q, r).unwrap();
-        assert_eq!(smd(big(7), big(10), false), big(0));
-        assert_eq!(smd(big(7), big(10), true), big(1));
-        assert_eq!(smd(big(-7), big(10), false), big(0));
+        assert_eq!(smd(big(7), big(10), Rounding::TowardZero), big(0));
+        assert_eq!(smd(big(7), big(10), Rounding::Up), big(1));
+        assert_eq!(smd(big(-7), big(10), Rounding::TowardZero), big(0));
         // The contract's roundUp guards on `!negative`: a negative non-exact
         // result stays truncated toward zero instead of gaining +1.
-        assert_eq!(smd(big(-7), big(10), true), big(0));
-        assert_eq!(smd(big(-70), big(10), false), big(-7));
-        assert_eq!(smd(big(-70), big(10), true), big(-7));
-        assert_eq!(smd(big(-75), big(10), true), big(-7));
-        assert_eq!(smd(big(75), big(10), true), big(8));
+        assert_eq!(smd(big(-7), big(10), Rounding::Up), big(0));
+        assert_eq!(smd(big(-70), big(10), Rounding::TowardZero), big(-7));
+        assert_eq!(smd(big(-70), big(10), Rounding::Up), big(-7));
+        assert_eq!(smd(big(-75), big(10), Rounding::Up), big(-7));
+        assert_eq!(smd(big(75), big(10), Rounding::Up), big(8));
     }
 
     #[test]
     fn division_by_zero_is_an_error() {
-        assert!(mul_div(U256::ONE, U256::ONE, U256::ZERO, false).is_err());
-        assert!(s_full_mul_div(I256::ONE, I256::ONE, U256::ZERO, true).is_err());
+        assert!(mul_div(U256::ONE, U256::ONE, U256::ZERO, Rounding::TowardZero).is_err());
+        assert!(s_full_mul_div(I256::ONE, I256::ONE, U256::ZERO, Rounding::Up).is_err());
     }
 }
