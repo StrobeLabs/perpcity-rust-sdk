@@ -424,10 +424,10 @@ impl PerpClient {
     /// Resolve the safe lagged block and load + accrue the market-wide
     /// snapshot for [`Self::get_maker_equities`] in one multicall.
     ///
-    /// The mark comes from the multicall's own `poolState().ammPrice`
-    /// unless `mark_override_x96` pins a what-if mark. Returns the accrued
-    /// snapshot, the pool id, and the block id every later read must pin
-    /// to.
+    /// The accrual replay always runs at the multicall's own
+    /// `poolState().ammPrice`; `mark_override_x96` then reprices the
+    /// accrued snapshot for what-if pricing. Returns the accrued snapshot,
+    /// the pool id, and the block id every later read must pin to.
     async fn load_maker_market_snapshot(
         &self,
         mark_override_x96: Option<U256>,
@@ -510,7 +510,7 @@ impl PerpClient {
             short_util_earnings_x96: cumls.shortUtilEarningsX96,
             tick: i24_to_i32(pool_state.tick),
             sqrt_price_x96: pool_state.sqrtPrice.to::<U256>(),
-            mark_price_x96: mark_override_x96.unwrap_or(pool_state.ammPrice),
+            mark_price_x96: pool_state.ammPrice,
         }
         .accrued(&AccrualInputs {
             funding_per_day_wad: i128::try_from(rates.fundingPerDay)
@@ -524,6 +524,13 @@ impl PerpClient {
             cap_long_atoms: capacity.long,
             cap_short_atoms: capacity.short,
         })?;
+        // The what-if mark is applied AFTER the replay: the elapsed accrual
+        // happened at the chain's mark, and only the pricing legs are the
+        // caller's to override.
+        let market = match mark_override_x96 {
+            Some(mark_price_x96) => market.with_mark(mark_price_x96),
+            None => market,
+        };
         Ok((market, pool_id, block_id))
     }
 

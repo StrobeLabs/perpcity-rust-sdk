@@ -444,6 +444,19 @@ impl AccruedMakerSnapshot {
         &self.0
     }
 
+    /// Reprice this accrued snapshot at a what-if mark (exact X96).
+    ///
+    /// Only the pricing input changes: the accrual replay already ran at
+    /// the mark the chain would have used, so the replayed funding and
+    /// utilization cumulatives are untouched. The new mark prices
+    /// `valPnl` (the band's liquidity value and the inventory legs) in
+    /// every subsequent [`Self::maker_equity`].
+    #[must_use]
+    pub fn with_mark(mut self, mark_price_x96: U256) -> Self {
+        self.0.mark_price_x96 = mark_price_x96;
+        self
+    }
+
     /// Compute the full settle preview for one maker position.
     ///
     /// # Errors
@@ -838,6 +851,54 @@ mod tests {
         );
         // Utilization also accrues.
         assert!(fresh.short_util_earnings_atoms() >= stale.short_util_earnings_atoms());
+    }
+
+    /// A what-if mark applied AFTER the accrual replay changes only the
+    /// pricing legs. Applying it before the replay would also reprice the
+    /// elapsed utilization accrual (`accrue` scales the utilization legs
+    /// by the mark), which is not what a what-if mark means.
+    #[test]
+    fn what_if_mark_leaves_the_accrual_replay_untouched() {
+        let (market, accrual, maker) = golden_market_and_maker();
+        let doubled_mark = market.mark_price_x96 * U256::from(2u8);
+
+        let at_chain_mark = market.accrued(&accrual).unwrap();
+        let chain = at_chain_mark.maker_equity(&maker).unwrap();
+        let what_if = at_chain_mark
+            .with_mark(doubled_mark)
+            .maker_equity(&maker)
+            .unwrap();
+
+        assert_eq!(what_if.funding_owed_atoms(), chain.funding_owed_atoms());
+        assert_eq!(
+            what_if.long_util_earnings_atoms(),
+            chain.long_util_earnings_atoms()
+        );
+        assert_eq!(
+            what_if.short_util_earnings_atoms(),
+            chain.short_util_earnings_atoms()
+        );
+        assert_eq!(what_if.lp_fees_atoms(), chain.lp_fees_atoms());
+        assert_ne!(
+            what_if.unrealized_pnl_atoms(),
+            chain.unrealized_pnl_atoms(),
+            "the what-if mark must reprice valPnl"
+        );
+
+        // The wrong order (override before the replay) moves the
+        // utilization legs — that is the regression this test pins.
+        let accrued_at_doubled = MakerMarketSnapshot {
+            mark_price_x96: doubled_mark,
+            ..market
+        }
+        .accrued(&accrual)
+        .unwrap()
+        .maker_equity(&maker)
+        .unwrap();
+        assert_ne!(
+            accrued_at_doubled.short_util_earnings_atoms(),
+            chain.short_util_earnings_atoms()
+        );
     }
 
     /// `valPnl` is a SIGNED sum (`liquidityVal + delta0·mark/Q96 + delta1`),
