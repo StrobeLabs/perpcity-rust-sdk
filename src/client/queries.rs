@@ -908,20 +908,21 @@ impl PerpClient {
             .get_block_number()
             .await?
             .saturating_sub(MAKER_EQUITY_BLOCK_LAG);
-        // A lagging replica may briefly miss the pinned header; fall back to
-        // the local clock for the accrual replay and pin by number.
-        let (block_id, block_hash, block_timestamp) = match self
+        // A lagging replica may briefly miss the pinned header. That is a
+        // failed read, not a degraded one: pinning by bare number would drop
+        // the reorg protection, and substituting the local wall clock for
+        // the block timestamp would silently skew the accrual replay (a
+        // slow clock reads as zero accrual). A settlement preview must not
+        // quietly degrade — fail and let the caller retry.
+        let block = self
             .provider
             .get_block_by_number(block_number.into())
             .await?
-        {
-            Some(block) => (
-                BlockId::hash(block.header.hash),
-                block.header.hash,
-                block.header.timestamp,
-            ),
-            None => (BlockId::number(block_number), B256::ZERO, now_secs()),
-        };
+            .ok_or(ContractError::BlockUnavailable {
+                number: block_number,
+            })?;
+        let block_id = BlockId::hash(block.header.hash);
+        let (block_hash, block_timestamp) = (block.header.hash, block.header.timestamp);
 
         let market_call = |calldata: Vec<u8>| IMulticall3::Call3 {
             target: perp_addr,

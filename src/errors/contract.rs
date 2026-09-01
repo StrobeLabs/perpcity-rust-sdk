@@ -33,4 +33,12 @@ pub enum ContractError {
         /// What went wrong.
         reason: String,
     },
+
+    /// A block header the read needed to pin to was not available from the
+    /// RPC endpoint (e.g. a lagging load-balanced replica).
+    #[error("block {number} header unavailable from RPC")]
+    BlockUnavailable {
+        /// The block number whose header was requested.
+        number: u64,
+    },
 }
