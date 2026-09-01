@@ -268,16 +268,22 @@ impl MakerMarketSnapshot {
             u512_to_u256((U512::from(maker.liquidity) * U512::from(fee_growth_delta)) >> 128)?;
 
         // ── valPnl (maker overload) ─────────────────────────────────────
+        // A SIGNED sum, per `PerpLogic.valPnl` (`perpcity-contracts@4bbe554f`):
+        //   unrealizedPnl = liquidityVal.toInt256()
+        //       + delta.amount0().sFullMulDiv(markP.toInt256(), Q96, false)
+        //       + delta.amount1();
+        // (For an open maker both deltas are usually negative — owed to the
+        // pool — but a mixed-sign delta must not collapse to magnitudes.)
         let (perps, usd) =
             amounts_for_liquidity(self.sqrt_amm_price_x96, sqrt_l, sqrt_u, maker.liquidity)?;
         let liquidity_val = mul_div(perps, self.mark_price_x96, Q96, false)? + usd;
-        let pos_val = mul_div(
-            U256::from(maker.delta_amount0.unsigned_abs()),
-            self.mark_price_x96,
+        let residual_val = s_full_mul_div(
+            I256::try_from(maker.delta_amount0).expect("i128 fits I256"),
+            to_i256(self.mark_price_x96)?,
             Q96,
             false,
-        )? + U256::from(maker.delta_amount1.unsigned_abs());
-        let unrealized = to_i256(liquidity_val)? - to_i256(pos_val)?;
+        )? + I256::try_from(maker.delta_amount1).expect("i128 fits I256");
+        let unrealized = to_i256(liquidity_val)? + residual_val;
 
         Ok(MakerEquityBreakdown {
             margin: maker.margin_6dec as f64 / 1e6,
@@ -505,6 +511,35 @@ mod tests {
         assert!((fresh.funding - stale.funding) < 5.0, "dt is ~1.6h");
         // Utilization also accrues.
         assert!(fresh.short_util_earnings >= stale.short_util_earnings);
+    }
+
+    /// `valPnl` is a SIGNED sum (`liquidityVal + delta0·mark/Q96 + delta1`),
+    /// not `liquidityVal − (|delta0|·mark/Q96 + |delta1|)`. The golden vector
+    /// has both delta legs negative, where the two formulas coincide — a
+    /// mixed-sign delta tells them apart (here they differ by 2·|delta1| =
+    /// 110 USD).
+    #[test]
+    fn val_pnl_is_a_signed_sum_over_mixed_sign_deltas() {
+        let (mut market, accrual, mut maker) = golden_market_and_maker();
+        market.accrue(&accrual).unwrap();
+
+        // With zero deltas, unrealized PnL is exactly the band's liquidity
+        // value priced at the mark.
+        maker.delta_amount0 = 0;
+        maker.delta_amount1 = 0;
+        let liquidity_val = market.maker_equity(&maker).unwrap().unrealized_pnl;
+
+        maker.delta_amount0 = -30_000_000; // −30 perp
+        maker.delta_amount1 = 55_000_000; // +55 USD
+        let b = market.maker_equity(&maker).unwrap();
+
+        let mark = crate::convert::price_x96_to_f64(market.mark_price_x96).unwrap();
+        let expected = liquidity_val + (-30.0 * mark + 55.0);
+        assert!(
+            (b.unrealized_pnl - expected).abs() < 1e-3,
+            "unrealized {} expected {expected}",
+            b.unrealized_pnl
+        );
     }
 
     #[test]
