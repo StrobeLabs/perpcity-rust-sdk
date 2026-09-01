@@ -123,8 +123,7 @@ mod tests {
 
         let revert: PerpCityError = TransactionError::SimulationReverted {
             error_name: "PriceImpactTooHigh".into(),
-            selector: "0xfb30d03a".into(),
-            selector_bytes: [0xfb, 0x30, 0xd0, 0x3a],
+            selector: [0xfb, 0x30, 0xd0, 0x3a].into(),
             revert_data: None,
         }
         .into();
@@ -142,11 +141,7 @@ mod tests {
 
         let revert = TransactionError::SimulationReverted {
             error_name: "NotLiquidatable".into(),
-            selector: format!(
-                "0x{}",
-                alloy::primitives::hex::encode(Perp::NotLiquidatable::SELECTOR)
-            ),
-            selector_bytes: Perp::NotLiquidatable::SELECTOR,
+            selector: Perp::NotLiquidatable::SELECTOR.into(),
             revert_data: None,
         };
         assert!(revert.is_revert::<Perp::NotLiquidatable>());

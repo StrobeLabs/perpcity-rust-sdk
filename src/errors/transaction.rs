@@ -1,5 +1,6 @@
 //! Transaction lifecycle errors.
 
+use alloy::primitives::FixedBytes;
 use thiserror::Error;
 
 /// Errors arising from the transaction lifecycle: simulation, signing,
@@ -16,11 +17,9 @@ pub enum TransactionError {
         /// (e.g. `"InvalidMarginRatio"`). Unknown selectors decode to
         /// `"UnknownContractError(0x…)"` with the selector preserved.
         error_name: String,
-        /// Raw 4-byte selector as hex (e.g. `"0xbcffc83f"`).
-        selector: String,
-        /// The raw 4-byte selector, for typed matching via
-        /// [`Self::is_revert`].
-        selector_bytes: [u8; 4],
+        /// The raw 4-byte selector (displays as `0x`-prefixed hex, e.g.
+        /// `0xbcffc83f`); match it typed via [`Self::is_revert`].
+        selector: FixedBytes<4>,
         /// Full revert data hex, if available.
         revert_data: Option<String>,
     },
@@ -95,7 +94,7 @@ impl TransactionError {
     pub fn is_revert<E: alloy::sol_types::SolError>(&self) -> bool {
         matches!(
             self,
-            Self::SimulationReverted { selector_bytes, .. } if *selector_bytes == E::SELECTOR
+            Self::SimulationReverted { selector, .. } if selector.0 == E::SELECTOR
         )
     }
 }
