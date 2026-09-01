@@ -225,29 +225,16 @@ fn tick_funding_for(funding: &BTreeMap<i32, TickFundingRead>, tick: i32) -> Resu
 /// that a method is unavailable.
 const METHOD_NOT_FOUND: i64 = -32601;
 
-/// Provider-specific message substrings that also mean "this RPC method is
-/// not served here". A heuristic: providers spell the condition many ways
-/// and some return generic codes, so the match is deliberately loose —
-/// worst case a genuine failure latches the (always-correct)
-/// `eth_getStorageAt` fallback.
-const METHOD_UNSUPPORTED_MARKERS: [&str; 4] = [
-    "not supported",
-    "unsupported",
-    "method not found",
-    "does not exist",
-];
-
-/// Whether a transport error means the RPC method itself is not available
-/// on the endpoint, as opposed to the call failing.
+/// Whether a transport error is the endpoint's definitive statement that
+/// the RPC method does not exist there (JSON-RPC `-32601`), as opposed to
+/// the call failing. Only this answer is worth remembering: any other
+/// failure of `eth_getProof` still falls back to `eth_getStorageAt` for
+/// the current read, but is not held against later reads — providers
+/// phrase transient and permanent failures too much alike to latch a
+/// permanent, client-wide policy on message text.
 fn method_unsupported(e: &TransportError) -> bool {
-    e.as_error_resp().is_some_and(|resp| {
-        resp.code == METHOD_NOT_FOUND || {
-            let message = resp.message.to_lowercase();
-            METHOD_UNSUPPORTED_MARKERS
-                .iter()
-                .any(|marker| message.contains(marker))
-        }
-    })
+    e.as_error_resp()
+        .is_some_and(|resp| resp.code == METHOD_NOT_FOUND)
 }
 
 /// Split the row-multicall results into positions awaiting slot reads and
@@ -638,11 +625,11 @@ impl PerpClient {
     /// Primary path: one `eth_getProof` request over all slots —
     /// `storageProof[i].value` carries the storage words, the request takes
     /// a block id so the batch stays pinned, and Arbitrum Nitro serves it.
-    /// An endpoint that does not support `eth_getProof` is remembered (the
-    /// probe is not repeated) and the read falls back to concurrent
-    /// `eth_getStorageAt` with bounded concurrency. On both paths a failed
-    /// (or missing) tick read degrades only the positions referencing that
-    /// tick.
+    /// Any `eth_getProof` failure falls back to concurrent
+    /// `eth_getStorageAt` with bounded concurrency; an endpoint that
+    /// answers "method not found" is remembered so the probe is not
+    /// repeated. On both paths a failed (or missing) tick read degrades
+    /// only the positions referencing that tick.
     async fn get_tick_funding(
         &self,
         block_id: BlockId,
@@ -706,12 +693,15 @@ impl PerpClient {
                     );
                     self.get_proof_unsupported.store(true, Ordering::Relaxed);
                 }
+                // Any other failure (rate limit, timeout, a replica hiccup)
+                // falls back for this read only — the per-tick reads give
+                // the batch a second chance, and if they fail too the
+                // failure surfaces per position from the fallback below.
                 Err(e) => {
-                    return Err(ContractError::StorageReadFailed {
-                        context: "tick funding eth_getProof".into(),
-                        source: Some(Arc::new(e)),
-                    }
-                    .into());
+                    tracing::debug!(
+                        error = %e,
+                        "eth_getProof failed; falling back to eth_getStorageAt for this read"
+                    );
                 }
             }
         }
@@ -948,6 +938,34 @@ mod tests {
             ),
             "{err}"
         );
+    }
+
+    /// Only the standardized "method not found" code may latch the
+    /// client-wide `eth_getStorageAt` policy: a rate limit or a replica
+    /// hiccup whose message merely resembles it must not permanently
+    /// switch every later read off `eth_getProof`.
+    #[test]
+    fn only_method_not_found_latches_the_fallback() {
+        let resp = |code: i64, message: &'static str| {
+            TransportError::ErrorResp(alloy::rpc::json_rpc::ErrorPayload {
+                code,
+                message: message.into(),
+                data: None,
+            })
+        };
+
+        assert!(method_unsupported(&resp(
+            METHOD_NOT_FOUND,
+            "the method eth_getProof does not exist/is not available"
+        )));
+        assert!(!method_unsupported(&resp(
+            -32000,
+            "eth_getProof is not supported on this plan"
+        )));
+        assert!(!method_unsupported(&resp(-32005, "rate limit exceeded")));
+        assert!(!method_unsupported(&TransportErrorKind::custom_str(
+            "method not found"
+        )));
     }
 
     /// The batch read must stay usable from spawned tasks: its future is
