@@ -398,6 +398,20 @@ impl PerpClient {
 
     // ── Liquidations (permissionless) ───────────────────────────────
 
+    /// Reject `Address::ZERO` as a liquidation fee recipient: the contract
+    /// transfers the fee wherever it is told, so the zero address silently
+    /// burns the caller's liquidation reward. Always a caller bug.
+    fn validate_fee_recipient(fee_recipient: Address) -> std::result::Result<(), ValidationError> {
+        if fee_recipient == Address::ZERO {
+            return Err(ValidationError::InvalidConfig {
+                reason: "liquidation fee_recipient must not be the zero address \
+                         (the fee would be burned)"
+                    .into(),
+            });
+        }
+        Ok(())
+    }
+
     /// Check whether `pos_id` is liquidatable right now, via `eth_call`.
     ///
     /// The contract is the health oracle: `Ok` means the liquidation would
@@ -417,6 +431,7 @@ impl PerpClient {
         pos_id: U256,
         fee_recipient: Address,
     ) -> Result<()> {
+        Self::validate_fee_recipient(fee_recipient)?;
         let calldata: Bytes = Perp::liquidateMakerCall {
             posId: pos_id,
             liquidationFeeRecipient: fee_recipient,
@@ -448,6 +463,7 @@ impl PerpClient {
         fee_recipient: Address,
         urgency: Urgency,
     ) -> Result<alloy::rpc::types::TransactionReceipt> {
+        Self::validate_fee_recipient(fee_recipient)?;
         let calldata = Perp::liquidateMakerCall {
             posId: pos_id,
             liquidationFeeRecipient: fee_recipient,
@@ -474,6 +490,7 @@ impl PerpClient {
         pos_id: U256,
         fee_recipient: Address,
     ) -> Result<()> {
+        Self::validate_fee_recipient(fee_recipient)?;
         let calldata: Bytes = Perp::liquidateTakerCall {
             posId: pos_id,
             liquidationFeeRecipient: fee_recipient,
@@ -497,6 +514,7 @@ impl PerpClient {
         fee_recipient: Address,
         urgency: Urgency,
     ) -> Result<alloy::rpc::types::TransactionReceipt> {
+        Self::validate_fee_recipient(fee_recipient)?;
         let calldata = Perp::liquidateTakerCall {
             posId: pos_id,
             liquidationFeeRecipient: fee_recipient,
