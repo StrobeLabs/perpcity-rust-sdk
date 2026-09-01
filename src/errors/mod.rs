@@ -124,11 +124,38 @@ mod tests {
         let revert: PerpCityError = TransactionError::SimulationReverted {
             error_name: "PriceImpactTooHigh".into(),
             selector: "0xfb30d03a".into(),
+            selector_bytes: [0xfb, 0x30, 0xd0, 0x3a],
             revert_data: None,
         }
         .into();
         assert!(!revert.is_transient(), "a contract revert is deterministic");
         assert!(revert.is_simulation_revert());
+    }
+
+    /// Typed revert matching compares raw selectors, not strings, so it
+    /// keeps working whatever the decoded name looks like.
+    #[test]
+    fn is_revert_matches_by_selector() {
+        use alloy::sol_types::SolError;
+
+        use crate::contracts::Perp;
+
+        let revert = TransactionError::SimulationReverted {
+            error_name: "NotLiquidatable".into(),
+            selector: format!(
+                "0x{}",
+                alloy::primitives::hex::encode(Perp::NotLiquidatable::SELECTOR)
+            ),
+            selector_bytes: Perp::NotLiquidatable::SELECTOR,
+            revert_data: None,
+        };
+        assert!(revert.is_revert::<Perp::NotLiquidatable>());
+        assert!(!revert.is_revert::<Perp::NonMakerPosition>());
+
+        let other = TransactionError::GasUnavailable {
+            reason: "down".into(),
+        };
+        assert!(!other.is_revert::<Perp::NotLiquidatable>());
     }
 
     /// The read-path errors documented as retryable must classify as

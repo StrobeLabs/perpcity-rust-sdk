@@ -13,10 +13,14 @@ pub enum TransactionError {
     #[error("simulation reverted: {error_name} ({selector})")]
     SimulationReverted {
         /// Human-readable error name decoded from the 4-byte selector
-        /// (e.g. `"InvalidMarginRatio"`).
+        /// (e.g. `"InvalidMarginRatio"`). Unknown selectors decode to
+        /// `"UnknownContractError(0x…)"` with the selector preserved.
         error_name: String,
         /// Raw 4-byte selector as hex (e.g. `"0xbcffc83f"`).
         selector: String,
+        /// The raw 4-byte selector, for typed matching via
+        /// [`Self::is_revert`].
+        selector_bytes: [u8; 4],
         /// Full revert data hex, if available.
         revert_data: Option<String>,
     },
@@ -72,4 +76,26 @@ pub enum TransactionError {
         /// Transactions still awaiting receipts, which block the resync.
         in_flight: usize,
     },
+}
+
+impl TransactionError {
+    /// Whether this error is a [`Self::SimulationReverted`] carrying the
+    /// typed contract error `E`, compared by 4-byte selector — no string
+    /// matching.
+    ///
+    /// ```rust,ignore
+    /// use perpcity_sdk::Perp;
+    ///
+    /// if err.is_revert::<Perp::NotLiquidatable>() {
+    ///     // healthy right now — retry later
+    /// } else if err.is_revert::<Perp::NonMakerPosition>() {
+    ///     // never liquidatable on this path — drop the id
+    /// }
+    /// ```
+    pub fn is_revert<E: alloy::sol_types::SolError>(&self) -> bool {
+        matches!(
+            self,
+            Self::SimulationReverted { selector_bytes, .. } if *selector_bytes == E::SELECTOR
+        )
+    }
 }

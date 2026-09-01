@@ -103,16 +103,27 @@ pub fn decode_revert_data(hex_data: &str) -> Option<(String, String)> {
     }
 
     let selector_str = &hex_data[0..10];
+    let selector = parse_selector(hex_data)?;
 
-    // Parse the 8 hex digits after `0x` into a 4-byte selector.
+    let name = name_for_selector(selector)
+        .map(String::from)
+        // Keep the selector visible: distinct unknown errors must stay
+        // distinguishable instead of collapsing into one opaque name.
+        .unwrap_or_else(|| format!("UnknownContractError({selector_str})"));
+    Some((name, selector_str.into()))
+}
+
+/// Parse the 8 hex digits after `0x` into the raw 4-byte selector.
+pub(crate) fn parse_selector(hex_data: &str) -> Option<[u8; 4]> {
+    if hex_data.len() < 10 || !hex_data.starts_with("0x") {
+        return None;
+    }
     let mut selector = [0u8; 4];
     for (i, byte) in selector.iter_mut().enumerate() {
         let start = 2 + i * 2;
         *byte = u8::from_str_radix(&hex_data[start..start + 2], 16).ok()?;
     }
-
-    let name = name_for_selector(selector).unwrap_or("UnknownContractError");
-    Some((name.into(), selector_str.into()))
+    Some(selector)
 }
 
 /// Try to extract revert data from an Alloy error string.
@@ -183,7 +194,7 @@ mod tests {
     #[test]
     fn decode_unknown_selector() {
         let (name, sel) = decode_revert_data("0xdeadbeef").unwrap();
-        assert_eq!(name, "UnknownContractError");
+        assert_eq!(name, "UnknownContractError(0xdeadbeef)");
         assert_eq!(sel, "0xdeadbeef");
     }
 

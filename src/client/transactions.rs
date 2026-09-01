@@ -362,6 +362,7 @@ impl PerpClient {
             if let Some((name, selector, data)) = decode::try_extract_revert(&error_str) {
                 TransactionError::SimulationReverted {
                     error_name: name,
+                    selector_bytes: decode::parse_selector(&selector).unwrap_or_default(),
                     selector,
                     revert_data: data,
                 }
@@ -466,6 +467,7 @@ impl PerpClient {
             if let Some((name, selector, data)) = decode::try_extract_revert(&error_str) {
                 TransactionError::SimulationReverted {
                     error_name: name,
+                    selector_bytes: decode::parse_selector(&selector).unwrap_or_default(),
                     selector,
                     revert_data: data,
                 }
