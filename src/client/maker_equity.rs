@@ -10,12 +10,14 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::future::IntoFuture;
+use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 use alloy::eips::BlockId;
 use alloy::primitives::{Address, B256, I256, U256};
 use alloy::providers::Provider;
 use alloy::sol_types::SolCall;
-use alloy::transports::TransportError;
+use alloy::transports::{TransportError, TransportErrorKind};
 use futures_util::stream::{self, StreamExt};
 
 use crate::constants::MULTICALL3;
@@ -40,7 +42,7 @@ const TICK_READ_CONCURRENCY: usize = 16;
 
 /// Outcome of one tick's funding read: the two decoded words, or the shared
 /// transport error that failed every position referencing the tick.
-type TickFundingRead = std::result::Result<TickFunding, std::sync::Arc<TransportError>>;
+type TickFundingRead = std::result::Result<TickFunding, Arc<TransportError>>;
 
 /// Maximum position ids per RPC batch inside a maker-equity read.
 ///
@@ -208,7 +210,7 @@ fn tick_funding_for(funding: &BTreeMap<i32, TickFundingRead>, tick: i32) -> Resu
         Some(Ok(funding)) => Ok(*funding),
         Some(Err(e)) => Err(ContractError::StorageReadFailed {
             context: format!("tick {tick} funding"),
-            source: Some(std::sync::Arc::clone(e)),
+            source: Some(Arc::clone(e)),
         }
         .into()),
         None => Err(ContractError::StorageReadFailed {
@@ -219,17 +221,31 @@ fn tick_funding_for(funding: &BTreeMap<i32, TickFundingRead>, tick: i32) -> Resu
     }
 }
 
+/// The JSON-RPC "method not found" code — the one standardized signal
+/// that a method is unavailable.
+const METHOD_NOT_FOUND: i64 = -32601;
+
+/// Provider-specific message substrings that also mean "this RPC method is
+/// not served here". A heuristic: providers spell the condition many ways
+/// and some return generic codes, so the match is deliberately loose —
+/// worst case a genuine failure latches the (always-correct)
+/// `eth_getStorageAt` fallback.
+const METHOD_UNSUPPORTED_MARKERS: [&str; 4] = [
+    "not supported",
+    "unsupported",
+    "method not found",
+    "does not exist",
+];
+
 /// Whether a transport error means the RPC method itself is not available
 /// on the endpoint, as opposed to the call failing.
-fn method_unsupported(e: &alloy::transports::TransportError) -> bool {
-    const METHOD_NOT_FOUND: i64 = -32601;
+fn method_unsupported(e: &TransportError) -> bool {
     e.as_error_resp().is_some_and(|resp| {
         resp.code == METHOD_NOT_FOUND || {
             let message = resp.message.to_lowercase();
-            message.contains("not supported")
-                || message.contains("unsupported")
-                || message.contains("method not found")
-                || message.contains("does not exist")
+            METHOD_UNSUPPORTED_MARKERS
+                .iter()
+                .any(|marker| message.contains(marker))
         }
     })
 }
@@ -625,9 +641,6 @@ impl PerpClient {
         block_id: BlockId,
         ticks: &BTreeSet<i32>,
     ) -> Result<BTreeMap<i32, TickFundingRead>> {
-        use std::sync::Arc;
-        use std::sync::atomic::Ordering;
-
         let perp_addr = self.deployments.perp;
         if !self.get_proof_unsupported.load(Ordering::Relaxed) {
             let keys: Vec<B256> = ticks
@@ -662,11 +675,9 @@ impl PerpClient {
                             );
                             funding.insert(
                                 tick,
-                                Err(std::sync::Arc::new(
-                                    alloy::transports::TransportErrorKind::custom_str(
-                                        "eth_getProof response missing the tick's storage slots",
-                                    ),
-                                )),
+                                Err(Arc::new(TransportErrorKind::custom_str(
+                                    "eth_getProof response missing the tick's storage slots",
+                                ))),
                             );
                             continue;
                         };
@@ -906,12 +917,10 @@ mod tests {
     /// position whose band avoids it computes normally.
     #[test]
     fn failed_tick_read_degrades_only_referencing_positions() {
-        let shared_error = std::sync::Arc::new(alloy::transports::TransportErrorKind::custom_str(
-            "replica dropped the read",
-        ));
+        let shared_error = Arc::new(TransportErrorKind::custom_str("replica dropped the read"));
         let funding: BTreeMap<i32, TickFundingRead> = BTreeMap::from([
             (-60, Ok(TickFunding::default())),
-            (60, Err(std::sync::Arc::clone(&shared_error))),
+            (60, Err(Arc::clone(&shared_error))),
             (120, Ok(TickFunding::default())),
             (180, Ok(TickFunding::default())),
         ]);

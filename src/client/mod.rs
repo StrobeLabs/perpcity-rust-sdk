@@ -202,6 +202,12 @@ pub struct PerpClient {
     /// Latched when the endpoint rejects `eth_getProof` as an unknown
     /// method, so maker-equity reads skip the probe and go straight to the
     /// `eth_getStorageAt` fallback.
+    ///
+    /// The latch is client-global, not per endpoint: one replica of a
+    /// multi-endpoint transport answering "method not found" switches every
+    /// later read to the fallback, which every endpoint serves. Accepted —
+    /// a per-endpoint capability record in `transport::health` is future
+    /// work.
     get_proof_unsupported: AtomicBool,
 }
 
