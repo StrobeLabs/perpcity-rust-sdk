@@ -35,7 +35,8 @@ use crate::convert::scale_from_6dec;
 use crate::errors::ValidationError;
 use crate::math::BlockContext;
 use crate::math::fixed_point::{Rounding, mul_div, s_full_mul_div, u512_to_u256};
-use crate::math::swap::{amount0_delta, amount1_delta};
+use crate::math::liquidity::amounts_for_liquidity;
+use crate::math::swap::amount0_delta;
 use crate::math::tick::get_sqrt_ratio_at_tick;
 
 /// One `TickInfo` from the Perp's tick funding mapping (`s.ticks[tick]`),
@@ -554,24 +555,6 @@ pub fn fee_growth_inside1(
         global_x128.wrapping_sub(outside_upper_x128)
     };
     global_x128.wrapping_sub(below).wrapping_sub(above)
-}
-
-/// Uniswap `getAmountsForLiquidity` with the price clamped into the range.
-fn amounts_for_liquidity(
-    sqrt_p: U256,
-    sqrt_a: U256,
-    sqrt_b: U256,
-    liquidity: u128,
-) -> Result<(U256, U256), ValidationError> {
-    let (sa, sb) = if sqrt_a <= sqrt_b {
-        (sqrt_a, sqrt_b)
-    } else {
-        (sqrt_b, sqrt_a)
-    };
-    let sp = sqrt_p.clamp(sa, sb);
-    let amount0 = amount0_delta(sp, sb, liquidity, Rounding::TowardZero)?;
-    let amount1 = amount1_delta(sa, sp, liquidity, Rounding::TowardZero)?;
-    Ok((amount0, amount1))
 }
 
 fn to_i256(v: U256) -> Result<I256, ValidationError> {
