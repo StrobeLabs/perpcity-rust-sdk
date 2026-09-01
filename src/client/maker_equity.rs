@@ -237,6 +237,44 @@ fn method_unsupported(e: &TransportError) -> bool {
         .is_some_and(|resp| resp.code == METHOD_NOT_FOUND)
 }
 
+/// A failure of one chunk's shared reads (its row multicall or fee-growth
+/// `extsload`), reshaped so every id in the chunk can carry it as its own
+/// [`MakerEquityKind::Failed`] — the same
+/// [`ContractError::StorageReadFailed`] shape a failed tick read produces,
+/// with a transport cause kept behind an `Arc` so the shared error stays
+/// retryable ([`PerpCityError::is_transient`]) on every affected id.
+struct ChunkReadFailure {
+    context: String,
+    source: Option<Arc<TransportError>>,
+}
+
+impl From<PerpCityError> for ChunkReadFailure {
+    fn from(error: PerpCityError) -> Self {
+        const CONTEXT: &str = "maker equity chunk read";
+        let (context, source) = match error {
+            PerpCityError::Rpc(e)
+            | PerpCityError::Abi(alloy::contract::Error::TransportError(e)) => {
+                (CONTEXT.to_string(), Some(Arc::new(e)))
+            }
+            PerpCityError::Contract(ContractError::StorageReadFailed { context, source }) => {
+                (context, source)
+            }
+            other => (format!("{CONTEXT}: {other}"), None),
+        };
+        Self { context, source }
+    }
+}
+
+impl ChunkReadFailure {
+    fn error(&self) -> PerpCityError {
+        ContractError::StorageReadFailed {
+            context: self.context.clone(),
+            source: self.source.clone(),
+        }
+        .into()
+    }
+}
+
 /// Split the row-multicall results into positions awaiting slot reads and
 /// per-position failures, both tagged with their input index. Zero-liquidity
 /// ids (takers, deleted positions) are dropped. A failed row degrades only
@@ -273,7 +311,10 @@ impl PerpClient {
     /// (takers, burned, never minted), and
     /// [`Failed`](MakerEquityKind::Failed) when that one position's reads,
     /// decoding, or settle math failed — the rest of the batch is
-    /// unaffected. Market-wide read failures still fail the whole call.
+    /// unaffected. A read shared by one chunk (its row multicall or
+    /// `extsload`) failing marks every id of that chunk `Failed` and leaves
+    /// the other chunks intact. Only the market-wide snapshot read fails
+    /// the whole call.
     ///
     /// A `Failed` outcome is worth retrying exactly when its error's
     /// [`PerpCityError::is_transient`] is true (a lagging replica or a
@@ -329,10 +370,27 @@ impl PerpClient {
 
         let mut kinds = Vec::with_capacity(pos_ids.len());
         for chunk in pos_ids.chunks(MAX_MAKER_EQUITY_BATCH) {
-            kinds.extend(
-                self.get_chunk_equity_kinds(&market, pool_id, block_id, chunk)
-                    .await?,
-            );
+            match self
+                .get_chunk_equity_kinds(&market, pool_id, block_id, chunk)
+                .await
+            {
+                Ok(chunk_kinds) => kinds.extend(chunk_kinds),
+                // A chunk-wide read failure (its row multicall or extsload)
+                // degrades that chunk's ids, not the chunks already read.
+                Err(e) => {
+                    tracing::debug!(
+                        ids = chunk.len(),
+                        error = %e,
+                        "maker equity: chunk read failed"
+                    );
+                    let failure = ChunkReadFailure::from(e);
+                    kinds.extend(
+                        chunk
+                            .iter()
+                            .map(|_| MakerEquityKind::Failed(failure.error())),
+                    );
+                }
+            }
         }
 
         tracing::debug!(
@@ -938,6 +996,30 @@ mod tests {
             ),
             "{err}"
         );
+    }
+
+    /// A chunk-wide read failure fans out to every id of the chunk as a
+    /// `StorageReadFailed`, keeping a transport cause (so the ids retry)
+    /// and turning a deterministic failure into a non-transient one.
+    #[test]
+    fn chunk_failure_keeps_transient_classification() {
+        let transport =
+            ChunkReadFailure::from(PerpCityError::Abi(alloy::contract::Error::TransportError(
+                TransportErrorKind::custom_str("replica timed out"),
+            )));
+        let first = transport.error();
+        let second = transport.error();
+        assert!(first.is_transient(), "{first}");
+        assert!(second.is_transient(), "{second}");
+        assert!(first.to_string().contains("maker equity chunk read"));
+
+        let deterministic =
+            ChunkReadFailure::from(PerpCityError::Contract(ContractError::MulticallFailed {
+                reason: "3 results, expected 4".into(),
+            }));
+        let err = deterministic.error();
+        assert!(!err.is_transient(), "{err}");
+        assert!(err.to_string().contains("3 results, expected 4"));
     }
 
     /// Only the standardized "method not found" code may latch the
