@@ -1120,7 +1120,8 @@ impl PerpClient {
             mark_price_x96,
         }
         .accrued(&AccrualInputs {
-            funding_per_day_wad: i128::try_from(rates.fundingPerDay).unwrap_or(0),
+            funding_per_day_wad: i128::try_from(rates.fundingPerDay)
+                .expect("int88 always fits i128"),
             long_util_fee_per_day_wad: rates.longUtilFeePerDay,
             short_util_fee_per_day_wad: rates.shortUtilFeePerDay,
             last_touch: rates.lastTouch.to::<u64>(),

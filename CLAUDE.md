@@ -24,7 +24,7 @@ outside market makers, so keep it ergonomic and general.
 - Anchor new contract math to golden vectors from real on-chain data
   (see the `maker_equity` golden test), not to synthetic fixtures alone.
 - One implementation per concept crate-wide (e.g. keccak mapping-slot
-  math lives in `maker_equity` and is delegated to elsewhere). Before
+  math lives in `math/storage.rs` and is delegated to elsewhere). Before
   adding a helper, search for an existing private one and export it
   instead.
 - `cargo fmt --check`, `cargo clippy --all-targets` and `cargo test`

@@ -25,7 +25,9 @@ type Selector = [u8; 4];
 
 /// Pre-empirically derived gas limits for PerpCity operations.
 ///
-/// Each limit includes ~20% margin over observed mainnet usage.
+/// Trade limits carry ~20% margin over observed mainnet usage;
+/// [`Self::LIQUIDATE`] is deliberately over-provisioned far beyond that
+/// (see its docs).
 #[derive(Debug, Clone, Copy)]
 pub struct GasLimits;
 

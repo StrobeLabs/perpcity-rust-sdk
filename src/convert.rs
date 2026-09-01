@@ -326,9 +326,11 @@ pub fn sqrt_price_x96_to_price(sqrt_price_x96: U256) -> Result<f64, ValidationEr
 /// The packing is part of the contract ABI: the upper 128 bits hold
 /// `amount0` and the lower 128 bits hold `amount1`.
 pub fn unpack_balance_delta(delta: I256) -> (i128, i128) {
-    let bytes: [u8; 32] = delta.to_be_bytes();
-    let amount0 = i128::from_be_bytes(bytes[0..16].try_into().unwrap());
-    let amount1 = i128::from_be_bytes(bytes[16..32].try_into().unwrap());
+    let raw = delta.into_raw();
+    // The shift/mask leave at most 128 significant bits, so the narrowing
+    // cannot truncate; `as i128` reinterprets the two's-complement halves.
+    let amount0 = (raw >> 128usize).to::<u128>() as i128;
+    let amount1 = (raw & U256::from(u128::MAX)).to::<u128>() as i128;
     (amount0, amount1)
 }
 
