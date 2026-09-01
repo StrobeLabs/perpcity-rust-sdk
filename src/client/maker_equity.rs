@@ -518,11 +518,11 @@ impl PerpClient {
             long_util_fee_per_day_wad: rates.longUtilFeePerDay,
             short_util_fee_per_day_wad: rates.shortUtilFeePerDay,
             last_touch: rates.lastTouch.to::<u64>(),
-            now: block.timestamp,
-            oi_long: oi.long,
-            oi_short: oi.short,
-            cap_long: capacity.long,
-            cap_short: capacity.short,
+            accrue_to: block.timestamp,
+            oi_long_atoms: oi.long,
+            oi_short_atoms: oi.short,
+            cap_long_atoms: capacity.long,
+            cap_short_atoms: capacity.short,
         })?;
         Ok((market, pool_id, block_id))
     }
@@ -587,7 +587,7 @@ impl PerpClient {
                 let fg1_inside_last = layout.inside_last(&words, i);
                 let (delta_amount0, delta_amount1) = unpack_balance_delta(maker.position.delta);
                 let state = MakerState {
-                    margin_6dec: maker.position.margin,
+                    margin_atoms: maker.position.margin,
                     delta_amount0,
                     delta_amount1,
                     last_cuml_funding_x96: maker.position.lastCumlFundingX96,
@@ -596,8 +596,8 @@ impl PerpClient {
                     liquidity: maker.details.liquidity,
                     last_long_util_earnings_x96: maker.details.lastLongUtilEarningsX96,
                     last_short_util_earnings_x96: maker.details.lastShortUtilEarningsX96,
-                    cap_long_6dec: maker.details.capacity.long,
-                    cap_short_6dec: maker.details.capacity.short,
+                    cap_long_atoms: maker.details.capacity.long,
+                    cap_short_atoms: maker.details.capacity.short,
                     last_below_x96: maker.details.lastCumlFunding.belowX96,
                     last_within_x96: maker.details.lastCumlFunding.withinX96,
                     last_div_sqrt_within_x96: maker.details.lastCumlFunding.divSqrtPriceWithinX96,

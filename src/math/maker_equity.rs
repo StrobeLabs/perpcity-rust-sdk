@@ -94,16 +94,18 @@ pub struct AccrualInputs {
     pub short_util_fee_per_day_wad: u64,
     /// `rates().lastTouch`: timestamp the cumulatives were last advanced.
     pub last_touch: u64,
-    /// Timestamp to accrue to — the snapshot block's timestamp.
-    pub now: u64,
+    /// Timestamp to accrue to — the snapshot block's timestamp, never a
+    /// wall clock (a local clock ahead of the chain fabricates accrual;
+    /// one behind erases it).
+    pub accrue_to: u64,
     /// `openInterest().long`, 6-decimal perp atoms.
-    pub oi_long: u128,
+    pub oi_long_atoms: u128,
     /// `openInterest().short`, 6-decimal perp atoms.
-    pub oi_short: u128,
+    pub oi_short_atoms: u128,
     /// `capacity().long`, 6-decimal perp atoms.
-    pub cap_long: u128,
+    pub cap_long_atoms: u128,
     /// `capacity().short`, 6-decimal perp atoms.
-    pub cap_short: u128,
+    pub cap_short_atoms: u128,
 }
 
 /// Per-position inputs: the position row, maker row, its band's tick funding
@@ -115,7 +117,7 @@ pub struct AccrualInputs {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MakerState {
     /// `positions(id).margin`: last-settled margin, 6-decimal USDC atoms.
-    pub margin_6dec: u128,
+    pub margin_atoms: u128,
     /// `positions(id).delta` amount0 (perp atoms), unpacked from the packed
     /// `BalanceDelta`. Negative = owed to the pool.
     pub delta_amount0: i128,
@@ -138,9 +140,9 @@ pub struct MakerState {
     /// earnings cumulative at the last settle.
     pub last_short_util_earnings_x96: U256,
     /// `makerDetails(id).capacity.long`, 6-decimal perp atoms.
-    pub cap_long_6dec: u128,
+    pub cap_long_atoms: u128,
     /// `makerDetails(id).capacity.short`, 6-decimal perp atoms.
-    pub cap_short_6dec: u128,
+    pub cap_short_atoms: u128,
     /// `makerDetails(id).lastCumlFunding.belowX96`: below-band funding
     /// cumulative at the last settle.
     pub last_below_x96: I256,
@@ -329,7 +331,7 @@ impl MakerEquityBreakdown {
 }
 
 impl MakerMarketSnapshot {
-    /// Replay `PerpLogic.accrue` from `lastTouch` to the accrual target,
+    /// Replay `PerpLogic.accrue` from `last_touch` to `accrue_to`,
     /// returning an [`AccruedMakerSnapshot`] with the cumulatives advanced.
     /// Mirrors the contract exactly, using [`Self::mark_price_x96`] for the
     /// utilization leg (the contract recomputes the mark inside `accrue`;
@@ -352,7 +354,7 @@ impl MakerMarketSnapshot {
         mut self,
         accrual: &AccrualInputs,
     ) -> Result<AccruedMakerSnapshot, ValidationError> {
-        let dt = accrual.now.saturating_sub(accrual.last_touch);
+        let dt = accrual.accrue_to.saturating_sub(accrual.last_touch);
         if dt == 0 {
             return Ok(AccruedMakerSnapshot(self));
         }
@@ -397,25 +399,25 @@ impl MakerMarketSnapshot {
             WAD,
             Rounding::TowardZero,
         )?;
-        if accrual.cap_long != 0 {
+        if accrual.cap_long_atoms != 0 {
             self.long_util_earnings_x96 = add_u(
                 self.long_util_earnings_x96,
                 mul_div(
                     lu_accrued,
-                    U256::from(accrual.oi_long),
-                    U256::from(accrual.cap_long),
+                    U256::from(accrual.oi_long_atoms),
+                    U256::from(accrual.cap_long_atoms),
                     Rounding::TowardZero,
                 )?,
                 "accrued long utilization cumulative",
             )?;
         }
-        if accrual.cap_short != 0 {
+        if accrual.cap_short_atoms != 0 {
             self.short_util_earnings_x96 = add_u(
                 self.short_util_earnings_x96,
                 mul_div(
                     su_accrued,
-                    U256::from(accrual.oi_short),
-                    U256::from(accrual.cap_short),
+                    U256::from(accrual.oi_short_atoms),
+                    U256::from(accrual.cap_short_atoms),
                     Rounding::TowardZero,
                 )?,
                 "accrued short utilization cumulative",
@@ -510,7 +512,7 @@ impl AccruedMakerSnapshot {
         )?;
 
         let long_util = mul_div(
-            U256::from(maker.cap_long_6dec),
+            U256::from(maker.cap_long_atoms),
             sub_u(
                 self.0.long_util_earnings_x96,
                 maker.last_long_util_earnings_x96,
@@ -520,7 +522,7 @@ impl AccruedMakerSnapshot {
             Rounding::TowardZero,
         )?;
         let short_util = mul_div(
-            U256::from(maker.cap_short_6dec),
+            U256::from(maker.cap_short_atoms),
             sub_u(
                 self.0.short_util_earnings_x96,
                 maker.last_short_util_earnings_x96,
@@ -569,7 +571,7 @@ impl AccruedMakerSnapshot {
         )?;
 
         Ok(MakerEquityBreakdown {
-            margin_atoms: atoms(to_i256(U256::from(maker.margin_6dec), "margin")?, "margin")?,
+            margin_atoms: atoms(to_i256(U256::from(maker.margin_atoms), "margin")?, "margin")?,
             funding_owed_atoms: atoms(funding, "accrued funding")?,
             long_util_earnings_atoms: atoms(
                 to_i256(long_util, "long utilization earnings")?,
@@ -730,14 +732,14 @@ mod tests {
             long_util_fee_per_day_wad: 10000000000000000,
             short_util_fee_per_day_wad: 10000000000000000,
             last_touch: 1788254416,
-            now: 1788260191,
-            oi_long: 2587247,
-            oi_short: 175795732,
-            cap_long: 303811186,
-            cap_short: 223153047,
+            accrue_to: 1788260191,
+            oi_long_atoms: 2587247,
+            oi_short_atoms: 175795732,
+            cap_long_atoms: 303811186,
+            cap_short_atoms: 223153047,
         };
         let maker = MakerState {
-            margin_6dec: 143730198,
+            margin_atoms: 143730198,
             delta_amount0: -134328,
             delta_amount1: -137992489,
             last_cuml_funding_x96: i("-10162710870332004796583430787875"),
@@ -746,8 +748,8 @@ mod tests {
             liquidity: 570282387,
             last_long_util_earnings_x96: u("105980308075601242205274025040"),
             last_short_util_earnings_x96: u("79412639757423009537924209956"),
-            cap_long_6dec: 134327,
-            cap_short_6dec: 4493830,
+            cap_long_atoms: 134327,
+            cap_short_atoms: 4493830,
             last_below_x96: i("-10162710870332004796583430787875"),
             last_within_x96: I256::ZERO,
             last_div_sqrt_within_x96: I256::ZERO,
@@ -813,7 +815,7 @@ mod tests {
         // A dt-0 replay (accrue exactly to last_touch) leaves the
         // cumulatives stale — the only way to see the pre-replay numbers.
         let stale_accrual = AccrualInputs {
-            now: accrual.last_touch,
+            accrue_to: accrual.last_touch,
             ..accrual
         };
         let stale = market
