@@ -663,9 +663,9 @@ mod tests {
     /// deployed contracts actually emit.
     #[test]
     fn decode_deployed_era_maker_converted_golden_vector() {
-        let topic0 = B256::from(alloy::primitives::b256!(
+        let topic0 = alloy::primitives::b256!(
             "8d8df09df1280157a012f3f883267724105b6d76650a4f9ff07413e4741711e8"
-        ));
+        );
         let data = alloy::hex::decode(concat!(
             "0000000000000000000000000000000000000000000000000000000000000036",
             "000000000000000000000000000000000000000000000000000000000c7ebfc7",

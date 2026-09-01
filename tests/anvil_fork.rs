@@ -17,8 +17,8 @@ use alloy::sol;
 use alloy::sol_types::SolCall;
 
 use perpcity_sdk::{
-    AdjustTakerParams, Deployments, HftTransport, MakerEquityKind, OpenTakerParams, PerpClient,
-    TransportConfig, Urgency,
+    AdjustTakerParams, Deployments, HftTransport, MakerEquityKind, OpenTakerParams, PerpCityError,
+    PerpClient, TransactionError, TransportConfig, Urgency,
 };
 
 sol! {
@@ -637,10 +637,10 @@ async fn maker_equities_via_batched_reads() {
 #[tokio::test]
 #[ignore] // Requires `anvil` — run with: cargo test --test anvil_fork -- --ignored --nocapture
 async fn liquidation_simulation_returns_typed_reverts() {
-    use perpcity_sdk::{PerpCityError, TransactionError};
-
+    // 1. Start Anvil forking Arbitrum Sepolia
     let anvil = AnvilInstance::fork().await;
 
+    // 2. Setup client (reads only — no funding needed)
     let signer: PrivateKeySigner = ANVIL_KEY.parse().unwrap();
     let address = signer.address();
     let transport = HftTransport::new(
@@ -652,7 +652,7 @@ async fn liquidation_simulation_returns_typed_reverts() {
     .unwrap();
     let client = PerpClient::new(transport, signer, deployments(), CHAIN_ID).unwrap();
 
-    // The zero address burns the liquidation fee — rejected before any RPC.
+    // 3. The zero address burns the liquidation fee — rejected before any RPC.
     let err = client
         .simulate_liquidate_maker(U256::from(1u8), Address::ZERO)
         .await
@@ -662,9 +662,9 @@ async fn liquidation_simulation_returns_typed_reverts() {
         "zero fee recipient must fail typed: {err}"
     );
 
-    // A healthy or non-maker position must come back as a DECODED contract
-    // revert — callers key retry/drop decisions off the error name — never
-    // an opaque ABI error.
+    // 4. A healthy or non-maker position must come back as a DECODED contract
+    //    revert — callers key retry/drop decisions off the error name — never
+    //    an opaque ABI error.
     for pos_id in [U256::from(1u8), U256::from(999_999u32)] {
         let err = client
             .simulate_liquidate_maker(pos_id, address)
