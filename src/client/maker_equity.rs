@@ -133,15 +133,19 @@ fn decode_maker_row(
 /// shared tick is read once), then one `feeGrowthInside1LastX128` word per
 /// position.
 struct FeeGrowthLayout {
-    slots: Vec<B256>,
     /// Word index of each distinct tick's outside-growth slot.
     tick_word: BTreeMap<i32, usize>,
     /// Word index of the first per-position inside-growth slot.
     first_inside_word: usize,
+    /// Total words the extsload response must carry.
+    word_count: usize,
 }
 
 impl FeeGrowthLayout {
-    fn new(pool_id: B256, perp: Address, pending: &[PendingMaker]) -> Self {
+    /// Build the layout and the slot vector it indexes into. The vector is
+    /// returned by value (the extsload call consumes it) rather than stored
+    /// and cloned.
+    fn new(pool_id: B256, perp: Address, pending: &[PendingMaker]) -> (Self, Vec<B256>) {
         let ticks: BTreeSet<i32> = pending
             .iter()
             .flat_map(|maker| [maker.tick_lower, maker.tick_upper])
@@ -163,25 +167,31 @@ impl FeeGrowthLayout {
                 B256::from(maker.pos_id),
             )));
         }
-        Self {
+        (
+            Self {
+                tick_word,
+                first_inside_word,
+                word_count: slots.len(),
+            },
             slots,
-            tick_word,
-            first_inside_word,
-        }
+        )
     }
 
     fn word_count(&self) -> usize {
-        self.slots.len()
+        self.word_count
     }
 
-    fn global(&self, words: &[B256]) -> U256 {
+    /// Word 0 is the pool's `feeGrowthGlobal1X128` by construction.
+    fn global(words: &[B256]) -> U256 {
         U256::from_be_bytes(words[0].0)
     }
 
-    /// `feeGrowthOutside1X128` of `tick`. The tick must be a band boundary
-    /// of one of the positions the layout was built from.
-    fn outside(&self, words: &[B256], tick: i32) -> U256 {
-        U256::from_be_bytes(words[self.tick_word[&tick]].0)
+    /// `feeGrowthOutside1X128` of `tick`, or `None` when the tick was not a
+    /// band boundary of the positions the layout was built from.
+    fn outside(&self, words: &[B256], tick: i32) -> Option<U256> {
+        self.tick_word
+            .get(&tick)
+            .map(|&word| U256::from_be_bytes(words[word].0))
     }
 
     /// `feeGrowthInside1LastX128` of the `position`-th pending position.
@@ -517,13 +527,9 @@ impl PerpClient {
             return Ok(Vec::new());
         }
 
-        let layout = FeeGrowthLayout::new(pool_id, self.deployments.perp, pending);
+        let (layout, slots) = FeeGrowthLayout::new(pool_id, self.deployments.perp, pending);
         let manager = IPoolManagerState::new(self.deployments.pool_manager, &self.provider);
-        let words = manager
-            .extsload_1(layout.slots.clone())
-            .block(block_id)
-            .call()
-            .await?;
+        let words = manager.extsload_1(slots).block(block_id).call().await?;
         if words.len() != layout.word_count() {
             return Err(ContractError::StorageReadFailed {
                 context: format!(
@@ -535,7 +541,7 @@ impl PerpClient {
             }
             .into());
         }
-        let fg1_global = layout.global(&words);
+        let fg1_global = FeeGrowthLayout::global(&words);
 
         // Positions share band boundaries (a maker ladder reuses each inner
         // tick twice), so read each distinct tick's two funding words once.
@@ -552,8 +558,16 @@ impl PerpClient {
             .map(|(i, maker)| {
                 let tick_lower_funding = funding_for(maker.tick_lower)?;
                 let tick_upper_funding = funding_for(maker.tick_upper)?;
-                let fg1_out_lower = layout.outside(&words, maker.tick_lower);
-                let fg1_out_upper = layout.outside(&words, maker.tick_upper);
+                let outside = |tick: i32| {
+                    layout.outside(&words, tick).ok_or_else(|| {
+                        PerpCityError::from(ContractError::StorageReadFailed {
+                            context: format!("tick {tick} missing from fee-growth layout"),
+                            source: None,
+                        })
+                    })
+                };
+                let fg1_out_lower = outside(maker.tick_lower)?;
+                let fg1_out_upper = outside(maker.tick_upper)?;
                 let fg1_inside_last = layout.inside_last(&words, i);
                 let (delta_amount0, delta_amount1) = unpack_balance_delta(maker.position.delta);
                 let state = MakerState {
@@ -831,24 +845,22 @@ mod tests {
             pending_maker(1, 2, 60, 120),
             pending_maker(2, 3, 120, 180),
         ];
-        let layout = FeeGrowthLayout::new(pool_id, perp, &pending);
+        let (layout, slots) = FeeGrowthLayout::new(pool_id, perp, &pending);
 
         // 1 global + 4 distinct ticks + 3 positions.
         assert_eq!(layout.word_count(), 8);
-        assert_eq!(
-            layout.slots[0],
-            B256::from(v4_fee_growth_global1_slot(pool_id))
-        );
+        assert_eq!(slots.len(), 8);
+        assert_eq!(slots[0], B256::from(v4_fee_growth_global1_slot(pool_id)));
         for tick in [-60, 60, 120, 180] {
             assert_eq!(
-                layout.slots[layout.tick_word[&tick]],
+                slots[layout.tick_word[&tick]],
                 B256::from(v4_tick_fee_growth_outside1_slot(pool_id, tick)),
                 "outside slot for tick {tick}"
             );
         }
         for (i, maker) in pending.iter().enumerate() {
             assert_eq!(
-                layout.slots[layout.first_inside_word + i],
+                slots[layout.first_inside_word + i],
                 B256::from(v4_position_fee_growth_inside1_slot(
                     pool_id,
                     perp,
@@ -860,13 +872,18 @@ mod tests {
             );
         }
 
-        // Word extraction follows the same indices.
+        // Word extraction follows the same indices; a tick outside the
+        // build set answers None instead of panicking.
         let words: Vec<B256> = (0u8..8).map(B256::repeat_byte).collect();
-        assert_eq!(layout.global(&words), U256::from_be_bytes(words[0].0));
+        assert_eq!(
+            FeeGrowthLayout::global(&words),
+            U256::from_be_bytes(words[0].0)
+        );
         assert_eq!(
             layout.outside(&words, 60),
-            U256::from_be_bytes(words[layout.tick_word[&60]].0)
+            Some(U256::from_be_bytes(words[layout.tick_word[&60]].0))
         );
+        assert_eq!(layout.outside(&words, 90), None);
         assert_eq!(
             layout.inside_last(&words, 2),
             U256::from_be_bytes(words[layout.first_inside_word + 2].0)
