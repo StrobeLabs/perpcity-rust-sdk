@@ -8,7 +8,7 @@
 use std::collections::BTreeMap;
 use std::ops::Bound::{Excluded, Included, Unbounded};
 
-use alloy::primitives::{B256, U256, U512};
+use alloy::primitives::{U256, U512};
 use serde::{Deserialize, Serialize};
 
 use crate::constants::{MAX_SWAP_SQRT_PRICE_X96, MIN_SWAP_SQRT_PRICE_X96, Q96};
@@ -130,10 +130,8 @@ pub struct TakerQuote {
     pub price_impact_allowed: bool,
     /// The first constraint encountered.
     pub limit: QuoteLimit,
-    /// Reference block number.
-    pub block_number: u64,
-    /// Reference block hash.
-    pub block_hash: B256,
+    /// The block the quoted snapshot was read at.
+    pub block: BlockContext,
 }
 
 impl TakerQuote {
@@ -317,8 +315,7 @@ impl TakerMarketSnapshot {
             fully_filled: sim.fully_filled,
             price_impact_allowed: allowed,
             limit: reason,
-            block_number: self.block.number,
-            block_hash: self.block.hash,
+            block: self.block,
         }
     }
 
