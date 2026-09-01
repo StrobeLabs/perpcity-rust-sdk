@@ -617,8 +617,9 @@ impl PerpClient {
     /// a block id so the batch stays pinned, and Arbitrum Nitro serves it.
     /// An endpoint that does not support `eth_getProof` is remembered (the
     /// probe is not repeated) and the read falls back to concurrent
-    /// `eth_getStorageAt` with bounded concurrency, where a failed tick
-    /// read degrades only the positions referencing that tick.
+    /// `eth_getStorageAt` with bounded concurrency. On both paths a failed
+    /// (or missing) tick read degrades only the positions referencing that
+    /// tick.
     async fn get_tick_funding(
         &self,
         block_id: BlockId,
@@ -651,13 +652,23 @@ impl PerpClient {
                         let word = |slot: U256| values.get(&B256::from(slot)).copied();
                         let (Some(opp), Some(div_sqrt_p_opp)) = (word(slot_opp), word(slot_div))
                         else {
-                            return Err(ContractError::StorageReadFailed {
-                                context: format!(
-                                    "eth_getProof response missing tick {tick} storage slots"
-                                ),
-                                source: None,
-                            }
-                            .into());
+                            // Degrade per tick, exactly like the fallback
+                            // path: only the positions referencing this
+                            // tick fail, and retryably (a replica may have
+                            // dropped part of the proof).
+                            tracing::debug!(
+                                tick,
+                                "eth_getProof response missing tick storage slots"
+                            );
+                            funding.insert(
+                                tick,
+                                Err(std::sync::Arc::new(
+                                    alloy::transports::TransportErrorKind::custom_str(
+                                        "eth_getProof response missing the tick's storage slots",
+                                    ),
+                                )),
+                            );
+                            continue;
                         };
                         funding.insert(
                             tick,
