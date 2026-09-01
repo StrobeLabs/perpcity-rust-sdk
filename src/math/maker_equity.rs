@@ -163,19 +163,32 @@ impl MakerMarketSnapshot {
         if dt == 0 {
             return Ok(());
         }
-        let dt_days = U256::from(dt) * Q96 / U256::from(INTERVAL);
+        let dt_days = U256::from(dt)
+            .checked_mul(Q96)
+            .ok_or(ValidationError::Overflow {
+                context: "accrual dt in days".into(),
+            })?
+            / U256::from(INTERVAL);
         let funding_accrued = s_full_mul_div(
             I256::try_from(accrual.funding_per_day_wad).expect("i128 fits I256"),
             to_i256(dt_days)?,
             WAD,
             false,
         )?;
-        self.funding_x96 += funding_accrued;
-        self.funding_div_sqrt_p_x96 += s_full_mul_div(
+        self.funding_x96 = add_i(
+            self.funding_x96,
             funding_accrued,
-            I256::from_raw(Q96),
-            self.sqrt_amm_price_x96,
-            false,
+            "accrued funding cumulative",
+        )?;
+        self.funding_div_sqrt_p_x96 = add_i(
+            self.funding_div_sqrt_p_x96,
+            s_full_mul_div(
+                funding_accrued,
+                I256::from_raw(Q96),
+                self.sqrt_amm_price_x96,
+                false,
+            )?,
+            "accrued funding/sqrtP cumulative",
         )?;
 
         let dt_days_mult_mark = mul_div(dt_days, self.mark_price_x96, Q96, false)?;
@@ -192,19 +205,27 @@ impl MakerMarketSnapshot {
             false,
         )?;
         if accrual.cap_long != 0 {
-            self.long_util_earnings_x96 += mul_div(
-                lu_accrued,
-                U256::from(accrual.oi_long),
-                U256::from(accrual.cap_long),
-                false,
+            self.long_util_earnings_x96 = add_u(
+                self.long_util_earnings_x96,
+                mul_div(
+                    lu_accrued,
+                    U256::from(accrual.oi_long),
+                    U256::from(accrual.cap_long),
+                    false,
+                )?,
+                "accrued long utilization cumulative",
             )?;
         }
         if accrual.cap_short != 0 {
-            self.short_util_earnings_x96 += mul_div(
-                su_accrued,
-                U256::from(accrual.oi_short),
-                U256::from(accrual.cap_short),
-                false,
+            self.short_util_earnings_x96 = add_u(
+                self.short_util_earnings_x96,
+                mul_div(
+                    su_accrued,
+                    U256::from(accrual.oi_short),
+                    U256::from(accrual.cap_short),
+                    false,
+                )?,
+                "accrued short utilization cumulative",
             )?;
         }
         Ok(())
@@ -224,37 +245,66 @@ impl MakerMarketSnapshot {
     ) -> Result<MakerEquityBreakdown, ValidationError> {
         let sqrt_l = get_sqrt_ratio_at_tick(maker.tick_lower)?;
         let sqrt_u = get_sqrt_ratio_at_tick(maker.tick_upper)?;
-        let (mf_below, mf_within, mf_div_sqrt_within) = self.maker_cuml_funding(maker);
+        let (mf_below, mf_within, mf_div_sqrt_within) = self.maker_cuml_funding(maker)?;
 
         // ── makerFeesAccrued ────────────────────────────────────────────
         let base_funding = s_full_mul_div(
             I256::try_from(maker.delta_amount0).expect("i128 fits I256"),
-            self.funding_x96 - maker.last_cuml_funding_x96,
+            sub_i(
+                self.funding_x96,
+                maker.last_cuml_funding_x96,
+                "funding cumulative delta",
+            )?,
             Q96,
             true,
         )?;
         let perp_below = to_i256(amount0_delta(sqrt_l, sqrt_u, maker.liquidity, false)?)?;
-        let funding_below = s_full_mul_div(perp_below, mf_below - maker.last_below_x96, Q96, true)?;
-        let div_amm = mf_div_sqrt_within - maker.last_div_sqrt_within_x96;
-        let d_within = mf_within - maker.last_within_x96;
-        let div_upper = s_full_mul_div(d_within, I256::from_raw(Q96), sqrt_u, false)?;
-        let funding_within = s_full_mul_div(
-            I256::try_from(maker.liquidity).expect("u128 fits I256"),
-            div_amm - div_upper,
+        let funding_below = s_full_mul_div(
+            perp_below,
+            sub_i(mf_below, maker.last_below_x96, "below-band funding delta")?,
             Q96,
             true,
         )?;
-        let funding = base_funding + funding_below + funding_within;
+        let div_amm = sub_i(
+            mf_div_sqrt_within,
+            maker.last_div_sqrt_within_x96,
+            "within-band funding/sqrtP delta",
+        )?;
+        let d_within = sub_i(
+            mf_within,
+            maker.last_within_x96,
+            "within-band funding delta",
+        )?;
+        let div_upper = s_full_mul_div(d_within, I256::from_raw(Q96), sqrt_u, false)?;
+        let funding_within = s_full_mul_div(
+            I256::try_from(maker.liquidity).expect("u128 fits I256"),
+            sub_i(div_amm, div_upper, "within-band funding components")?,
+            Q96,
+            true,
+        )?;
+        let funding = add_i(
+            add_i(base_funding, funding_below, "accrued funding")?,
+            funding_within,
+            "accrued funding",
+        )?;
 
         let long_util = mul_div(
             U256::from(maker.cap_long_6dec),
-            self.long_util_earnings_x96 - maker.last_long_util_earnings_x96,
+            sub_u(
+                self.long_util_earnings_x96,
+                maker.last_long_util_earnings_x96,
+                "long utilization checkpoint ahead of market cumulative",
+            )?,
             Q96,
             false,
         )?;
         let short_util = mul_div(
             U256::from(maker.cap_short_6dec),
-            self.short_util_earnings_x96 - maker.last_short_util_earnings_x96,
+            sub_u(
+                self.short_util_earnings_x96,
+                maker.last_short_util_earnings_x96,
+                "short utilization checkpoint ahead of market cumulative",
+            )?,
             Q96,
             false,
         )?;
@@ -276,14 +326,22 @@ impl MakerMarketSnapshot {
         // pool — but a mixed-sign delta must not collapse to magnitudes.)
         let (perps, usd) =
             amounts_for_liquidity(self.sqrt_amm_price_x96, sqrt_l, sqrt_u, maker.liquidity)?;
-        let liquidity_val = mul_div(perps, self.mark_price_x96, Q96, false)? + usd;
-        let residual_val = s_full_mul_div(
-            I256::try_from(maker.delta_amount0).expect("i128 fits I256"),
-            to_i256(self.mark_price_x96)?,
-            Q96,
-            false,
-        )? + I256::try_from(maker.delta_amount1).expect("i128 fits I256");
-        let unrealized = to_i256(liquidity_val)? + residual_val;
+        let liquidity_val = add_u(
+            mul_div(perps, self.mark_price_x96, Q96, false)?,
+            usd,
+            "band liquidity value",
+        )?;
+        let residual_val = add_i(
+            s_full_mul_div(
+                I256::try_from(maker.delta_amount0).expect("i128 fits I256"),
+                to_i256(self.mark_price_x96)?,
+                Q96,
+                false,
+            )?,
+            I256::try_from(maker.delta_amount1).expect("i128 fits I256"),
+            "deposit residual value",
+        )?;
+        let unrealized = add_i(to_i256(liquidity_val)?, residual_val, "unrealized PnL")?;
 
         Ok(MakerEquityBreakdown {
             margin: maker.margin_6dec as f64 / 1e6,
@@ -298,7 +356,10 @@ impl MakerMarketSnapshot {
     /// `PerpLogic.makerCumlFunding`: assemble the band's cumulative funding
     /// (below / within / within-div-sqrtP) from the two ticks' opposite-side
     /// checkpoints, branching on which side of each tick the current tick is.
-    fn maker_cuml_funding(&self, maker: &MakerState) -> (I256, I256, I256) {
+    fn maker_cuml_funding(
+        &self,
+        maker: &MakerState,
+    ) -> Result<(I256, I256, I256), ValidationError> {
         let lower = &maker.tick_lower_funding;
         let upper = &maker.tick_upper_funding;
 
@@ -309,8 +370,16 @@ impl MakerMarketSnapshot {
             )
         } else {
             (
-                self.funding_x96 - lower.cuml_funding_opp_x96,
-                self.funding_div_sqrt_p_x96 - lower.cuml_funding_div_sqrt_p_opp_x96,
+                sub_i(
+                    self.funding_x96,
+                    lower.cuml_funding_opp_x96,
+                    "lower-tick funding checkpoint",
+                )?,
+                sub_i(
+                    self.funding_div_sqrt_p_x96,
+                    lower.cuml_funding_div_sqrt_p_opp_x96,
+                    "lower-tick funding/sqrtP checkpoint",
+                )?,
             )
         };
         let (below_upper, div_below_upper) = if self.current_tick >= maker.tick_upper {
@@ -320,15 +389,27 @@ impl MakerMarketSnapshot {
             )
         } else {
             (
-                self.funding_x96 - upper.cuml_funding_opp_x96,
-                self.funding_div_sqrt_p_x96 - upper.cuml_funding_div_sqrt_p_opp_x96,
+                sub_i(
+                    self.funding_x96,
+                    upper.cuml_funding_opp_x96,
+                    "upper-tick funding checkpoint",
+                )?,
+                sub_i(
+                    self.funding_div_sqrt_p_x96,
+                    upper.cuml_funding_div_sqrt_p_opp_x96,
+                    "upper-tick funding/sqrtP checkpoint",
+                )?,
             )
         };
-        (
+        Ok((
             below,
-            below_upper - below,
-            div_below_upper - div_below_lower,
-        )
+            sub_i(below_upper, below, "within-band cumulative funding")?,
+            sub_i(
+                div_below_upper,
+                div_below_lower,
+                "within-band cumulative funding/sqrtP",
+            )?,
+        ))
     }
 }
 
@@ -377,6 +458,36 @@ fn amounts_for_liquidity(
 fn to_i256(v: U256) -> Result<I256, ValidationError> {
     I256::try_from(v).map_err(|_| ValidationError::Overflow {
         context: "value exceeds I256".into(),
+    })
+}
+
+// Chain-derived values must never wrap silently: alloy's `Signed` only
+// debug-asserts on overflow and ruint's `Sub` wraps in release, so every
+// add/sub on snapshot inputs goes through these checked helpers. An `Err`
+// means corrupt or mutually inconsistent inputs (e.g. a position checkpoint
+// ahead of the market cumulative), not a value to propagate.
+
+fn add_i(a: I256, b: I256, context: &'static str) -> Result<I256, ValidationError> {
+    a.checked_add(b).ok_or(ValidationError::Overflow {
+        context: context.into(),
+    })
+}
+
+fn sub_i(a: I256, b: I256, context: &'static str) -> Result<I256, ValidationError> {
+    a.checked_sub(b).ok_or(ValidationError::Overflow {
+        context: context.into(),
+    })
+}
+
+fn add_u(a: U256, b: U256, context: &'static str) -> Result<U256, ValidationError> {
+    a.checked_add(b).ok_or(ValidationError::Overflow {
+        context: context.into(),
+    })
+}
+
+fn sub_u(a: U256, b: U256, context: &'static str) -> Result<U256, ValidationError> {
+    a.checked_sub(b).ok_or(ValidationError::Overflow {
+        context: context.into(),
     })
 }
 
@@ -547,6 +658,20 @@ mod tests {
         let (market, _, mut maker) = golden_market_and_maker();
         maker.tick_upper = 1_000_000; // beyond the Uniswap tick domain
         assert!(market.maker_equity(&maker).is_err());
+    }
+
+    /// A position checkpoint AHEAD of the market cumulative is mutually
+    /// inconsistent state (a stale-replica read, or corrupt inputs). The
+    /// unsigned subtraction must surface it as an error — ruint's `Sub`
+    /// wraps in release, which would fabricate an astronomical earnings
+    /// delta instead.
+    #[test]
+    fn checkpoint_ahead_of_market_cumulative_is_an_error_not_a_number() {
+        let (mut market, accrual, mut maker) = golden_market_and_maker();
+        market.accrue(&accrual).unwrap();
+        maker.last_long_util_earnings_x96 = market.long_util_earnings_x96 + U256::from(1u8);
+        let err = market.maker_equity(&maker).unwrap_err();
+        assert!(matches!(err, ValidationError::Overflow { .. }), "{err}");
     }
 
     #[test]
