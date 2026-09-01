@@ -11,23 +11,25 @@
 //! simulation).
 
 use std::collections::BTreeMap;
+use std::future::IntoFuture;
 
 use alloy::eips::{BlockId, BlockNumberOrTag};
 use alloy::primitives::{Address, B256, I256, U256};
 use alloy::providers::Provider;
 use alloy::sol_types::{SolCall, SolValue};
+use futures_util::future::join_all;
 
 use crate::constants::{
     MAX_SWAP_SQRT_PRICE_X96, MAX_TICK, MIN_SWAP_SQRT_PRICE_X96, MIN_TICK, MULTICALL3,
 };
 use crate::contracts::{
-    IBeacon, IERC20, IFees, IMarginRatios, IMulticall3, IPoolManagerState, IPriceImpact, Perp,
-    Position,
+    IBeacon, IERC20, IFees, IMarginRatios, IMulticall3, IPoolManagerState, IPriceImpact, Maker,
+    Perp, Position,
 };
 use crate::convert::{
     margin_ratio_to_leverage, price_x96_to_f64, scale_from_6dec, unpack_balance_delta,
 };
-use crate::errors::{ContractError, Result, ValidationError};
+use crate::errors::{ContractError, PerpCityError, Result, ValidationError};
 use crate::hft::state_cache::{CachedBounds, CachedFees};
 use crate::math::ema::{PricePair, calculate_emas};
 use crate::math::maker_equity::{
@@ -39,6 +41,7 @@ use crate::math::storage::{
     v4_tick_bitmap_slot, v4_tick_fee_growth_outside1_slot, v4_tick_slot,
 };
 use crate::math::swap::{TakerMarketSnapshot, TickLiquidity};
+use crate::math::tick::get_sqrt_ratio_at_tick;
 use crate::types::{Bounds, Fees, OpenInterest, PerpData, PerpSnapshot};
 
 use super::{PerpClient, SCALE_F64, i24_to_i32, now_secs, u24_to_u32};
@@ -59,6 +62,18 @@ pub(super) struct BookImmutables {
     ema_window: u64,
 }
 
+/// Convert an `int88` per-day funding rate (scaled by 1e18) to a human-readable
+/// fraction. An 88-bit signed value always fits in `i128`.
+fn funding_per_day_to_f64(rate: alloy::primitives::Signed<88, 2>) -> f64 {
+    i128::try_from(rate).unwrap_or(0) as f64 / WAD_F64
+}
+
+/// Blocks to lag behind the head when pinning maker-equity reads: on
+/// load-balanced RPC endpoints the newest block's state may not be
+/// materialized on every replica yet, and Arbitrum produces ~4 blocks/s so
+/// the lag stays under two seconds.
+const MAKER_EQUITY_BLOCK_LAG: u64 = 8;
+
 /// Convert an f64 mark price to X96 for the maker-equity reader.
 fn f64_to_x96(value: f64) -> U256 {
     if value <= 0.0 {
@@ -70,10 +85,61 @@ fn f64_to_x96(value: f64) -> U256 {
     U256::from(hi) << (96 - 48)
 }
 
-/// Convert an `int88` per-day funding rate (scaled by 1e18) to a human-readable
-/// fraction. An 88-bit signed value always fits in `i128`.
-fn funding_per_day_to_f64(rate: alloy::primitives::Signed<88, 2>) -> f64 {
-    i128::try_from(rate).unwrap_or(0) as f64 / WAD_F64
+/// A maker position that survived the row-read phase and awaits slot reads.
+struct PendingMaker {
+    pos_id: U256,
+    position: Position,
+    details: Maker,
+    tick_lower: i32,
+    tick_upper: i32,
+}
+
+/// Per-requested-position outcome of the row-read phase, in input order.
+enum MakerRowOutcome {
+    /// Zero liquidity — not an open maker position; omitted from the output.
+    Skipped,
+    /// This position's read or validation failed; the rest of the batch
+    /// survives.
+    Failed(PerpCityError),
+    /// Awaiting slot reads; equity results consume pending in input order.
+    Pending,
+}
+
+/// Decode one position's `positions` + `makerDetails` multicall rows.
+///
+/// Returns `Ok(None)` for zero-liquidity ids (takers, deleted positions).
+/// Ticks are validated against the Uniswap domain here so downstream tick
+/// math cannot fail on chain-supplied values.
+fn decode_maker_row(
+    pos_id: U256,
+    position_row: &IMulticall3::Result,
+    details_row: &IMulticall3::Result,
+) -> Result<Option<PendingMaker>> {
+    if !position_row.success || !details_row.success {
+        return Err(ContractError::MulticallFailed {
+            reason: format!("maker equity: position {pos_id} row read reverted"),
+        }
+        .into());
+    }
+    let decode_err = |context: String| ValidationError::DecodeFailed { context };
+    let position = Perp::positionsCall::abi_decode_returns(&position_row.returnData)
+        .map_err(|e| decode_err(format!("position {pos_id}: {e}")))?;
+    let details = Perp::makerDetailsCall::abi_decode_returns(&details_row.returnData)
+        .map_err(|e| decode_err(format!("makerDetails {pos_id}: {e}")))?;
+    if details.liquidity == 0 {
+        return Ok(None);
+    }
+    let tick_lower = i24_to_i32(details.tickLower);
+    let tick_upper = i24_to_i32(details.tickUpper);
+    get_sqrt_ratio_at_tick(tick_lower)?;
+    get_sqrt_ratio_at_tick(tick_upper)?;
+    Ok(Some(PendingMaker {
+        pos_id,
+        position,
+        details,
+        tick_lower,
+        tick_upper,
+    }))
 }
 
 impl PerpClient {
@@ -746,9 +812,19 @@ impl PerpClient {
 
     // ── Maker equity (block-pinned batch read) ──────────────────────
 
-    /// Read everything needed and compute the equity breakdown for each maker
-    /// position in `pos_ids`, all pinned to one block. Non-maker ids (zero
-    /// liquidity — takers or deleted positions) are omitted from the result.
+    /// Read chain state and compute the settle-preview equity for each maker
+    /// position in `pos_ids`, all pinned to one block.
+    ///
+    /// Reads are batched: one Multicall3 round trip for the market-wide
+    /// state, one for all position/maker rows, one PoolManager `extsload`
+    /// for the V4 fee-growth slots, and concurrent `eth_getStorageAt` reads
+    /// for the Perp tick-funding slots.
+    ///
+    /// Failures degrade per position: a position whose reads, decoding, or
+    /// math fail is returned with an `Err` (and logged) instead of
+    /// discarding the batch. Market-wide read failures still fail the whole
+    /// call. Non-maker ids (zero liquidity — takers or deleted positions)
+    /// are omitted from the output.
     ///
     /// `mark_price` is the caller's current mark (snapshot / market-data
     /// cache); it prices `valPnl` and the accrual replay.
@@ -756,36 +832,90 @@ impl PerpClient {
         &self,
         pos_ids: &[U256],
         mark_price: f64,
-    ) -> Result<Vec<(U256, MakerEquityBreakdown)>> {
+    ) -> Result<Vec<(U256, Result<MakerEquityBreakdown>)>> {
+        let mark_price_x96 = f64_to_x96(mark_price);
         if pos_ids.is_empty() {
             return Ok(Vec::new());
         }
-        let provider = &self.provider;
-        let deployments = &self.deployments;
-        let perp = Perp::new(deployments.perp, provider);
+        let perp_addr = self.deployments.perp;
 
-        // Pin a few blocks back: on load-balanced RPC endpoints the newest
-        // block's state may not be materialized on every replica yet, and
-        // Arbitrum produces ~4 blocks/s so the lag is under two seconds.
-        let block_number = provider.get_block_number().await?.saturating_sub(8);
+        let block_number = self
+            .provider
+            .get_block_number()
+            .await?
+            .saturating_sub(MAKER_EQUITY_BLOCK_LAG);
         // A lagging replica may briefly miss the pinned header; fall back to
         // the local clock for the accrual replay and pin by number.
-        let (block_id, block_hash, block_timestamp) =
-            match provider.get_block_by_number(block_number.into()).await? {
-                Some(block) => (
-                    BlockId::hash(block.header.hash),
-                    block.header.hash,
-                    block.header.timestamp,
-                ),
-                None => (BlockId::number(block_number), B256::ZERO, now_secs()),
-            };
+        let (block_id, block_hash, block_timestamp) = match self
+            .provider
+            .get_block_by_number(block_number.into())
+            .await?
+        {
+            Some(block) => (
+                BlockId::hash(block.header.hash),
+                block.header.hash,
+                block.header.timestamp,
+            ),
+            None => (BlockId::number(block_number), B256::ZERO, now_secs()),
+        };
 
-        let cumls = perp.cumulatives().block(block_id).call().await?;
-        let rates = perp.rates().block(block_id).call().await?;
-        let pool_state = perp.poolState().block(block_id).call().await?;
-        let capacity = perp.capacity().block(block_id).call().await?;
-        let oi = perp.openInterest().block(block_id).call().await?;
-        let pool_id = perp.POOL_ID().block(block_id).call().await?;
+        // ── Market-wide state: one multicall ────────────────────────
+        let market_call = |calldata: Vec<u8>| IMulticall3::Call3 {
+            target: perp_addr,
+            allowFailure: false,
+            callData: calldata.into(),
+        };
+        let calls = vec![
+            market_call(Perp::cumulativesCall {}.abi_encode()),
+            market_call(Perp::ratesCall {}.abi_encode()),
+            market_call(Perp::poolStateCall {}.abi_encode()),
+            market_call(Perp::capacityCall {}.abi_encode()),
+            market_call(Perp::openInterestCall {}.abi_encode()),
+            market_call(Perp::POOL_IDCall {}.abi_encode()),
+        ];
+        let multicall = IMulticall3::new(MULTICALL3, &self.provider);
+        let results = multicall.aggregate3(calls).block(block_id).call().await?;
+        let call_names = [
+            "cumulatives",
+            "rates",
+            "poolState",
+            "capacity",
+            "openInterest",
+            "POOL_ID",
+        ];
+        if results.len() != call_names.len() {
+            return Err(ContractError::MulticallFailed {
+                reason: format!(
+                    "maker equity market multicall returned {} results, expected {}",
+                    results.len(),
+                    call_names.len()
+                ),
+            }
+            .into());
+        }
+        for (result, name) in results.iter().zip(call_names) {
+            if !result.success {
+                return Err(ContractError::MulticallFailed {
+                    reason: format!("maker equity market multicall: {name} call failed"),
+                }
+                .into());
+            }
+        }
+        let decode_err = |name: &str, e: alloy::sol_types::Error| ValidationError::DecodeFailed {
+            context: format!("failed to decode {name}: {e}"),
+        };
+        let cumls = Perp::cumulativesCall::abi_decode_returns(&results[0].returnData)
+            .map_err(|e| decode_err("cumulatives", e))?;
+        let rates = Perp::ratesCall::abi_decode_returns(&results[1].returnData)
+            .map_err(|e| decode_err("rates", e))?;
+        let pool_state = Perp::poolStateCall::abi_decode_returns(&results[2].returnData)
+            .map_err(|e| decode_err("poolState", e))?;
+        let capacity = Perp::capacityCall::abi_decode_returns(&results[3].returnData)
+            .map_err(|e| decode_err("capacity", e))?;
+        let oi = Perp::openInterestCall::abi_decode_returns(&results[4].returnData)
+            .map_err(|e| decode_err("openInterest", e))?;
+        let pool_id = Perp::POOL_IDCall::abi_decode_returns(&results[5].returnData)
+            .map_err(|e| decode_err("POOL_ID", e))?;
 
         let mut market = MakerMarketSnapshot {
             block_number,
@@ -797,7 +927,7 @@ impl PerpClient {
             short_util_earnings_x96: cumls.shortUtilEarningsX96,
             current_tick: i24_to_i32(pool_state.tick),
             sqrt_amm_price_x96: pool_state.sqrtPrice.to::<U256>(),
-            mark_price_x96: f64_to_x96(mark_price),
+            mark_price_x96,
         };
         market.accrue(&AccrualInputs {
             funding_per_day_wad: i128::try_from(rates.fundingPerDay).unwrap_or(0),
@@ -811,96 +941,203 @@ impl PerpClient {
             cap_short: capacity.short,
         })?;
 
-        let fg1_global = provider
-            .get_storage_at(
-                deployments.pool_manager,
-                v4_fee_growth_global1_slot(pool_id),
-            )
-            .block_id(block_id)
-            .await?;
-
-        let read_slot =
-            |addr: Address, slot: U256| provider.get_storage_at(addr, slot).block_id(block_id);
-        let as_i256 = I256::from_raw;
-
-        let mut out = Vec::with_capacity(pos_ids.len());
-        for &pos_id in pos_ids {
-            let pos = perp.positions(pos_id).block(block_id).call().await?;
-            let details = perp.makerDetails(pos_id).block(block_id).call().await?;
-            if details.liquidity == 0 {
-                continue;
+        // ── Position rows: one multicall, degrading per position ────
+        let row_call = |calldata: Vec<u8>| IMulticall3::Call3 {
+            target: perp_addr,
+            allowFailure: true,
+            callData: calldata.into(),
+        };
+        let calls = pos_ids
+            .iter()
+            .flat_map(|&pos_id| {
+                [
+                    row_call(Perp::positionsCall { posId: pos_id }.abi_encode()),
+                    row_call(Perp::makerDetailsCall { posId: pos_id }.abi_encode()),
+                ]
+            })
+            .collect();
+        let rows = multicall.aggregate3(calls).block(block_id).call().await?;
+        if rows.len() != 2 * pos_ids.len() {
+            return Err(ContractError::MulticallFailed {
+                reason: format!(
+                    "maker equity row multicall returned {} results, expected {}",
+                    rows.len(),
+                    2 * pos_ids.len()
+                ),
             }
-            let (tick_lower, tick_upper) =
-                (i24_to_i32(details.tickLower), i24_to_i32(details.tickUpper));
+            .into());
+        }
 
-            let tl_slot = perp_tick_slot(tick_lower);
-            let tu_slot = perp_tick_slot(tick_upper);
-            let tick_lower_funding = TickFunding {
-                cuml_funding_opp_x96: as_i256(read_slot(deployments.perp, tl_slot).await?),
-                cuml_funding_div_sqrt_p_opp_x96: as_i256(
-                    read_slot(deployments.perp, tl_slot + U256::ONE).await?,
-                ),
-            };
-            let tick_upper_funding = TickFunding {
-                cuml_funding_opp_x96: as_i256(read_slot(deployments.perp, tu_slot).await?),
-                cuml_funding_div_sqrt_p_opp_x96: as_i256(
-                    read_slot(deployments.perp, tu_slot + U256::ONE).await?,
-                ),
-            };
+        let mut outcomes = Vec::with_capacity(pos_ids.len());
+        let mut pending = Vec::new();
+        for (row, &pos_id) in rows.chunks_exact(2).zip(pos_ids) {
+            outcomes.push(match decode_maker_row(pos_id, &row[0], &row[1]) {
+                Ok(None) => MakerRowOutcome::Skipped,
+                Ok(Some(maker)) => {
+                    pending.push(maker);
+                    MakerRowOutcome::Pending
+                }
+                Err(e) => {
+                    tracing::warn!(%pos_id, error = %e, "maker equity: position row failed");
+                    MakerRowOutcome::Failed(e)
+                }
+            });
+        }
 
-            let fg1_out_lower = read_slot(
-                deployments.pool_manager,
-                v4_tick_fee_growth_outside1_slot(pool_id, tick_lower),
-            )
-            .await?;
-            let fg1_out_upper = read_slot(
-                deployments.pool_manager,
-                v4_tick_fee_growth_outside1_slot(pool_id, tick_upper),
-            )
-            .await?;
-            let fg1_inside_last = read_slot(
-                deployments.pool_manager,
-                v4_position_fee_growth_inside1_slot(
-                    pool_id,
-                    deployments.perp,
-                    tick_lower,
-                    tick_upper,
-                    B256::from(pos_id),
-                ),
-            )
-            .await?;
-
-            let (amount0, amount1) = unpack_balance_delta(pos.delta);
-            let maker = MakerState {
-                margin_6dec: pos.margin,
-                delta_amount0: amount0,
-                delta_amount1: amount1,
-                last_cuml_funding_x96: pos.lastCumlFundingX96,
-                tick_lower,
-                tick_upper,
-                liquidity: details.liquidity,
-                last_long_util_earnings_x96: details.lastLongUtilEarningsX96,
-                last_short_util_earnings_x96: details.lastShortUtilEarningsX96,
-                cap_long_6dec: details.capacity.long,
-                cap_short_6dec: details.capacity.short,
-                last_below_x96: details.lastCumlFunding.belowX96,
-                last_within_x96: details.lastCumlFunding.withinX96,
-                last_div_sqrt_within_x96: details.lastCumlFunding.divSqrtPriceWithinX96,
-                tick_lower_funding,
-                tick_upper_funding,
-                fee_growth_inside1_x128: fee_growth_inside1(
-                    fg1_global,
-                    fg1_out_lower,
-                    fg1_out_upper,
-                    tick_lower,
-                    tick_upper,
-                    market.current_tick,
-                ),
-                fee_growth_inside1_last_x128: fg1_inside_last,
-            };
-            out.push((pos_id, market.maker_equity(&maker)?));
+        let mut equities = self
+            .read_pending_maker_equities(&market, pool_id, block_id, &pending)
+            .await?
+            .into_iter();
+        let mut out = Vec::with_capacity(pos_ids.len());
+        for (&pos_id, outcome) in pos_ids.iter().zip(outcomes) {
+            match outcome {
+                MakerRowOutcome::Skipped => {}
+                MakerRowOutcome::Failed(e) => out.push((pos_id, Err(e))),
+                MakerRowOutcome::Pending => out.push((
+                    pos_id,
+                    equities.next().expect("one equity per pending position"),
+                )),
+            }
         }
         Ok(out)
+    }
+
+    /// Slot reads and math for the surviving positions of
+    /// [`Self::read_maker_equities`]: one `extsload` batch for the V4
+    /// fee-growth slots, then the Perp tick-funding slots concurrently,
+    /// degrading per position on failure.
+    async fn read_pending_maker_equities(
+        &self,
+        market: &MakerMarketSnapshot,
+        pool_id: B256,
+        block_id: BlockId,
+        pending: &[PendingMaker],
+    ) -> Result<Vec<Result<MakerEquityBreakdown>>> {
+        if pending.is_empty() {
+            return Ok(Vec::new());
+        }
+        let perp_addr = self.deployments.perp;
+
+        let mut slots = Vec::with_capacity(1 + 3 * pending.len());
+        slots.push(B256::from(v4_fee_growth_global1_slot(pool_id)));
+        for maker in pending {
+            slots.push(B256::from(v4_tick_fee_growth_outside1_slot(
+                pool_id,
+                maker.tick_lower,
+            )));
+            slots.push(B256::from(v4_tick_fee_growth_outside1_slot(
+                pool_id,
+                maker.tick_upper,
+            )));
+            slots.push(B256::from(v4_position_fee_growth_inside1_slot(
+                pool_id,
+                perp_addr,
+                maker.tick_lower,
+                maker.tick_upper,
+                B256::from(maker.pos_id),
+            )));
+        }
+        let expected = slots.len();
+        let manager = IPoolManagerState::new(self.deployments.pool_manager, &self.provider);
+        let words = manager.extsload_1(slots).block(block_id).call().await?;
+        if words.len() != expected {
+            return Err(ContractError::MulticallFailed {
+                reason: format!(
+                    "maker equity extsload returned {} words, expected {expected}",
+                    words.len()
+                ),
+            }
+            .into());
+        }
+        let fg1_global = U256::from_be_bytes(words[0].0);
+
+        // The four funding words per position are independent and pinned to
+        // the same block; read each position's concurrently, and all
+        // positions concurrently.
+        let tick_reads = pending.iter().map(|maker| {
+            let lower = perp_tick_slot(maker.tick_lower);
+            let upper = perp_tick_slot(maker.tick_upper);
+            let read = |slot: U256| {
+                self.provider
+                    .get_storage_at(perp_addr, slot)
+                    .block_id(block_id)
+                    .into_future()
+            };
+            async move {
+                let (lower_a, lower_b, upper_a, upper_b) = tokio::try_join!(
+                    read(lower),
+                    read(lower + U256::ONE),
+                    read(upper),
+                    read(upper + U256::ONE),
+                )?;
+                let tick_funding = |a: U256, b: U256| TickFunding {
+                    cuml_funding_opp_x96: I256::from_raw(a),
+                    cuml_funding_div_sqrt_p_opp_x96: I256::from_raw(b),
+                };
+                Ok::<_, alloy::transports::TransportError>((
+                    tick_funding(lower_a, lower_b),
+                    tick_funding(upper_a, upper_b),
+                ))
+            }
+        });
+        let tick_funding = join_all(tick_reads).await;
+
+        let equities = pending
+            .iter()
+            .zip(tick_funding)
+            .enumerate()
+            .map(|(i, (maker, funding))| {
+                let (tick_lower_funding, tick_upper_funding) = match funding {
+                    Ok(funding) => funding,
+                    Err(e) => {
+                        tracing::warn!(
+                            pos_id = %maker.pos_id, error = %e,
+                            "maker equity: tick funding read failed"
+                        );
+                        return Err(e.into());
+                    }
+                };
+                let fg1_out_lower = U256::from_be_bytes(words[1 + 3 * i].0);
+                let fg1_out_upper = U256::from_be_bytes(words[2 + 3 * i].0);
+                let fg1_inside_last = U256::from_be_bytes(words[3 + 3 * i].0);
+                let (delta_amount0, delta_amount1) = unpack_balance_delta(maker.position.delta);
+                let state = MakerState {
+                    margin_6dec: maker.position.margin,
+                    delta_amount0,
+                    delta_amount1,
+                    last_cuml_funding_x96: maker.position.lastCumlFundingX96,
+                    tick_lower: maker.tick_lower,
+                    tick_upper: maker.tick_upper,
+                    liquidity: maker.details.liquidity,
+                    last_long_util_earnings_x96: maker.details.lastLongUtilEarningsX96,
+                    last_short_util_earnings_x96: maker.details.lastShortUtilEarningsX96,
+                    cap_long_6dec: maker.details.capacity.long,
+                    cap_short_6dec: maker.details.capacity.short,
+                    last_below_x96: maker.details.lastCumlFunding.belowX96,
+                    last_within_x96: maker.details.lastCumlFunding.withinX96,
+                    last_div_sqrt_within_x96: maker.details.lastCumlFunding.divSqrtPriceWithinX96,
+                    tick_lower_funding,
+                    tick_upper_funding,
+                    fee_growth_inside1_x128: fee_growth_inside1(
+                        fg1_global,
+                        fg1_out_lower,
+                        fg1_out_upper,
+                        maker.tick_lower,
+                        maker.tick_upper,
+                        market.current_tick,
+                    ),
+                    fee_growth_inside1_last_x128: fg1_inside_last,
+                };
+                market.maker_equity(&state).map_err(|e| {
+                    tracing::warn!(
+                        pos_id = %maker.pos_id, error = %e,
+                        "maker equity: settle math failed"
+                    );
+                    e.into()
+                })
+            })
+            .collect();
+        Ok(equities)
     }
 
     // ── Cache helpers ───────────────────────────────────────────────

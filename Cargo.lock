@@ -3435,6 +3435,7 @@ dependencies = [
  "aws-sdk-kms",
  "criterion",
  "dotenvy",
+ "futures-util",
  "reqwest",
  "serde",
  "serde_json",
