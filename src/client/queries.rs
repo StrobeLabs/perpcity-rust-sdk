@@ -78,22 +78,14 @@ const MAKER_EQUITY_BLOCK_LAG: u64 = 8;
 
 /// A maker position that survived the row-read phase and awaits slot reads.
 struct PendingMaker {
+    /// Index into the caller's `pos_ids`, so per-position results can be
+    /// merged back into input order without positional bookkeeping.
+    input_index: usize,
     pos_id: U256,
     position: Position,
     details: Maker,
     tick_lower: i32,
     tick_upper: i32,
-}
-
-/// Per-requested-position outcome of the row-read phase, in input order.
-enum MakerRowOutcome {
-    /// Zero liquidity — not an open maker position; omitted from the output.
-    Skipped,
-    /// This position's read or validation failed; the rest of the batch
-    /// survives.
-    Failed(PerpCityError),
-    /// Awaiting slot reads; equity results consume pending in input order.
-    Pending,
 }
 
 /// Decode one position's `positions` + `makerDetails` multicall rows.
@@ -102,6 +94,7 @@ enum MakerRowOutcome {
 /// Ticks are validated against the Uniswap domain here so downstream tick
 /// math cannot fail on chain-supplied values.
 fn decode_maker_row(
+    input_index: usize,
     pos_id: U256,
     position_row: &IMulticall3::Result,
     details_row: &IMulticall3::Result,
@@ -125,12 +118,36 @@ fn decode_maker_row(
     get_sqrt_ratio_at_tick(tick_lower)?;
     get_sqrt_ratio_at_tick(tick_upper)?;
     Ok(Some(PendingMaker {
+        input_index,
         pos_id,
         position,
         details,
         tick_lower,
         tick_upper,
     }))
+}
+
+/// Split the row-multicall results into positions awaiting slot reads and
+/// per-position failures, both tagged with their input index. Zero-liquidity
+/// ids (takers, deleted positions) are dropped. A failed row degrades only
+/// its own position; the rest of the batch survives.
+fn split_maker_rows(
+    pos_ids: &[U256],
+    rows: &[IMulticall3::Result],
+) -> (Vec<PendingMaker>, Vec<(usize, U256, PerpCityError)>) {
+    let mut pending = Vec::new();
+    let mut failed = Vec::new();
+    for (input_index, (row, &pos_id)) in rows.chunks_exact(2).zip(pos_ids).enumerate() {
+        match decode_maker_row(input_index, pos_id, &row[0], &row[1]) {
+            Ok(None) => {}
+            Ok(Some(maker)) => pending.push(maker),
+            Err(e) => {
+                tracing::warn!(%pos_id, error = %e, "maker equity: position row failed");
+                failed.push((input_index, pos_id, e));
+            }
+        }
+    }
+    (pending, failed)
 }
 
 impl PerpClient {
@@ -862,38 +879,29 @@ impl PerpClient {
             .into());
         }
 
-        let mut outcomes = Vec::with_capacity(pos_ids.len());
-        let mut pending = Vec::new();
-        for (row, &pos_id) in rows.chunks_exact(2).zip(pos_ids) {
-            outcomes.push(match decode_maker_row(pos_id, &row[0], &row[1]) {
-                Ok(None) => MakerRowOutcome::Skipped,
-                Ok(Some(maker)) => {
-                    pending.push(maker);
-                    MakerRowOutcome::Pending
-                }
-                Err(e) => {
-                    tracing::warn!(%pos_id, error = %e, "maker equity: position row failed");
-                    MakerRowOutcome::Failed(e)
-                }
-            });
-        }
+        let (pending, failed) = split_maker_rows(pos_ids, &rows);
 
-        let mut equities = self
+        // Merge by input index: `read_pending_maker_equities` returns one
+        // result per pending position (it maps over `pending`), so the zip
+        // is structurally exhaustive — no positional counter to get wrong.
+        let equities = self
             .read_pending_maker_equities(&market, pool_id, block_id, &pending)
-            .await?
-            .into_iter();
-        let mut out = Vec::with_capacity(pos_ids.len());
-        for (&pos_id, outcome) in pos_ids.iter().zip(outcomes) {
-            match outcome {
-                MakerRowOutcome::Skipped => {}
-                MakerRowOutcome::Failed(e) => out.push((pos_id, Err(e))),
-                MakerRowOutcome::Pending => out.push((
-                    pos_id,
-                    equities.next().expect("one equity per pending position"),
-                )),
-            }
-        }
-        Ok(out)
+            .await?;
+        let mut out: Vec<(usize, U256, Result<MakerEquityBreakdown>)> = pending
+            .iter()
+            .zip(equities)
+            .map(|(maker, equity)| (maker.input_index, maker.pos_id, equity))
+            .collect();
+        out.extend(
+            failed
+                .into_iter()
+                .map(|(input_index, pos_id, e)| (input_index, pos_id, Err(e))),
+        );
+        out.sort_by_key(|&(input_index, ..)| input_index);
+        Ok(out
+            .into_iter()
+            .map(|(_, pos_id, equity)| (pos_id, equity))
+            .collect())
     }
 
     /// Resolve the safe lagged block and load + accrue the market-wide
@@ -1255,5 +1263,75 @@ impl PerpClient {
             max_taker_leverage: margin_ratio_to_leverage(u24_to_u32(taker.init))?,
             liquidation_taker_ratio: u24_to_u32(taker.liq) as f64 / scale,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::contracts::{Capacity, MakerFunding};
+    use alloy::primitives::I256;
+
+    fn ok_row(return_data: Vec<u8>) -> IMulticall3::Result {
+        IMulticall3::Result {
+            success: true,
+            returnData: return_data.into(),
+        }
+    }
+
+    fn position_row() -> IMulticall3::Result {
+        ok_row(Perp::positionsCall::abi_encode_returns(&Position {
+            delta: I256::ZERO,
+            margin: 1_000_000,
+            liqMarginRatio: alloy::primitives::Uint::<24, 1>::from(50_000u32),
+            backstopMarginRatio: alloy::primitives::Uint::<24, 1>::from(25_000u32),
+            lastCumlFundingX96: I256::ZERO,
+        }))
+    }
+
+    fn maker_row(liquidity: u128) -> IMulticall3::Result {
+        ok_row(Perp::makerDetailsCall::abi_encode_returns(&Maker {
+            tickLower: alloy::primitives::Signed::<24, 1>::try_from(-60).unwrap(),
+            tickUpper: alloy::primitives::Signed::<24, 1>::try_from(60).unwrap(),
+            liquidity,
+            lastLongUtilEarningsX96: U256::ZERO,
+            lastShortUtilEarningsX96: U256::ZERO,
+            capacity: Capacity { long: 0, short: 0 },
+            lastCumlFunding: MakerFunding {
+                belowX96: I256::ZERO,
+                withinX96: I256::ZERO,
+                divSqrtPriceWithinX96: I256::ZERO,
+            },
+        }))
+    }
+
+    /// One bad position row must degrade alone: the other ids in the batch
+    /// keep their pending/skipped classification and their input order.
+    #[test]
+    fn split_maker_rows_degrades_one_bad_row_alone() {
+        let pos_ids = [U256::from(11u8), U256::from(22u8), U256::from(33u8)];
+        let reverted = IMulticall3::Result {
+            success: false,
+            returnData: Vec::new().into(),
+        };
+        let rows = vec![
+            position_row(),
+            maker_row(1_000), // pos 11: open maker → pending
+            position_row(),
+            reverted, // pos 22: failed row → degrades alone
+            position_row(),
+            maker_row(0), // pos 33: zero liquidity → skipped
+        ];
+
+        let (pending, failed) = split_maker_rows(&pos_ids, &rows);
+
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].input_index, 0);
+        assert_eq!(pending[0].pos_id, U256::from(11u8));
+        assert_eq!((pending[0].tick_lower, pending[0].tick_upper), (-60, 60));
+
+        assert_eq!(failed.len(), 1);
+        assert_eq!(failed[0].0, 1);
+        assert_eq!(failed[0].1, U256::from(22u8));
     }
 }
