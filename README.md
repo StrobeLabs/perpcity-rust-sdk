@@ -126,8 +126,27 @@ let all = client.get_balances_batch(&addresses).await?;
 `get_maker_equities` computes, off-chain and pinned to one block, exactly
 what the contract would settle for each open maker position if it were
 touched now — margin, accrued funding, utilization earnings, uncollected V4
-LP fees, and inventory PnL, in exact 6-decimal atoms (validated against a
-real on-chain liquidation settle):
+LP fees, and inventory PnL (validated against a real on-chain liquidation
+settle). Every input id gets exactly one outcome, in input order:
+`Computed(breakdown)`, `NotAMaker`, or `Failed(error)`.
+
+Three conventions to know:
+
+- **Atoms vs USD.** The breakdown's primary representation is exact signed
+  6-decimal USDC atoms — the integer units the contract settles in — via
+  the `*_atoms()` getters. The matching `*_usd()` accessors (and
+  `equity()`, `settled_margin()`, `accrued_income()`) convert to `f64` at
+  the display boundary. Do accounting in atoms; print in USD.
+- **Funding sign.** `funding_owed_atoms()` / `funding_owed_usd()` are what
+  the position OWES since its last settle: positive = the position pays
+  (it is subtracted when settling margin). All the earnings components
+  (utilization, LP fees) are positive when the position receives.
+- **Pinning is automatic.** Every read in a batch — including the mark
+  that prices `valPnl` (`poolState().ammPrice`, exact X96) — comes from
+  one reorg-safe block a few blocks behind the head. There is no mark to
+  supply and no way to mix state from different blocks;
+  `get_maker_equities_at_mark(pos_ids, mark_price_x96)` exists for
+  what-if pricing at a caller-chosen X96 mark over the same pinned state.
 
 ```rust
 for outcome in client.get_maker_equities(&pos_ids).await? {
