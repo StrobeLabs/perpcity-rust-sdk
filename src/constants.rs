@@ -75,6 +75,12 @@ pub const MAX_PROTOCOL_FEE: u32 = 50_000;
 /// f64. This bound holds regardless of price magnitude.
 pub const Q96_PRECISION: f64 = 0.000001;
 
+/// ERC721 name for PerpCity position NFTs.
+pub const ERC721_NAME: &str = "Perp City Positions";
+
+/// ERC721 symbol for PerpCity position NFTs.
+pub const ERC721_SYMBOL: &str = "PERPCITY";
+
 // ── SDK read policy (not mirrored from Constants.sol) ─────────────────
 
 /// Blocks to lag behind the head when pinning snapshot reads (the taker
@@ -83,12 +89,6 @@ pub const Q96_PRECISION: f64 = 0.000001;
 /// Arbitrum produces ~4 blocks/s so the lag stays under two seconds of
 /// staleness.
 pub const SNAPSHOT_BLOCK_LAG: u64 = 8;
-
-/// ERC721 name for PerpCity position NFTs.
-pub const ERC721_NAME: &str = "Perp City Positions";
-
-/// ERC721 symbol for PerpCity position NFTs.
-pub const ERC721_SYMBOL: &str = "PERPCITY";
 
 #[cfg(test)]
 mod tests {
