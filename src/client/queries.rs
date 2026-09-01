@@ -13,7 +13,7 @@
 use std::collections::BTreeMap;
 
 use alloy::eips::{BlockId, BlockNumberOrTag};
-use alloy::primitives::{Address, B256, I256, U256, keccak256};
+use alloy::primitives::{Address, B256, U256, keccak256};
 use alloy::providers::Provider;
 use alloy::sol_types::{SolCall, SolValue};
 
@@ -55,13 +55,12 @@ fn add_slot(slot: B256, offset: u64) -> B256 {
 }
 
 fn mapping_slot_signed(key: i32, mapping_slot: B256) -> B256 {
-    let signed = I256::try_from(key)
-        .expect("i32 always fits I256")
-        .into_raw();
-    let mut encoded = [0u8; 64];
-    encoded[..32].copy_from_slice(&signed.to_be_bytes::<32>());
-    encoded[32..].copy_from_slice(mapping_slot.as_slice());
-    keccak256(encoded)
+    // One keccak-layout implementation crate-wide (see `maker_equity`).
+    let slot = crate::maker_equity::mapping_slot(
+        crate::maker_equity::signed_key(key),
+        U256::from_be_bytes(mapping_slot.0),
+    );
+    B256::from(slot.to_be_bytes::<32>())
 }
 
 /// Convert an `int88` per-day funding rate (scaled by 1e18) to a human-readable

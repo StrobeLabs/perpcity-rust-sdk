@@ -1,7 +1,7 @@
 //! Write operations: open, close, adjust positions, transfers, approvals.
 
 use alloy::primitives::{Address, B256, Bytes, I256, U256};
-use alloy::sol_types::SolEvent;
+use alloy::sol_types::{SolCall, SolEvent};
 
 use crate::constants::{MAX_TICK, MIN_OPENING_MARGIN, MIN_TICK, TICK_SPACING};
 use crate::contracts::{IERC20, Perp};
@@ -16,6 +16,9 @@ use crate::types::{
 };
 
 use super::{MAX_APPROVAL, PerpClient, i32_to_i24};
+
+/// Fixed gas limit for liquidation sends — see the liquidate methods.
+const LIQUIDATE_GAS_LIMIT: u64 = 3_000_000;
 
 /// Extract the minted token ID from an ERC721 `Transfer(address(0), to, tokenId)` event.
 ///
@@ -394,6 +397,82 @@ impl PerpClient {
             urgency,
         )
         .await
+    }
+
+    // ── Liquidations (permissionless) ───────────────────────────────
+
+    /// Check whether `pos_id` is liquidatable right now, via `eth_call`.
+    ///
+    /// The contract is the health oracle: `Ok` means the liquidation would
+    /// execute; a typed revert (`NotLiquidatable`, `NonMakerPosition`, a
+    /// utilization gate from capacity pinned under live OI, …) means not —
+    /// or not yet. Gate [`Self::liquidate_maker`] on this to avoid burning
+    /// gas on reverts.
+    pub async fn simulate_liquidate_maker(
+        &self,
+        pos_id: U256,
+        fee_recipient: Address,
+    ) -> Result<()> {
+        let contract = Perp::new(self.deployments.perp, &self.provider);
+        contract
+            .liquidateMaker(pos_id, fee_recipient)
+            .call()
+            .await?;
+        Ok(())
+    }
+
+    /// Liquidate an unhealthy maker position (always the full position on
+    /// the deployed contracts). The liquidation fee goes to `fee_recipient`.
+    ///
+    /// Sends with a fixed gas limit instead of estimating: Arbitrum
+    /// liquidations have gone out-of-gas where `eth_call` passed, so
+    /// simulate first ([`Self::simulate_liquidate_maker`]) and bound the
+    /// send.
+    pub async fn liquidate_maker(
+        &self,
+        pos_id: U256,
+        fee_recipient: Address,
+    ) -> Result<alloy::rpc::types::TransactionReceipt> {
+        let calldata = Perp::liquidateMakerCall {
+            posId: pos_id,
+            liquidationFeeRecipient: fee_recipient,
+        }
+        .abi_encode();
+        self.tx(self.deployments.perp, calldata.into())
+            .with_gas_limit(LIQUIDATE_GAS_LIMIT)
+            .send()
+            .await
+    }
+
+    /// Taker-side twin of [`Self::simulate_liquidate_maker`].
+    pub async fn simulate_liquidate_taker(
+        &self,
+        pos_id: U256,
+        fee_recipient: Address,
+    ) -> Result<()> {
+        let contract = Perp::new(self.deployments.perp, &self.provider);
+        contract
+            .liquidateTaker(pos_id, fee_recipient)
+            .call()
+            .await?;
+        Ok(())
+    }
+
+    /// Taker-side twin of [`Self::liquidate_maker`].
+    pub async fn liquidate_taker(
+        &self,
+        pos_id: U256,
+        fee_recipient: Address,
+    ) -> Result<alloy::rpc::types::TransactionReceipt> {
+        let calldata = Perp::liquidateTakerCall {
+            posId: pos_id,
+            liquidationFeeRecipient: fee_recipient,
+        }
+        .abi_encode();
+        self.tx(self.deployments.perp, calldata.into())
+            .with_gas_limit(LIQUIDATE_GAS_LIMIT)
+            .send()
+            .await
     }
 
     // ── Approval + transfers ────────────────────────────────────────

@@ -46,7 +46,7 @@ use alloy::sol_types::SolEvent;
 use serde::{Deserialize, Serialize};
 
 use crate::contracts::{IBeacon, Perp, PerpDeployedEvents, SwapResult};
-use crate::convert::{price_x96_to_f64, scale_from_6dec};
+use crate::convert::{price_x96_to_f64, scale_from_6dec, unpack_balance_delta};
 
 /// Funding/utilization rates are scaled by 1e18 per day on-chain.
 const WAD_F64: f64 = 1e18;
@@ -453,17 +453,6 @@ fn decode_raw<E: SolEvent>(log: &Log) -> Option<E> {
         log.inner.data.data.as_ref(),
     )
     .ok()
-}
-
-/// Unpack a Uniswap V4 `BalanceDelta` (packed `int256`) into `(amount0, amount1)`.
-///
-/// The upper 128 bits hold `amount0` (perp) and the lower 128 bits hold
-/// `amount1` (USD), each a signed `int128` in two's-complement.
-fn unpack_balance_delta(delta: I256) -> (i128, i128) {
-    let bytes: [u8; 32] = delta.to_be_bytes();
-    let amount0 = i128::from_be_bytes(bytes[0..16].try_into().unwrap());
-    let amount1 = i128::from_be_bytes(bytes[16..32].try_into().unwrap());
-    (amount0, amount1)
 }
 
 /// Build a [`SwapInfo`] from a contract [`SwapResult`].

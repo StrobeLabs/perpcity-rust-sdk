@@ -14,7 +14,7 @@
 //! The [`price_to_sqrt_price_x96`] / [`sqrt_price_x96_to_price`] pair
 //! handles this encoding, using a 6-decimal intermediate for precision.
 
-use alloy::primitives::U256;
+use alloy::primitives::{I256, U256};
 
 use crate::constants::Q96;
 use crate::errors::ValidationError;
@@ -210,7 +210,7 @@ pub fn price_x96_to_f64(value: U256) -> Result<f64, ValidationError> {
 /// ```
 /// # use perpcity_sdk::convert::price_to_sqrt_price_x96;
 /// # use perpcity_sdk::constants::Q96;
-/// # use alloy::primitives::U256;
+/// # use alloy::primitives::{I256, U256};
 /// let result = price_to_sqrt_price_x96(1.0).unwrap();
 /// // For price=1.0, sqrtPriceX96 ≈ Q96
 /// let diff = result.abs_diff(Q96);
@@ -282,6 +282,18 @@ pub fn sqrt_price_x96_to_price(sqrt_price_x96: U256) -> Result<f64, ValidationEr
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────
+
+/// Unpack a Uniswap V4 `BalanceDelta` (packed `int256`) into `(amount0,
+/// amount1)` = (perp, USD), each a signed `int128` in two's-complement.
+///
+/// The packing is part of the contract ABI: the upper 128 bits hold
+/// `amount0` and the lower 128 bits hold `amount1`.
+pub fn unpack_balance_delta(delta: I256) -> (i128, i128) {
+    let bytes: [u8; 32] = delta.to_be_bytes();
+    let amount0 = i128::from_be_bytes(bytes[0..16].try_into().unwrap());
+    let amount1 = i128::from_be_bytes(bytes[16..32].try_into().unwrap());
+    (amount0, amount1)
+}
 
 #[cfg(test)]
 mod tests {

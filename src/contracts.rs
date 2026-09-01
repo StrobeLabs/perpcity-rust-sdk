@@ -329,8 +329,13 @@ sol! {
         /// Burns the position NFT if fully closed.
         function adjustMaker(AdjustMakerParams calldata params) external;
 
-        /// Liquidate an unhealthy maker position (`liquidityAmount` of the range).
-        function liquidateMaker(uint256 posId, address liquidationFeeRecipient, uint128 liquidityAmount) external;
+        /// Liquidate an unhealthy maker position. Always the FULL position:
+        /// the deployed perps predate partial liquidations (contracts #171),
+        /// and the 3-arg form reverts empty (no matching selector) on every
+        /// live market. Verified against mainnet 2026-09-01: the 2-arg
+        /// selector reverts typed (NotLiquidatable/NonMakerPosition), the
+        /// 3-arg one falls through.
+        function liquidateMaker(uint256 posId, address liquidationFeeRecipient) external;
 
         /// Backstop a maker position approaching liquidation.
         function backstopMaker(uint256 posId, uint128 marginIn, address positionRecipient) external;
@@ -344,8 +349,9 @@ sol! {
         /// opposing `perpDelta`. Burns the position NFT if fully closed.
         function adjustTaker(AdjustTakerParams calldata params) external;
 
-        /// Liquidate an unhealthy taker position (`perpAmount` of exposure).
-        function liquidateTaker(uint256 posId, address liquidationFeeRecipient, uint128 perpAmount) external;
+        /// Liquidate an unhealthy taker position. Always the FULL position —
+        /// see `liquidateMaker` above for the deployment-era note.
+        function liquidateTaker(uint256 posId, address liquidationFeeRecipient) external;
 
         /// Backstop a taker position approaching liquidation.
         function backstopTaker(uint256 posId, uint128 marginIn, address positionRecipient) external;
@@ -664,14 +670,16 @@ mod abi_lock {
             Perp::adjustMakerCall::SIGNATURE,
             "adjustMaker((uint256,int128,int128,uint256,uint256))"
         );
-        // The liquidate functions each take a third uint128 amount (was missing).
+        // Deployed 2-arg forms (full liquidation only). The post-#171 3-arg
+        // partial-liquidation selectors exist on no live market — verified
+        // 2026-09-01: 2-arg reverts typed, 3-arg reverts empty.
         assert_eq!(
             Perp::liquidateMakerCall::SIGNATURE,
-            "liquidateMaker(uint256,address,uint128)"
+            "liquidateMaker(uint256,address)"
         );
         assert_eq!(
             Perp::liquidateTakerCall::SIGNATURE,
-            "liquidateTaker(uint256,address,uint128)"
+            "liquidateTaker(uint256,address)"
         );
         assert_eq!(
             Perp::backstopMakerCall::SIGNATURE,
