@@ -13,7 +13,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::future::IntoFuture;
 
-use alloy::eips::{BlockId, BlockNumberOrTag};
+use alloy::eips::BlockId;
 use alloy::primitives::{Address, B256, I256, U256};
 use alloy::providers::Provider;
 use alloy::sol_types::{SolCall, SolValue};
@@ -22,6 +22,7 @@ use futures_util::stream::{self, StreamExt};
 
 use crate::constants::{
     MAX_SWAP_SQRT_PRICE_X96, MAX_TICK, MIN_SWAP_SQRT_PRICE_X96, MIN_TICK, MULTICALL3,
+    SNAPSHOT_BLOCK_LAG,
 };
 use crate::contracts::{
     IBeacon, IERC20, IFees, IMarginRatios, IMulticall3, IPoolManagerState, IPriceImpact, Maker,
@@ -70,12 +71,6 @@ pub(super) struct BookImmutables {
 fn funding_per_day_to_f64(rate: alloy::primitives::Signed<88, 2>) -> f64 {
     i128::try_from(rate).unwrap_or(0) as f64 / WAD_F64
 }
-
-/// Blocks to lag behind the head when pinning maker-equity reads: on
-/// load-balanced RPC endpoints the newest block's state may not be
-/// materialized on every replica yet, and Arbitrum produces ~4 blocks/s so
-/// the lag stays under two seconds.
-const MAKER_EQUITY_BLOCK_LAG: u64 = 8;
 
 /// Concurrency bound for the `eth_getStorageAt` fallback when the endpoint
 /// does not serve `eth_getProof`.
@@ -301,23 +296,44 @@ impl PerpClient {
             .await
     }
 
-    /// Load an exact concentrated-liquidity snapshot at the latest canonical
+    /// Resolve the lagged, reorg-safe block that snapshot reads pin to.
+    ///
+    /// Lagging [`SNAPSHOT_BLOCK_LAG`] blocks behind the head keeps every
+    /// replica of a load-balanced endpoint able to serve the pinned state;
+    /// a replica that still misses the header is a failed read
+    /// ([`ContractError::BlockUnavailable`]), never a silent degrade.
+    async fn lagged_snapshot_block(&self) -> Result<(BlockContext, BlockId)> {
+        let number = self
+            .provider
+            .get_block_number()
+            .await?
+            .saturating_sub(SNAPSHOT_BLOCK_LAG);
+        let block = self
+            .provider
+            .get_block_by_number(number.into())
+            .await?
+            .ok_or(ContractError::BlockUnavailable { number })?;
+        Ok((
+            BlockContext {
+                number: block.header.number,
+                hash: block.header.hash,
+                timestamp: block.header.timestamp,
+            },
+            BlockId::hash(block.header.hash),
+        ))
+    }
+
+    /// Load an exact concentrated-liquidity snapshot at a lagged canonical
     /// block for the deployed Perp contract (`perpcity-contracts@4bbe554f`).
     ///
     /// The loader reads the stored EMA pair from its deployed storage slot,
     /// advances it with the contract's exact arithmetic, and evaluates the
     /// configured price-impact module. Every contract and PoolManager read is
-    /// pinned to the returned block hash.
+    /// pinned to the returned block hash, resolved via the same
+    /// [`SNAPSHOT_BLOCK_LAG`] policy as the maker-equity reads.
     pub async fn load_taker_market_snapshot(&self) -> Result<TakerMarketSnapshot> {
         let immutables = *self.book_immutables().await?;
-        let block = self
-            .provider
-            .get_block_by_number(BlockNumberOrTag::Latest)
-            .await?
-            .ok_or_else(|| ContractError::MulticallFailed {
-                reason: "latest block not found".into(),
-            })?;
-        let block_id = BlockId::hash(block.header.hash);
+        let (block, block_id) = self.lagged_snapshot_block().await?;
         let perp = Perp::new(self.deployments.perp, &self.provider);
         // PerpStorage starts at slot 3 and `emas` is field slot 8 in the
         // deployed layout. PricePair packs ammPrice in the low 128 bits and
@@ -359,7 +375,7 @@ impl PerpClient {
             stored,
             spot,
             rates.lastTouch.to::<u64>(),
-            block.header.timestamp,
+            block.timestamp,
             immutables.ema_window,
         )?;
         let bounds = IPriceImpact::new(modules.priceImpact, &self.provider)
@@ -373,11 +389,7 @@ impl PerpClient {
             .call()
             .await?;
         let header = TakerMarketSnapshot {
-            block: BlockContext {
-                number: block.header.number,
-                hash: block.header.hash,
-                timestamp: block.header.timestamp,
-            },
+            block,
             sqrt_price_x96: state.sqrtPrice.to::<U256>(),
             tick: i24_to_i32(state.tick),
             liquidity: state.liquidity,
@@ -1028,26 +1040,13 @@ impl PerpClient {
         mark_price_x96: U256,
     ) -> Result<(MakerMarketSnapshot, B256, BlockId)> {
         let perp_addr = self.deployments.perp;
-        let block_number = self
-            .provider
-            .get_block_number()
-            .await?
-            .saturating_sub(MAKER_EQUITY_BLOCK_LAG);
         // A lagging replica may briefly miss the pinned header. That is a
         // failed read, not a degraded one: pinning by bare number would drop
         // the reorg protection, and substituting the local wall clock for
         // the block timestamp would silently skew the accrual replay (a
         // slow clock reads as zero accrual). A settlement preview must not
         // quietly degrade — fail and let the caller retry.
-        let block = self
-            .provider
-            .get_block_by_number(block_number.into())
-            .await?
-            .ok_or(ContractError::BlockUnavailable {
-                number: block_number,
-            })?;
-        let block_id = BlockId::hash(block.header.hash);
-        let (block_hash, block_timestamp) = (block.header.hash, block.header.timestamp);
+        let (block, block_id) = self.lagged_snapshot_block().await?;
 
         let market_call = |calldata: Vec<u8>| IMulticall3::Call3 {
             target: perp_addr,
@@ -1055,7 +1054,9 @@ impl PerpClient {
             callData: calldata.into(),
         };
 
-        // ── Position rows: one multicall, degrading per position ────
+        // ── Market-wide state: one multicall, all-or-nothing ────────
+        // (allowFailure: false — without a consistent market snapshot no
+        // position's equity can be computed.)
         let calls = vec![
             market_call(Perp::cumulativesCall {}.abi_encode()),
             market_call(Perp::ratesCall {}.abi_encode()),
@@ -1109,11 +1110,7 @@ impl PerpClient {
             .map_err(|e| decode_err("POOL_ID", e))?;
 
         let market = MakerMarketSnapshot {
-            block: BlockContext {
-                number: block_number,
-                hash: block_hash,
-                timestamp: block_timestamp,
-            },
+            block,
             funding_x96: cumls.fundingX96,
             funding_div_sqrt_p_x96: cumls.fundingDivSqrtPX96,
             long_util_earnings_x96: cumls.longUtilEarningsX96,
@@ -1127,7 +1124,7 @@ impl PerpClient {
             long_util_fee_per_day_wad: rates.longUtilFeePerDay,
             short_util_fee_per_day_wad: rates.shortUtilFeePerDay,
             last_touch: rates.lastTouch.to::<u64>(),
-            now: block_timestamp,
+            now: block.timestamp,
             oi_long: oi.long,
             oi_short: oi.short,
             cap_long: capacity.long,
