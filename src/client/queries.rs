@@ -27,7 +27,8 @@ use crate::contracts::{
     Perp, Position,
 };
 use crate::convert::{
-    margin_ratio_to_leverage, price_x96_to_f64, scale_from_6dec, unpack_balance_delta,
+    margin_ratio_to_leverage, price_f64_to_x96, price_x96_to_f64, scale_from_6dec,
+    unpack_balance_delta,
 };
 use crate::errors::{ContractError, PerpCityError, Result, ValidationError};
 use crate::hft::state_cache::{CachedBounds, CachedFees};
@@ -73,17 +74,6 @@ fn funding_per_day_to_f64(rate: alloy::primitives::Signed<88, 2>) -> f64 {
 /// materialized on every replica yet, and Arbitrum produces ~4 blocks/s so
 /// the lag stays under two seconds.
 const MAKER_EQUITY_BLOCK_LAG: u64 = 8;
-
-/// Convert an f64 mark price to X96 for the maker-equity reader.
-fn f64_to_x96(value: f64) -> U256 {
-    if value <= 0.0 {
-        return U256::ZERO;
-    }
-    // Two-step conversion keeps the full f64 mantissa: value × 2^48 fits in
-    // u128 for any real price, then shift the rest.
-    let hi = (value * (1u64 << 48) as f64) as u128;
-    U256::from(hi) << (96 - 48)
-}
 
 /// A maker position that survived the row-read phase and awaits slot reads.
 struct PendingMaker {
@@ -827,13 +817,14 @@ impl PerpClient {
     /// are omitted from the output.
     ///
     /// `mark_price` is the caller's current mark (snapshot / market-data
-    /// cache); it prices `valPnl` and the accrual replay.
+    /// cache); it prices `valPnl` and the accrual replay. It must be a
+    /// positive finite number.
     pub async fn read_maker_equities(
         &self,
         pos_ids: &[U256],
         mark_price: f64,
     ) -> Result<Vec<(U256, Result<MakerEquityBreakdown>)>> {
-        let mark_price_x96 = f64_to_x96(mark_price);
+        let mark_price_x96 = price_f64_to_x96(mark_price)?;
         if pos_ids.is_empty() {
             return Ok(Vec::new());
         }

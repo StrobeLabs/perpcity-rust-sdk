@@ -191,6 +191,43 @@ pub fn price_x96_to_f64(value: U256) -> Result<f64, ValidationError> {
     Ok(int_val as f64 / F64_1E6)
 }
 
+/// Convert a human-readable price to its Q96 fixed-point representation.
+///
+/// Inverse of [`price_x96_to_f64`]. A two-step conversion keeps the full
+/// f64 mantissa: `price × 2^48` fits in `u128` for any accepted price, and
+/// the remaining `2^48` factor is an exact shift.
+///
+/// # Errors
+///
+/// Returns [`ValidationError::InvalidPrice`] if `price` is zero, negative,
+/// NaN, infinite, or at least `2^80` (where `price × 2^48` would exceed
+/// `u128`).
+///
+/// # Examples
+///
+/// ```
+/// # use perpcity_sdk::convert::{price_f64_to_x96, price_x96_to_f64};
+/// let x96 = price_f64_to_x96(1.5).unwrap();
+/// assert!((price_x96_to_f64(x96).unwrap() - 1.5).abs() < 1e-9);
+/// assert!(price_f64_to_x96(0.0).is_err());
+/// assert!(price_f64_to_x96(f64::NAN).is_err());
+/// ```
+pub fn price_f64_to_x96(price: f64) -> Result<U256, ValidationError> {
+    if !price.is_finite() || price <= 0.0 {
+        return Err(ValidationError::InvalidPrice {
+            reason: format!("price must be a positive finite number, got {price}"),
+        });
+    }
+    const PRICE_LIMIT: f64 = (1u128 << 80) as f64;
+    if price >= PRICE_LIMIT {
+        return Err(ValidationError::InvalidPrice {
+            reason: format!("price {price} exceeds the representable Q96 range (2^80)"),
+        });
+    }
+    let hi = (price * (1u64 << 48) as f64) as u128;
+    Ok(U256::from(hi) << 48)
+}
+
 // ── Price ↔ sqrtPriceX96 ──────────────────────────────────────────────
 
 /// Convert a human-readable price to `sqrtPriceX96` (Uniswap V4 format).
