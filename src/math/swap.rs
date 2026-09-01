@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::constants::{MAX_SWAP_SQRT_PRICE_X96, MIN_SWAP_SQRT_PRICE_X96, Q96};
 use crate::errors::ValidationError;
+use crate::math::BlockContext;
 use crate::math::fixed_point::{mul_div, u512_to_u256};
 use crate::math::tick::{
     UNISWAP_MAX_TICK, UNISWAP_MIN_TICK, get_sqrt_ratio_at_tick, get_tick_at_sqrt_ratio,
@@ -66,11 +67,7 @@ impl Default for QuoteConstraints {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TakerMarketSnapshot {
     /// Block containing all state in this snapshot.
-    pub block_number: u64,
-    /// Canonical block hash.
-    pub block_hash: B256,
-    /// Block timestamp.
-    pub block_timestamp: u64,
+    pub block: BlockContext,
     /// Current Q64.96 square-root price.
     pub sqrt_price_x96: U256,
     /// Current pool tick.
@@ -95,9 +92,7 @@ impl Default for TakerMarketSnapshot {
     /// `PerpClient::load_taker_market_snapshot`.
     fn default() -> Self {
         Self {
-            block_number: 0,
-            block_hash: B256::ZERO,
-            block_timestamp: 0,
+            block: BlockContext::default(),
             sqrt_price_x96: Q96,
             tick: 0,
             liquidity: 0,
@@ -322,8 +317,8 @@ impl TakerMarketSnapshot {
             fully_filled: sim.fully_filled,
             price_impact_allowed: allowed,
             limit: reason,
-            block_number: self.block_number,
-            block_hash: self.block_hash,
+            block_number: self.block.number,
+            block_hash: self.block.hash,
         }
     }
 

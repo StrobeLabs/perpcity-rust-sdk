@@ -74,7 +74,7 @@ impl LiveTakerMarket {
 
     /// Whether `block_hash` is still the quoteable head in this cache.
     pub fn is_current(&self, block_hash: B256) -> bool {
-        self.latest.borrow().block_hash == block_hash
+        self.latest.borrow().block.hash == block_hash
     }
 }
 
@@ -100,12 +100,15 @@ mod tests {
         let first = TakerMarketSnapshot::default();
         let (market, publisher) = LiveTakerMarket::from_snapshot(first);
         let second = TakerMarketSnapshot {
-            block_number: 2,
-            block_hash: B256::with_last_byte(2),
+            block: crate::math::BlockContext {
+                number: 2,
+                hash: B256::with_last_byte(2),
+                timestamp: 0,
+            },
             ..Default::default()
         };
         publisher.publish(second);
-        assert_eq!(market.latest().block_number, 2);
+        assert_eq!(market.latest().block.number, 2);
         assert!(market.is_current(B256::with_last_byte(2)));
     }
 }

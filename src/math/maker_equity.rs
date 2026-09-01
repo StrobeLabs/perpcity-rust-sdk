@@ -27,11 +27,12 @@
 //! [`storage`](crate::math::storage)) lives in the client:
 //! [`PerpClient::read_maker_equities`](crate::client::PerpClient::read_maker_equities).
 
-use alloy::primitives::{B256, I256, U256, U512};
+use alloy::primitives::{I256, U256, U512};
 
 use crate::constants::{INTERVAL, Q96, WAD};
 use crate::convert::scale_from_6dec;
 use crate::errors::ValidationError;
+use crate::math::BlockContext;
 use crate::math::fixed_point::{mul_div, s_full_mul_div, u512_to_u256};
 use crate::math::swap::{amount0_delta, amount1_delta};
 use crate::math::tick::get_sqrt_ratio_at_tick;
@@ -52,12 +53,7 @@ pub struct TickFunding {
 #[derive(Debug, Clone, Copy)]
 pub struct MakerMarketSnapshot {
     /// Block containing all state in this snapshot.
-    pub block_number: u64,
-    /// Canonical block hash (zero when the pinned block header was
-    /// unavailable and only the number is known).
-    pub block_hash: B256,
-    /// Block timestamp.
-    pub block_timestamp: u64,
+    pub block: BlockContext,
     /// Cumulative funding (X96), signed.
     pub funding_x96: I256,
     /// Cumulative funding divided by sqrt price (X96), signed.
@@ -67,9 +63,9 @@ pub struct MakerMarketSnapshot {
     /// Cumulative short utilization earnings (X96).
     pub short_util_earnings_x96: U256,
     /// Current pool tick.
-    pub current_tick: i32,
-    /// Current AMM sqrt price (X96).
-    pub sqrt_amm_price_x96: U256,
+    pub tick: i32,
+    /// Current AMM Q64.96 square-root price.
+    pub sqrt_price_x96: U256,
     /// Mark price (X96) — prices `valPnl` and the accrual replay.
     pub mark_price_x96: U256,
 }
@@ -251,7 +247,7 @@ impl MakerMarketSnapshot {
             s_full_mul_div(
                 funding_accrued,
                 I256::from_raw(Q96),
-                self.sqrt_amm_price_x96,
+                self.sqrt_price_x96,
                 false,
             )?,
             "accrued funding/sqrtP cumulative",
@@ -391,7 +387,7 @@ impl MakerMarketSnapshot {
         // (For an open maker both deltas are usually negative — owed to the
         // pool — but a mixed-sign delta must not collapse to magnitudes.)
         let (perps, usd) =
-            amounts_for_liquidity(self.sqrt_amm_price_x96, sqrt_l, sqrt_u, maker.liquidity)?;
+            amounts_for_liquidity(self.sqrt_price_x96, sqrt_l, sqrt_u, maker.liquidity)?;
         let liquidity_val = add_u(
             mul_div(perps, self.mark_price_x96, Q96, false)?,
             usd,
@@ -429,7 +425,7 @@ impl MakerMarketSnapshot {
         let lower = &maker.tick_lower_funding;
         let upper = &maker.tick_upper_funding;
 
-        let (below, div_below_lower) = if self.current_tick >= maker.tick_lower {
+        let (below, div_below_lower) = if self.tick >= maker.tick_lower {
             (
                 lower.cuml_funding_opp_x96,
                 lower.cuml_funding_div_sqrt_p_opp_x96,
@@ -448,7 +444,7 @@ impl MakerMarketSnapshot {
                 )?,
             )
         };
-        let (below_upper, div_below_upper) = if self.current_tick >= maker.tick_upper {
+        let (below_upper, div_below_upper) = if self.tick >= maker.tick_upper {
             (
                 upper.cuml_funding_opp_x96,
                 upper.cuml_funding_div_sqrt_p_opp_x96,
@@ -578,6 +574,8 @@ fn atoms(v: I256, context: &'static str) -> Result<i128, ValidationError> {
 
 #[cfg(test)]
 mod tests {
+    use alloy::primitives::B256;
+
     use super::*;
 
     /// Golden vector: CHINA-PC (`0x796f…8ed0`) position 54, chain state at
@@ -591,15 +589,17 @@ mod tests {
         let i = |s: &str| I256::from_dec_str(s).unwrap();
         let u = |s: &str| U256::from_str_radix(s, 10).unwrap();
         let market = MakerMarketSnapshot {
-            block_number: 500612175,
-            block_hash: B256::ZERO,
-            block_timestamp: 1788260191,
+            block: BlockContext {
+                number: 500612175,
+                hash: B256::ZERO,
+                timestamp: 1788260191,
+            },
             funding_x96: i("-5817301051923220663714693204286"),
             funding_div_sqrt_p_x96: i("-1332253658657311045256648214058"),
             long_util_earnings_x96: u("361206840527920163630096383165"),
             short_util_earnings_x96: u("512938731932611361114843741066"),
-            current_tick: 28543,
-            sqrt_amm_price_x96: u("330115084885190701587787251116"),
+            tick: 28543,
+            sqrt_price_x96: u("330115084885190701587787251116"),
             mark_price_x96: u("1375470108235016714305503507110"),
         };
         let accrual = AccrualInputs {

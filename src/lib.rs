@@ -70,6 +70,9 @@ pub use feeds::{
 pub use errors::{ContractError, PerpCityError, Result, TransactionError, ValidationError};
 
 #[doc(inline)]
+pub use math::BlockContext;
+
+#[doc(inline)]
 pub use math::maker_equity::{
     AccrualInputs, MakerEquityBreakdown, MakerMarketSnapshot, MakerState, TickFunding,
 };

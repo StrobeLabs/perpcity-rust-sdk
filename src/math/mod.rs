@@ -13,6 +13,9 @@
 //! | [`maker_equity`] | Contract-exact maker settle preview over a block-pinned snapshot |
 //! | [`storage`] | Storage-slot math for reads with no contract getter |
 
+use alloy::primitives::B256;
+use serde::{Deserialize, Serialize};
+
 pub mod ema;
 pub(crate) mod fixed_point;
 pub mod liquidity;
@@ -21,3 +24,19 @@ pub mod position;
 pub mod storage;
 pub mod swap;
 pub mod tick;
+
+/// The block a market snapshot's state was read at.
+///
+/// Shared by [`swap::TakerMarketSnapshot`] and
+/// [`maker_equity::MakerMarketSnapshot`]: every field in a snapshot comes
+/// from this one block, and chain reads derived from the snapshot pin to
+/// [`Self::hash`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BlockContext {
+    /// Block number.
+    pub number: u64,
+    /// Canonical block hash.
+    pub hash: B256,
+    /// Block timestamp (seconds since the Unix epoch).
+    pub timestamp: u64,
+}

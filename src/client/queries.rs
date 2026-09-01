@@ -32,6 +32,7 @@ use crate::convert::{
 };
 use crate::errors::{ContractError, PerpCityError, Result, ValidationError};
 use crate::hft::state_cache::{CachedBounds, CachedFees};
+use crate::math::BlockContext;
 use crate::math::ema::{PricePair, calculate_emas};
 use crate::math::maker_equity::{
     AccrualInputs, MakerEquityBreakdown, MakerMarketSnapshot, MakerState, TickFunding,
@@ -248,9 +249,11 @@ impl PerpClient {
             .call()
             .await?;
         let header = TakerMarketSnapshot {
-            block_number: block.header.number,
-            block_hash: block.header.hash,
-            block_timestamp: block.header.timestamp,
+            block: BlockContext {
+                number: block.header.number,
+                hash: block.header.hash,
+                timestamp: block.header.timestamp,
+            },
             sqrt_price_x96: state.sqrtPrice.to::<U256>(),
             tick: i24_to_i32(state.tick),
             liquidity: state.liquidity,
@@ -267,7 +270,7 @@ impl PerpClient {
     /// snapshot's block, then verify the reconstruction against the pool's
     /// reported active liquidity before returning it.
     async fn fill_book(&self, mut snapshot: TakerMarketSnapshot) -> Result<TakerMarketSnapshot> {
-        let block_id = BlockId::hash(snapshot.block_hash);
+        let block_id = BlockId::hash(snapshot.block.hash);
         let BookImmutables {
             pool_id,
             tick_spacing: spacing,
@@ -984,15 +987,17 @@ impl PerpClient {
             .map_err(|e| decode_err("POOL_ID", e))?;
 
         let market = MakerMarketSnapshot {
-            block_number,
-            block_hash,
-            block_timestamp,
+            block: BlockContext {
+                number: block_number,
+                hash: block_hash,
+                timestamp: block_timestamp,
+            },
             funding_x96: cumls.fundingX96,
             funding_div_sqrt_p_x96: cumls.fundingDivSqrtPX96,
             long_util_earnings_x96: cumls.longUtilEarningsX96,
             short_util_earnings_x96: cumls.shortUtilEarningsX96,
-            current_tick: i24_to_i32(pool_state.tick),
-            sqrt_amm_price_x96: pool_state.sqrtPrice.to::<U256>(),
+            tick: i24_to_i32(pool_state.tick),
+            sqrt_price_x96: pool_state.sqrtPrice.to::<U256>(),
             mark_price_x96,
         }
         .accrued(&AccrualInputs {
@@ -1143,7 +1148,7 @@ impl PerpClient {
                         fg1_out_upper,
                         maker.tick_lower,
                         maker.tick_upper,
-                        market.current_tick,
+                        market.tick,
                     ),
                     fee_growth_inside1_last_x128: fg1_inside_last,
                 };
