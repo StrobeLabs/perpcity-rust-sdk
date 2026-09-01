@@ -13,7 +13,7 @@
 //! | [`errors`] | SDK-wide error types using `thiserror` |
 //! | [`feeds`] | Live data feeds over WebSocket: market events, block headers, event decoding |
 //! | [`hft`] | HFT infrastructure: nonce, gas, pipeline, state cache, latency, positions |
-//! | [`math`] | Pure math: tick ↔ price, liquidity estimation, position calculations |
+//! | [`math`] | Pure math: tick ↔ price, liquidity, positions, EMAs, taker swap simulation, maker settle previews |
 //! | [`transport`] | Multi-endpoint RPC transport with health-aware routing |
 //! | [`types`] | Client-facing types with human-readable f64 fields |
 //!
@@ -71,15 +71,6 @@ pub use feeds::{
 pub use errors::{ContractError, PerpCityError, Result, TransactionError, ValidationError};
 
 #[doc(inline)]
-pub use math::BlockContext;
-
-#[doc(inline)]
-pub use math::maker_equity::{
-    AccrualInputs, AccruedMakerSnapshot, MakerEquityBreakdown, MakerMarketSnapshot, MakerState,
-    TickFunding,
-};
-
-#[doc(inline)]
 pub use hft::gas::{GasLimits, Urgency};
 
 #[doc(inline)]
@@ -90,6 +81,15 @@ pub use types::{
     AdjustMakerParams, AdjustMakerResult, AdjustTakerParams, AdjustTakerResult, Bounds,
     Deployments, ExactAdjustTakerParams, ExactOpenTakerParams, Fees, OpenInterest, OpenMakerParams,
     OpenResult, OpenTakerParams, PerpData, PerpSnapshot, PriceImpactPoint,
+};
+
+#[doc(inline)]
+pub use math::BlockContext;
+
+#[doc(inline)]
+pub use math::maker_equity::{
+    AccrualInputs, AccruedMakerSnapshot, MakerEquityBreakdown, MakerMarketSnapshot, MakerState,
+    TickFunding,
 };
 
 #[doc(inline)]
