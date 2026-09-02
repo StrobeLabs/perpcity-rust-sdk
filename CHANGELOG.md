@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-09-02
+
 ### Breaking
 
 - **`Perp::liquidateMaker` / `liquidateTaker` bindings target the deployed 2-argument selectors** (`(posId, liquidationFeeRecipient)`) — bindings match deployed bytecode, not contracts-repo HEAD.
@@ -28,6 +30,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `TransactionError::is_revert::<E: SolError>()` — typed matching of decoded simulation reverts by 4-byte selector (`err.is_revert::<Perp::NotLiquidatable>()`), replacing `error_name` string comparison.
 - `futures-util` is now a direct dependency (already in the tree via alloy): the tick-funding fallback uses bounded buffered streaming.
 - **`aws` feature — AWS KMS signing.** Enables alloy's `signer-aws` so bots can sign with a KMS asymmetric secp256k1 key that never leaves AWS (`alloy::signers::aws::AwsSigner`). New `examples/aws_kms_signer.rs` shows the full flow: AWS credential chain → KMS client → `AwsSigner` → `PerpClient`.
+- `errors::decode` module — decodes PerpCity contract error selectors (20+ known selectors) into human-readable names. Used in gas estimation, pre-flight simulation, and quote functions.
+- `TransactionError::SimulationReverted` — returned when `eth_estimateGas` or `eth_call` detects a contract revert before broadcast. Carries decoded error name, selector, and revert data.
+- `TransactionError::ReceiptTimeout` — distinct from `Reverted` for receipt polling timeouts.
+- `TransactionError::SigningFailed` — distinct from `Reverted` for signing errors.
+- `ValidationError::DecodeFailed` — for ABI decode errors (distinct from `Overflow`).
+- `ContractError::QuoteReverted` — for quote function reverts with decoded error names.
+- `ContractError::MulticallFailed` — for multicall count mismatches and subcall failures.
+- `PerpCityError::is_simulation_revert()` — check if the error is a pre-broadcast simulation revert.
+- `PerpCityError::is_transient()` — check if the error is transient and worth retrying (RPC errors, gas unavailable, receipt timeouts).
+- `TxBuilder` — public transaction builder, re-exported from crate root.
+- Gas limit validation: `TxBuilder::send()` rejects `gas_limit = 0` with a clear `ValidationError`.
 
 ### Changed
 
@@ -49,20 +62,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **In-flight transaction eviction.** Failed `poll_receipt` and on-chain reverts now evict the transaction from the pipeline's in-flight map, preventing permanent slot consumption. Previously, 16 failed transactions would jam the pipeline and block all new transactions including closes and retreats.
 - **Stale cached gas estimates self-heal.** A cached per-selector gas limit that had gone too small failed the capped preflight on every send until its TTL expired; a preflight the node fails without a contract revert (`SimulationFailed`) now evicts the estimate and re-estimates. A preflight that never reached the node (a timeout, a rate limit) keeps the cached estimate and surfaces the transient error instead of paying for a re-estimate.
 - **`MakerMarketSnapshot::accrued` rejects an accrual target behind `last_touch`** (`ValidationError::InvalidConfig`) instead of silently returning the un-accrued snapshot — the chain cannot touch a market after the snapshot block, so the inputs came from different blocks.
-
-### Added
-
-- `errors::decode` module — decodes PerpCity contract error selectors (20+ known selectors) into human-readable names. Used in gas estimation, pre-flight simulation, and quote functions.
-- `TransactionError::SimulationReverted` — returned when `eth_estimateGas` or `eth_call` detects a contract revert before broadcast. Carries decoded error name, selector, and revert data.
-- `TransactionError::ReceiptTimeout` — distinct from `Reverted` for receipt polling timeouts.
-- `TransactionError::SigningFailed` — distinct from `Reverted` for signing errors.
-- `ValidationError::DecodeFailed` — for ABI decode errors (distinct from `Overflow`).
-- `ContractError::QuoteReverted` — for quote function reverts with decoded error names.
-- `ContractError::MulticallFailed` — for multicall count mismatches and subcall failures.
-- `PerpCityError::is_simulation_revert()` — check if the error is a pre-broadcast simulation revert.
-- `PerpCityError::is_transient()` — check if the error is transient and worth retrying (RPC errors, gas unavailable, receipt timeouts).
-- `TxBuilder` — public transaction builder, re-exported from crate root.
-- Gas limit validation: `TxBuilder::send()` rejects `gas_limit = 0` with a clear `ValidationError`.
 
 ## [0.2.1] - 2026-04-01
 
@@ -154,7 +153,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Examples: quickstart, open_position, open_maker, market_maker, hft_bot
 - Benchmarks: math, HFT pipeline, transport
 
-[Unreleased]: https://github.com/StrobeLabs/perpcity-rust-sdk/compare/v0.2.1...HEAD
+[Unreleased]: https://github.com/StrobeLabs/perpcity-rust-sdk/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/StrobeLabs/perpcity-rust-sdk/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/StrobeLabs/perpcity-rust-sdk/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/StrobeLabs/perpcity-rust-sdk/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/StrobeLabs/perpcity-rust-sdk/releases/tag/v0.1.0
