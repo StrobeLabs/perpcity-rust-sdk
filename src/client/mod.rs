@@ -309,7 +309,7 @@ impl PerpClient {
     ///
     /// Fetches the latest block directly in a single RPC call and extracts
     /// the base fee for EIP-1559 fee computation. Should be called
-    /// periodically (every 1-2 seconds on Base L2) or from a `newHeads`
+    /// periodically (every 1-2 seconds) or from a `newHeads`
     /// subscription callback.
     pub async fn refresh_gas(&self) -> Result<()> {
         let header = self

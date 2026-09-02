@@ -187,7 +187,7 @@ pub struct FeeCache {
 impl FeeCache {
     /// Create a new cache.
     ///
-    /// - `ttl_ms`: how long cached fees are valid (2000 = 2 Base L2 blocks)
+    /// - `ttl_ms`: how long cached fees are valid (e.g. 2000 = 2s)
     /// - `default_priority_fee`: miner tip in wei (e.g. 1_000_000_000 = 1 gwei)
     pub fn new(ttl_ms: u64, default_priority_fee: u64) -> Self {
         Self {

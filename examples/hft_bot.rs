@@ -307,7 +307,7 @@ async fn main() -> perpcity_sdk::Result<()> {
             client.in_flight_count(),
         );
 
-        // Wait for next block (~1s on Base L2)
+        // Pace the loop to ~1s per iteration
         let elapsed = loop_start.elapsed();
         if elapsed < Duration::from_secs(1) {
             tokio::time::sleep(Duration::from_secs(1) - elapsed).await;
