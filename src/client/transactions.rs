@@ -28,10 +28,11 @@ use super::PerpClient;
 /// Default receipt polling timeout.
 const RECEIPT_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Wait one block (~2s on Base) before first receipt poll.
+/// Delay before the first receipt poll — a just-broadcast transaction
+/// rarely has a receipt sooner, so an earlier poll is a wasted call.
 const RECEIPT_POLL_INITIAL_DELAY: Duration = Duration::from_secs(2);
 
-/// Poll for receipt every ~2s (Base block time).
+/// Interval between receipt polls.
 const RECEIPT_POLL_INTERVAL: Duration = Duration::from_secs(2);
 
 // ── TxBuilder ───────────────────────────────────────────────────────
@@ -309,7 +310,7 @@ impl PerpClient {
         }
     }
 
-    /// Poll for a transaction receipt with intervals tuned for Base's ~2s block time.
+    /// Poll for a transaction receipt on a ~2s cadence.
     async fn poll_receipt(&self, tx_hash: B256) -> Result<alloy::rpc::types::TransactionReceipt> {
         tokio::time::sleep(RECEIPT_POLL_INITIAL_DELAY).await;
         let deadline = tokio::time::Instant::now() + RECEIPT_TIMEOUT;

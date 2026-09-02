@@ -1,6 +1,6 @@
 //! Multi-layer TTL-based state cache for frequently-read on-chain data.
 //!
-//! Two TTL tiers match the data's expected rate of change on Base L2:
+//! Two TTL tiers match the data's expected rate of change on Arbitrum:
 //!
 //! | Layer | TTL | Data | Why |
 //! |---|---|---|---|
