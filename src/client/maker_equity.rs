@@ -28,17 +28,23 @@ use crate::math::maker_equity::{
     AccrualInputs, AccruedMakerSnapshot, MakerEquityBreakdown, MakerMarketSnapshot, MakerState,
     TickFunding, fee_growth_inside1,
 };
-use crate::math::storage::{
+use crate::math::tick::get_sqrt_ratio_at_tick;
+use crate::storage::{
     perp_tick_funding_slots, v4_fee_growth_global1_slot, v4_position_fee_growth_inside1_slot,
     v4_tick_fee_growth_outside1_slot,
 };
-use crate::math::tick::get_sqrt_ratio_at_tick;
 
-use super::{PerpClient, i24_to_i32};
+use super::{PerpClient, i24_to_i32, u24_to_u32};
 
 /// Concurrency bound for the `eth_getStorageAt` fallback when the endpoint
 /// does not serve `eth_getProof`.
 const TICK_READ_CONCURRENCY: usize = 16;
+
+/// Concurrency bound for the per-chunk reads of a batch larger than
+/// [`MAX_MAKER_EQUITY_BATCH`]: each chunk is a row multicall, an
+/// `extsload`, and a proof/storage read, so a few in flight saturate a
+/// shared endpoint's fair share without flooding it.
+const CHUNK_READ_CONCURRENCY: usize = 4;
 
 /// Outcome of one tick's funding read: the two decoded words, or the shared
 /// transport error that failed every position referencing the tick.
@@ -368,30 +374,41 @@ impl PerpClient {
         let (market, pool_id, block_id) =
             self.load_maker_market_snapshot(mark_override_x96).await?;
 
-        let mut kinds = Vec::with_capacity(pos_ids.len());
-        for chunk in pos_ids.chunks(MAX_MAKER_EQUITY_BATCH) {
-            match self
-                .get_chunk_equity_kinds(&market, pool_id, block_id, chunk)
-                .await
-            {
-                Ok(chunk_kinds) => kinds.extend(chunk_kinds),
-                // A chunk-wide read failure (its row multicall or extsload)
-                // degrades that chunk's ids, not the chunks already read.
-                Err(e) => {
-                    tracing::debug!(
-                        ids = chunk.len(),
-                        error = %e,
-                        "maker equity: chunk read failed"
-                    );
-                    let failure = ChunkReadFailure::from(e);
-                    kinds.extend(
+        // Chunks are disjoint id ranges pinned to the one block, so they
+        // read concurrently (bounded); `buffered` yields them in input
+        // order, which the zip below relies on. Collected into a Vec first
+        // so the returned future's Send bound is provable from the concrete
+        // future type, not the borrowing iterator adapter.
+        let market = &market;
+        let chunk_reads: Vec<_> = pos_ids
+            .chunks(MAX_MAKER_EQUITY_BATCH)
+            .map(|chunk| async move {
+                match self
+                    .get_chunk_equity_kinds(market, pool_id, block_id, chunk)
+                    .await
+                {
+                    Ok(chunk_kinds) => chunk_kinds,
+                    // A chunk-wide read failure (its row multicall or
+                    // extsload) degrades that chunk's ids, not the others.
+                    Err(e) => {
+                        tracing::debug!(
+                            ids = chunk.len(),
+                            error = %e,
+                            "maker equity: chunk read failed"
+                        );
+                        let failure = ChunkReadFailure::from(e);
                         chunk
                             .iter()
-                            .map(|_| MakerEquityKind::Failed(failure.error())),
-                    );
+                            .map(|_| MakerEquityKind::Failed(failure.error()))
+                            .collect()
+                    }
                 }
-            }
-        }
+            })
+            .collect();
+        let kinds: Vec<MakerEquityKind> = stream::iter(chunk_reads)
+            .buffered(CHUNK_READ_CONCURRENCY)
+            .concat()
+            .await;
 
         tracing::debug!(
             count = pos_ids.len(),
@@ -596,8 +613,25 @@ impl PerpClient {
         }
 
         let (layout, slots) = FeeGrowthLayout::new(pool_id, self.deployments.perp, pending);
+        // Positions share band boundaries (a maker ladder reuses each inner
+        // tick twice), so read each distinct tick's two funding words once.
+        let ticks: BTreeSet<i32> = pending
+            .iter()
+            .flat_map(|maker| [maker.tick_lower, maker.tick_upper])
+            .collect();
+        // The tick set comes from the rows, not from the fee-growth words,
+        // and both reads pin to the same block: run them concurrently.
         let manager = IPoolManagerState::new(self.deployments.pool_manager, &self.provider);
-        let words = manager.extsload_1(slots).block(block_id).call().await?;
+        let fee_growth = async {
+            manager
+                .extsload_1(slots)
+                .block(block_id)
+                .call()
+                .await
+                .map_err(PerpCityError::from)
+        };
+        let (words, tick_funding) =
+            tokio::try_join!(fee_growth, self.get_tick_funding(block_id, &ticks))?;
         if words.len() != layout.word_count() {
             return Err(ContractError::StorageReadFailed {
                 context: format!(
@@ -610,14 +644,6 @@ impl PerpClient {
             .into());
         }
         let fg1_global = FeeGrowthLayout::global(&words);
-
-        // Positions share band boundaries (a maker ladder reuses each inner
-        // tick twice), so read each distinct tick's two funding words once.
-        let ticks: BTreeSet<i32> = pending
-            .iter()
-            .flat_map(|maker| [maker.tick_lower, maker.tick_upper])
-            .collect();
-        let tick_funding = self.get_tick_funding(block_id, &ticks).await?;
         let funding_for = |tick: i32| tick_funding_for(&tick_funding, tick);
 
         let equities = pending
@@ -640,6 +666,7 @@ impl PerpClient {
                 let (delta_amount0, delta_amount1) = unpack_balance_delta(maker.position.delta);
                 let state = MakerState {
                     margin_atoms: maker.position.margin,
+                    liq_margin_ratio_e6: u24_to_u32(maker.position.liqMarginRatio),
                     delta_amount0,
                     delta_amount1,
                     last_cuml_funding_x96: maker.position.lastCumlFundingX96,

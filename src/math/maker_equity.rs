@@ -24,7 +24,7 @@
 //! [`swap`](crate::math::swap): a block-pinned [`MakerMarketSnapshot`] plus
 //! per-position [`MakerState`] rows. The chain-read layer that populates
 //! them (including the raw storage-slot reads, see
-//! `math::storage`) lives in the client:
+//! `crate::storage`) lives in the client:
 //! [`PerpClient::get_maker_equities`](crate::client::PerpClient::get_maker_equities).
 
 use alloy::primitives::{I256, U256, U512};
@@ -118,6 +118,11 @@ pub struct AccrualInputs {
 pub struct MakerState {
     /// `positions(id).margin`: last-settled margin, 6-decimal USDC atoms.
     pub margin_atoms: u128,
+    /// `positions(id).liqMarginRatio`: the liquidation margin ratio stored
+    /// on the position, scaled by 1e6 (`50_000` = 5%). The contract's
+    /// health check compares the position's equity/value ratio against
+    /// this, not against the market-wide module value.
+    pub liq_margin_ratio_e6: u32,
     /// `positions(id).delta` amount0 (perp atoms), unpacked from the packed
     /// `BalanceDelta`. Negative = owed to the pool.
     pub delta_amount0: i128,
@@ -183,6 +188,8 @@ pub struct MakerEquityBreakdown {
     short_util_earnings_atoms: i128,
     lp_fees_atoms: i128,
     unrealized_pnl_atoms: i128,
+    position_value_atoms: i128,
+    liq_margin_ratio_e6: u32,
 }
 
 /// Deserialization shadow of [`MakerEquityBreakdown`]: identical fields,
@@ -196,6 +203,8 @@ struct RawMakerEquityBreakdown {
     short_util_earnings_atoms: i128,
     lp_fees_atoms: i128,
     unrealized_pnl_atoms: i128,
+    position_value_atoms: i128,
+    liq_margin_ratio_e6: u32,
 }
 
 impl TryFrom<RawMakerEquityBreakdown> for MakerEquityBreakdown {
@@ -224,9 +233,31 @@ impl TryFrom<RawMakerEquityBreakdown> for MakerEquityBreakdown {
             )?,
             lp_fees_atoms: bounded(raw.lp_fees_atoms, "deserialized LP fees")?,
             unrealized_pnl_atoms: bounded(raw.unrealized_pnl_atoms, "deserialized unrealized PnL")?,
+            position_value_atoms: bounded(raw.position_value_atoms, "deserialized position value")
+                .and_then(|v| {
+                    if v >= 0 {
+                        Ok(v)
+                    } else {
+                        Err(ValidationError::Overflow {
+                            context: "deserialized position value is negative".into(),
+                        })
+                    }
+                })?,
+            liq_margin_ratio_e6: if raw.liq_margin_ratio_e6 <= MAX_UINT24 {
+                raw.liq_margin_ratio_e6
+            } else {
+                return Err(ValidationError::InvalidMarginRatio {
+                    value: raw.liq_margin_ratio_e6,
+                    min: 0,
+                    max: MAX_UINT24,
+                });
+            },
         })
     }
 }
+
+/// `type(uint24).max`: the domain of the contract's margin ratios.
+const MAX_UINT24: u32 = (1 << 24) - 1;
 
 impl MakerEquityBreakdown {
     /// Last-settled margin (`positions(id).margin`), in atoms.
@@ -328,6 +359,58 @@ impl MakerEquityBreakdown {
     pub fn accrued_income(&self) -> f64 {
         scale_from_6dec(self.accrued_income_atoms())
     }
+
+    /// `posVal`: the band's liquidity value priced at the mark, in atoms
+    /// (never negative) — the denominator of the contract's health check.
+    pub fn position_value_atoms(&self) -> i128 {
+        self.position_value_atoms
+    }
+
+    /// The band's liquidity value priced at the mark, in USD.
+    pub fn position_value_usd(&self) -> f64 {
+        scale_from_6dec(self.position_value_atoms)
+    }
+
+    /// `positions(id).liqMarginRatio`, scaled by 1e6 (`50_000` = 5%).
+    pub fn liq_margin_ratio_e6(&self) -> u32 {
+        self.liq_margin_ratio_e6
+    }
+
+    /// The position's own liquidation margin ratio as a fraction
+    /// (`0.05` = 5%).
+    pub fn liq_margin_ratio(&self) -> f64 {
+        f64::from(self.liq_margin_ratio_e6) / 1e6
+    }
+
+    /// The position's margin ratio as `PerpLogic.isHealthy` computes it:
+    /// live equity over position value, zero when equity is not positive,
+    /// with a zero position value counted as one atom (as in the
+    /// contract).
+    pub fn margin_ratio(&self) -> f64 {
+        Self::health_ratio(self.equity_atoms() as f64, self.position_value_atoms)
+    }
+
+    /// Whether the contract would liquidate the position now, given the
+    /// market's liquidation fee as a fraction
+    /// ([`Fees::liquidation_fee`](crate::types::Fees::liquidation_fee)):
+    /// the negation of
+    /// `isHealthy(equity − posVal·liqFee, posVal, liqMarginRatio)`.
+    ///
+    /// A screening gate, not the oracle: the fee leg is applied in `f64`,
+    /// so a position within an atom of the boundary can go either way.
+    /// Confirm with `simulate_liquidate_maker` before sending.
+    pub fn is_liquidatable(&self, liquidation_fee: f64) -> bool {
+        let fee_atoms = self.position_value_atoms as f64 * liquidation_fee;
+        let equity_after_fee = self.equity_atoms() as f64 - fee_atoms;
+        Self::health_ratio(equity_after_fee, self.position_value_atoms) < self.liq_margin_ratio()
+    }
+
+    fn health_ratio(equity_atoms: f64, position_value_atoms: i128) -> f64 {
+        if equity_atoms <= 0.0 {
+            return 0.0;
+        }
+        equity_atoms / position_value_atoms.max(1) as f64
+    }
 }
 
 impl MakerMarketSnapshot {
@@ -345,25 +428,37 @@ impl MakerMarketSnapshot {
     ///
     /// # Errors
     ///
-    /// Returns [`ValidationError::Overflow`] when a replayed cumulative
-    /// exceeds its integer domain — chain-consistent rates over a sane dt
-    /// stay far in range, so an error indicates corrupt inputs (e.g. a
-    /// wall-clock timestamp fed as the accrual target against a stale
-    /// `last_touch`).
+    /// Returns [`ValidationError::InvalidConfig`] when `accrue_to` precedes
+    /// `last_touch` — the chain cannot have touched the market in the
+    /// future of the snapshot block, so the inputs come from different
+    /// blocks (or a wall clock behind the chain); silently replaying zero
+    /// accrual would hide that. Returns [`ValidationError::Overflow`] when
+    /// a replayed cumulative exceeds its integer domain — chain-consistent
+    /// rates over a sane dt stay far in range, so an error indicates
+    /// corrupt inputs (e.g. a wall-clock timestamp fed as the accrual
+    /// target against a stale `last_touch`).
     pub fn accrued(
         mut self,
         accrual: &AccrualInputs,
     ) -> Result<AccruedMakerSnapshot, ValidationError> {
-        let dt = accrual.accrue_to.saturating_sub(accrual.last_touch);
+        if accrual.accrue_to < accrual.last_touch {
+            return Err(ValidationError::InvalidConfig {
+                reason: format!(
+                    "accrual target {} precedes the market's last touch {}",
+                    accrual.accrue_to, accrual.last_touch
+                ),
+            });
+        }
+        let dt = accrual.accrue_to - accrual.last_touch;
         if dt == 0 {
             return Ok(AccruedMakerSnapshot(self));
         }
-        let dt_days = U256::from(dt)
-            .checked_mul(Q96)
-            .ok_or(ValidationError::Overflow {
-                context: "accrual dt in days".into(),
-            })?
-            / U256::from(INTERVAL);
+        let dt_days = mul_div(
+            U256::from(dt),
+            Q96,
+            U256::from(INTERVAL),
+            Rounding::TowardZero,
+        )?;
         let funding_accrued = s_full_mul_div(
             I256::unchecked_from(accrual.funding_per_day_wad),
             to_i256(dt_days, "accrual dt in days")?,
@@ -596,6 +691,11 @@ impl AccruedMakerSnapshot {
             )?,
             lp_fees_atoms: atoms(to_i256(lp_fees, "LP fees")?, "LP fees")?,
             unrealized_pnl_atoms: atoms(unrealized, "unrealized PnL")?,
+            position_value_atoms: atoms(
+                to_i256(liquidity_val, "position value")?,
+                "position value",
+            )?,
+            liq_margin_ratio_e6: maker.liq_margin_ratio_e6,
         })
     }
 }
@@ -753,6 +853,9 @@ mod tests {
         };
         let maker = MakerState {
             margin_atoms: 143730198,
+            // A pass-through the settle event does not exercise; 5% is the
+            // maker liquidation ratio the client tests use.
+            liq_margin_ratio_e6: 50_000,
             delta_amount0: -134328,
             delta_amount1: -137992489,
             last_cuml_funding_x96: i("-10162710870332004796583430787875"),
@@ -817,6 +920,69 @@ mod tests {
             b.equity()
         );
         assert!(b.accrued_income_atoms() < 0);
+    }
+
+    /// The chain cannot have touched the market after the snapshot block,
+    /// so an accrual target behind `last_touch` means the inputs came from
+    /// different blocks. Returning an un-accrued snapshot would hide that.
+    #[test]
+    fn accrual_target_before_last_touch_is_an_error() {
+        let (market, accrual, _) = golden_market_and_maker();
+        let backwards = AccrualInputs {
+            accrue_to: accrual.last_touch - 1,
+            ..accrual
+        };
+        assert!(matches!(
+            market.accrued(&backwards),
+            Err(ValidationError::InvalidConfig { .. })
+        ));
+    }
+
+    /// The health gate mirrors `PerpLogic.isHealthy`: equity over the
+    /// band's liquidity value against the POSITION's stored ratio, with the
+    /// liquidation fee taken off equity first. Pos 54 was fee-insolvent
+    /// (negative equity), so its ratio floors at zero and it is
+    /// liquidatable under any fee; a healthy synthetic sibling is not.
+    #[test]
+    fn health_gate_mirrors_the_contracts_is_healthy() {
+        let (market, accrual, maker) = golden_market_and_maker();
+        let market = market.accrued(&accrual).unwrap();
+        let b = market.maker_equity(&maker).unwrap();
+
+        assert!(b.position_value_atoms() > 0);
+        assert!(
+            (b.position_value_usd() - b.unrealized_pnl_usd()).abs() > 100.0,
+            "position value is the band value, not the PnL"
+        );
+        assert_eq!(b.liq_margin_ratio_e6(), 50_000);
+        assert!((b.liq_margin_ratio() - 0.05).abs() < 1e-12);
+        assert!(b.equity_atoms() < 0);
+        assert_eq!(b.margin_ratio(), 0.0);
+        assert!(b.is_liquidatable(0.0));
+        assert!(b.is_liquidatable(0.01));
+
+        // Same band, no accrued liabilities, a fat margin: healthy, and the
+        // fee leg alone must not flip it.
+        let healthy = MakerEquityBreakdown {
+            margin_atoms: b.position_value_atoms(),
+            funding_owed_atoms: 0,
+            long_util_earnings_atoms: 0,
+            short_util_earnings_atoms: 0,
+            lp_fees_atoms: 0,
+            unrealized_pnl_atoms: 0,
+            position_value_atoms: b.position_value_atoms(),
+            liq_margin_ratio_e6: 50_000,
+        };
+        assert!((healthy.margin_ratio() - 1.0).abs() < 1e-12);
+        assert!(!healthy.is_liquidatable(0.01));
+        // Equity of 5.5% of value: healthy at a 0% fee, liquidatable once
+        // a 1% fee takes it under the 5% line.
+        let thin = MakerEquityBreakdown {
+            margin_atoms: b.position_value_atoms() * 55 / 1000,
+            ..healthy
+        };
+        assert!(!thin.is_liquidatable(0.0));
+        assert!(thin.is_liquidatable(0.01));
     }
 
     /// Without the accrual replay the funding is stale to lastTouch — the
@@ -1039,6 +1205,25 @@ mod tests {
         assert!(
             serde_json::from_str::<MakerEquityBreakdown>(&out_of_bound).is_err(),
             "an over-supply component must be rejected at construction"
+        );
+
+        let negative_value = json.replace(
+            &format!("\"position_value_atoms\":{}", b.position_value_atoms()),
+            "\"position_value_atoms\":-1",
+        );
+        assert_ne!(json, negative_value, "replacement must have applied");
+        assert!(
+            serde_json::from_str::<MakerEquityBreakdown>(&negative_value).is_err(),
+            "posVal is a uint on chain"
+        );
+        let wide_ratio = json.replace(
+            "\"liq_margin_ratio_e6\":50000",
+            "\"liq_margin_ratio_e6\":16777216",
+        );
+        assert_ne!(json, wide_ratio, "replacement must have applied");
+        assert!(
+            serde_json::from_str::<MakerEquityBreakdown>(&wide_ratio).is_err(),
+            "the ratio is a uint24 on chain"
         );
     }
 

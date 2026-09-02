@@ -1,4 +1,5 @@
-//! Storage-slot math for state that has no contract getter.
+//! Storage-slot derivation for the deployed contract layouts — state the
+//! contracts expose no getter for.
 //!
 //! Solidity stores the value for `key` in a mapping at slot `p` at
 //! `keccak256(abi.encode(key, p))`. These helpers compute those slots for

@@ -43,6 +43,7 @@ pub mod errors;
 pub mod feeds;
 pub mod hft;
 pub mod math;
+pub(crate) mod storage;
 pub mod transport;
 pub mod types;
 

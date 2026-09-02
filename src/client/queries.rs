@@ -30,8 +30,8 @@ use crate::errors::{ContractError, Result, ValidationError};
 use crate::hft::state_cache::{CachedBounds, CachedFees};
 use crate::math::BlockContext;
 use crate::math::ema::{PricePair, calculate_emas};
-use crate::math::storage::{perp_emas_slot, v4_tick_bitmap_slot, v4_tick_slot};
 use crate::math::swap::{TakerMarketSnapshot, TickLiquidity};
+use crate::storage::{perp_emas_slot, v4_tick_bitmap_slot, v4_tick_slot};
 use crate::types::{Bounds, Fees, OpenInterest, PerpData, PerpSnapshot};
 
 use super::{PerpClient, SCALE_F64, i24_to_i32, now_secs, u24_to_u32};

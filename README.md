@@ -141,6 +141,13 @@ Three conventions to know:
   the position OWES since its last settle: positive = the position pays
   (it is subtracted when settling margin). All the earnings components
   (utilization, LP fees) are positive when the position receives.
+- **Health is per position.** The contract liquidates when
+  `(equity − posVal·liqFee) / posVal` drops under the ratio stored on THAT
+  position (`PerpLogic.isHealthy`) — not under a market-wide ratio, and not
+  relative to margin. The breakdown carries both sides:
+  `position_value_usd()`, `liq_margin_ratio()`, `margin_ratio()`, and
+  `is_liquidatable(liquidation_fee)` as a screening gate. The contract stays
+  the oracle: confirm with `simulate_liquidate_maker` before sending.
 - **Pinning is automatic.** Every read in a batch — including the mark
   that prices `valPnl` (`poolState().ammPrice`, exact X96) — comes from
   one reorg-safe block a few blocks behind the head. There is no mark to

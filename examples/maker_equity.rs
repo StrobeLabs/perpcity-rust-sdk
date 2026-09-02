@@ -74,13 +74,17 @@ async fn main() -> perpcity_sdk::Result<()> {
             MakerEquityKind::Computed(b) => {
                 println!(
                     "pos {pos_id}: equity={:+.6} settled_margin={:+.6} \
-                     funding={:+.6} util={:+.6} lp_fees={:+.6} pnl={:+.6}",
+                     funding={:+.6} util={:+.6} lp_fees={:+.6} pnl={:+.6} \
+                     value={:.6} ratio={:.4} (liq at {:.4})",
                     b.equity(),
                     b.settled_margin(),
                     b.funding_owed_usd(),
                     b.long_util_earnings_usd() + b.short_util_earnings_usd(),
                     b.lp_fees_usd(),
                     b.unrealized_pnl_usd(),
+                    b.position_value_usd(),
+                    b.margin_ratio(),
+                    b.liq_margin_ratio(),
                 );
                 candidates.push((pos_id, b));
             }
@@ -91,16 +95,18 @@ async fn main() -> perpcity_sdk::Result<()> {
 
     // ── 2. Pick candidates from the equities just computed ──────────
     // Coarse pre-filter so the health probe only runs where the numbers
-    // already look thin: a position is worth probing when its live equity
-    // has fallen under the protocol's liquidation margin ratio applied to
-    // its last-settled margin (the ratio comes from the market's own
-    // bounds). The contract remains the oracle — the filter only saves
-    // eth_calls on obviously healthy positions.
-    let config = client.get_perp_config().await?;
-    let liq_ratio = config.bounds.liquidation_taker_ratio;
-    candidates.retain(|(_, b)| b.equity() < liq_ratio * b.margin_usd());
+    // already look thin. `is_liquidatable` mirrors the contract's own
+    // check (`PerpLogic.isHealthy`): live equity net of the liquidation
+    // fee, over the band's value, against the ratio stored on THAT
+    // position — not the market-wide taker ratio, and not the margin.
+    // The contract remains the oracle — the filter only saves eth_calls on
+    // obviously healthy positions, so it keeps anything near the line.
+    let liq_fee = client.get_perp_config().await?.fees.liquidation_fee;
+    candidates.retain(|(_, b)| {
+        b.is_liquidatable(liq_fee) || b.margin_ratio() < b.liq_margin_ratio() * 1.1
+    });
     println!(
-        "\n{} candidate(s) under {liq_ratio:.3} x margin — probing the contract",
+        "\n{} candidate(s) at or near their liquidation ratio — probing the contract",
         candidates.len()
     );
 
