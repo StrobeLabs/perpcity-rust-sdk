@@ -1,7 +1,9 @@
-//! Protocol constants from `perpcity-contracts/src/libraries/Constants.sol`.
+//! Protocol constants from `perpcity-contracts/src/libraries/Constants.sol`,
+//! plus a small set of SDK read-policy constants at the end.
 //!
-//! All values are exact mirrors of the on-chain constants. Scaling factors
-//! use the same names as the Solidity source to eliminate any ambiguity.
+//! The protocol values are exact mirrors of the on-chain constants. Scaling
+//! factors use the same names as the Solidity source to eliminate any
+//! ambiguity.
 
 use alloy::primitives::{Address, U256, address, uint};
 
@@ -78,6 +80,15 @@ pub const ERC721_NAME: &str = "Perp City Positions";
 
 /// ERC721 symbol for PerpCity position NFTs.
 pub const ERC721_SYMBOL: &str = "PERPCITY";
+
+// ── SDK read policy (not mirrored from Constants.sol) ─────────────────
+
+/// Blocks to lag behind the head when pinning snapshot reads (the taker
+/// book and maker equity batches): on load-balanced RPC endpoints the
+/// newest block's state may not be materialized on every replica yet, and
+/// Arbitrum produces ~4 blocks/s so the lag stays under two seconds of
+/// staleness.
+pub const SNAPSHOT_BLOCK_LAG: u64 = 8;
 
 #[cfg(test)]
 mod tests {

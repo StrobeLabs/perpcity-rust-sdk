@@ -7,6 +7,7 @@ use thiserror::Error;
 
 /// Errors from validating user-supplied parameters.
 #[derive(Error, Debug)]
+#[non_exhaustive]
 pub enum ValidationError {
     /// Price is not positive, not finite, or outside protocol bounds.
     #[error("invalid price: {reason}")]

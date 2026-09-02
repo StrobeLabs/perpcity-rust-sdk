@@ -11,6 +11,7 @@ documentation = "https://docs.rs/perpcity-sdk"
 homepage = "https://docs.perp.city"
 keywords = ["perpetuals", "defi", "trading", "ethereum", "uniswap"]
 categories = ["api-bindings", "cryptography::cryptocurrencies", "finance"]
+exclude = ["CLAUDE.md"]
 
 [features]
 # AWS KMS signing: pulls in alloy's AwsSigner (alloy::signers::aws) so clients
@@ -20,6 +21,7 @@ aws = ["alloy/signer-aws"]
 
 [dependencies]
 alloy = { version = "1", features = ["full", "sol-types", "json-rpc", "rpc-client"] }
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
 tokio = { version = "1", features = ["full"] }
 tokio-stream = "0.1"
 thiserror = "2"
@@ -51,6 +53,9 @@ name = "hft_bot"
 
 [[example]]
 name = "taker_price_impact"
+
+[[example]]
+name = "maker_equity"
 
 [[example]]
 name = "aws_kms_signer"

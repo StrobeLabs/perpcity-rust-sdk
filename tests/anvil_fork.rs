@@ -17,8 +17,8 @@ use alloy::sol;
 use alloy::sol_types::SolCall;
 
 use perpcity_sdk::{
-    AdjustTakerParams, Deployments, HftTransport, OpenTakerParams, PerpClient, TransportConfig,
-    Urgency,
+    AdjustTakerParams, Deployments, HftTransport, MakerEquityKind, OpenTakerParams, PerpCityError,
+    PerpClient, TransactionError, TransportConfig, Urgency,
 };
 
 sol! {
@@ -570,4 +570,117 @@ async fn perp_snapshot_via_multicall() {
     );
 
     println!("\n=== Perp snapshot test passed! ===");
+}
+
+#[tokio::test]
+#[ignore] // Requires `anvil` — run with: cargo test --test anvil_fork -- --ignored --nocapture
+async fn maker_equities_via_batched_reads() {
+    // 1. Start Anvil forking Arbitrum Sepolia
+    let anvil = AnvilInstance::fork().await;
+
+    // 2. Setup client (reads only — no funding needed)
+    let signer: PrivateKeySigner = ANVIL_KEY.parse().unwrap();
+    let transport = HftTransport::new(
+        TransportConfig::builder()
+            .shared_endpoint(&anvil.url)
+            .build()
+            .unwrap(),
+    )
+    .unwrap();
+    let client = PerpClient::new(transport, signer, deployments(), CHAIN_ID).unwrap();
+
+    // 3. Empty input short-circuits without touching the chain.
+    assert!(client.get_maker_equities(&[]).await.unwrap().is_empty());
+
+    // 4. Preview a range of position ids. CITI-NYC has live maker liquidity,
+    //    so at least one open maker position must exist among the early ids.
+    let pos_ids: Vec<U256> = (1u64..=20).map(U256::from).collect();
+    let equities = client.get_maker_equities(&pos_ids).await.unwrap();
+
+    // One outcome per input id, in input order.
+    assert_eq!(equities.len(), pos_ids.len());
+    for (outcome, &requested) in equities.iter().zip(&pos_ids) {
+        assert_eq!(outcome.pos_id, requested, "outcomes keep input order");
+    }
+
+    for outcome in &equities {
+        let pos_id = outcome.pos_id;
+        match &outcome.kind {
+            MakerEquityKind::Computed(b) => {
+                println!(
+                    "pos {pos_id}: margin={:.6} funding={:+.6} lp={:+.6} pnl={:+.6} equity={:+.6}",
+                    b.margin_usd(),
+                    b.funding_owed_usd(),
+                    b.lp_fees_usd(),
+                    b.unrealized_pnl_usd(),
+                    b.equity(),
+                );
+                assert!(b.margin_atoms() >= 0, "settled margin is stored unsigned");
+                assert!(b.equity().is_finite());
+            }
+            MakerEquityKind::NotAMaker => {}
+            MakerEquityKind::Failed(e) => panic!("pos {pos_id} degraded: {e}"),
+        }
+    }
+    let open_makers = equities
+        .iter()
+        .filter(|o| matches!(o.kind, MakerEquityKind::Computed(_)))
+        .count();
+    assert!(
+        open_makers > 0,
+        "expected at least one open maker among ids 1..=20"
+    );
+
+    println!("\n=== Maker equities test passed! ({open_makers} open makers) ===");
+}
+
+#[tokio::test]
+#[ignore] // Requires `anvil` — run with: cargo test --test anvil_fork -- --ignored --nocapture
+async fn liquidation_simulation_returns_typed_reverts() {
+    // 1. Start Anvil forking Arbitrum Sepolia
+    let anvil = AnvilInstance::fork().await;
+
+    // 2. Setup client (reads only — no funding needed)
+    let signer: PrivateKeySigner = ANVIL_KEY.parse().unwrap();
+    let address = signer.address();
+    let transport = HftTransport::new(
+        TransportConfig::builder()
+            .shared_endpoint(&anvil.url)
+            .build()
+            .unwrap(),
+    )
+    .unwrap();
+    let client = PerpClient::new(transport, signer, deployments(), CHAIN_ID).unwrap();
+
+    // 3. The zero address burns the liquidation fee — rejected before any RPC.
+    let err = client
+        .simulate_liquidate_maker(U256::from(1u8), Address::ZERO)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, PerpCityError::Validation(_)),
+        "zero fee recipient must fail typed: {err}"
+    );
+
+    // 4. A healthy or non-maker position must come back as a DECODED contract
+    //    revert — callers key retry/drop decisions off the error name — never
+    //    an opaque ABI error.
+    for pos_id in [U256::from(1u8), U256::from(999_999u32)] {
+        let err = client
+            .simulate_liquidate_maker(pos_id, address)
+            .await
+            .unwrap_err();
+        match err {
+            PerpCityError::Transaction(TransactionError::SimulationReverted {
+                error_name,
+                selector,
+                ..
+            }) => {
+                println!("pos {pos_id}: revert {error_name} ({selector})");
+            }
+            other => panic!("pos {pos_id}: expected SimulationReverted, got {other}"),
+        }
+    }
+
+    println!("\n=== Liquidation simulation test passed! ===");
 }

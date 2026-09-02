@@ -8,11 +8,13 @@
 use std::collections::BTreeMap;
 use std::ops::Bound::{Excluded, Included, Unbounded};
 
-use alloy::primitives::{B256, U256, U512};
+use alloy::primitives::{U256, U512};
 use serde::{Deserialize, Serialize};
 
 use crate::constants::{MAX_SWAP_SQRT_PRICE_X96, MIN_SWAP_SQRT_PRICE_X96, Q96};
 use crate::errors::ValidationError;
+use crate::math::BlockContext;
+use crate::math::fixed_point::{Rounding, mul_div, u512_to_u256};
 use crate::math::tick::{
     UNISWAP_MAX_TICK, UNISWAP_MIN_TICK, get_sqrt_ratio_at_tick, get_tick_at_sqrt_ratio,
 };
@@ -65,11 +67,7 @@ impl Default for QuoteConstraints {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TakerMarketSnapshot {
     /// Block containing all state in this snapshot.
-    pub block_number: u64,
-    /// Canonical block hash.
-    pub block_hash: B256,
-    /// Block timestamp.
-    pub block_timestamp: u64,
+    pub block: BlockContext,
     /// Current Q64.96 square-root price.
     pub sqrt_price_x96: U256,
     /// Current pool tick.
@@ -94,9 +92,7 @@ impl Default for TakerMarketSnapshot {
     /// `PerpClient::load_taker_market_snapshot`.
     fn default() -> Self {
         Self {
-            block_number: 0,
-            block_hash: B256::ZERO,
-            block_timestamp: 0,
+            block: BlockContext::default(),
             sqrt_price_x96: Q96,
             tick: 0,
             liquidity: 0,
@@ -134,10 +130,8 @@ pub struct TakerQuote {
     pub price_impact_allowed: bool,
     /// The first constraint encountered.
     pub limit: QuoteLimit,
-    /// Reference block number.
-    pub block_number: u64,
-    /// Reference block hash.
-    pub block_hash: B256,
+    /// The block the quoted snapshot was read at.
+    pub block: BlockContext,
 }
 
 impl TakerQuote {
@@ -321,8 +315,7 @@ impl TakerMarketSnapshot {
             fully_filled: sim.fully_filled,
             price_impact_allowed: allowed,
             limit: reason,
-            block_number: self.block_number,
-            block_hash: self.block_hash,
+            block: self.block,
         }
     }
 
@@ -371,35 +364,35 @@ impl TakerMarketSnapshot {
                     other: U256::ZERO,
                 }
             } else if zero_for_one {
-                let to_target = amount0_delta(target, sqrt, liquidity, true)?;
+                let to_target = amount0_delta(target, sqrt, liquidity, Rounding::Up)?;
                 if remaining >= to_target {
                     StepResult {
                         sqrt_after: target,
                         used: to_target,
-                        other: amount1_delta(target, sqrt, liquidity, false)?,
+                        other: amount1_delta(target, sqrt, liquidity, Rounding::TowardZero)?,
                     }
                 } else {
                     let after = next_sqrt_from_amount0(sqrt, liquidity, remaining, true)?;
                     StepResult {
                         sqrt_after: after,
                         used: remaining,
-                        other: amount1_delta(after, sqrt, liquidity, false)?,
+                        other: amount1_delta(after, sqrt, liquidity, Rounding::TowardZero)?,
                     }
                 }
             } else {
-                let to_target = amount0_delta(sqrt, target, liquidity, false)?;
+                let to_target = amount0_delta(sqrt, target, liquidity, Rounding::TowardZero)?;
                 if remaining >= to_target {
                     StepResult {
                         sqrt_after: target,
                         used: to_target,
-                        other: amount1_delta(sqrt, target, liquidity, true)?,
+                        other: amount1_delta(sqrt, target, liquidity, Rounding::Up)?,
                     }
                 } else {
                     let after = next_sqrt_from_amount0(sqrt, liquidity, remaining, false)?;
                     StepResult {
                         sqrt_after: after,
                         used: remaining,
-                        other: amount1_delta(sqrt, after, liquidity, true)?,
+                        other: amount1_delta(sqrt, after, liquidity, Rounding::Up)?,
                     }
                 }
             };
@@ -493,11 +486,13 @@ fn add_liquidity(liquidity: u128, delta: i128) -> Result<u128, ValidationError> 
     })
 }
 
-fn amount0_delta(
+/// Uniswap `SqrtPriceMath.getAmount0Delta`: token0 owed between two sqrt
+/// prices for `liquidity`, with Solidity-compatible rounding.
+pub(crate) fn amount0_delta(
     a: U256,
     b: U256,
     liquidity: u128,
-    round_up: bool,
+    rounding: Rounding,
 ) -> Result<U256, ValidationError> {
     let (lower, upper) = if a <= b { (a, b) } else { (b, a) };
     if lower.is_zero() {
@@ -507,18 +502,20 @@ fn amount0_delta(
     }
     let numerator1: U256 = U256::from(liquidity) << 96;
     let numerator2 = upper - lower;
-    let first = mul_div(numerator1, numerator2, upper, round_up)?;
-    Ok(div(first, lower, round_up))
+    let first = mul_div(numerator1, numerator2, upper, rounding)?;
+    Ok(div(first, lower, rounding))
 }
 
-fn amount1_delta(
+/// Uniswap `SqrtPriceMath.getAmount1Delta`: token1 owed between two sqrt
+/// prices for `liquidity`, with Solidity-compatible rounding.
+pub(crate) fn amount1_delta(
     a: U256,
     b: U256,
     liquidity: u128,
-    round_up: bool,
+    rounding: Rounding,
 ) -> Result<U256, ValidationError> {
     let diff = if a >= b { a - b } else { b - a };
-    mul_div(U256::from(liquidity), diff, Q96, round_up)
+    mul_div(U256::from(liquidity), diff, Q96, rounding)
 }
 
 fn next_sqrt_from_amount0(
@@ -551,24 +548,9 @@ fn next_sqrt_from_amount0(
     u512_to_u256(value)
 }
 
-fn mul_div(a: U256, b: U256, d: U256, round_up: bool) -> Result<U256, ValidationError> {
-    if d.is_zero() {
-        return Err(ValidationError::Overflow {
-            context: "division by zero".into(),
-        });
-    }
-    let product: U512 = a.widening_mul(b);
-    let divisor = U512::from(d);
-    let mut q = product / divisor;
-    if round_up && product % divisor != U512::ZERO {
-        q += U512::ONE;
-    }
-    u512_to_u256(q)
-}
-
-fn div(value: U256, denominator: U256, round_up: bool) -> U256 {
+fn div(value: U256, denominator: U256, rounding: Rounding) -> U256 {
     let q = value / denominator;
-    if round_up && value % denominator != U256::ZERO {
+    if rounding == Rounding::Up && value % denominator != U256::ZERO {
         q + U256::ONE
     } else {
         q
@@ -582,15 +564,6 @@ fn div_ceil_512(value: U512, denominator: U512) -> U512 {
     } else {
         q + U512::ONE
     }
-}
-
-fn u512_to_u256(value: U512) -> Result<U256, ValidationError> {
-    if value > U512::from(U256::MAX) {
-        return Err(ValidationError::Overflow {
-            context: "U512 to U256".into(),
-        });
-    }
-    Ok(value.to::<U256>())
 }
 
 fn u256_to_i128(value: U256) -> Result<i128, ValidationError> {

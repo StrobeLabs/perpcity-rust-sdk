@@ -39,7 +39,7 @@ const RECEIPT_POLL_INTERVAL: Duration = Duration::from_secs(2);
 /// Builder for constructing and sending transactions.
 ///
 /// Created via [`PerpClient::tx`]. Defaults: `value = 0`,
-/// `gas_limit = None` (triggers simulation), `urgency = Normal`.
+/// `gas_limit = None` (estimated at send), `urgency = Normal`.
 #[derive(Debug)]
 pub struct TxBuilder<'a> {
     client: &'a PerpClient,
@@ -57,7 +57,13 @@ impl<'a> TxBuilder<'a> {
         self
     }
 
-    /// Set an explicit gas limit, skipping simulation.
+    /// Set an explicit gas limit, skipping gas estimation.
+    ///
+    /// The transaction is still simulated via `eth_call` before broadcast,
+    /// so a would-be revert surfaces as a decoded
+    /// [`TransactionError::SimulationReverted`] instead of a mined failure.
+    /// Use this when the estimate cannot be trusted (e.g. liquidations that
+    /// have gone out-of-gas on Arbitrum where the estimate passed).
     pub fn with_gas_limit(mut self, gas_limit: u64) -> Self {
         self.gas_limit = Some(gas_limit);
         self
@@ -71,10 +77,11 @@ impl<'a> TxBuilder<'a> {
 
     /// Simulate, sign, broadcast, and wait for the transaction receipt.
     ///
-    /// When `gas_limit` is `None` (the default), the transaction is
-    /// simulated before broadcast via `eth_call` or `eth_estimateGas`.
-    /// An explicit `gas_limit` skips simulation (used for simple
-    /// transfers that can't revert from contract logic).
+    /// Every send is simulated before broadcast. When `gas_limit` is `None`
+    /// (the default), `eth_estimateGas` (or a cached estimate plus an
+    /// `eth_call` preflight) provides both the limit and the simulation. An
+    /// explicit `gas_limit` skips only the estimation — the `eth_call`
+    /// preflight still runs so reverts decode into typed errors.
     pub async fn send(self) -> Result<alloy::rpc::types::TransactionReceipt> {
         let now = super::now_ms();
 
@@ -117,7 +124,9 @@ impl<'a> TxBuilder<'a> {
             }
         }
 
-        // Simulate + resolve gas limit. Explicit gas_limit skips simulation.
+        // Simulate + resolve gas limit. An explicit gas_limit skips only the
+        // estimation: the preflight still runs so a would-be revert is
+        // decoded before broadcast instead of burning the pinned gas.
         let resolved_gas_limit = match self.gas_limit {
             Some(0) => {
                 return Err(ValidationError::InvalidConfig {
@@ -125,7 +134,14 @@ impl<'a> TxBuilder<'a> {
                 }
                 .into());
             }
-            Some(limit) => limit,
+            Some(limit) => {
+                // Preflight at the pinned limit itself: a call that runs out
+                // of gas at this limit must fail here, not on-chain.
+                self.client
+                    .preflight_call(self.to, &self.calldata, self.value, Some(limit))
+                    .await?;
+                limit
+            }
             None => {
                 self.client
                     .simulate(self.to, &self.calldata, self.value, now)
@@ -254,13 +270,34 @@ impl<'a> TxBuilder<'a> {
     }
 }
 
+/// Build the preflight `eth_call` request. Kept as a pure function so the
+/// request shape — in particular that a pinned gas limit is carried onto
+/// the simulation — is unit-testable without a provider.
+fn preflight_request(
+    from: Address,
+    to: Address,
+    calldata: &Bytes,
+    value: u128,
+    gas_limit: Option<u64>,
+) -> TransactionRequest {
+    let tx = TransactionRequest::default()
+        .with_from(from)
+        .with_to(to)
+        .with_input(calldata.clone())
+        .with_value(U256::from(value));
+    match gas_limit {
+        Some(limit) => tx.with_gas_limit(limit),
+        None => tx,
+    }
+}
+
 // ── PerpClient transaction methods ──────────────────────────────────
 
 impl PerpClient {
     /// Start building a transaction.
     ///
     /// Returns a [`TxBuilder`] with defaults: `value = 0`,
-    /// `gas_limit = None` (triggers simulation), `urgency = Normal`.
+    /// `gas_limit = None` (estimated at send), `urgency = Normal`.
     pub fn tx(&self, to: Address, calldata: Bytes) -> TxBuilder<'_> {
         TxBuilder {
             client: self,
@@ -303,32 +340,27 @@ impl PerpClient {
     }
 
     /// Run an `eth_call` simulation to verify a transaction won't revert.
-    async fn preflight_call(
+    ///
+    /// When `gas_limit` is set, the simulation is capped at exactly the
+    /// limit the transaction will broadcast with, so an execution that
+    /// cannot finish inside a pinned limit fails preflight instead of
+    /// burning the gas on-chain — the one failure a fixed limit like
+    /// [`GasLimits::LIQUIDATE`](crate::hft::gas::GasLimits::LIQUIDATE)
+    /// exists to prevent. Without a limit the node simulates with its
+    /// default gas cap.
+    pub(super) async fn preflight_call(
         &self,
         to: Address,
         calldata: &Bytes,
         value: u128,
+        gas_limit: Option<u64>,
     ) -> std::result::Result<(), TransactionError> {
-        let tx = TransactionRequest::default()
-            .with_from(self.address)
-            .with_to(to)
-            .with_input(calldata.clone())
-            .with_value(U256::from(value));
+        let tx = preflight_request(self.address, to, calldata, value, gas_limit);
 
-        self.provider.call(tx).await.map_err(|e| {
-            let error_str = e.to_string();
-            if let Some((name, selector, data)) = decode::try_extract_revert(&error_str) {
-                TransactionError::SimulationReverted {
-                    error_name: name,
-                    selector,
-                    revert_data: data,
-                }
-            } else {
-                TransactionError::GasUnavailable {
-                    reason: format!("simulation failed: {e}"),
-                }
-            }
-        })?;
+        self.provider
+            .call(tx)
+            .await
+            .map_err(|e| classify_simulation_failure(&e, "eth_call"))?;
         Ok(())
     }
 
@@ -362,8 +394,34 @@ impl PerpClient {
         };
         if let Some(limit) = cached_limit {
             tracing::trace!(selector = %alloy::primitives::hex::encode(selector), limit, "gas estimate cache hit");
-            self.preflight_call(to, calldata, value).await?;
-            return Ok(limit);
+            // Cap the preflight at the cached limit the transaction will be
+            // sent with, so a stale (too-small) cached estimate surfaces as
+            // a failed preflight rather than an on-chain out-of-gas.
+            match self.preflight_call(to, calldata, value, Some(limit)).await {
+                Ok(()) => return Ok(limit),
+                Err(revert @ TransactionError::SimulationReverted { .. }) => {
+                    return Err(revert.into());
+                }
+                Err(error @ TransactionError::SimulationFailed { .. }) => {
+                    // The node ran the call and it failed inside the cached
+                    // limit without a contract revert: the estimate has gone
+                    // stale (a bigger trade crossing more ticks, say). Evict
+                    // it and fall through to a fresh estimate instead of
+                    // failing every send for this selector until the TTL
+                    // expires.
+                    tracing::debug!(
+                        selector = %alloy::primitives::hex::encode(selector),
+                        limit,
+                        %error,
+                        "cached gas limit failed preflight; re-estimating"
+                    );
+                    self.gas_limit_cache.lock().unwrap().invalidate(&selector);
+                }
+                // The call never reached the node (a timeout, a rate limit):
+                // nothing disproved the cached estimate, so keep it and let
+                // the caller retry instead of paying for a re-estimate.
+                Err(transient) => return Err(transient.into()),
+            }
         }
 
         // Cache miss — call eth_estimateGas
@@ -398,21 +456,131 @@ impl PerpClient {
             .with_input(calldata.clone())
             .with_value(U256::from(value));
 
-        self.provider.estimate_gas(tx).await.map_err(|e| {
-            let error_str = e.to_string();
-            if let Some((name, selector, data)) = decode::try_extract_revert(&error_str) {
-                TransactionError::SimulationReverted {
-                    error_name: name,
-                    selector,
-                    revert_data: data,
-                }
-                .into()
-            } else {
-                TransactionError::GasUnavailable {
-                    reason: format!("eth_estimateGas failed: {e}"),
-                }
-                .into()
-            }
+        self.provider
+            .estimate_gas(tx)
+            .await
+            .map_err(|e| classify_simulation_failure(&e, "eth_estimateGas").into())
+    }
+}
+
+/// JSON-RPC error codes a node answers an execution failure with: `3`
+/// (geth's `execution reverted`, data attached when the contract supplied
+/// any) and `-32000` (the generic server error geth-lineage nodes use for
+/// `out of gas` and data-less reverts). Rate limits and replica hiccups
+/// use other codes (`-32005`, `-32029`, `429`, …) or are transport-level,
+/// and stay transient.
+fn is_execution_outcome(resp: &alloy::rpc::json_rpc::ErrorPayload) -> bool {
+    matches!(resp.code, 3 | -32000)
+}
+
+/// Sort a failed `eth_call` / `eth_estimateGas` into the three things it
+/// can mean: a decodable contract revert
+/// ([`TransactionError::SimulationReverted`]), the node's definitive
+/// execution failure without revert data
+/// ([`TransactionError::SimulationFailed`], not transient), or a failure to
+/// get an answer at all ([`TransactionError::GasUnavailable`], transient).
+fn classify_simulation_failure(
+    e: &alloy::transports::TransportError,
+    what: &str,
+) -> TransactionError {
+    let error_str = e.to_string();
+    if let Some((name, selector, data)) = decode::try_extract_revert(&error_str) {
+        return TransactionError::SimulationReverted {
+            error_name: name,
+            selector: selector.into(),
+            revert_data: data,
+        };
+    }
+    if e.as_error_resp().is_some_and(is_execution_outcome) {
+        TransactionError::SimulationFailed {
+            reason: format!("{what} failed: {e}"),
+        }
+    } else {
+        TransactionError::GasUnavailable {
+            reason: format!("{what} failed: {e}"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The explicit-limit path exists for operations (liquidations) where
+    /// `eth_estimateGas` has passed while the real execution ran out of gas.
+    /// The preflight can only catch that failure if the simulation is capped
+    /// at the pinned limit — an uncapped `eth_call` runs under the node's
+    /// default gas cap and succeeds where the pinned limit would OOG.
+    #[test]
+    fn preflight_request_pins_the_explicit_gas_limit() {
+        let from = Address::repeat_byte(1);
+        let to = Address::repeat_byte(2);
+        let calldata = Bytes::from_static(&[0xde, 0xad, 0xbe, 0xef]);
+
+        let pinned = preflight_request(from, to, &calldata, 7, Some(3_000_000));
+        assert_eq!(pinned.gas, Some(3_000_000));
+        assert_eq!(pinned.from, Some(from));
+        assert_eq!(pinned.value, Some(U256::from(7u8)));
+
+        let unpinned = preflight_request(from, to, &calldata, 0, None);
+        assert_eq!(unpinned.gas, None, "no limit means the node default cap");
+    }
+
+    fn error_resp(code: i64, message: &'static str) -> alloy::transports::TransportError {
+        alloy::transports::TransportError::ErrorResp(alloy::rpc::json_rpc::ErrorPayload {
+            code,
+            message: message.into(),
+            data: None,
         })
+    }
+
+    /// One variant used to carry both "the node said the call fails" and
+    /// "the node could not be reached", and `is_transient()` could not
+    /// tell them apart — a liquidation bot retrying on it would loop on an
+    /// empty revert forever. The three outcomes must stay distinct.
+    #[test]
+    fn simulation_failures_are_sorted_by_what_the_node_said() {
+        use alloy::transports::TransportErrorKind;
+
+        let decoded = classify_simulation_failure(
+            &error_resp(3, "execution reverted, data: \"0xbcffc83f\""),
+            "eth_call",
+        );
+        assert!(
+            matches!(decoded, TransactionError::SimulationReverted { .. }),
+            "{decoded}"
+        );
+
+        let empty_revert =
+            classify_simulation_failure(&error_resp(3, "execution reverted"), "eth_call");
+        assert!(
+            matches!(empty_revert, TransactionError::SimulationFailed { .. }),
+            "{empty_revert}"
+        );
+        let out_of_gas = classify_simulation_failure(&error_resp(-32000, "out of gas"), "eth_call");
+        assert!(
+            matches!(out_of_gas, TransactionError::SimulationFailed { .. }),
+            "{out_of_gas}"
+        );
+
+        let rate_limited =
+            classify_simulation_failure(&error_resp(-32005, "limit exceeded"), "eth_call");
+        assert!(
+            matches!(rate_limited, TransactionError::GasUnavailable { .. }),
+            "{rate_limited}"
+        );
+        let timeout = classify_simulation_failure(
+            &TransportErrorKind::custom_str("request timed out"),
+            "eth_estimateGas",
+        );
+        assert!(
+            matches!(timeout, TransactionError::GasUnavailable { .. }),
+            "{timeout}"
+        );
+
+        let transient: crate::errors::PerpCityError = timeout.into();
+        assert!(transient.is_transient());
+        let deterministic: crate::errors::PerpCityError = empty_revert.into();
+        assert!(!deterministic.is_transient());
     }
 }

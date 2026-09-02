@@ -98,29 +98,41 @@ fn name_for_selector(selector: [u8; 4]) -> Option<&'static str> {
 /// assert_eq!(sel, "0x08c379a0");
 /// ```
 pub fn decode_revert_data(hex_data: &str) -> Option<(String, String)> {
-    if hex_data.len() < 10 {
+    let (name, _) = decode_revert(hex_data)?;
+    Some((name, hex_data[0..10].into()))
+}
+
+/// [`decode_revert_data`] with the selector kept raw, for callers that
+/// match on it typed rather than print it.
+pub(crate) fn decode_revert(hex_data: &str) -> Option<(String, [u8; 4])> {
+    let selector = parse_selector(hex_data)?;
+    let name = name_for_selector(selector)
+        .map(String::from)
+        // Keep the selector visible: distinct unknown errors must stay
+        // distinguishable instead of collapsing into one opaque name.
+        .unwrap_or_else(|| format!("UnknownContractError({})", &hex_data[0..10]));
+    Some((name, selector))
+}
+
+/// Parse the 8 hex digits after `0x` into the raw 4-byte selector.
+pub(crate) fn parse_selector(hex_data: &str) -> Option<[u8; 4]> {
+    if hex_data.len() < 10 || !hex_data.starts_with("0x") {
         return None;
     }
-
-    let selector_str = &hex_data[0..10];
-
-    // Parse the 8 hex digits after `0x` into a 4-byte selector.
     let mut selector = [0u8; 4];
     for (i, byte) in selector.iter_mut().enumerate() {
         let start = 2 + i * 2;
         *byte = u8::from_str_radix(&hex_data[start..start + 2], 16).ok()?;
     }
-
-    let name = name_for_selector(selector).unwrap_or("UnknownContractError");
-    Some((name.into(), selector_str.into()))
+    Some(selector)
 }
 
 /// Try to extract revert data from an Alloy error string.
 ///
 /// Scans the error message for hex data following `"data: \""` (the format
 /// Alloy uses for RPC error code 3 responses). Returns
-/// `(error_name, selector, full_revert_data)`.
-pub fn try_extract_revert(error: &str) -> Option<(String, String, Option<String>)> {
+/// `(error_name, raw_selector, full_revert_data)`.
+pub fn try_extract_revert(error: &str) -> Option<(String, [u8; 4], Option<String>)> {
     // Alloy format: `execution reverted, data: "0x...."`
     let data = if let Some(idx) = error.find("data: \"0x") {
         let start = idx + "data: \"".len();
@@ -141,7 +153,7 @@ pub fn try_extract_revert(error: &str) -> Option<(String, String, Option<String>
         return None;
     }
 
-    let (name, selector) = decode_revert_data(data)?;
+    let (name, selector) = decode_revert(data)?;
     let full_data = if data.len() > 10 {
         Some(data.to_string())
     } else {
@@ -183,7 +195,7 @@ mod tests {
     #[test]
     fn decode_unknown_selector() {
         let (name, sel) = decode_revert_data("0xdeadbeef").unwrap();
-        assert_eq!(name, "UnknownContractError");
+        assert_eq!(name, "UnknownContractError(0xdeadbeef)");
         assert_eq!(sel, "0xdeadbeef");
     }
 
@@ -201,7 +213,7 @@ mod tests {
         );
         let (name, selector, data) = try_extract_revert(&error).unwrap();
         assert_eq!(name, "ZeroDelta");
-        assert_eq!(selector, sel);
+        assert_eq!(selector, Perp::ZeroDelta::SELECTOR);
         assert!(data.is_none()); // no extra params beyond selector
     }
 
@@ -213,7 +225,7 @@ mod tests {
         let error = format!(r#"execution reverted, data: "{sel}{params}""#);
         let (name, selector, data) = try_extract_revert(&error).unwrap();
         assert_eq!(name, "MarginTooLow");
-        assert_eq!(selector, sel);
+        assert_eq!(selector, Perp::MarginTooLow::SELECTOR);
         assert!(data.is_some());
     }
 

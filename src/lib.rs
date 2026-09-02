@@ -13,7 +13,7 @@
 //! | [`errors`] | SDK-wide error types using `thiserror` |
 //! | [`feeds`] | Live data feeds over WebSocket: market events, block headers, event decoding |
 //! | [`hft`] | HFT infrastructure: nonce, gas, pipeline, state cache, latency, positions |
-//! | [`math`] | Pure math: tick ↔ price, liquidity estimation, position calculations |
+//! | [`math`] | Pure math: tick ↔ price, liquidity, positions, EMAs, taker swap simulation, maker settle previews |
 //! | [`transport`] | Multi-endpoint RPC transport with health-aware routing |
 //! | [`types`] | Client-facing types with human-readable f64 fields |
 //!
@@ -43,6 +43,7 @@ pub mod errors;
 pub mod feeds;
 pub mod hft;
 pub mod math;
+pub(crate) mod storage;
 pub mod transport;
 pub mod types;
 
@@ -50,7 +51,8 @@ pub mod types;
 pub use client::{
     ARBITRUM_CHAIN_ID, ARBITRUM_POOL_MANAGER, ARBITRUM_SEPOLIA_CHAIN_ID,
     ARBITRUM_SEPOLIA_PERP_FACTORY, ARBITRUM_SEPOLIA_POOL_MANAGER, ARBITRUM_SEPOLIA_USDC,
-    ARBITRUM_USDC, PerpClient, TxBuilder,
+    ARBITRUM_USDC, MAX_MAKER_EQUITY_BATCH, MakerEquityKind, MakerEquityOutcome, PerpClient,
+    TxBuilder,
 };
 
 #[doc(inline)]
@@ -80,6 +82,15 @@ pub use types::{
     AdjustMakerParams, AdjustMakerResult, AdjustTakerParams, AdjustTakerResult, Bounds,
     Deployments, ExactAdjustTakerParams, ExactOpenTakerParams, Fees, OpenInterest, OpenMakerParams,
     OpenResult, OpenTakerParams, PerpData, PerpSnapshot, PriceImpactPoint,
+};
+
+#[doc(inline)]
+pub use math::BlockContext;
+
+#[doc(inline)]
+pub use math::maker_equity::{
+    AccrualInputs, AccruedMakerSnapshot, MakerEquityBreakdown, MakerMarketSnapshot, MakerState,
+    TickFunding,
 };
 
 #[doc(inline)]

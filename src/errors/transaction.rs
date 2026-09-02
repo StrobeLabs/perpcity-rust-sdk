@@ -1,10 +1,12 @@
 //! Transaction lifecycle errors.
 
+use alloy::primitives::FixedBytes;
 use thiserror::Error;
 
 /// Errors arising from the transaction lifecycle: simulation, signing,
 /// broadcasting, receipt polling, and gas resolution.
 #[derive(Error, Debug)]
+#[non_exhaustive]
 pub enum TransactionError {
     /// Pre-flight simulation (`eth_estimateGas` or `eth_call`) detected a
     /// contract revert. The transaction was **not** broadcast — no gas was
@@ -12,10 +14,12 @@ pub enum TransactionError {
     #[error("simulation reverted: {error_name} ({selector})")]
     SimulationReverted {
         /// Human-readable error name decoded from the 4-byte selector
-        /// (e.g. `"InvalidMarginRatio"`).
+        /// (e.g. `"InvalidMarginRatio"`). Unknown selectors decode to
+        /// `"UnknownContractError(0x…)"` with the selector preserved.
         error_name: String,
-        /// Raw 4-byte selector as hex (e.g. `"0xbcffc83f"`).
-        selector: String,
+        /// The raw 4-byte selector (displays as `0x`-prefixed hex, e.g.
+        /// `0xbcffc83f`); match it typed via [`Self::is_revert`].
+        selector: FixedBytes<4>,
         /// Full revert data hex, if available.
         revert_data: Option<String>,
     },
@@ -42,7 +46,24 @@ pub enum TransactionError {
         reason: String,
     },
 
-    /// Gas price or base fee is not available (cache stale, RPC down).
+    /// Pre-flight simulation (`eth_estimateGas` or `eth_call`) failed with
+    /// the node's definitive execution answer but no decodable contract
+    /// revert: an empty revert (a selector the deployed contract does not
+    /// have, a bare `revert()`), or execution running out of gas inside
+    /// the pinned limit. The transaction was **not** broadcast.
+    ///
+    /// Deterministic for the same calldata and chain state, so — unlike
+    /// [`Self::GasUnavailable`] — **not** transient: retrying reproduces
+    /// it. (`PerpCityError::is_transient` says `false`.)
+    #[error("simulation failed: {reason}")]
+    SimulationFailed {
+        /// The node's error response.
+        reason: String,
+    },
+
+    /// Gas price or base fee is not available (cache stale, RPC down), or a
+    /// pre-flight simulation could not reach the node (transport failure).
+    /// Transient: the transaction was neither disproved nor broadcast.
     #[error("gas unavailable: {reason}")]
     GasUnavailable {
         /// Description of why gas data is unavailable.
@@ -71,4 +92,26 @@ pub enum TransactionError {
         /// Transactions still awaiting receipts, which block the resync.
         in_flight: usize,
     },
+}
+
+impl TransactionError {
+    /// Whether this error is a [`Self::SimulationReverted`] carrying the
+    /// typed contract error `E`, compared by 4-byte selector — no string
+    /// matching.
+    ///
+    /// ```rust,ignore
+    /// use perpcity_sdk::Perp;
+    ///
+    /// if err.is_revert::<Perp::NotLiquidatable>() {
+    ///     // healthy right now — retry later
+    /// } else if err.is_revert::<Perp::NonMakerPosition>() {
+    ///     // never liquidatable on this path — drop the id
+    /// }
+    /// ```
+    pub fn is_revert<E: alloy::sol_types::SolError>(&self) -> bool {
+        matches!(
+            self,
+            Self::SimulationReverted { selector, .. } if selector.0 == E::SELECTOR
+        )
+    }
 }

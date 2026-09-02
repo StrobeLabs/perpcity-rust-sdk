@@ -40,13 +40,16 @@
 //! # }
 //! ```
 
+mod maker_equity;
 mod queries;
 mod trades;
 mod transactions;
 
+pub use maker_equity::{MAX_MAKER_EQUITY_BATCH, MakerEquityKind, MakerEquityOutcome};
 pub use transactions::TxBuilder;
 
 use std::sync::Mutex;
+use std::sync::atomic::AtomicBool;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use alloy::network::{Ethereum, EthereumWallet, TxSigner};
@@ -196,6 +199,16 @@ pub struct PerpClient {
     /// Deployment-fixed Perp/pool values (pool id, tick spacing, EMA window),
     /// fetched once on first taker book load.
     book_immutables: tokio::sync::OnceCell<queries::BookImmutables>,
+    /// Latched when the endpoint rejects `eth_getProof` as an unknown
+    /// method, so maker-equity reads skip the probe and go straight to the
+    /// `eth_getStorageAt` fallback.
+    ///
+    /// The latch is client-global, not per endpoint: one replica of a
+    /// multi-endpoint transport answering "method not found" switches every
+    /// later read to the fallback, which every endpoint serves. Accepted —
+    /// a per-endpoint capability record in `transport::health` is future
+    /// work.
+    get_proof_unsupported: AtomicBool,
 }
 
 impl std::fmt::Debug for PerpClient {
@@ -250,6 +263,7 @@ impl PerpClient {
             gas_limit_cache: Mutex::new(GasLimitCache::new()),
             state_cache: Mutex::new(StateCache::new(StateCacheConfig::default())),
             book_immutables: tokio::sync::OnceCell::new(),
+            get_proof_unsupported: AtomicBool::new(false),
         })
     }
 

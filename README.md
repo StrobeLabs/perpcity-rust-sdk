@@ -53,6 +53,8 @@ All examples load configuration from `.env` automatically via `dotenvy`.
 | **open_position** | `cargo run --example open_position` | Full taker lifecycle: market data, open, monitor PnL/funding/liquidation, close. |
 | **market_maker** | `cargo run --example market_maker` | LP position: calculate tick range around mark, estimate liquidity, open maker position. *Note: makers are currently subject to a 7-day lockup, so this example shouldn't run.* |
 | **hft_bot** | `cargo run --example hft_bot` | Full trading loop: multi-endpoint transport, momentum strategy, position manager with SL/TP/trailing stop, latency stats. |
+| **taker_price_impact** | `cargo run --example taker_price_impact` | Local, exact taker quoting over a block-pinned liquidity book: price impact, target-price sizing, hypothetical liquidity. |
+| **maker_equity** | `cargo run --example maker_equity` | Batched maker settle previews (`get_maker_equities`) plus a liquidation gated on the contract's own health check. |
 
 ## API Overview
 
@@ -118,6 +120,59 @@ let position = client.get_position(open.pos_id).await?; // raw on-chain Position
 let (usdc, eth) = client.get_balances(address).await?;
 let all = client.get_balances_batch(&addresses).await?;
 ```
+
+### Maker Equity and Liquidations
+
+`get_maker_equities` computes, off-chain and pinned to one block, exactly
+what the contract would settle for each open maker position if it were
+touched now — margin, accrued funding, utilization earnings, uncollected V4
+LP fees, and inventory PnL (validated against a real on-chain liquidation
+settle). Every input id gets exactly one outcome, in input order:
+`Computed(breakdown)`, `NotAMaker`, or `Failed(error)`.
+
+Three conventions to know:
+
+- **Atoms vs USD.** The breakdown's primary representation is exact signed
+  6-decimal USDC atoms — the integer units the contract settles in — via
+  the `*_atoms()` getters. The matching `*_usd()` accessors (and
+  `equity()`, `settled_margin()`, `accrued_income()`) convert to `f64` at
+  the display boundary. Do accounting in atoms; print in USD.
+- **Funding sign.** `funding_owed_atoms()` / `funding_owed_usd()` are what
+  the position OWES since its last settle: positive = the position pays
+  (it is subtracted when settling margin). All the earnings components
+  (utilization, LP fees) are positive when the position receives.
+- **Health is per position.** The contract liquidates when
+  `(equity − posVal·liqFee) / posVal` drops under the ratio stored on THAT
+  position (`PerpLogic.isHealthy`) — not under a market-wide ratio, and not
+  relative to margin. The breakdown carries both sides:
+  `position_value_usd()`, `liq_margin_ratio()`, `margin_ratio()`, and
+  `is_liquidatable(liquidation_fee)` as a screening gate. The contract stays
+  the oracle: confirm with `simulate_liquidate_maker` before sending.
+- **Pinning is automatic.** Every read in a batch — including the mark
+  that prices `valPnl` (`poolState().ammPrice`, exact X96) — comes from
+  one reorg-safe block a few blocks behind the head. There is no mark to
+  supply and no way to mix state from different blocks;
+  `get_maker_equities_at_mark(pos_ids, mark_price_x96)` exists for
+  what-if pricing at a caller-chosen X96 mark over the same pinned state.
+
+```rust
+for outcome in client.get_maker_equities(&pos_ids).await? {
+    if let MakerEquityKind::Computed(b) = outcome.kind {
+        println!(
+            "pos {}: equity {:.6} (accrued {:+.6})",
+            outcome.pos_id, b.equity(), b.accrued_income(),
+        );
+    }
+}
+
+// Liquidations gate on the contract's own health check; typed reverts
+// distinguish "not yet" (NotLiquidatable) from "never" (NonMakerPosition).
+if client.simulate_liquidate_maker(pos_id, me).await.is_ok() {
+    client.liquidate_maker(pos_id, me, Urgency::Critical).await?;
+}
+```
+
+See `examples/maker_equity.rs` for the full flow.
 
 ### HFT Infrastructure
 

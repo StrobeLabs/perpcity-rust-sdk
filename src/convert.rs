@@ -14,7 +14,7 @@
 //! The [`price_to_sqrt_price_x96`] / [`sqrt_price_x96_to_price`] pair
 //! handles this encoding, using a 6-decimal intermediate for precision.
 
-use alloy::primitives::U256;
+use alloy::primitives::{I256, U256};
 
 use crate::constants::Q96;
 use crate::errors::ValidationError;
@@ -191,6 +191,43 @@ pub fn price_x96_to_f64(value: U256) -> Result<f64, ValidationError> {
     Ok(int_val as f64 / F64_1E6)
 }
 
+/// Convert a human-readable price to its Q96 fixed-point representation.
+///
+/// Inverse of [`price_x96_to_f64`]. A two-step conversion keeps the full
+/// f64 mantissa: `price × 2^48` fits in `u128` for any accepted price, and
+/// the remaining `2^48` factor is an exact shift.
+///
+/// # Errors
+///
+/// Returns [`ValidationError::InvalidPrice`] if `price` is zero, negative,
+/// NaN, infinite, or at least `2^80` (where `price × 2^48` would exceed
+/// `u128`).
+///
+/// # Examples
+///
+/// ```
+/// # use perpcity_sdk::convert::{price_f64_to_x96, price_x96_to_f64};
+/// let x96 = price_f64_to_x96(1.5).unwrap();
+/// assert!((price_x96_to_f64(x96).unwrap() - 1.5).abs() < 1e-9);
+/// assert!(price_f64_to_x96(0.0).is_err());
+/// assert!(price_f64_to_x96(f64::NAN).is_err());
+/// ```
+pub fn price_f64_to_x96(price: f64) -> Result<U256, ValidationError> {
+    if !price.is_finite() || price <= 0.0 {
+        return Err(ValidationError::InvalidPrice {
+            reason: format!("price must be a positive finite number, got {price}"),
+        });
+    }
+    const PRICE_LIMIT: f64 = (1u128 << 80) as f64;
+    if price >= PRICE_LIMIT {
+        return Err(ValidationError::InvalidPrice {
+            reason: format!("price {price} exceeds the representable Q96 range (2^80)"),
+        });
+    }
+    let hi = (price * (1u64 << 48) as f64) as u128;
+    Ok(U256::from(hi) << 48)
+}
+
 // ── Price ↔ sqrtPriceX96 ──────────────────────────────────────────────
 
 /// Convert a human-readable price to `sqrtPriceX96` (Uniswap V4 format).
@@ -281,12 +318,61 @@ pub fn sqrt_price_x96_to_price(sqrt_price_x96: U256) -> Result<f64, ValidationEr
     price_x96_to_f64(price_x96)
 }
 
+// ── BalanceDelta unpacking ─────────────────────────────────────────────
+
+/// Unpack a Uniswap V4 `BalanceDelta` (packed `int256`) into `(amount0,
+/// amount1)` = (perp, USD), each a signed `int128` in two's-complement.
+///
+/// The packing is part of the contract ABI: the upper 128 bits hold
+/// `amount0` and the lower 128 bits hold `amount1`. The unpacking is
+/// lossless: each half is exactly 128 bits wide on-chain (`int128`), so
+/// reinterpreting the shifted/masked halves as two's-complement `i128`
+/// reproduces the values the contract packed — no truncation and no
+/// sign-extension ambiguity is possible.
+///
+/// # Examples
+///
+/// ```
+/// use alloy::primitives::I256;
+/// use perpcity_sdk::convert::unpack_balance_delta;
+///
+/// // amount0 = -2 (upper 128 bits), amount1 = 3 (lower 128 bits).
+/// let packed = (I256::try_from(-2).unwrap() << 128)
+///     | I256::try_from(3u8).unwrap();
+/// assert_eq!(unpack_balance_delta(packed), (-2, 3));
+/// ```
+pub fn unpack_balance_delta(delta: I256) -> (i128, i128) {
+    let raw = delta.into_raw();
+    // The shift/mask leave at most 128 significant bits, so the narrowing
+    // cannot truncate; `as i128` reinterprets the two's-complement halves.
+    let amount0 = (raw >> 128usize).to::<u128>() as i128;
+    let amount1 = (raw & U256::from(u128::MAX)).to::<u128>() as i128;
+    (amount0, amount1)
+}
+
 // ── Tests ──────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::constants::{MAX_SQRT_PRICE_X96, Q96_PRECISION};
+
+    // ── price_f64_to_x96 ───────────────────────────────────────────
+
+    /// The Q96 conversion is only exact below 2^80: the mantissa trick
+    /// shifts by 48 bits twice, so prices at or past the bound must be
+    /// rejected, and the largest representable prices must still convert.
+    #[test]
+    fn price_f64_to_x96_enforces_the_2_pow_80_bound() {
+        let bound = (1u128 << 80) as f64;
+        assert!(price_f64_to_x96(bound).is_err());
+        assert!(price_f64_to_x96(bound * 2.0).is_err());
+        assert!(price_f64_to_x96(f64::MAX).is_err());
+
+        let just_under = bound * (1.0 - f64::EPSILON);
+        let converted = price_f64_to_x96(just_under).unwrap();
+        assert!(converted > U256::ZERO);
+    }
 
     // ── scale_to_6dec ──────────────────────────────────────────────
 

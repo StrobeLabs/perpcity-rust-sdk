@@ -46,7 +46,7 @@ async fn main() -> perpcity_sdk::Result<()> {
     let market = client.load_taker_market_snapshot().await?;
     println!(
         "snapshot block {} ({})",
-        market.block_number, market.block_hash
+        market.block.number, market.block.hash
     );
 
     // Positive perp is an exact-output buy; negative perp is an exact-input sell.

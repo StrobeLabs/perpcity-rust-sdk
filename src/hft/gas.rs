@@ -25,7 +25,9 @@ type Selector = [u8; 4];
 
 /// Pre-empirically derived gas limits for PerpCity operations.
 ///
-/// Each limit includes ~20% margin over observed mainnet usage.
+/// Trade limits carry ~20% margin over observed mainnet usage;
+/// [`Self::LIQUIDATE`] is deliberately over-provisioned far beyond that
+/// (see its docs).
 #[derive(Debug, Clone, Copy)]
 pub struct GasLimits;
 
@@ -46,6 +48,10 @@ impl GasLimits {
     pub const ADJUST_NOTIONAL: u64 = 500_000;
     /// Adjust position margin (add/remove collateral).
     pub const ADJUST_MARGIN: u64 = 500_000;
+    /// Liquidate a maker or taker position. Deliberately generous: Arbitrum
+    /// liquidations have run out of gas where `eth_estimateGas` passed, so
+    /// the liquidation paths pin this bound instead of estimating.
+    pub const LIQUIDATE: u64 = 3_000_000;
     /// ERC-20 `transfer` call.
     pub const TRANSFER: u64 = 65_000;
 }
@@ -119,6 +125,13 @@ impl GasLimitCache {
                 cached_at_ms: now_ms,
             },
         );
+    }
+
+    /// Drop a cached estimate so the next send re-estimates. Used when a
+    /// preflight capped at the cached limit fails without a contract
+    /// revert — the estimate has gone stale (too small), not the call.
+    pub fn invalidate(&mut self, selector: &Selector) {
+        self.estimates.remove(selector);
     }
 
     /// Override the TTL.
@@ -393,6 +406,8 @@ mod tests {
         assert!(GasLimits::CLOSE_POSITION > 100_000 && GasLimits::CLOSE_POSITION < 2_000_000);
         // Maker is more expensive than taker (more Uniswap V4 work)
         assert!(GasLimits::OPEN_MAKER > GasLimits::OPEN_TAKER);
+        // Liquidations get the most headroom (close swap + settle + fees).
+        assert!(GasLimits::LIQUIDATE > GasLimits::OPEN_MAKER);
     }
 
     // ── GasLimitCache tests ───────────────────────────────────────
@@ -421,5 +436,16 @@ mod tests {
 
         assert_eq!(cache.get(&open, 0), Some(600_000));
         assert_eq!(cache.get(&close, 0), Some(960_000));
+    }
+
+    #[test]
+    fn estimate_cache_invalidate_forces_a_miss() {
+        let mut cache = GasLimitCache::new();
+        let selector = [0xAA, 0xBB, 0xCC, 0xDD];
+        cache.put(selector, 500_000, 0);
+        assert!(cache.get(&selector, 0).is_some());
+
+        cache.invalidate(&selector);
+        assert!(cache.get(&selector, 0).is_none());
     }
 }

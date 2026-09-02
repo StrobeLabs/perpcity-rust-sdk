@@ -8,6 +8,8 @@ use alloy::primitives::U256;
 
 use crate::constants::Q96;
 use crate::errors::ValidationError;
+use crate::math::fixed_point::Rounding;
+use crate::math::swap::{amount0_delta, amount1_delta};
 
 use super::tick::get_sqrt_ratio_at_tick;
 
@@ -154,6 +156,24 @@ pub fn liquidity_for_target_ratio(
     }
 
     Ok(liquidity_f as u128)
+}
+
+/// Uniswap `getAmountsForLiquidity` with the price clamped into the range.
+pub(crate) fn amounts_for_liquidity(
+    sqrt_p: U256,
+    sqrt_a: U256,
+    sqrt_b: U256,
+    liquidity: u128,
+) -> Result<(U256, U256), ValidationError> {
+    let (sa, sb) = if sqrt_a <= sqrt_b {
+        (sqrt_a, sqrt_b)
+    } else {
+        (sqrt_b, sqrt_a)
+    };
+    let sp = sqrt_p.clamp(sa, sb);
+    let amount0 = amount0_delta(sp, sb, liquidity, Rounding::TowardZero)?;
+    let amount1 = amount1_delta(sa, sp, liquidity, Rounding::TowardZero)?;
+    Ok((amount0, amount1))
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────

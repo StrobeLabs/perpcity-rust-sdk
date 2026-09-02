@@ -78,9 +78,20 @@ impl PerpCityError {
     /// Returns `true` if the error is likely transient and worth retrying
     /// (RPC errors, gas unavailable, etc.).
     ///
+    /// A pre-flight simulation that the node answered — a decoded
+    /// `SimulationReverted`, or a `SimulationFailed` (empty revert, out of
+    /// gas inside the pinned limit) — is deterministic and never transient;
+    /// `GasUnavailable` covers the simulation that got no answer at all.
+    ///
     /// `NonceDesynced` is transient by construction: it clears itself once
     /// in-flight transactions drain and the next send resyncs from chain,
     /// so callers should back off briefly rather than give up.
+    ///
+    /// `BlockUnavailable` (a lagging replica briefly missing the pinned
+    /// header) and `StorageReadFailed` with a transport `source` are
+    /// stale-replica / network conditions — retryable. A
+    /// `StorageReadFailed` without a source means the response had an
+    /// unexpected shape, which retrying will not fix.
     pub fn is_transient(&self) -> bool {
         matches!(
             self,
@@ -88,6 +99,11 @@ impl PerpCityError {
                 | Self::Transaction(TransactionError::GasUnavailable { .. })
                 | Self::Transaction(TransactionError::ReceiptTimeout { .. })
                 | Self::Transaction(TransactionError::NonceDesynced { .. })
+                | Self::Contract(ContractError::BlockUnavailable { .. })
+                | Self::Contract(ContractError::StorageReadFailed {
+                    source: Some(_),
+                    ..
+                })
         )
     }
 }
@@ -112,11 +128,73 @@ mod tests {
 
         let revert: PerpCityError = TransactionError::SimulationReverted {
             error_name: "PriceImpactTooHigh".into(),
-            selector: "0xfb30d03a".into(),
+            selector: [0xfb, 0x30, 0xd0, 0x3a].into(),
             revert_data: None,
         }
         .into();
         assert!(!revert.is_transient(), "a contract revert is deterministic");
+
+        let failed: PerpCityError = TransactionError::SimulationFailed {
+            reason: "eth_call failed: execution reverted".into(),
+        }
+        .into();
+        assert!(
+            !failed.is_transient(),
+            "an empty revert is the node's answer, not a network condition"
+        );
         assert!(revert.is_simulation_revert());
+    }
+
+    /// Typed revert matching compares raw selectors, not strings, so it
+    /// keeps working whatever the decoded name looks like.
+    #[test]
+    fn is_revert_matches_by_selector() {
+        use alloy::sol_types::SolError;
+
+        use crate::contracts::Perp;
+
+        let revert = TransactionError::SimulationReverted {
+            error_name: "NotLiquidatable".into(),
+            selector: Perp::NotLiquidatable::SELECTOR.into(),
+            revert_data: None,
+        };
+        assert!(revert.is_revert::<Perp::NotLiquidatable>());
+        assert!(!revert.is_revert::<Perp::NonMakerPosition>());
+
+        let other = TransactionError::GasUnavailable {
+            reason: "down".into(),
+        };
+        assert!(!other.is_revert::<Perp::NotLiquidatable>());
+    }
+
+    /// The read-path errors documented as retryable must classify as
+    /// transient, and a malformed-response storage failure (no transport
+    /// source) must not.
+    #[test]
+    fn stale_replica_read_failures_are_transient() {
+        let unavailable: PerpCityError = ContractError::BlockUnavailable { number: 1 }.into();
+        assert!(
+            unavailable.is_transient(),
+            "a lagging replica missing the pinned header clears on retry"
+        );
+
+        let transport: PerpCityError = ContractError::StorageReadFailed {
+            context: "tick 60 funding".into(),
+            source: Some(std::sync::Arc::new(
+                alloy::transports::TransportErrorKind::custom_str("replica dropped the read"),
+            )),
+        }
+        .into();
+        assert!(transport.is_transient(), "transport-caused reads retry");
+
+        let malformed: PerpCityError = ContractError::StorageReadFailed {
+            context: "extsload word count".into(),
+            source: None,
+        }
+        .into();
+        assert!(
+            !malformed.is_transient(),
+            "an unexpected response shape does not fix itself"
+        );
     }
 }
