@@ -14,19 +14,19 @@
 //! | [`feeds`] | Live data feeds over WebSocket: market events, block headers, event decoding |
 //! | [`hft`] | HFT infrastructure: nonce, gas, pipeline, state cache, latency, positions |
 //! | [`math`] | Pure math: tick ↔ price, liquidity, positions, EMAs, taker swap simulation, maker settle previews |
+//! | [`prelude`] | Everyday public surface, bundled for `use perpcity_sdk::prelude::*;` |
 //! | [`transport`] | Multi-endpoint RPC transport with health-aware routing |
 //! | [`types`] | Client-facing types with human-readable f64 fields |
 //!
 //! ## Quick start
 //!
 //! ```rust,no_run
-//! use perpcity_sdk::{
-//!     PerpClient, HftTransport, TransportConfig, Urgency,
-//!     Deployments, OpenTakerParams, OpenMakerParams,
-//!     PerpCityError, Result,
-//! };
+//! use perpcity_sdk::prelude::*;
 //! use alloy::signers::local::PrivateKeySigner;
 //! ```
+//!
+//! Or import only what's needed — every [`prelude`] item is also available
+//! individually at the crate root (`perpcity_sdk::PerpClient`, etc.).
 //!
 //! [`PerpClient`] accepts any `alloy` transaction signer (`TxSigner`), not just
 //! `PrivateKeySigner` — e.g. AWS KMS via `alloy::signers::aws::AwsSigner` with
@@ -43,6 +43,7 @@ pub mod errors;
 pub mod feeds;
 pub mod hft;
 pub mod math;
+pub mod prelude;
 pub(crate) mod storage;
 pub mod transport;
 pub mod types;
@@ -103,3 +104,6 @@ pub use math::tick::{
 pub use math::swap::{
     QuoteConstraints, QuoteLimit, TakerMarketSnapshot, TakerQuote, TickLiquidity,
 };
+
+#[doc(inline)]
+pub use math::liquidity::{estimate_liquidity, liquidity_for_target_ratio};

@@ -61,7 +61,7 @@ All examples load configuration from `.env` automatically via `dotenvy`.
 ### Client Setup
 
 ```rust
-use perpcity_sdk::*;
+use perpcity_sdk::prelude::*;
 
 // 1. Transport — single endpoint or read/write split
 let transport = HftTransport::new(
