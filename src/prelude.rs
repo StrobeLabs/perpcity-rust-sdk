@@ -8,13 +8,14 @@
 //! (`PerpCityError`, `Result`, `ContractError`, `TransactionError`,
 //! `ValidationError`), gas/urgency (`GasLimits`, `Urgency`), feeds
 //! (`MarketFeed`, `MarketEvent`, `decode_log`, ...), the client-facing
-//! params/result types (`OpenTakerParams`, `OpenResult`, ...), and the
-//! maker-equity types (`MakerEquityBreakdown`, `MakerState`, ...).
+//! params/result types (`OpenTakerParams`, `OpenResult`, ...), the
+//! maker-equity types (`MakerEquityBreakdown`, `MakerState`, ...), and
+//! liquidity sizing (`estimate_liquidity`, `liquidity_for_target_ratio`).
 //!
 //! It re-exports exactly that set, nothing more: lower-level ABI/
 //! contract-interface types (`contracts::*`) and the fine-grained math
-//! helpers (`math::tick`, `math::swap`) are not included, since they're
-//! reached for far less often than everything above.
+//! helpers (`math::tick`, `math::swap`, `convert`) are not included, since
+//! they're reached for far less often than everything above.
 
 #[doc(no_inline)]
 pub use crate::{
@@ -25,5 +26,6 @@ pub use crate::{
     MakerEquityOutcome, MakerMarketSnapshot, MakerState, MarketEvent, MarketFeed, OpenInterest,
     OpenMakerParams, OpenResult, OpenTakerParams, PerpCityError, PerpClient, PerpData,
     PerpSnapshot, PriceImpactPoint, Result, TickFunding, TransactionError, TransportConfig,
-    TxBuilder, Urgency, ValidationError, decode_log,
+    TxBuilder, Urgency, ValidationError, decode_log, estimate_liquidity,
+    liquidity_for_target_ratio,
 };
