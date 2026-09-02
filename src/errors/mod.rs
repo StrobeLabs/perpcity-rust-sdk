@@ -78,6 +78,11 @@ impl PerpCityError {
     /// Returns `true` if the error is likely transient and worth retrying
     /// (RPC errors, gas unavailable, etc.).
     ///
+    /// A pre-flight simulation that the node answered — a decoded
+    /// `SimulationReverted`, or a `SimulationFailed` (empty revert, out of
+    /// gas inside the pinned limit) — is deterministic and never transient;
+    /// `GasUnavailable` covers the simulation that got no answer at all.
+    ///
     /// `NonceDesynced` is transient by construction: it clears itself once
     /// in-flight transactions drain and the next send resyncs from chain,
     /// so callers should back off briefly rather than give up.
@@ -128,6 +133,15 @@ mod tests {
         }
         .into();
         assert!(!revert.is_transient(), "a contract revert is deterministic");
+
+        let failed: PerpCityError = TransactionError::SimulationFailed {
+            reason: "eth_call failed: execution reverted".into(),
+        }
+        .into();
+        assert!(
+            !failed.is_transient(),
+            "an empty revert is the node's answer, not a network condition"
+        );
         assert!(revert.is_simulation_revert());
     }
 

@@ -357,20 +357,10 @@ impl PerpClient {
     ) -> std::result::Result<(), TransactionError> {
         let tx = preflight_request(self.address, to, calldata, value, gas_limit);
 
-        self.provider.call(tx).await.map_err(|e| {
-            let error_str = e.to_string();
-            if let Some((name, selector, data)) = decode::try_extract_revert(&error_str) {
-                TransactionError::SimulationReverted {
-                    error_name: name,
-                    selector: selector.into(),
-                    revert_data: data,
-                }
-            } else {
-                TransactionError::GasUnavailable {
-                    reason: format!("simulation failed: {e}"),
-                }
-            }
-        })?;
+        self.provider
+            .call(tx)
+            .await
+            .map_err(|e| classify_simulation_failure(&e, "eth_call"))?;
         Ok(())
     }
 
@@ -412,12 +402,13 @@ impl PerpClient {
                 Err(revert @ TransactionError::SimulationReverted { .. }) => {
                     return Err(revert.into());
                 }
-                Err(error) => {
-                    // No contract revert, yet the call failed inside the
-                    // cached limit: the estimate has gone stale (a bigger
-                    // trade crossing more ticks, say). Evict it and fall
-                    // through to a fresh estimate instead of failing every
-                    // send for this selector until the TTL expires.
+                Err(error @ TransactionError::SimulationFailed { .. }) => {
+                    // The node ran the call and it failed inside the cached
+                    // limit without a contract revert: the estimate has gone
+                    // stale (a bigger trade crossing more ticks, say). Evict
+                    // it and fall through to a fresh estimate instead of
+                    // failing every send for this selector until the TTL
+                    // expires.
                     tracing::debug!(
                         selector = %alloy::primitives::hex::encode(selector),
                         limit,
@@ -426,6 +417,10 @@ impl PerpClient {
                     );
                     self.gas_limit_cache.lock().unwrap().invalidate(&selector);
                 }
+                // The call never reached the node (a timeout, a rate limit):
+                // nothing disproved the cached estimate, so keep it and let
+                // the caller retry instead of paying for a re-estimate.
+                Err(transient) => return Err(transient.into()),
             }
         }
 
@@ -461,22 +456,49 @@ impl PerpClient {
             .with_input(calldata.clone())
             .with_value(U256::from(value));
 
-        self.provider.estimate_gas(tx).await.map_err(|e| {
-            let error_str = e.to_string();
-            if let Some((name, selector, data)) = decode::try_extract_revert(&error_str) {
-                TransactionError::SimulationReverted {
-                    error_name: name,
-                    selector: selector.into(),
-                    revert_data: data,
-                }
-                .into()
-            } else {
-                TransactionError::GasUnavailable {
-                    reason: format!("eth_estimateGas failed: {e}"),
-                }
-                .into()
-            }
-        })
+        self.provider
+            .estimate_gas(tx)
+            .await
+            .map_err(|e| classify_simulation_failure(&e, "eth_estimateGas").into())
+    }
+}
+
+/// JSON-RPC error codes a node answers an execution failure with: `3`
+/// (geth's `execution reverted`, data attached when the contract supplied
+/// any) and `-32000` (the generic server error geth-lineage nodes use for
+/// `out of gas` and data-less reverts). Rate limits and replica hiccups
+/// use other codes (`-32005`, `-32029`, `429`, …) or are transport-level,
+/// and stay transient.
+fn is_execution_outcome(resp: &alloy::rpc::json_rpc::ErrorPayload) -> bool {
+    matches!(resp.code, 3 | -32000)
+}
+
+/// Sort a failed `eth_call` / `eth_estimateGas` into the three things it
+/// can mean: a decodable contract revert
+/// ([`TransactionError::SimulationReverted`]), the node's definitive
+/// execution failure without revert data
+/// ([`TransactionError::SimulationFailed`], not transient), or a failure to
+/// get an answer at all ([`TransactionError::GasUnavailable`], transient).
+fn classify_simulation_failure(
+    e: &alloy::transports::TransportError,
+    what: &str,
+) -> TransactionError {
+    let error_str = e.to_string();
+    if let Some((name, selector, data)) = decode::try_extract_revert(&error_str) {
+        return TransactionError::SimulationReverted {
+            error_name: name,
+            selector: selector.into(),
+            revert_data: data,
+        };
+    }
+    if e.as_error_resp().is_some_and(is_execution_outcome) {
+        TransactionError::SimulationFailed {
+            reason: format!("{what} failed: {e}"),
+        }
+    } else {
+        TransactionError::GasUnavailable {
+            reason: format!("{what} failed: {e}"),
+        }
     }
 }
 
@@ -502,5 +524,63 @@ mod tests {
 
         let unpinned = preflight_request(from, to, &calldata, 0, None);
         assert_eq!(unpinned.gas, None, "no limit means the node default cap");
+    }
+
+    fn error_resp(code: i64, message: &'static str) -> alloy::transports::TransportError {
+        alloy::transports::TransportError::ErrorResp(alloy::rpc::json_rpc::ErrorPayload {
+            code,
+            message: message.into(),
+            data: None,
+        })
+    }
+
+    /// One variant used to carry both "the node said the call fails" and
+    /// "the node could not be reached", and `is_transient()` could not
+    /// tell them apart — a liquidation bot retrying on it would loop on an
+    /// empty revert forever. The three outcomes must stay distinct.
+    #[test]
+    fn simulation_failures_are_sorted_by_what_the_node_said() {
+        use alloy::transports::TransportErrorKind;
+
+        let decoded = classify_simulation_failure(
+            &error_resp(3, "execution reverted, data: \"0xbcffc83f\""),
+            "eth_call",
+        );
+        assert!(
+            matches!(decoded, TransactionError::SimulationReverted { .. }),
+            "{decoded}"
+        );
+
+        let empty_revert =
+            classify_simulation_failure(&error_resp(3, "execution reverted"), "eth_call");
+        assert!(
+            matches!(empty_revert, TransactionError::SimulationFailed { .. }),
+            "{empty_revert}"
+        );
+        let out_of_gas = classify_simulation_failure(&error_resp(-32000, "out of gas"), "eth_call");
+        assert!(
+            matches!(out_of_gas, TransactionError::SimulationFailed { .. }),
+            "{out_of_gas}"
+        );
+
+        let rate_limited =
+            classify_simulation_failure(&error_resp(-32005, "limit exceeded"), "eth_call");
+        assert!(
+            matches!(rate_limited, TransactionError::GasUnavailable { .. }),
+            "{rate_limited}"
+        );
+        let timeout = classify_simulation_failure(
+            &TransportErrorKind::custom_str("request timed out"),
+            "eth_estimateGas",
+        );
+        assert!(
+            matches!(timeout, TransactionError::GasUnavailable { .. }),
+            "{timeout}"
+        );
+
+        let transient: crate::errors::PerpCityError = timeout.into();
+        assert!(transient.is_transient());
+        let deterministic: crate::errors::PerpCityError = empty_revert.into();
+        assert!(!deterministic.is_transient());
     }
 }
