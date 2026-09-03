@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`TransactionError::OutOfGas { tx_hash, gas_used, gas_limit }`** (new variant on the `#[non_exhaustive]` enum) — a broadcast transaction that was mined having consumed its gas limit with no revert data. Distinct from `Reverted`: the call was never disproved, only the limit was too small. Not `is_transient()` — the send path evicts the cached estimate before returning, so a retry re-estimates rather than repeating the limit, but whether to retry is the caller's decision.
+
+### Fixed
+
+- **Cached gas estimates are floored at the `GasLimits` constants for the Perp entrypoints.** `GasLimitCache` keys estimates by 4-byte selector, so one cheap `adjustTaker`/`adjustMaker` seeds the limit an expensive tick-crossing one inherits, and Arbitrum charges execution costs `eth_estimateGas` does not model — leaving the cache able to produce a limit below the constant it replaced. `eth_call` does not reproduce the shortfall, so the capped pre-flight in `simulate()` could not catch it. The constants are now a lower bound on the estimate rather than a fallback it can undercut.
+- **A mined out-of-gas evicts its cached estimate.** Previously only a failed pre-flight evicted, so an estimate that passed simulation and failed on-chain kept killing every send for that selector until the 1-hour TTL expired.
+
 ## [0.3.0] - 2026-09-02
 
 ### Breaking

@@ -20,7 +20,7 @@ use alloy::providers::Provider;
 use alloy::rpc::types::TransactionRequest;
 
 use crate::errors::{Result, TransactionError, ValidationError, decode};
-use crate::hft::gas::{Urgency, looks_out_of_gas};
+use crate::hft::gas::{Urgency, is_out_of_gas};
 use crate::hft::pipeline::TxRequest;
 
 use super::PerpClient;
@@ -256,38 +256,39 @@ impl<'a> TxBuilder<'a> {
             pipeline.resolve(&tx_hash_bytes);
         }
 
-        // Check if reverted
-        if !receipt.status() {
-            // An Arbitrum out-of-gas passes both `eth_estimateGas` and the
-            // capped `eth_call` preflight and only fails once mined, so a
-            // cached estimate that causes one is never evicted by `simulate()`
-            // — it would keep killing every send for this selector until the
-            // TTL expires. Drop it here, where the receipt proves it wrong.
-            let out_of_gas = looks_out_of_gas(receipt.gas_used as u64, prepared_gas_limit);
-            if let Some(selector) = selector.filter(|_| out_of_gas) {
+        // Out of gas, not reverted: the call was never disproved, only the
+        // limit was too small. The capped pre-flight in `simulate()` evicts a
+        // stale estimate that fails `eth_call`, but an Arbitrum out-of-gas
+        // reproduces in neither `eth_call` nor `eth_estimateGas` — the receipt
+        // is where it first shows, so it is where the estimate is dropped.
+        let gas_used = receipt.gas_used as u64;
+        if !receipt.status() && is_out_of_gas(gas_used, prepared_gas_limit) {
+            if let Some(selector) = selector {
                 self.client
                     .gas_limit_cache
                     .lock()
                     .unwrap()
                     .invalidate(&selector);
-                tracing::warn!(
-                    tx_hash = %tx_hash_b256,
-                    selector = %alloy::primitives::hex::encode(selector),
-                    gas_used = receipt.gas_used,
-                    gas_limit = prepared_gas_limit,
-                    "tx ran out of gas; evicted the cached estimate"
-                );
             }
-            tracing::warn!(tx_hash = %tx_hash_b256, out_of_gas, "tx reverted");
+            tracing::warn!(
+                tx_hash = %tx_hash_b256,
+                gas_used,
+                gas_limit = prepared_gas_limit,
+                "tx out of gas; cached estimate evicted"
+            );
+            return Err(TransactionError::OutOfGas {
+                tx_hash: tx_hash_b256,
+                gas_used,
+                gas_limit: prepared_gas_limit,
+            }
+            .into());
+        }
+
+        // Check if reverted
+        if !receipt.status() {
+            tracing::warn!(tx_hash = %tx_hash_b256, "tx reverted");
             return Err(TransactionError::Reverted {
-                reason: if out_of_gas {
-                    format!(
-                        "transaction {} ran out of gas (used {} of {})",
-                        tx_hash_b256, receipt.gas_used, prepared_gas_limit
-                    )
-                } else {
-                    format!("transaction {} reverted", tx_hash_b256)
-                },
+                reason: format!("transaction {} reverted", tx_hash_b256),
             }
             .into());
         }
