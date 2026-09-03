@@ -18,7 +18,10 @@
 
 use std::collections::HashMap;
 
+use alloy::sol_types::SolCall;
 use serde::{Deserialize, Serialize};
+
+use crate::contracts::Perp;
 
 /// 4-byte function selector (first 4 bytes of calldata).
 type Selector = [u8; 4];
@@ -54,6 +57,62 @@ impl GasLimits {
     pub const LIQUIDATE: u64 = 3_000_000;
     /// ERC-20 `transfer` call.
     pub const TRANSFER: u64 = 65_000;
+}
+
+/// The lowest gas limit a cached estimate is allowed to produce for a known
+/// PerpCity entrypoint.
+///
+/// `eth_estimateGas` on Arbitrum can return LESS than the same call consumes
+/// in a block: execution charges an L1 data component and reserves gas for the
+/// reentrancy sentry, neither of which the estimate models the same way. The
+/// transaction then burns ~99% of its limit and reverts with no revert data.
+/// `eth_call` does not reproduce it either, so the capped preflight in
+/// `simulate()` cannot catch this class — the estimate looks fine right up
+/// until it is mined.
+///
+/// Observed on HORMUZ-TRAFFIC 2026-09-03: `adjustTaker` estimates cached at
+/// 374-381k against the 500k [`GasLimits::ADJUST_NOTIONAL`] constant, and 14
+/// of 17 band-keeper sends over 48 hours reverted having used ~98.6% of the
+/// limit. The keeper could not converge the basis for two days.
+///
+/// The floor makes the empirical constant a lower BOUND on the estimate
+/// rather than a fallback that estimation silently undercuts. An over-generous
+/// limit is close to free: the chain charges for gas used, not gas reserved.
+fn estimate_floor(selector: &Selector) -> Option<u64> {
+    const OPEN_TAKER: Selector = Perp::openTakerCall::SELECTOR;
+    const OPEN_MAKER: Selector = Perp::openMakerCall::SELECTOR;
+    const ADJUST_TAKER: Selector = Perp::adjustTakerCall::SELECTOR;
+    const ADJUST_MAKER: Selector = Perp::adjustMakerCall::SELECTOR;
+    const LIQUIDATE_TAKER: Selector = Perp::liquidateTakerCall::SELECTOR;
+    const LIQUIDATE_MAKER: Selector = Perp::liquidateMakerCall::SELECTOR;
+
+    match *selector {
+        OPEN_TAKER => Some(GasLimits::OPEN_TAKER),
+        OPEN_MAKER => Some(GasLimits::OPEN_MAKER),
+        // Both adjust paths carry a swap whose cost scales with the ticks it
+        // crosses, so their estimate is the one that varies most per call.
+        ADJUST_TAKER | ADJUST_MAKER => Some(GasLimits::ADJUST_NOTIONAL),
+        LIQUIDATE_TAKER | LIQUIDATE_MAKER => Some(GasLimits::LIQUIDATE),
+        _ => None,
+    }
+}
+
+/// Share of the gas limit at or above which a reverted receipt is read as an
+/// out-of-gas failure rather than a contract revert.
+///
+/// An Arbitrum OOG consumes the whole limit; a contract revert refunds the
+/// remainder and returns revert data. 95% separates them without needing the
+/// trace: no PerpCity entrypoint lands that close to its limit and succeeds,
+/// because every limit carries at least the 20% cache buffer.
+const OUT_OF_GAS_RATIO: f64 = 0.95;
+
+/// Whether a reverted receipt looks like it ran out of gas.
+///
+/// Used to evict a cached estimate that only fails once mined — the failure
+/// mode [`estimate_floor`] guards against, caught after the fact for the
+/// selectors that have no floor.
+pub fn looks_out_of_gas(gas_used: u64, gas_limit: u64) -> bool {
+    gas_limit > 0 && gas_used as f64 >= gas_limit as f64 * OUT_OF_GAS_RATIO
 }
 
 /// Cached gas estimates from `eth_estimateGas`, keyed by function selector.
@@ -115,13 +174,15 @@ impl GasLimitCache {
         }
     }
 
-    /// Store an estimate. Applies the buffer (e.g. raw 580K → stored 696K at 1.2×).
+    /// Store an estimate. Applies the buffer (e.g. raw 580K → stored 696K at 1.2×),
+    /// then raises the result to the selector's [`estimate_floor`] if it has one.
     pub fn put(&mut self, selector: Selector, raw_estimate: u64, now_ms: u64) {
         let buffered = (raw_estimate as f64 * self.buffer) as u64;
+        let gas_limit = buffered.max(estimate_floor(&selector).unwrap_or(0));
         self.estimates.insert(
             selector,
             CachedEstimate {
-                gas_limit: buffered,
+                gas_limit,
                 cached_at_ms: now_ms,
             },
         );
@@ -423,6 +484,50 @@ mod tests {
         assert_eq!(cache.get(&selector, 0), Some(150_000)); // 1.5× buffer
         assert_eq!(cache.get(&selector, 999), Some(150_000)); // within TTL
         assert!(cache.get(&selector, 1000).is_none()); // expired
+    }
+
+    #[test]
+    fn estimate_floor_lifts_an_undercooked_adjust_estimate() {
+        // The live failure: adjustTaker estimated ~313k, buffered to ~376k,
+        // then burned 98.6% of that limit on-chain. The floor lifts it to the
+        // empirical constant so the send is never made with the bad number.
+        let mut cache = GasLimitCache::new();
+        let selector = Perp::adjustTakerCall::SELECTOR;
+
+        cache.put(selector, 313_000, 0);
+        assert_eq!(cache.get(&selector, 0), Some(GasLimits::ADJUST_NOTIONAL));
+    }
+
+    #[test]
+    fn estimate_floor_never_lowers_a_bigger_estimate() {
+        // A genuinely expensive swap must keep its own headroom; the floor is
+        // a lower bound, not a pin.
+        let mut cache = GasLimitCache::new();
+        let selector = Perp::adjustTakerCall::SELECTOR;
+
+        cache.put(selector, 900_000, 0);
+        assert_eq!(cache.get(&selector, 0), Some(1_080_000)); // 900k x 1.2
+    }
+
+    #[test]
+    fn estimate_floor_leaves_unknown_selectors_alone() {
+        // ERC-20 and everything else outside the Perp entrypoints keep the
+        // plain buffered estimate.
+        let mut cache = GasLimitCache::new();
+        let selector = [0xaa, 0xbb, 0xcc, 0xdd];
+
+        cache.put(selector, 100_000, 0);
+        assert_eq!(cache.get(&selector, 0), Some(120_000));
+    }
+
+    #[test]
+    fn out_of_gas_is_told_apart_from_a_contract_revert() {
+        // The live receipts: 372,314 used of a 377,451 limit (98.6%).
+        assert!(looks_out_of_gas(372_314, 377_451));
+        // A contract revert refunds the remainder.
+        assert!(!looks_out_of_gas(120_000, 377_451));
+        // Never divide by a zero limit.
+        assert!(!looks_out_of_gas(0, 0));
     }
 
     #[test]
