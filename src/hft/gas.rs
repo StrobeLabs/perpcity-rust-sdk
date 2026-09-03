@@ -97,7 +97,7 @@ const OUT_OF_GAS_RATIO: f64 = 0.95;
 
 /// Whether a reverted receipt exhausted its gas limit.
 ///
-/// Covers the selectors [`estimate_floor`] has no bound for, so one estimate
+/// Covers the selectors with no [`GasLimits`] bound, so one estimate
 /// that only fails once mined cannot own the cache for a whole TTL.
 pub(crate) fn is_out_of_gas(gas_used: u64, gas_limit: u64) -> bool {
     gas_limit > 0 && gas_used as f64 >= gas_limit as f64 * OUT_OF_GAS_RATIO
@@ -163,7 +163,7 @@ impl GasLimitCache {
     }
 
     /// Store an estimate. Applies the buffer (e.g. raw 580K → stored 696K at 1.2×),
-    /// then raises the result to the selector's [`estimate_floor`] if it has one.
+    /// then raises it to the [`GasLimits`] bound where the selector has one.
     pub fn put(&mut self, selector: Selector, raw_estimate: u64, now_ms: u64) {
         let buffered = (raw_estimate as f64 * self.buffer) as u64;
         let gas_limit = buffered.max(estimate_floor(&selector).unwrap_or(0));
