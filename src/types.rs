@@ -79,12 +79,13 @@ pub struct Fees {
     pub liquidation_fee: f64,
 }
 
-/// Taker open interest for a perp market, in USDC.
+/// Taker open interest for a perp market, in perp tokens (multiply by the
+/// mark price for USD). The contract accumulates `|perp_delta|` per side.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct OpenInterest {
-    /// Total long open interest in USDC.
+    /// Total long open interest in perp tokens.
     pub long_oi: f64,
-    /// Total short open interest in USDC.
+    /// Total short open interest in perp tokens.
     pub short_oi: f64,
 }
 

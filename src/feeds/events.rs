@@ -165,12 +165,14 @@ pub enum MarketEvent {
     },
 
     // ── Market state ─────────────────────────────────────────────────
-    /// Available taker open-interest capacity supplied by makers, in USDC.
+    /// Available taker open-interest capacity supplied by makers, in perp
+    /// tokens — the same units the contract checks `OpenInterest` against.
     CapacityUpdated {
         long: f64,
         short: f64,
     },
-    /// Current taker open interest, in USDC.
+    /// Current taker open interest, in perp tokens (multiply by the mark
+    /// price for USD).
     OpenInterestUpdated {
         long_oi: f64,
         short_oi: f64,
