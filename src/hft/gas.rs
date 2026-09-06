@@ -18,7 +18,10 @@
 
 use std::collections::HashMap;
 
+use alloy::sol_types::SolCall;
 use serde::{Deserialize, Serialize};
+
+use crate::contracts::Perp;
 
 /// 4-byte function selector (first 4 bytes of calldata).
 type Selector = [u8; 4];
@@ -54,6 +57,50 @@ impl GasLimits {
     pub const LIQUIDATE: u64 = 3_000_000;
     /// ERC-20 `transfer` call.
     pub const TRANSFER: u64 = 65_000;
+}
+
+/// Lower bound on a cached estimate for the known Perp entrypoints.
+///
+/// Arbitrum charges execution costs — an L1 data component, the reentrancy
+/// sentry reserve — that `eth_estimateGas` does not model, so an estimate can
+/// come back below what the same call consumes in a block. `eth_call` does not
+/// reproduce the shortfall, so the capped pre-flight in `simulate()` cannot
+/// catch it either: the limit is only disproved once mined.
+///
+/// The entrypoint costs vary most where a call crosses ticks, and the cache is
+/// keyed by selector alone, so one cheap call's estimate is reused for an
+/// expensive one. Flooring at the [`GasLimits`] constants makes them a bound on
+/// the estimate rather than a fallback it can silently undercut. An
+/// over-generous limit is close to free: the chain charges for gas used, not
+/// gas reserved.
+fn estimate_floor(selector: &Selector) -> Option<u64> {
+    const OPEN_TAKER: Selector = Perp::openTakerCall::SELECTOR;
+    const OPEN_MAKER: Selector = Perp::openMakerCall::SELECTOR;
+    const ADJUST_TAKER: Selector = Perp::adjustTakerCall::SELECTOR;
+    const ADJUST_MAKER: Selector = Perp::adjustMakerCall::SELECTOR;
+    const LIQUIDATE_TAKER: Selector = Perp::liquidateTakerCall::SELECTOR;
+    const LIQUIDATE_MAKER: Selector = Perp::liquidateMakerCall::SELECTOR;
+
+    match *selector {
+        OPEN_TAKER => Some(GasLimits::OPEN_TAKER),
+        OPEN_MAKER => Some(GasLimits::OPEN_MAKER),
+        ADJUST_TAKER | ADJUST_MAKER => Some(GasLimits::ADJUST_NOTIONAL),
+        LIQUIDATE_TAKER | LIQUIDATE_MAKER => Some(GasLimits::LIQUIDATE),
+        _ => None,
+    }
+}
+
+/// Share of the gas limit at or above which a reverted receipt is read as out
+/// of gas rather than a contract revert. A revert refunds the remainder and
+/// returns revert data; an out-of-gas consumes the limit.
+const OUT_OF_GAS_RATIO: f64 = 0.95;
+
+/// Whether a reverted receipt exhausted its gas limit.
+///
+/// Covers the selectors with no [`GasLimits`] bound, so one estimate
+/// that only fails once mined cannot own the cache for a whole TTL.
+pub(crate) fn is_out_of_gas(gas_used: u64, gas_limit: u64) -> bool {
+    gas_limit > 0 && gas_used as f64 >= gas_limit as f64 * OUT_OF_GAS_RATIO
 }
 
 /// Cached gas estimates from `eth_estimateGas`, keyed by function selector.
@@ -115,13 +162,15 @@ impl GasLimitCache {
         }
     }
 
-    /// Store an estimate. Applies the buffer (e.g. raw 580K → stored 696K at 1.2×).
+    /// Store an estimate. Applies the buffer (e.g. raw 580K → stored 696K at 1.2×),
+    /// then raises it to the [`GasLimits`] bound where the selector has one.
     pub fn put(&mut self, selector: Selector, raw_estimate: u64, now_ms: u64) {
         let buffered = (raw_estimate as f64 * self.buffer) as u64;
+        let gas_limit = buffered.max(estimate_floor(&selector).unwrap_or(0));
         self.estimates.insert(
             selector,
             CachedEstimate {
-                gas_limit: buffered,
+                gas_limit,
                 cached_at_ms: now_ms,
             },
         );
@@ -423,6 +472,44 @@ mod tests {
         assert_eq!(cache.get(&selector, 0), Some(150_000)); // 1.5× buffer
         assert_eq!(cache.get(&selector, 999), Some(150_000)); // within TTL
         assert!(cache.get(&selector, 1000).is_none()); // expired
+    }
+
+    #[test]
+    fn estimate_floor_lifts_an_undercooked_estimate() {
+        // A tick-crossing adjust costs more than the cheap one that seeded the
+        // cache; the floor keeps the limit at the empirical constant.
+        let mut cache = GasLimitCache::new();
+        let selector = Perp::adjustTakerCall::SELECTOR;
+
+        cache.put(selector, 313_000, 0);
+        assert_eq!(cache.get(&selector, 0), Some(GasLimits::ADJUST_NOTIONAL));
+    }
+
+    #[test]
+    fn estimate_floor_never_lowers_a_bigger_estimate() {
+        // The floor is a bound, not a pin: an expensive call keeps its own
+        // headroom.
+        let mut cache = GasLimitCache::new();
+        let selector = Perp::adjustTakerCall::SELECTOR;
+
+        cache.put(selector, 900_000, 0);
+        assert_eq!(cache.get(&selector, 0), Some(1_080_000)); // 900k x 1.2
+    }
+
+    #[test]
+    fn estimate_floor_leaves_unknown_selectors_alone() {
+        let mut cache = GasLimitCache::new();
+        let selector = [0xaa, 0xbb, 0xcc, 0xdd];
+
+        cache.put(selector, 100_000, 0);
+        assert_eq!(cache.get(&selector, 0), Some(120_000));
+    }
+
+    #[test]
+    fn out_of_gas_is_told_apart_from_a_contract_revert() {
+        assert!(is_out_of_gas(372_314, 377_451)); // exhausted the limit
+        assert!(!is_out_of_gas(120_000, 377_451)); // revert refunded the rest
+        assert!(!is_out_of_gas(0, 0)); // never divide by a zero limit
     }
 
     #[test]

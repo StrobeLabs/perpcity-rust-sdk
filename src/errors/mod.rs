@@ -142,6 +142,17 @@ mod tests {
             !failed.is_transient(),
             "an empty revert is the node's answer, not a network condition"
         );
+
+        let out_of_gas: PerpCityError = TransactionError::OutOfGas {
+            tx_hash: [0x11; 32].into(),
+            gas_used: 372_314,
+            gas_limit: 377_451,
+        }
+        .into();
+        assert!(
+            !out_of_gas.is_transient(),
+            "the send evicts the estimate, so a retry is the caller's call — not a backoff loop's"
+        );
         assert!(revert.is_simulation_revert());
     }
 

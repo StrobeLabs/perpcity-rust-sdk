@@ -32,6 +32,29 @@ pub enum TransactionError {
         reason: String,
     },
 
+    /// Transaction was broadcast and mined but ran out of gas: execution
+    /// consumed the limit and returned no revert data. Gas was burned.
+    ///
+    /// Distinct from [`Self::Reverted`] because the call was never disproved
+    /// — only the limit it carried was too small. Arbitrum charges execution
+    /// costs that `eth_estimateGas` does not model, so an estimate can be
+    /// below what the same call consumes in a block, and `eth_call` does not
+    /// reproduce the shortfall either: pre-flight passes and the limit is
+    /// only disproved here.
+    ///
+    /// Not transient, so a backoff loop does not spin on it. The send path
+    /// evicts the cached estimate before returning, so a caller-level retry
+    /// re-estimates rather than repeating the same limit.
+    #[error("transaction out of gas: {tx_hash} used {gas_used} of {gas_limit}")]
+    OutOfGas {
+        /// Hash of the mined transaction.
+        tx_hash: FixedBytes<32>,
+        /// Gas the transaction consumed.
+        gas_used: u64,
+        /// Limit it was broadcast with.
+        gas_limit: u64,
+    },
+
     /// Receipt polling timed out before the transaction was confirmed.
     #[error("receipt timeout: {reason}")]
     ReceiptTimeout {
