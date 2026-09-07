@@ -7,8 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Maker equities are priced at the deployed fair price, not the pool price.** `get_maker_equities` pinned `mark_price_x96` to `poolState().ammPrice`; the contract never prices there. `PerpLogic.accrue` sets `markPrice = pricing.fairPrice(ammPrice, index, emaAmmPrice, emaIndex)` with the EMAs advanced to the block, and every `valPnl`, health check, liquidation test and utilization accrual uses that mark — so a maker guard built on `is_liquidatable` disagreed with the chain whenever the EMA basis was open. The market-wide read now also takes `modules()`, `emas()`, `EMA_WINDOW()` and the beacon's `index()` at the pinned block and computes the contract's mark (`math::pricing::fair_price_x96`). Consumers see `position_value`, `unrealized_pnl`, `margin_ratio` and `is_liquidatable` move to the chain's numbers; `get_maker_equities_at_mark` is unchanged as the what-if override. A failed beacon read fails the call, like any other market-wide read.
+
+- **`MarketEvent::TakerClosed`, `MakerClosed` and `MakerConverted` carry the deployed liquidation tails**: new fields `liq_fee: f64` (USDC) and `is_liquidation: bool`. `Perp::TakerClosed` and the deployed-era `PerpDeployedEvents::MakerClosed`/`MakerConverted` declare them; the post-#171 maker shapes have none and decode as `0.0` / `false`. Consumers destructuring with `..` are unaffected; exhaustive patterns must name the new fields.
+
 ### Added
 
+- **`math::pricing`** — the deployed pricing module's `fairPrice` as `fair_price_x96` (exact X96, Solady overflow-safe average) and `fair_price` (f64, for simulators); both re-exported at the crate root and in `prelude`. Golden vectors from an `eth_call` to the live module (Arbitrum One, 2026-09-07).
+- **`Perp::emas()`** binding (`0x6ab80a34`), the stored EMA pair as of `rates().lastTouch`; `math::ema::PricePair::try_from_x96` narrows X96 `uint256` observations to the contract's `uint128` pair with a typed overflow error.
+- **`PerpClient::get_margin_ratios`** → `MarginRatios { maker, taker }` of `MarginRatioTriple { init, liquidation, backstop }` (fractions; `from_e6` / `*_e6()` for the on-chain `uint24` values). Previously only the taker liquidation ratio was reachable, through `Bounds`.
+- **`MarketEvent::ModifyLiquidity`** (Uniswap V4 PoolManager, `salt == posId` for perp pools; declared on `IPoolManagerState`) and **`MarketEvent::PositionTransferred`** (the Perp's ERC721 `Transfer`; a mint has `from == Address::ZERO`). An ERC20-shaped `Transfer` log, which shares the topic0, returns `None`. `MarketFeed` is unaffected — it filters by Perp + beacon address, so the PoolManager log only arrives to a consumer that subscribes to it.
 - **`TransactionError::OutOfGas { tx_hash, gas_used, gas_limit }`** (new variant on the `#[non_exhaustive]` enum) — a broadcast transaction that was mined having consumed its gas limit with no revert data. Distinct from `Reverted`: the call was never disproved, only the limit was too small. Not `is_transient()` — the send path evicts the cached estimate before returning, so a retry re-estimates rather than repeating the limit, but whether to retry is the caller's decision.
 
 ### Fixed

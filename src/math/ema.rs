@@ -22,6 +22,27 @@ pub struct PricePair {
     pub index: u128,
 }
 
+impl PricePair {
+    /// Narrow a pair of X96 `uint256` observations (`poolState().ammPrice`,
+    /// the beacon's `index()`) to the contract's `uint128` pair.
+    ///
+    /// # Errors
+    ///
+    /// [`ValidationError::Overflow`] when either exceeds `u128::MAX` — the
+    /// contract would revert on the same cast.
+    pub fn try_from_x96(amm: U256, index: U256) -> Result<Self, ValidationError> {
+        let narrow = |value: U256, what: &str| {
+            u128::try_from(value).map_err(|_| ValidationError::Overflow {
+                context: format!("{what} exceeds uint128"),
+            })
+        };
+        Ok(Self {
+            amm: narrow(amm, "AMM price")?,
+            index: narrow(index, "index")?,
+        })
+    }
+}
+
 fn i(value: i128) -> I256 {
     I256::try_from(value).expect("i128 fits I256")
 }

@@ -65,7 +65,8 @@ async fn main() -> perpcity_sdk::Result<()> {
     // ── 1. One batched, block-pinned read ───────────────────────────
     // Every requested id comes back exactly once, in input order: the
     // settle preview each open maker would receive if touched now, priced
-    // at the pinned poolState mark.
+    // at the contract's own mark for the pinned block (the deployed fair
+    // price of pool price, beacon index, and block-advanced EMAs).
     let equities = client.get_maker_equities(&pos_ids).await?;
     let mut candidates: Vec<(U256, &MakerEquityBreakdown)> = Vec::new();
     for outcome in &equities {

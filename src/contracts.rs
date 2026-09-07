@@ -235,14 +235,26 @@ sol! {
             external view returns (uint256 sqrtMin, uint256 sqrtMax);
     }
 
-    /// Uniswap V4 PoolManager state surface used by the local quoter.
+    /// Uniswap V4 PoolManager surface used by the SDK.
     ///
-    /// Only `extsload` is declared: the quoter reconstructs the book from
-    /// block-pinned storage reads. The `ModifyLiquidity`/`Swap` events return
-    /// here with the PR that consumes them for incremental (event-sourced)
-    /// tick maintenance.
+    /// `extsload` feeds the local quoter and the maker-equity reads from
+    /// block-pinned storage. `ModifyLiquidity` is the pool's liquidity
+    /// event: perp pools are vanilla V4 pools, so a maker open/adjust emits
+    /// it from the PoolManager with `sender` = the Perp and `salt` = the
+    /// position id.
     #[sol(rpc)]
     interface IPoolManagerState {
+        /// Liquidity added to (`liquidityDelta > 0`) or removed from a pool's
+        /// tick range.
+        event ModifyLiquidity(
+            bytes32 indexed id,
+            address indexed sender,
+            int24 tickLower,
+            int24 tickUpper,
+            int256 liquidityDelta,
+            bytes32 salt
+        );
+
         function extsload(bytes32 slot) external view returns (bytes32 value);
         function extsload(bytes32[] calldata slots) external view returns (bytes32[] memory values);
     }
@@ -407,7 +419,15 @@ sol! {
 
         function cumulatives() external view returns (Cumulatives memory);
 
+        /// The stored EMA pair as of `rates().lastTouch`. Advance it to a
+        /// block with `math::ema::calculate_emas` before pricing with it.
+        function emas() external view returns (PricePair memory);
+
         // ── ERC721 ─────────────────────────────────────────────────
+
+        /// Position NFT transfer: a mint has `from == address(0)`, a burn
+        /// (full close, liquidation) `to == address(0)`.
+        event Transfer(address indexed from, address indexed to, uint256 indexed tokenId);
 
         function name() external view returns (string memory);
         function symbol() external view returns (string memory);
@@ -687,6 +707,12 @@ mod abi_lock {
         assert_eq!(Perp::modulesCall::SIGNATURE, "modules()");
         assert_eq!(Perp::ratesCall::SIGNATURE, "rates()");
         assert_eq!(Perp::cumulativesCall::SIGNATURE, "cumulatives()");
+        // Verified 2026-09-07 by eth_call on HORMUZ-TRAFFIC
+        // (0x137e00487dc079dad69ba149994320a8ff4c5b17, Arbitrum One):
+        // selector 0x6ab80a34 returned (ammPrice 0x2e4e1d5d09c24b2a50779abaf3,
+        // index 0x2dc0f47dc4c7764d34d2f6a88f).
+        assert_eq!(Perp::emasCall::SIGNATURE, "emas()");
+        assert_eq!(Perp::emasCall::SELECTOR, [0x6a, 0xb8, 0x0a, 0x34]);
     }
 
     /// Event signatures (all params) — drives `topic0`; catches event drift.
@@ -780,5 +806,33 @@ mod abi_lock {
             "TicksCrossed(int24,int24,bool)"
         );
         assert_eq!(IBeacon::IndexUpdated::SIGNATURE, "IndexUpdated(uint256)");
+        // The topic0 the live PoolManager (0x360e68faccca8ca495c1b759fd9eee466db9fb32,
+        // Arbitrum One) emits for every perp pool's liquidity change.
+        assert_eq!(
+            IPoolManagerState::ModifyLiquidity::SIGNATURE,
+            "ModifyLiquidity(bytes32,address,int24,int24,int256,bytes32)"
+        );
+        assert_eq!(
+            IPoolManagerState::ModifyLiquidity::SIGNATURE_HASH,
+            alloy::primitives::b256!(
+                "f208f4912782fd25c7f114ca3723a2d5dd6f3bcc3ac8db5af63baa85f711d5ec"
+            )
+        );
+        // ERC721 Transfer shares its topic0 with ERC20 Transfer (the
+        // signature omits `indexed`); only the topic count tells them apart.
+        assert_eq!(
+            Perp::Transfer::SIGNATURE,
+            "Transfer(address,address,uint256)"
+        );
+        assert_eq!(
+            Perp::Transfer::SIGNATURE_HASH,
+            IERC20::Transfer::SIGNATURE_HASH
+        );
+        assert_eq!(
+            Perp::Transfer::SIGNATURE_HASH,
+            alloy::primitives::b256!(
+                "ddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
+            )
+        );
     }
 }

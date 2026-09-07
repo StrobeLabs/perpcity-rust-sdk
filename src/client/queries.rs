@@ -32,12 +32,37 @@ use crate::math::BlockContext;
 use crate::math::ema::{PricePair, calculate_emas};
 use crate::math::swap::{TakerMarketSnapshot, TickLiquidity};
 use crate::storage::{perp_emas_slot, v4_tick_bitmap_slot, v4_tick_slot};
-use crate::types::{Bounds, Fees, OpenInterest, PerpData, PerpSnapshot};
+use crate::types::{
+    Bounds, Fees, MarginRatioTriple, MarginRatios, OpenInterest, PerpData, PerpSnapshot,
+};
 
 use super::{PerpClient, SCALE_F64, i24_to_i32, now_secs, u24_to_u32};
 
 /// Funding/utilization rates are scaled by 1e18 per day on-chain.
 const WAD_F64: f64 = 1e18;
+
+/// A module address from `modules()`, rejecting the zero address (an
+/// unregistered module) with a typed error naming the interface.
+fn registered_module(addr: Address, module: &str) -> Result<Address> {
+    if addr == Address::ZERO {
+        return Err(ContractError::ModuleNotRegistered {
+            module: module.into(),
+        }
+        .into());
+    }
+    Ok(addr)
+}
+
+/// The contract's `EMA_WINDOW` (seconds) narrowed to the width
+/// `calculate_emas` takes.
+pub(super) fn ema_window_secs(ema_window: U256) -> Result<u64> {
+    u64::try_from(ema_window).map_err(|_| {
+        ValidationError::Overflow {
+            context: "EMA window".into(),
+        }
+        .into()
+    })
+}
 
 /// Perp/pool values fixed at deployment, cached after the first taker book
 /// load. All are Solidity `immutable`s (or built from them), so no block
@@ -87,16 +112,10 @@ impl PerpClient {
                     }
                     .into());
                 }
-                if ema_window > U256::from(u64::MAX) {
-                    return Err(ValidationError::Overflow {
-                        context: "EMA window".into(),
-                    }
-                    .into());
-                }
                 Ok(BookImmutables {
                     pool_id,
                     tick_spacing,
-                    ema_window: ema_window.to::<u64>(),
+                    ema_window: ema_window_secs(ema_window)?,
                 })
             })
             .await
@@ -159,20 +178,11 @@ impl PerpClient {
             .block(block_id)
             .call()
             .await?;
-        if state.ammPrice > U256::from(u128::MAX) || index > U256::from(u128::MAX) {
-            return Err(ValidationError::Overflow {
-                context: "deployed EMA inputs".into(),
-            }
-            .into());
-        }
         let stored = PricePair {
             amm: (stored_emas & U256::from(u128::MAX)).to::<u128>(),
             index: (stored_emas >> 128usize).to::<u128>(),
         };
-        let spot = PricePair {
-            amm: state.ammPrice.to::<u128>(),
-            index: index.to::<u128>(),
-        };
+        let spot = PricePair::try_from_x96(state.ammPrice, index)?;
         let emas = calculate_emas(
             stored,
             spot,
@@ -442,6 +452,44 @@ impl PerpClient {
 
         let index = price_x96_to_f64(index_x96)?;
         Ok(index)
+    }
+
+    /// Read the market's `IMarginRatios` module: the maker and taker
+    /// init / liquidation / backstop thresholds, as fractions.
+    ///
+    /// Two module calls after `modules()`, not cached. Verified live
+    /// 2026-09-07 on HORMUZ-TRAFFIC's module
+    /// `0x8afca53c52b1f02d76aefb811c6b08f4bd3e4cf9` (Arbitrum One):
+    /// `makerMarginRatios()` = (1000000, 900000, 800000), i.e.
+    /// 1.0 / 0.9 / 0.8; `takerMarginRatios()` = (100000, 50000, 20000),
+    /// i.e. 0.1 / 0.05 / 0.02.
+    ///
+    /// # Errors
+    ///
+    /// [`ContractError::ModuleNotRegistered`] when `modules().marginRatios`
+    /// is the zero address.
+    pub async fn get_margin_ratios(&self) -> Result<MarginRatios> {
+        let perp = Perp::new(self.deployments.perp, &self.provider);
+        let modules = perp.modules().call().await?;
+        let ratios = IMarginRatios::new(
+            registered_module(modules.marginRatios, "IMarginRatios")?,
+            &self.provider,
+        );
+        let maker_call = ratios.makerMarginRatios();
+        let taker_call = ratios.takerMarginRatios();
+        let (maker, taker) = tokio::try_join!(maker_call.call(), taker_call.call())?;
+        Ok(MarginRatios {
+            maker: MarginRatioTriple::from_e6(
+                u24_to_u32(maker.init),
+                u24_to_u32(maker.liq),
+                u24_to_u32(maker.backstop),
+            ),
+            taker: MarginRatioTriple::from_e6(
+                u24_to_u32(taker.init),
+                u24_to_u32(taker.liq),
+                u24_to_u32(taker.backstop),
+            ),
+        })
     }
 
     /// Get taker open interest for the market.
@@ -787,14 +835,7 @@ impl PerpClient {
 
     /// Fetch fees from the `IFees` module contract.
     async fn fetch_fees(&self, fees_addr: Address) -> Result<Fees> {
-        if fees_addr == Address::ZERO {
-            return Err(ContractError::ModuleNotRegistered {
-                module: "IFees".into(),
-            }
-            .into());
-        }
-
-        let fees_contract = IFees::new(fees_addr, &self.provider);
+        let fees_contract = IFees::new(registered_module(fees_addr, "IFees")?, &self.provider);
 
         let fee_result = fees_contract.fees().call().await?;
         let c_fee = u24_to_u32(fee_result.cFee);
@@ -814,14 +855,10 @@ impl PerpClient {
 
     /// Fetch taker margin-ratio bounds from the `IMarginRatios` module contract.
     async fn fetch_bounds(&self, ratios_addr: Address) -> Result<Bounds> {
-        if ratios_addr == Address::ZERO {
-            return Err(ContractError::ModuleNotRegistered {
-                module: "IMarginRatios".into(),
-            }
-            .into());
-        }
-
-        let ratios_contract = IMarginRatios::new(ratios_addr, &self.provider);
+        let ratios_contract = IMarginRatios::new(
+            registered_module(ratios_addr, "IMarginRatios")?,
+            &self.provider,
+        );
         let taker = ratios_contract.takerMarginRatios().call().await?;
 
         let scale = SCALE_F64;
