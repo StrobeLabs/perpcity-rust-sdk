@@ -43,7 +43,7 @@ const WAD_F64: f64 = 1e18;
 
 /// A module address from `modules()`, rejecting the zero address (an
 /// unregistered module) with a typed error naming the interface.
-fn registered_module(addr: Address, module: &str) -> Result<Address> {
+pub(super) fn registered_module(addr: Address, module: &str) -> Result<Address> {
     if addr == Address::ZERO {
         return Err(ContractError::ModuleNotRegistered {
             module: module.into(),

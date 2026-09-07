@@ -36,7 +36,7 @@ use crate::storage::{
     v4_tick_fee_growth_outside1_slot,
 };
 
-use super::queries::ema_window_secs;
+use super::queries::{ema_window_secs, registered_module};
 use super::{PerpClient, i24_to_i32, u24_to_u32};
 
 /// Concurrency bound for the `eth_getStorageAt` fallback when the endpoint
@@ -590,8 +590,11 @@ impl PerpClient {
         // The contract's mark for this block, as `PerpLogic.accrue` sets
         // it: the deployed fair price of the spot pair and the EMAs
         // advanced to the block timestamp. `index()` mutates on chain;
-        // an eth_call pinned to the block reads it without sending.
-        let index = IBeacon::new(modules.beacon, &self.provider)
+        // an eth_call pinned to the block reads it without sending. The
+        // guard names the missing interface on a perp with no beacon,
+        // where the bare call returns an opaque ABI-decode error.
+        let beacon = registered_module(modules.beacon, "IBeacon")?;
+        let index = IBeacon::new(beacon, &self.provider)
             .index()
             .block(block_id)
             .call()
