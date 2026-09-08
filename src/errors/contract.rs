@@ -1,6 +1,6 @@
 //! On-chain / protocol state errors.
 
-use alloy::primitives::U256;
+use alloy::primitives::{Address, U256};
 use thiserror::Error;
 
 /// Errors from querying on-chain protocol state.
@@ -12,6 +12,21 @@ pub enum ContractError {
     PositionNotFound {
         /// The position ID that was not found.
         pos_id: U256,
+    },
+
+    /// The position exists but belongs to another account.
+    ///
+    /// Raised by writes that must own the position (transfer). The
+    /// contract would revert `TransferFromIncorrectOwner`; checking first
+    /// turns a wasted broadcast into a typed error.
+    #[error("position {pos_id} is owned by {owner}, not {caller}")]
+    PositionNotOwned {
+        /// The position ID.
+        pos_id: U256,
+        /// The account that actually owns it.
+        owner: Address,
+        /// The account that attempted the write.
+        caller: Address,
     },
 
     /// A required module is not registered.
