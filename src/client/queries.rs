@@ -457,9 +457,10 @@ impl PerpClient {
     /// Read the market's `IMarginRatios` module: the maker and taker
     /// init / liquidation / backstop thresholds, as fractions.
     ///
-    /// Two module calls after `modules()`, not cached. Verified live
-    /// 2026-09-07 on HORMUZ-TRAFFIC's module
-    /// `0x8afca53c52b1f02d76aefb811c6b08f4bd3e4cf9` (Arbitrum One):
+    /// `modules()` and the two ratio getters are pinned to one lagged
+    /// block, so a governance module swap or ratio update cannot straddle
+    /// the result. Not cached. Verified live 2026-09-07 on HORMUZ-TRAFFIC's
+    /// module `0x8afca53c52b1f02d76aefb811c6b08f4bd3e4cf9` (Arbitrum One):
     /// `makerMarginRatios()` = (1000000, 900000, 800000), i.e.
     /// 1.0 / 0.9 / 0.8; `takerMarginRatios()` = (100000, 50000, 20000),
     /// i.e. 0.1 / 0.05 / 0.02.
@@ -467,16 +468,18 @@ impl PerpClient {
     /// # Errors
     ///
     /// [`ContractError::ModuleNotRegistered`] when `modules().marginRatios`
-    /// is the zero address.
+    /// is the zero address; [`ContractError::BlockUnavailable`] when the
+    /// pinned header is missing from the serving replica.
     pub async fn get_margin_ratios(&self) -> Result<MarginRatios> {
+        let (_, block_id) = self.lagged_snapshot_block().await?;
         let perp = Perp::new(self.deployments.perp, &self.provider);
-        let modules = perp.modules().call().await?;
+        let modules = perp.modules().block(block_id).call().await?;
         let ratios = IMarginRatios::new(
             registered_module(modules.marginRatios, "IMarginRatios")?,
             &self.provider,
         );
-        let maker_call = ratios.makerMarginRatios();
-        let taker_call = ratios.takerMarginRatios();
+        let maker_call = ratios.makerMarginRatios().block(block_id);
+        let taker_call = ratios.takerMarginRatios().block(block_id);
         let (maker, taker) = tokio::try_join!(maker_call.call(), taker_call.call())?;
         Ok(MarginRatios {
             maker: MarginRatioTriple::from_e6(
