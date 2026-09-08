@@ -399,10 +399,13 @@ impl PerpClient {
         Ok(owned)
     }
 
-    /// Get the current mark price for the market (AMM spot price).
+    /// Get the pool (AMM spot) price via `poolState`. Uses the fast cache
+    /// layer (2s TTL).
     ///
-    /// Reads the live Uniswap V4 pool price via `poolState`. Uses the fast
-    /// cache layer (2s TTL).
+    /// Despite the name, this is not the price the contract marks at: every
+    /// health check and `valPnl` prices at `fairPrice(ammPrice, index,
+    /// emas…)` — see [`crate::math::pricing`]. Use this for the pool's spot
+    /// state; use the maker/taker snapshots for contract-consistent marks.
     pub async fn get_mark_price(&self) -> Result<f64> {
         let now_ts = now_secs();
         let key = self.market_key();

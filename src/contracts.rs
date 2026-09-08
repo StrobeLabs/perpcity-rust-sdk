@@ -9,10 +9,10 @@
 //! `libraries/Errors.sol`, `interfaces/modules/*`).
 //!
 //! Caveat: the deployed bytecode predates `4bbe554f` for maker closes — live
-//! perps emit the pre-#171 `MakerClosed`/`MakerConverted` shapes with
+//! perps emit `MakerClosed`/`MakerConverted` shapes with
 //! `liqFee`/`isLiquidation` tails and no `MakerLiquidated` event.
 //! [`PerpDeployedEvents`] declares those shapes so `decode_log` recognizes
-//! both eras.
+//! both.
 //!
 //! Architecture: `PerpFactory` creates `Perp` contracts. There is no
 //! `PerpManager` — each market is its own `Perp` contract (ERC721 for position
@@ -341,10 +341,10 @@ sol! {
         /// Burns the position NFT if fully closed.
         function adjustMaker(AdjustMakerParams calldata params) external;
 
-        /// Liquidate an unhealthy maker position. Always the FULL position:
-        /// the deployed perps predate partial liquidations (contracts #171),
-        /// so only this 2-arg selector exists on live markets — the later
-        /// 3-arg partial form reverts empty (no matching selector).
+        /// Liquidate an unhealthy maker position. Always the full position:
+        /// the deployed perps predate partial liquidations, so only this
+        /// 2-arg selector exists on live markets — the later 3-arg partial
+        /// form reverts empty (no matching selector).
         function liquidateMaker(uint256 posId, address liquidationFeeRecipient) external;
 
         /// Backstop a maker position approaching liquidation.
@@ -465,15 +465,14 @@ sol! {
     // ═══════════════════════════════════════════════════════════════════
 
     /// Maker close/convert events as emitted by the Perp contracts currently
-    /// live on Arbitrum, which predate partial liquidations
-    /// (perpcity-contracts #171).
+    /// live on Arbitrum, which predate partial liquidations.
     ///
-    /// On that era there is no `MakerLiquidated` event; a maker liquidation
-    /// emits `MakerConverted` (and the residual taker close emits
-    /// `TakerClosed`) with a `liqFee` amount and `isLiquidation = true`.
-    /// The `#171`-and-later contracts dropped both tail fields (moving
+    /// On those contracts there is no `MakerLiquidated` event; a maker
+    /// liquidation emits `MakerConverted` (and the residual taker close
+    /// emits `TakerClosed`) with a `liqFee` amount and `isLiquidation =
+    /// true`. The later contracts dropped both tail fields (moving
     /// liquidations to dedicated events), which changes the event signature
-    /// hash — so both eras must be declared for `decode_log` to recognize
+    /// hash — so both shapes must be declared for `decode_log` to recognize
     /// maker settles from live markets. (`Perp::TakerClosed` above already
     /// carries the deployed-era tails, so takers need no legacy variant.)
     interface PerpDeployedEvents {
