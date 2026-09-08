@@ -17,6 +17,13 @@
 //! (cumulatives, tick funding) are surfaced as raw on-chain integers to avoid
 //! precision loss.
 //!
+//! Two events come from outside the `Perp`'s own event library: the
+//! PoolManager's `ModifyLiquidity` (perp pools are vanilla V4 pools, so a
+//! maker's liquidity change is logged by the PoolManager, `salt == posId`)
+//! and the position NFT's ERC721 `Transfer`. The ERC721 `Transfer` shares
+//! its `topic0` with ERC20 `Transfer`; an ERC20-shaped log (two indexed
+//! fields, the value in data) fails the ERC721 decode and returns `None`.
+//!
 //! Admin/governance events (module setters, timelock, fee collection) are
 //! intentionally not decoded — they return `None`.
 //!
@@ -40,12 +47,12 @@
 //! # }
 //! ```
 
-use alloy::primitives::{Address, I256, U256};
+use alloy::primitives::{Address, B256, I256, U256};
 use alloy::rpc::types::Log;
 use alloy::sol_types::SolEvent;
 use serde::{Deserialize, Serialize};
 
-use crate::contracts::{IBeacon, Perp, PerpDeployedEvents, SwapResult};
+use crate::contracts::{IBeacon, IPoolManagerState, Perp, PerpDeployedEvents, SwapResult};
 use crate::convert::{price_x96_to_f64, scale_from_6dec, unpack_balance_delta};
 
 /// Funding/utilization rates are scaled by 1e18 per day on-chain.
@@ -114,13 +121,22 @@ pub enum MarketEvent {
         pos_id: U256,
         settle: MakerSettle,
     },
+    /// A maker converted to a taker. On the deployed era this is also how
+    /// a maker liquidation surfaces (`is_liquidation`, with `liq_fee` in
+    /// USDC); the post-#171 shape has no tails, so they decode as
+    /// `0.0` / `false`.
     MakerConverted {
         pos_id: U256,
         settle: MakerSettle,
+        liq_fee: f64,
+        is_liquidation: bool,
     },
+    /// A maker closed. Tails as on [`Self::MakerConverted`].
     MakerClosed {
         pos_id: U256,
         settle: MakerSettle,
+        liq_fee: f64,
+        is_liquidation: bool,
     },
     MakerLiquidated {
         pos_id: U256,
@@ -145,11 +161,15 @@ pub enum MarketEvent {
         funding: f64,
         util_fees: f64,
     },
+    /// A taker closed; the deployed event unifies close and liquidation
+    /// (`is_liquidation`, with `liq_fee` in USDC).
     TakerClosed {
         pos_id: U256,
         swap: SwapInfo,
         funding: f64,
         util_fees: f64,
+        liq_fee: f64,
+        is_liquidation: bool,
     },
     TakerLiquidated {
         pos_id: U256,
@@ -240,6 +260,30 @@ pub enum MarketEvent {
     IndexUpdated {
         index: f64,
     },
+
+    // ── Pool (Uniswap V4 PoolManager) ────────────────────────────────
+    /// Liquidity added to (`liquidity_delta > 0`) or removed from a pool's
+    /// tick range. Emitted by the PoolManager, not the Perp — it reaches a
+    /// consumer only through a subscription to the PoolManager address.
+    /// For a perp pool `sender` is the Perp and `salt` is the position id.
+    ModifyLiquidity {
+        pool_id: B256,
+        sender: Address,
+        tick_lower: i32,
+        tick_upper: i32,
+        liquidity_delta: i128,
+        salt: B256,
+    },
+
+    // ── Position NFT ─────────────────────────────────────────────────
+    /// ERC721 transfer of a position NFT. A mint has
+    /// `from == Address::ZERO`; a burn (full close, liquidation)
+    /// `to == Address::ZERO`.
+    PositionTransferred {
+        from: Address,
+        to: Address,
+        pos_id: U256,
+    },
 }
 
 /// Decode a raw Alloy [`Log`] into a [`MarketEvent`], if recognized.
@@ -265,35 +309,45 @@ pub fn decode_log(log: &Log) -> Option<MarketEvent> {
             settle: maker_settle(d.funding, d.longUtilFees, d.shortUtilFees, d.lpFees)?,
         })
     } else if topic0 == Perp::MakerConverted::SIGNATURE_HASH {
+        // Post-#171 shape: liquidations moved to `MakerLiquidated`, so
+        // this event carries no tails.
         let d = decode_raw::<Perp::MakerConverted>(log)?;
         Some(MarketEvent::MakerConverted {
             pos_id: d.posId,
             settle: maker_settle(d.funding, d.longUtilFees, d.shortUtilFees, d.lpFees)?,
+            liq_fee: 0.0,
+            is_liquidation: false,
         })
     } else if topic0 == Perp::MakerClosed::SIGNATURE_HASH {
         let d = decode_raw::<Perp::MakerClosed>(log)?;
         Some(MarketEvent::MakerClosed {
             pos_id: d.posId,
             settle: maker_settle(d.funding, d.longUtilFees, d.shortUtilFees, d.lpFees)?,
+            liq_fee: 0.0,
+            is_liquidation: false,
         })
 
     // ── Deployed-era (pre-#171) maker close/convert shapes ───────────
     // The live Arbitrum perps emit maker closes with `liqFee`/
     // `isLiquidation` tails (there is no MakerLiquidated event on that
-    // era), which changes topic0. Decode them into the same variants; the
-    // tail fields are dropped — a liquidation surfaces as a close with its
-    // settle.
+    // era), which changes topic0. Decode them into the same variants,
+    // tails included — a maker liquidation is a convert with
+    // `is_liquidation` set.
     } else if topic0 == PerpDeployedEvents::MakerConverted::SIGNATURE_HASH {
         let d = decode_raw::<PerpDeployedEvents::MakerConverted>(log)?;
         Some(MarketEvent::MakerConverted {
             pos_id: d.posId,
             settle: maker_settle(d.funding, d.longUtilFees, d.shortUtilFees, d.lpFees)?,
+            liq_fee: u256_usdc(d.liqFee)?,
+            is_liquidation: d.isLiquidation,
         })
     } else if topic0 == PerpDeployedEvents::MakerClosed::SIGNATURE_HASH {
         let d = decode_raw::<PerpDeployedEvents::MakerClosed>(log)?;
         Some(MarketEvent::MakerClosed {
             pos_id: d.posId,
             settle: maker_settle(d.funding, d.longUtilFees, d.shortUtilFees, d.lpFees)?,
+            liq_fee: u256_usdc(d.liqFee)?,
+            is_liquidation: d.isLiquidation,
         })
     } else if topic0 == Perp::MakerLiquidated::SIGNATURE_HASH {
         let d = decode_raw::<Perp::MakerLiquidated>(log)?;
@@ -333,6 +387,8 @@ pub fn decode_log(log: &Log) -> Option<MarketEvent> {
             swap: swap_info(&d.sr)?,
             funding: i256_usdc(d.funding)?,
             util_fees: u256_usdc(d.utilFees)?,
+            liq_fee: u256_usdc(d.liqFee)?,
+            is_liquidation: d.isLiquidation,
         })
     } else if topic0 == Perp::TakerLiquidated::SIGNATURE_HASH {
         let d = decode_raw::<Perp::TakerLiquidated>(log)?;
@@ -442,6 +498,27 @@ pub fn decode_log(log: &Log) -> Option<MarketEvent> {
         let d = decode_raw::<IBeacon::IndexUpdated>(log)?;
         Some(MarketEvent::IndexUpdated {
             index: price_x96_to_f64(d.index).ok()?,
+        })
+
+    // ── Pool / position NFT ──────────────────────────────────────────
+    } else if topic0 == IPoolManagerState::ModifyLiquidity::SIGNATURE_HASH {
+        let d = decode_raw::<IPoolManagerState::ModifyLiquidity>(log)?;
+        Some(MarketEvent::ModifyLiquidity {
+            pool_id: d.id,
+            sender: d.sender,
+            tick_lower: d.tickLower.as_i32(),
+            tick_upper: d.tickUpper.as_i32(),
+            liquidity_delta: i128::try_from(d.liquidityDelta).ok()?,
+            salt: d.salt,
+        })
+    } else if topic0 == Perp::Transfer::SIGNATURE_HASH {
+        // Same topic0 as ERC20 Transfer; the ERC721 shape needs three
+        // indexed topics, so an ERC20 log fails here and returns None.
+        let d = decode_raw::<Perp::Transfer>(log)?;
+        Some(MarketEvent::PositionTransferred {
+            from: d.from,
+            to: d.to,
+            pos_id: d.tokenId,
         })
     } else {
         None
@@ -643,19 +720,88 @@ mod tests {
             longUtilFees: U256::from(500_000u64),
             shortUtilFees: U256::from(250_000u64),
             lpFees: U256::from(1_500_000u64),
-            liqFee: U256::from(0u64),
-            isLiquidation: false,
+            liqFee: U256::from(750_000u64),
+            isLiquidation: true,
         };
         let log = make_log(&event, Address::ZERO);
         match decode_log(&log).expect("should decode deployed-era MakerClosed") {
-            MarketEvent::MakerClosed { pos_id, settle } => {
+            MarketEvent::MakerClosed {
+                pos_id,
+                settle,
+                liq_fee,
+                is_liquidation,
+            } => {
                 assert_eq!(pos_id, U256::from(9u64));
                 assert!((settle.funding - 2.0).abs() < 1e-9);
                 assert!((settle.long_util_fees - 0.5).abs() < 1e-9);
                 assert!((settle.short_util_fees - 0.25).abs() < 1e-9);
                 assert!((settle.lp_fees - 1.5).abs() < 1e-9);
+                assert!((liq_fee - 0.75).abs() < 1e-9);
+                assert!(is_liquidation);
             }
             other => panic!("expected MakerClosed, got {other:?}"),
+        }
+    }
+
+    /// The post-#171 shape has no tails; they decode as no liquidation.
+    #[test]
+    fn decode_post_171_maker_closed_has_no_liquidation_tail() {
+        let event = Perp::MakerClosed {
+            posId: U256::from(9u64),
+            funding: I256::ZERO,
+            longUtilFees: U256::ZERO,
+            shortUtilFees: U256::ZERO,
+            lpFees: U256::ZERO,
+        };
+        let log = make_log(&event, Address::ZERO);
+        match decode_log(&log).expect("should decode MakerClosed") {
+            MarketEvent::MakerClosed {
+                liq_fee,
+                is_liquidation,
+                ..
+            } => {
+                assert_eq!(liq_fee, 0.0);
+                assert!(!is_liquidation);
+            }
+            other => panic!("expected MakerClosed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decode_taker_closed_carries_liquidation_tail() {
+        let event = Perp::TakerClosed {
+            posId: U256::from(5u64),
+            sr: SwapResult {
+                delta: pack_balance_delta(-100_000_000, 100_000_000),
+                ammPrice: Q96,
+                totalFeeAmt: I256::ZERO,
+                lpFeeAmt: U256::ZERO,
+                protocolFeeAmt: U256::ZERO,
+                creatorFeeAmt: U256::ZERO,
+                insuranceFeeAmt: U256::ZERO,
+            },
+            funding: I256::try_from(-250_000i64).unwrap(),
+            utilFees: U256::from(10_000u64),
+            liqFee: U256::from(1_250_000u64),
+            isLiquidation: true,
+        };
+        let log = make_log(&event, Address::ZERO);
+        match decode_log(&log).expect("should decode TakerClosed") {
+            MarketEvent::TakerClosed {
+                pos_id,
+                funding,
+                util_fees,
+                liq_fee,
+                is_liquidation,
+                ..
+            } => {
+                assert_eq!(pos_id, U256::from(5u64));
+                assert!((funding + 0.25).abs() < 1e-9);
+                assert!((util_fees - 0.01).abs() < 1e-9);
+                assert!((liq_fee - 1.25).abs() < 1e-9);
+                assert!(is_liquidation);
+            }
+            other => panic!("expected TakerClosed, got {other:?}"),
         }
     }
 
@@ -692,15 +838,104 @@ mod tests {
             removed: false,
         };
         match decode_log(&log).expect("should decode mainnet MakerConverted") {
-            MarketEvent::MakerConverted { pos_id, settle } => {
+            MarketEvent::MakerConverted {
+                pos_id,
+                settle,
+                liq_fee,
+                is_liquidation,
+            } => {
                 assert_eq!(pos_id, U256::from(54u64));
                 assert!((settle.funding - 209.633223).abs() < 1e-9);
                 assert!((settle.long_util_fees - 0.432735).abs() < 1e-9);
                 assert!((settle.short_util_fees - 24.630722).abs() < 1e-9);
                 assert!((settle.lp_fees - 7.722360).abs() < 1e-9);
+                // The liquidation tails: liqFee 0x15696a = 1.403242 USDC.
+                assert!((liq_fee - 1.403242).abs() < 1e-9);
+                assert!(is_liquidation);
             }
             other => panic!("expected MakerConverted, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn decode_modify_liquidity_event() {
+        let pool_id = B256::repeat_byte(0xAB);
+        let perp = Address::repeat_byte(0xCD);
+        let event = IPoolManagerState::ModifyLiquidity {
+            id: pool_id,
+            sender: perp,
+            tickLower: alloy::primitives::Signed::<24, 1>::try_from(-60).unwrap(),
+            tickUpper: alloy::primitives::Signed::<24, 1>::try_from(120).unwrap(),
+            liquidityDelta: I256::try_from(-570_282_387i64).unwrap(),
+            salt: B256::from(U256::from(54u64)),
+        };
+        let log = make_log(&event, Address::repeat_byte(0x36));
+        match decode_log(&log).expect("should decode ModifyLiquidity") {
+            MarketEvent::ModifyLiquidity {
+                pool_id: id,
+                sender,
+                tick_lower,
+                tick_upper,
+                liquidity_delta,
+                salt,
+            } => {
+                assert_eq!(id, pool_id);
+                assert_eq!(sender, perp);
+                assert_eq!((tick_lower, tick_upper), (-60, 120));
+                assert_eq!(liquidity_delta, -570_282_387);
+                assert_eq!(U256::from_be_bytes(salt.0), U256::from(54u64));
+            }
+            other => panic!("expected ModifyLiquidity, got {other:?}"),
+        }
+    }
+
+    /// A `liquidityDelta` outside `i128` cannot come from a V4 pool
+    /// (liquidity is `uint128`); like the other decoders, the malformed
+    /// log yields `None` rather than a panic.
+    #[test]
+    fn modify_liquidity_delta_overflow_returns_none() {
+        let event = IPoolManagerState::ModifyLiquidity {
+            id: B256::ZERO,
+            sender: Address::ZERO,
+            tickLower: alloy::primitives::Signed::<24, 1>::ZERO,
+            tickUpper: alloy::primitives::Signed::<24, 1>::ZERO,
+            liquidityDelta: I256::MAX,
+            salt: B256::ZERO,
+        };
+        assert!(decode_log(&make_log(&event, Address::ZERO)).is_none());
+    }
+
+    #[test]
+    fn decode_position_transferred_mint() {
+        let holder = Address::repeat_byte(0x11);
+        let event = Perp::Transfer {
+            from: Address::ZERO,
+            to: holder,
+            tokenId: U256::from(77u64),
+        };
+        let log = make_log(&event, Address::ZERO);
+        match decode_log(&log).expect("should decode Transfer") {
+            MarketEvent::PositionTransferred { from, to, pos_id } => {
+                assert_eq!(from, Address::ZERO);
+                assert_eq!(to, holder);
+                assert_eq!(pos_id, U256::from(77u64));
+            }
+            other => panic!("expected PositionTransferred, got {other:?}"),
+        }
+    }
+
+    /// ERC20 `Transfer` has the same topic0 but only two indexed fields
+    /// (the value is in data); it must not decode as a position transfer.
+    #[test]
+    fn erc20_shaped_transfer_returns_none() {
+        let event = crate::contracts::IERC20::Transfer {
+            from: Address::repeat_byte(0x11),
+            to: Address::repeat_byte(0x22),
+            value: U256::from(1_000_000u64),
+        };
+        let log = make_log(&event, Address::ZERO);
+        assert_eq!(log.topic0(), Some(&Perp::Transfer::SIGNATURE_HASH));
+        assert!(decode_log(&log).is_none());
     }
 
     #[test]

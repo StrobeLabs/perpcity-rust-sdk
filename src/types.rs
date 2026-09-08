@@ -64,6 +64,72 @@ pub struct Bounds {
     pub liquidation_taker_ratio: f64,
 }
 
+/// One side's margin-ratio thresholds, as fractions of position value.
+///
+/// Built from the module's 1e6-scaled `uint24` values by [`Self::from_e6`];
+/// the `*_e6` getters recover them exactly.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct MarginRatioTriple {
+    /// Minimum equity over value to open or increase a position.
+    pub init: f64,
+    /// Equity over value below which the position is liquidatable.
+    pub liquidation: f64,
+    /// Equity over value below which the position can be backstopped.
+    pub backstop: f64,
+}
+
+/// `MarginRatioTriple` fractions are the on-chain e6 values over this.
+const RATIO_E6_F64: f64 = 1_000_000.0;
+
+impl MarginRatioTriple {
+    /// Build from the module's 1e6-scaled values (`1_000_000` = 100%).
+    pub fn from_e6(init_e6: u32, liquidation_e6: u32, backstop_e6: u32) -> Self {
+        Self {
+            init: init_e6 as f64 / RATIO_E6_F64,
+            liquidation: liquidation_e6 as f64 / RATIO_E6_F64,
+            backstop: backstop_e6 as f64 / RATIO_E6_F64,
+        }
+    }
+
+    /// `init` as the on-chain 1e6-scaled value.
+    pub fn init_e6(&self) -> u32 {
+        to_e6(self.init)
+    }
+
+    /// `liquidation` as the on-chain 1e6-scaled value — the
+    /// `liq_margin_ratio_e6` a position opened now stores.
+    pub fn liquidation_e6(&self) -> u32 {
+        to_e6(self.liquidation)
+    }
+
+    /// `backstop` as the on-chain 1e6-scaled value.
+    pub fn backstop_e6(&self) -> u32 {
+        to_e6(self.backstop)
+    }
+}
+
+/// Recover a `uint24` e6 value from its fraction. Exact: the fraction came
+/// from an integer below 2^24 divided by 1e6, so the product rounds back
+/// to that integer.
+fn to_e6(ratio: f64) -> u32 {
+    (ratio * RATIO_E6_F64).round() as u32
+}
+
+/// The market's `IMarginRatios` module: maker and taker thresholds.
+///
+/// These are the module's CURRENT values, applied to positions opened from
+/// now on; an open position keeps the liquidation ratio stored on it at
+/// open (`positions(id).liqMarginRatio`, surfaced by
+/// [`MakerEquityBreakdown::liq_margin_ratio_e6`](crate::MakerEquityBreakdown::liq_margin_ratio_e6)).
+/// Read with [`PerpClient::get_margin_ratios`](crate::PerpClient::get_margin_ratios).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct MarginRatios {
+    /// Maker (LP) thresholds.
+    pub maker: MarginRatioTriple,
+    /// Taker thresholds.
+    pub taker: MarginRatioTriple,
+}
+
 /// Fee percentages for a perpetual market, expressed as fractions of 1.
 ///
 /// For example, `0.001` means 0.1% (which is `1_000` on-chain at 1e6 scale).
@@ -321,6 +387,39 @@ mod tests {
         let json = serde_json::to_string(&deployments).unwrap();
         let recovered: Deployments = serde_json::from_str(&json).unwrap();
         assert_eq!(deployments, recovered);
+    }
+
+    /// The deployed HORMUZ-TRAFFIC module values (2026-09-07): maker
+    /// 1.0 / 0.9 / 0.8, taker 0.1 / 0.05 / 0.02 — and the e6 getters
+    /// recover every `uint24` exactly.
+    #[test]
+    fn margin_ratio_triple_e6_roundtrip() {
+        let maker = MarginRatioTriple::from_e6(1_000_000, 900_000, 800_000);
+        assert_eq!(
+            (maker.init, maker.liquidation, maker.backstop),
+            (1.0, 0.9, 0.8)
+        );
+        let taker = MarginRatioTriple::from_e6(100_000, 50_000, 20_000);
+        assert_eq!(
+            (taker.init, taker.liquidation, taker.backstop),
+            (0.1, 0.05, 0.02)
+        );
+        assert_eq!(
+            (maker.init_e6(), maker.liquidation_e6(), maker.backstop_e6()),
+            (1_000_000, 900_000, 800_000)
+        );
+        assert_eq!(
+            (taker.init_e6(), taker.liquidation_e6(), taker.backstop_e6()),
+            (100_000, 50_000, 20_000)
+        );
+        for e6 in [0u32, 1, 3, 333_333, 999_999, (1 << 24) - 1] {
+            assert_eq!(MarginRatioTriple::from_e6(e6, e6, e6).init_e6(), e6);
+        }
+
+        let ratios = MarginRatios { maker, taker };
+        let json = serde_json::to_string(&ratios).unwrap();
+        let recovered: MarginRatios = serde_json::from_str(&json).unwrap();
+        assert_eq!(ratios, recovered);
     }
 
     #[test]

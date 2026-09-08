@@ -75,7 +75,12 @@ pub struct MakerMarketSnapshot {
     pub tick: i32,
     /// Current AMM Q64.96 square-root price.
     pub sqrt_price_x96: U256,
-    /// Mark price (X96) — prices `valPnl` and the accrual replay.
+    /// Mark price (X96) — prices `valPnl` and the accrual replay's
+    /// utilization leg. The client loads the contract's own mark for the
+    /// block: the deployed fair price
+    /// ([`crate::math::pricing::fair_price_x96`]) of the pool price, beacon
+    /// index, and block-advanced EMAs, as `PerpLogic.accrue` sets
+    /// `markPrice`.
     pub mark_price_x96: U256,
 }
 
@@ -417,8 +422,9 @@ impl MakerMarketSnapshot {
     /// Replay `PerpLogic.accrue` from `last_touch` to `accrue_to`,
     /// returning an [`AccruedMakerSnapshot`] with the cumulatives advanced.
     /// Mirrors the contract exactly, using [`Self::mark_price_x96`] for the
-    /// utilization leg (the contract recomputes the mark inside `accrue`;
-    /// passing the current mark keeps the replay within micro-dollars).
+    /// utilization leg. `accrue` recomputes the mark as the deployed fair
+    /// price of the block's spot pair and advanced EMAs; a client-loaded
+    /// snapshot carries that same mark, so the replay is the contract's.
     ///
     /// Consumes `self` and returns a distinct type: the replay is not
     /// idempotent (each application adds another rate × dt), and equities
@@ -820,9 +826,11 @@ mod tests {
     /// block 500612175 — the block before its liquidation. The liquidation's
     /// `MakerConverted` event settled at timestamp 1788260191 with funding
     /// 209.633223, longUtil 0.432735, shortUtil 24.630722, lpFees 7.722360.
-    /// The accrual replay uses the AMM price as the mark (the contract
-    /// recomputes mark inside `accrue`), which costs a few micro-dollars on
-    /// the utilization legs over the 5775s replay window.
+    /// The fixture's recorded `mark_price_x96` is the pool's AMM price at
+    /// that block, not the fair price `accrue` recomputes (the client now
+    /// loads the fair price; this fixture predates that), which costs a
+    /// few micro-dollars on the utilization legs over the 5775s replay
+    /// window.
     fn golden_market_and_maker() -> (MakerMarketSnapshot, AccrualInputs, MakerState) {
         let i = |s: &str| I256::from_dec_str(s).unwrap();
         let u = |s: &str| U256::from_str_radix(s, 10).unwrap();
@@ -896,8 +904,9 @@ mod tests {
         // The funding replay lands within one atom of the event's exact
         // 209_633_223 (the settle's own rounding happens at a different
         // cumulative granularity); the short-util leg is priced with the
-        // caller's mark instead of the mark `accrue` recomputes, costing a
-        // few atoms over the 5775s window. The unreplayed legs are exact.
+        // fixture's recorded AMM mark instead of the fair price `accrue`
+        // recomputes, costing a few atoms over the 5775s window. The
+        // unreplayed legs are exact.
         assert!(
             (b.funding_owed_atoms() - 209_633_223).abs() <= 1,
             "funding {}",

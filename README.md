@@ -149,9 +149,11 @@ Three conventions to know:
   `is_liquidatable(liquidation_fee)` as a screening gate. The contract stays
   the oracle: confirm with `simulate_liquidate_maker` before sending.
 - **Pinning is automatic.** Every read in a batch — including the mark
-  that prices `valPnl` (`poolState().ammPrice`, exact X96) — comes from
-  one reorg-safe block a few blocks behind the head. There is no mark to
-  supply and no way to mix state from different blocks;
+  that prices `valPnl` (the contract's own fair price for the block:
+  `fair_price_x96` of the pool price, beacon index, and block-advanced
+  EMAs, exact X96) — comes from one reorg-safe block a few blocks behind
+  the head. There is no mark to supply and no way to mix state from
+  different blocks;
   `get_maker_equities_at_mark(pos_ids, mark_price_x96)` exists for
   what-if pricing at a caller-chosen X96 mark over the same pinned state.
 
