@@ -121,10 +121,10 @@ pub enum MarketEvent {
         pos_id: U256,
         settle: MakerSettle,
     },
-    /// A maker converted to a taker. On the deployed era this is also how
-    /// a maker liquidation surfaces (`is_liquidation`, with `liq_fee` in
-    /// USDC); the post-#171 shape has no tails, so they decode as
-    /// `0.0` / `false`.
+    /// A maker converted to a taker. On the deployed contracts this is
+    /// also how a maker liquidation surfaces (`is_liquidation`, with
+    /// `liq_fee` in USDC); the untailed shape from contracts that split
+    /// liquidations into dedicated events decodes as `0.0` / `false`.
     MakerConverted {
         pos_id: U256,
         settle: MakerSettle,
@@ -309,8 +309,8 @@ pub fn decode_log(log: &Log) -> Option<MarketEvent> {
             settle: maker_settle(d.funding, d.longUtilFees, d.shortUtilFees, d.lpFees)?,
         })
     } else if topic0 == Perp::MakerConverted::SIGNATURE_HASH {
-        // Post-#171 shape: liquidations moved to `MakerLiquidated`, so
-        // this event carries no tails.
+        // Untailed shape: these contracts split liquidations into
+        // `MakerLiquidated`, so this event carries no tails.
         let d = decode_raw::<Perp::MakerConverted>(log)?;
         Some(MarketEvent::MakerConverted {
             pos_id: d.posId,
@@ -327,7 +327,7 @@ pub fn decode_log(log: &Log) -> Option<MarketEvent> {
             is_liquidation: false,
         })
 
-    // ── Deployed-era (pre-#171) maker close/convert shapes ───────────
+    // ── Deployed-era maker close/convert shapes ──────────────────────
     // The live Arbitrum perps emit maker closes with `liqFee`/
     // `isLiquidation` tails (there is no MakerLiquidated event on that
     // era), which changes topic0. Decode them into the same variants,
@@ -743,9 +743,9 @@ mod tests {
         }
     }
 
-    /// The post-#171 shape has no tails; they decode as no liquidation.
+    /// The untailed shape has no tails; they decode as no liquidation.
     #[test]
-    fn decode_post_171_maker_closed_has_no_liquidation_tail() {
+    fn decode_untailed_maker_closed_has_no_liquidation_tail() {
         let event = Perp::MakerClosed {
             posId: U256::from(9u64),
             funding: I256::ZERO,

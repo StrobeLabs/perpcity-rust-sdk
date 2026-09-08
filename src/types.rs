@@ -37,7 +37,9 @@ pub struct PerpData {
     pub perp: Address,
     /// Tick spacing for the underlying Uniswap V4 pool.
     pub tick_spacing: i32,
-    /// Current mark price in human-readable units (e.g. `1.05`).
+    /// Pool (AMM spot) price in human-readable units (e.g. `1.05`) — not
+    /// the contract's mark, which is the fair price
+    /// ([`crate::math::pricing`]).
     pub mark: f64,
     /// Beacon contract address.
     pub beacon: Address,
@@ -161,7 +163,9 @@ pub struct OpenInterest {
 /// from [`PerpClient::get_perp_snapshot`](crate::PerpClient::get_perp_snapshot).
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct PerpSnapshot {
-    /// Current mark price (TWAP) in human-readable units.
+    /// Pool (AMM spot) price in human-readable units — not a TWAP, and not
+    /// the contract's mark, which is the fair price
+    /// ([`crate::math::pricing`]).
     pub mark_price: f64,
     /// Oracle index price from the beacon contract.
     pub index_price: f64,
