@@ -7,7 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Changed
+## [0.4.0] - 2026-09-08
+
+### Breaking
 
 - **Maker equities are priced at the deployed fair price, not the pool price.** `get_maker_equities` pinned `mark_price_x96` to `poolState().ammPrice`; the contract never prices there. `PerpLogic.accrue` sets `markPrice = pricing.fairPrice(ammPrice, index, emaAmmPrice, emaIndex)` with the EMAs advanced to the block, and every `valPnl`, health check, liquidation test and utilization accrual uses that mark — so a maker guard built on `is_liquidatable` disagreed with the chain whenever the EMA basis was open. The market-wide read now also takes `modules()`, `emas()`, `EMA_WINDOW()` and the beacon's `index()` at the pinned block and computes the contract's mark (`math::pricing::fair_price_x96`). Consumers see `position_value`, `unrealized_pnl`, `margin_ratio` and `is_liquidatable` move to the chain's numbers; `get_maker_equities_at_mark` is unchanged as the what-if override. A failed beacon read fails the call, like any other market-wide read, and a perp with no beacon registered fails with `ContractError::ModuleNotRegistered` rather than an opaque ABI-decode error.
 
@@ -174,7 +176,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Examples: quickstart, open_position, open_maker, market_maker, hft_bot
 - Benchmarks: math, HFT pipeline, transport
 
-[Unreleased]: https://github.com/StrobeLabs/perpcity-rust-sdk/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/StrobeLabs/perpcity-rust-sdk/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/StrobeLabs/perpcity-rust-sdk/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/StrobeLabs/perpcity-rust-sdk/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/StrobeLabs/perpcity-rust-sdk/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/StrobeLabs/perpcity-rust-sdk/compare/v0.1.0...v0.2.0
