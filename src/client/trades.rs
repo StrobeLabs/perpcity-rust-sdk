@@ -667,6 +667,71 @@ impl PerpClient {
         tracing::debug!(tx_hash = %receipt.transaction_hash, "USDC transferred");
         Ok(receipt.transaction_hash)
     }
+
+    /// Transfer an open position to another address.
+    ///
+    /// A position is an ERC721 token that owns its margin and its whole
+    /// accrual history, so the transfer hands over the live position — the
+    /// contract settles nothing, withdraws nothing, and the recipient
+    /// adjusts or closes it exactly as the sender could have. Use it to move
+    /// a position between wallets you control (handing a hand-seeded book to
+    /// the account that will manage it); the receiving account must be able
+    /// to call the Perp, so an EOA or a contract that can.
+    ///
+    /// Ownership is checked before sending: the contract's own
+    /// `TransferFromIncorrectOwner` revert costs a broadcast to discover,
+    /// and calling this for a position the client does not own is always a
+    /// caller bug.
+    pub async fn transfer_position(
+        &self,
+        to: Address,
+        pos_id: U256,
+        urgency: Urgency,
+    ) -> Result<B256> {
+        tracing::debug!(%to, %pos_id, ?urgency, "transferring position");
+        if to == Address::ZERO {
+            return Err(ValidationError::InvalidConfig {
+                reason: "position recipient must not be the zero address \
+                         (the position and its margin would be unrecoverable)"
+                    .into(),
+            }
+            .into());
+        }
+        let from = self.address();
+        if to == from {
+            return Err(ValidationError::InvalidConfig {
+                reason: "position recipient must differ from the sender".into(),
+            }
+            .into());
+        }
+
+        let contract = Perp::new(self.deployments.perp, &self.provider);
+        let owner = contract.ownerOf(pos_id).call().await?;
+        if owner != from {
+            return Err(ContractError::PositionNotOwned {
+                pos_id,
+                owner,
+                caller: from,
+            }
+            .into());
+        }
+
+        let calldata = contract
+            .safeTransferFrom(from, to, pos_id)
+            .calldata()
+            .clone();
+        let receipt = self
+            .tx(self.deployments.perp, calldata)
+            .with_urgency(urgency)
+            .send()
+            .await?;
+        tracing::debug!(
+            tx_hash = %receipt.transaction_hash,
+            %pos_id, %to,
+            "position transferred"
+        );
+        Ok(receipt.transaction_hash)
+    }
 }
 
 #[cfg(test)]

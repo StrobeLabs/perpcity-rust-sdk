@@ -433,6 +433,31 @@ sol! {
         function symbol() external view returns (string memory);
         function tokenURI(uint256 tokenId) external view returns (string memory);
         function ownerOf(uint256 tokenId) external view returns (address);
+
+        /// Move a position to another account. Positions carry their margin
+        /// and their whole accrual history, so the new owner inherits the
+        /// live position rather than a claim on it: the transfer settles
+        /// nothing and touches no margin.
+        ///
+        /// `safeTransferFrom` over plain `transferFrom` because the SDK
+        /// cannot know the destination is an EOA; the receiver check is the
+        /// difference between a rejected transfer and a position stranded in
+        /// a contract that has no code path to adjust it.
+        function safeTransferFrom(address from, address to, uint256 tokenId) external;
+
+        // ── Solady ERC721 errors ───────────────────────────────────
+        //
+        // Not from `libraries/Errors.sol` — the Perp inherits Solady's
+        // ERC721, which reverts with its own set. Probed on the deployed
+        // HORMUZ-TRAFFIC market (0x137E0048, Arbitrum One, 2026-09-08):
+        // `safeTransferFrom` from a non-owner returns 0xa1148100 =
+        // `TransferFromIncorrectOwner()`, while an undefined selector on the
+        // same contract returns empty revert data. The selector exists.
+        error TokenDoesNotExist();
+        error NotOwnerNorApproved();
+        error TransferToZeroAddress();
+        error TransferFromIncorrectOwner();
+        error TransferToNonERC721ReceiverImplementer();
     }
 
     // ═══════════════════════════════════════════════════════════════════
@@ -701,6 +726,10 @@ mod abi_lock {
         assert_eq!(
             Perp::backstopTakerCall::SIGNATURE,
             "backstopTaker(uint256,uint128,address)"
+        );
+        assert_eq!(
+            Perp::safeTransferFromCall::SIGNATURE,
+            "safeTransferFrom(address,address,uint256)"
         );
         assert_eq!(Perp::positionsCall::SIGNATURE, "positions(uint256)");
         assert_eq!(Perp::poolStateCall::SIGNATURE, "poolState()");
