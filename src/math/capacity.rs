@@ -38,7 +38,7 @@ use crate::constants::{MAX_TICK, MIN_TICK, Q96, SCALE_1E6, UTILIZATION_E6_NO_CAP
 use crate::contracts;
 use crate::errors::ValidationError;
 use crate::math::BlockContext;
-use crate::math::fixed_point::{Rounding, div_ceil_512};
+use crate::math::fixed_point::{Rounding, div_ceil_512, mul_div};
 use crate::math::swap::amount0_delta;
 use crate::math::tick::get_sqrt_ratio_at_tick;
 use crate::types::Side;
@@ -115,8 +115,15 @@ impl MarketCapacity {
         if capacity == 0 {
             return UTILIZATION_E6_NO_CAPACITY;
         }
-        let scaled = U256::from(self.open_interest_atoms(side)) * U256::from(SCALE_1E6);
-        (scaled / U256::from(capacity)).saturating_to::<u32>()
+        // Cannot fail: the divisor is non-zero and the quotient stays below
+        // 2^148.
+        mul_div(
+            U256::from(self.open_interest_atoms(side)),
+            U256::from(SCALE_1E6),
+            U256::from(capacity),
+            Rounding::TowardZero,
+        )
+        .map_or(u32::MAX, |utilization| utilization.saturating_to())
     }
 }
 
@@ -183,7 +190,9 @@ pub fn liquidity_for_capacity(
     // `getAmount0ForLiquidity` is floor(floor(L·2^96·(hi − lo) / hi) / lo),
     // and nested floors of integer divisions collapse to one:
     // floor(L·2^96·(hi − lo) / (hi·lo)). The least L reaching the target
-    // is therefore ceil(target·hi·lo / (2^96·(hi − lo))).
+    // is therefore ceil(target·hi·lo / (2^96·(hi − lo))). The numerator
+    // has three factors, past `mul_div`'s two, so it is built in 512 bits
+    // directly (at most 2^448).
     let numerator = U512::from(target_atoms) * U512::from(hi) * U512::from(lo);
     let denominator = U512::from(Q96) * U512::from(hi - lo);
     let liquidity = div_ceil_512(numerator, denominator);
