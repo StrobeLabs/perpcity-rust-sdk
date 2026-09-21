@@ -54,8 +54,8 @@ pub struct Capacity {
 }
 
 impl Capacity {
-    /// The capacity on one side.
-    pub fn side(&self, side: Side) -> u128 {
+    /// The capacity on one side, in 6-decimal perp atoms.
+    pub fn atoms(&self, side: Side) -> u128 {
         match side {
             Side::Long => self.long_atoms,
             Side::Short => self.short_atoms,
@@ -101,7 +101,7 @@ impl MarketCapacity {
     /// fill the headroom exactly.
     pub fn headroom_atoms(&self, side: Side) -> u128 {
         self.capacity
-            .side(side)
+            .atoms(side)
             .saturating_sub(self.open_interest_atoms(side))
     }
 
@@ -115,7 +115,7 @@ impl MarketCapacity {
     /// interest equal to it. A hand-built value above `u32::MAX`
     /// saturates.
     pub fn utilization_e6(&self, side: Side) -> Option<u32> {
-        let capacity = self.capacity.side(side);
+        let capacity = self.capacity.atoms(side);
         if capacity == 0 {
             return None;
         }
@@ -452,16 +452,16 @@ mod tests {
         let liquidity = liquidity_for_capacity(sqrt_price_x96, lower, upper, side, target).unwrap();
         let reached = band_capacity(sqrt_price_x96, lower, upper, liquidity).unwrap();
         assert!(
-            reached.side(side) >= target,
+            reached.atoms(side) >= target,
             "{side} target {target}: liquidity {liquidity} gives {}",
-            reached.side(side)
+            reached.atoms(side)
         );
         let below = band_capacity(sqrt_price_x96, lower, upper, liquidity - 1).unwrap();
         assert!(
-            below.side(side) < target,
+            below.atoms(side) < target,
             "{side} target {target}: liquidity {} already gives {}",
             liquidity - 1,
-            below.side(side)
+            below.atoms(side)
         );
     }
 
@@ -469,7 +469,7 @@ mod tests {
     fn liquidity_for_capacity_inverts_mainnet_opens() {
         for g in &GOLDEN {
             for side in [Side::Long, Side::Short] {
-                let target = g.capacity.side(side);
+                let target = g.capacity.atoms(side);
                 if target == 0 {
                     continue;
                 }
