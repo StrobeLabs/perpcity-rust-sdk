@@ -29,6 +29,7 @@ use crate::convert::{margin_ratio_to_leverage, price_x96_to_f64, scale_from_6dec
 use crate::errors::{ContractError, Result, ValidationError};
 use crate::hft::state_cache::{CachedBounds, CachedFees};
 use crate::math::BlockContext;
+use crate::math::capacity::MarketCapacity;
 use crate::math::ema::{PricePair, calculate_emas};
 use crate::math::swap::{TakerMarketSnapshot, TickLiquidity};
 use crate::storage::{perp_emas_slot, v4_tick_bitmap_slot, v4_tick_slot};
@@ -571,6 +572,37 @@ impl PerpClient {
         Ok(OpenInterest {
             long_oi: oi.long as f64 / SCALE_F64,
             short_oi: oi.short as f64 / SCALE_F64,
+        })
+    }
+
+    /// Read the market's taker capacity and open interest, pinned to one
+    /// lagged block (see [`SNAPSHOT_BLOCK_LAG`]).
+    ///
+    /// [`MarketCapacity`] derives each side's headroom (open interest a
+    /// taker can still add) and utilization as the contract computes it.
+    ///
+    /// # Errors
+    ///
+    /// [`ContractError::BlockUnavailable`] when the pinned header is missing
+    /// from the serving replica.
+    pub async fn get_capacity(&self) -> Result<MarketCapacity> {
+        let (block, block_id) = self.lagged_snapshot_block().await?;
+        let data = self
+            .perp_views(
+                vec![
+                    view_call(Perp::capacityCall {}),
+                    view_call(Perp::openInterestCall {}),
+                ],
+                block_id,
+            )
+            .await?;
+        let capacity = decode_view::<Perp::capacityCall>(&data[0])?;
+        let oi = decode_view::<Perp::openInterestCall>(&data[1])?;
+        Ok(MarketCapacity {
+            block,
+            capacity: capacity.into(),
+            long_open_interest_atoms: oi.long,
+            short_open_interest_atoms: oi.short,
         })
     }
 
