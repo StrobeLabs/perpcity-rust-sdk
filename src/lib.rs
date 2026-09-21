@@ -10,6 +10,7 @@
 //! | [`constants`] | Protocol constants mirrored from on-chain `Constants.sol` |
 //! | [`contracts`] | ABI bindings via Alloy `sol!` — structs, events, errors, functions |
 //! | [`convert`] | Conversions between client f64 values and on-chain representations |
+//! | [`discovery`] | Market discovery: decoding `PerpCreated` from a caller-supplied factory list |
 //! | [`errors`] | SDK-wide error types using `thiserror` |
 //! | [`feeds`] | Live data feeds over WebSocket: market events, block headers, event decoding |
 //! | [`hft`] | HFT infrastructure: nonce, gas, pipeline, state cache, latency, positions |
@@ -40,6 +41,7 @@ pub mod client;
 pub mod constants;
 pub mod contracts;
 pub mod convert;
+pub mod discovery;
 pub mod errors;
 pub mod feeds;
 pub mod hft;

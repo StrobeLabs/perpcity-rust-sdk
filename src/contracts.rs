@@ -115,6 +115,7 @@ sol! {
     }
 
     /// Module addresses for a Perp market.
+    #[derive(Debug, PartialEq, Eq)]
     struct Modules {
         address beacon;
         address fees;
