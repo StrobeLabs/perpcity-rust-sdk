@@ -619,7 +619,11 @@ impl PerpClient {
         })
     }
 
-    /// Get taker open interest for the market.
+    /// Get taker open interest for the market, in perp tokens.
+    ///
+    /// Reads the latest block, not the lagged snapshot block. For open
+    /// interest in atoms at a known block, next to the capacity it draws
+    /// on, use [`Self::get_capacity`].
     pub async fn get_open_interest(&self) -> Result<OpenInterest> {
         let perp = Perp::new(self.deployments.perp, &self.provider);
         let oi = perp.openInterest().call().await?;
@@ -841,6 +845,11 @@ impl PerpClient {
     /// several individual RPCs.
     ///
     /// Returns `(PerpData, PerpSnapshot)` — static config and live market data.
+    ///
+    /// Unlike the pinned reads ([`Self::get_capacity`],
+    /// [`Self::get_fair_price`]), this reads the latest block, and the
+    /// multicall and the beacon read are separate calls, so a trade between
+    /// them can put the index one block after the pool state.
     pub async fn get_perp_snapshot(&self) -> Result<(PerpData, PerpSnapshot)> {
         let perp = Perp::new(self.deployments.perp, &self.provider);
         let (modules, pool_key, pool_state, rates, oi) = self
