@@ -38,10 +38,10 @@ pub(crate) fn mul_div(
     }
     let product: U512 = a.widening_mul(b);
     let divisor = U512::from(d);
-    let mut q = product / divisor;
-    if rounding == Rounding::Up && product % divisor != U512::ZERO {
-        q += U512::ONE;
-    }
+    let q = match rounding {
+        Rounding::Up => product.div_ceil(divisor),
+        Rounding::TowardZero => product / divisor,
+    };
     u512_to_u256(q)
 }
 
@@ -129,17 +129,6 @@ pub(crate) fn sub_u(a: U256, b: U256, context: &'static str) -> Result<U256, Val
     a.checked_sub(b).ok_or(ValidationError::Overflow {
         context: context.into(),
     })
-}
-
-/// `value / denominator` rounded up, in 512 bits. The caller guarantees a
-/// non-zero `denominator`.
-pub(crate) fn div_ceil_512(value: U512, denominator: U512) -> U512 {
-    let q = value / denominator;
-    if value % denominator == U512::ZERO {
-        q
-    } else {
-        q + U512::ONE
-    }
 }
 
 /// Narrow a 512-bit value to `U256`, erroring instead of truncating.
