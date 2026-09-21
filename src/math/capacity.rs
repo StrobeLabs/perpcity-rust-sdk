@@ -34,7 +34,7 @@
 use alloy::primitives::{U256, U512};
 use serde::{Deserialize, Serialize};
 
-use crate::constants::{MAX_TICK, MIN_TICK, Q96, SCALE_1E6, UTILIZATION_E6_NO_CAPACITY};
+use crate::constants::{MAX_TICK, MIN_TICK, Q96, SCALE_1E6};
 use crate::contracts;
 use crate::errors::ValidationError;
 use crate::math::BlockContext;
@@ -96,7 +96,9 @@ impl MarketCapacity {
     }
 
     /// Open interest `side` can still add before a trade reverts with
-    /// `LongUtilizationExceeded` / `ShortUtilizationExceeded`.
+    /// `LongUtilizationExceeded` / `ShortUtilizationExceeded`. The contract
+    /// reverts only when open interest exceeds capacity, so a trade can
+    /// fill the headroom exactly.
     pub fn headroom_atoms(&self, side: Side) -> u128 {
         self.capacity
             .side(side)
@@ -104,26 +106,29 @@ impl MarketCapacity {
     }
 
     /// Utilization on one side as the Perp passes it to the fees module:
-    /// `openInterest * 1e6 / capacity`, rounded down, or
-    /// [`UTILIZATION_E6_NO_CAPACITY`] when the side has no capacity.
+    /// `openInterest * 1e6 / capacity`, rounded down. `None` when the side
+    /// has no capacity, where the contract passes `type(uint24).max`
+    /// instead of a ratio.
     ///
-    /// Chain state never exceeds [`SCALE_1E6`] (100%), because the contract
-    /// reverts any change that leaves open interest above capacity. A
-    /// hand-built value above `u32::MAX` saturates.
-    pub fn utilization_e6(&self, side: Side) -> u32 {
+    /// Chain state is at most [`SCALE_1E6`] (100%): the contract reverts
+    /// any change that leaves open interest above capacity, and allows open
+    /// interest equal to it. A hand-built value above `u32::MAX`
+    /// saturates.
+    pub fn utilization_e6(&self, side: Side) -> Option<u32> {
         let capacity = self.capacity.side(side);
         if capacity == 0 {
-            return UTILIZATION_E6_NO_CAPACITY;
+            return None;
         }
         // Cannot fail: the divisor is non-zero and the quotient stays below
         // 2^148.
-        mul_div(
+        let utilization = mul_div(
             U256::from(self.open_interest_atoms(side)),
             U256::from(SCALE_1E6),
             U256::from(capacity),
             Rounding::TowardZero,
         )
-        .map_or(u32::MAX, |utilization| utilization.saturating_to())
+        .map_or(u32::MAX, |utilization| utilization.saturating_to());
+        Some(utilization)
     }
 }
 
@@ -389,8 +394,8 @@ mod tests {
     #[test]
     fn market_utilization_matches_the_contract_formula() {
         // floor(37772806e6 / 60883605) and floor(42582564e6 / 51603209).
-        assert_eq!(HORMUZ_TRAFFIC.utilization_e6(Side::Long), 620_410);
-        assert_eq!(HORMUZ_TRAFFIC.utilization_e6(Side::Short), 825_192);
+        assert_eq!(HORMUZ_TRAFFIC.utilization_e6(Side::Long), Some(620_410));
+        assert_eq!(HORMUZ_TRAFFIC.utilization_e6(Side::Short), Some(825_192));
         assert_eq!(HORMUZ_TRAFFIC.headroom_atoms(Side::Long), 23_110_799);
         assert_eq!(HORMUZ_TRAFFIC.headroom_atoms(Side::Short), 9_020_645);
         assert_eq!(HORMUZ_TRAFFIC.open_interest_atoms(Side::Short), 42_582_564);
@@ -399,7 +404,7 @@ mod tests {
     #[test]
     fn market_utilization_edges() {
         let empty = MarketCapacity::default();
-        assert_eq!(empty.utilization_e6(Side::Long), UTILIZATION_E6_NO_CAPACITY);
+        assert_eq!(empty.utilization_e6(Side::Long), None);
         assert_eq!(empty.headroom_atoms(Side::Short), 0);
 
         let full = MarketCapacity {
@@ -411,9 +416,9 @@ mod tests {
             long_open_interest_atoms: u128::MAX,
             short_open_interest_atoms: u128::MAX,
         };
-        assert_eq!(full.utilization_e6(Side::Long), SCALE_1E6);
+        assert_eq!(full.utilization_e6(Side::Long), Some(SCALE_1E6));
         assert_eq!(full.headroom_atoms(Side::Long), 0);
-        assert_eq!(full.utilization_e6(Side::Short), u32::MAX);
+        assert_eq!(full.utilization_e6(Side::Short), Some(u32::MAX));
         assert_eq!(full.headroom_atoms(Side::Short), 0);
     }
 
