@@ -12,7 +12,7 @@
 //! ```
 
 use alloy::primitives::{Address, address};
-use alloy::providers::ProviderBuilder;
+use alloy::providers::{Provider, ProviderBuilder};
 use alloy::rpc::client::RpcClient;
 use alloy::transports::layers::RetryBackoffLayer;
 
@@ -50,7 +50,7 @@ async fn lists_mainnet_perps_and_reads_beacon_prints() {
         .expect("HORMUZ is listed");
     assert_eq!(hormuz.block_number, 486_214_447);
 
-    let head = perps.last().expect("non-empty").block_number;
+    let head = provider.get_block_number().await.expect("eth_blockNumber");
     let prints = latest_beacon_prints(
         &provider,
         hormuz.modules.beacon,
