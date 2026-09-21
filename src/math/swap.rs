@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use crate::constants::{MAX_SWAP_SQRT_PRICE_X96, MIN_SWAP_SQRT_PRICE_X96, Q96};
 use crate::errors::ValidationError;
 use crate::math::BlockContext;
-use crate::math::fixed_point::{Rounding, div_ceil_512, mul_div, u512_to_u256};
+use crate::math::fixed_point::{Rounding, mul_div, u512_to_u256};
 use crate::math::tick::{
     UNISWAP_MAX_TICK, UNISWAP_MIN_TICK, get_sqrt_ratio_at_tick, get_tick_at_sqrt_ratio,
 };
@@ -544,16 +544,14 @@ fn next_sqrt_from_amount0(
             context: "zero sqrt denominator".into(),
         });
     }
-    let value = div_ceil_512(numerator.widening_mul(sqrt), denominator);
+    let value = numerator.widening_mul(sqrt).div_ceil(denominator);
     u512_to_u256(value)
 }
 
 fn div(value: U256, denominator: U256, rounding: Rounding) -> U256 {
-    let q = value / denominator;
-    if rounding == Rounding::Up && value % denominator != U256::ZERO {
-        q + U256::ONE
-    } else {
-        q
+    match rounding {
+        Rounding::Up => value.div_ceil(denominator),
+        Rounding::TowardZero => value / denominator,
     }
 }
 

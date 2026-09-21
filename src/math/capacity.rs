@@ -38,7 +38,7 @@ use crate::constants::{MAX_TICK, MIN_TICK, Q96, SCALE_1E6, UTILIZATION_E6_NO_CAP
 use crate::contracts;
 use crate::errors::ValidationError;
 use crate::math::BlockContext;
-use crate::math::fixed_point::{Rounding, div_ceil_512, mul_div};
+use crate::math::fixed_point::{Rounding, mul_div};
 use crate::math::swap::amount0_delta;
 use crate::math::tick::get_sqrt_ratio_at_tick;
 use crate::types::Side;
@@ -195,7 +195,7 @@ pub fn liquidity_for_capacity(
     // directly (at most 2^448).
     let numerator = U512::from(target_atoms) * U512::from(hi) * U512::from(lo);
     let denominator = U512::from(Q96) * U512::from(hi - lo);
-    let liquidity = div_ceil_512(numerator, denominator);
+    let liquidity = numerator.div_ceil(denominator);
     if liquidity > U512::from(u128::MAX) {
         return Err(ValidationError::Overflow {
             context: "liquidity for capacity exceeds u128".into(),
