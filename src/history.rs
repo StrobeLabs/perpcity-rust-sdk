@@ -219,58 +219,76 @@ pub struct TokenTransfer {
 }
 
 /// Every `Transfer` of `token` in blocks `from_block..=to_block` whose
-/// sender is in `from` and whose recipient is in `to`, in chain order.
+/// sender is in `senders` and whose recipient is in `recipients`, in chain
+/// order.
 ///
-/// An empty set matches any address, but at least one set must be
-/// non-empty: an unfiltered query reads every transfer the token ever
-/// made. The sets go to the node as topic filters, so the scan returns
-/// only matching logs.
+/// `None` matches any address and `Some(&[])` matches none, so a set that
+/// comes out empty reads nothing rather than every transfer. At least one
+/// side must be `Some`: an unfiltered query reads every transfer the token
+/// ever made. The sets go to the node as topic filters, so the scan
+/// returns only matching logs.
 ///
 /// # Errors
 ///
-/// [`ValidationError::InvalidConfig`] for the zero token or two empty
-/// sets, [`ValidationError::DecodeFailed`] for a log that does not decode
-/// as an ERC-20 `Transfer` (for example, an ERC-721 `Transfer`, which
-/// shares the topic but indexes its third argument), or an error from
-/// [`get_logs_chunked`].
+/// [`ValidationError::InvalidConfig`] for the zero token or two `None`
+/// sets, [`ValidationError::InvalidBlockRange`] if
+/// `from_block > to_block`, [`ValidationError::DecodeFailed`] for a log
+/// that does not decode as an ERC-20 `Transfer` (for example, an ERC-721
+/// `Transfer`, which shares the topic but indexes its third argument), or
+/// an error from [`get_logs_chunked`].
 pub async fn token_transfers<P: Provider>(
     provider: &P,
     token: Address,
-    from: &[Address],
-    to: &[Address],
+    senders: Option<&[Address]>,
+    recipients: Option<&[Address]>,
     from_block: u64,
     to_block: u64,
 ) -> Result<Vec<TokenTransfer>> {
-    let filter = transfer_filter(token, from, to)?;
+    let Some(filter) = transfer_filter(token, senders, recipients, from_block, to_block)? else {
+        return Ok(Vec::new());
+    };
     let logs = get_logs_chunked(provider, &filter, from_block, to_block).await?;
     logs.iter().map(decode_transfer).collect()
 }
 
+/// The filter for [`token_transfers`], or `None` when an empty set means
+/// nothing can match.
 fn transfer_filter(
     token: Address,
-    from: &[Address],
-    to: &[Address],
-) -> std::result::Result<Filter, ValidationError> {
+    senders: Option<&[Address]>,
+    recipients: Option<&[Address]>,
+    from_block: u64,
+    to_block: u64,
+) -> std::result::Result<Option<Filter>, ValidationError> {
     if token.is_zero() {
         return Err(ValidationError::InvalidConfig {
             reason: "token address is zero".into(),
         });
     }
-    if from.is_empty() && to.is_empty() {
+    if senders.is_none() && recipients.is_none() {
         return Err(ValidationError::InvalidConfig {
             reason: "a transfer query needs a sender or a recipient set".into(),
         });
     }
+    check_block_range(from_block, to_block)?;
+    if senders.is_some_and(<[Address]>::is_empty) || recipients.is_some_and(<[Address]>::is_empty) {
+        return Ok(None);
+    }
     let mut filter = Filter::new()
         .address(token)
         .event_signature(IERC20::Transfer::SIGNATURE_HASH);
-    if !from.is_empty() {
-        filter = filter.topic1(from.iter().map(|a| a.into_word()).collect::<Vec<B256>>());
+    if let Some(senders) = senders {
+        filter = filter.topic1(senders.iter().map(|a| a.into_word()).collect::<Vec<B256>>());
     }
-    if !to.is_empty() {
-        filter = filter.topic2(to.iter().map(|a| a.into_word()).collect::<Vec<B256>>());
+    if let Some(recipients) = recipients {
+        filter = filter.topic2(
+            recipients
+                .iter()
+                .map(|a| a.into_word())
+                .collect::<Vec<B256>>(),
+        );
     }
-    Ok(filter)
+    Ok(Some(filter))
 }
 
 fn decode_transfer(log: &Log) -> Result<TokenTransfer> {
@@ -326,6 +344,16 @@ pub async fn get_logs_chunked<P: Provider>(
     Ok(logs)
 }
 
+fn check_block_range(from_block: u64, to_block: u64) -> std::result::Result<(), ValidationError> {
+    if from_block > to_block {
+        return Err(ValidationError::InvalidBlockRange {
+            from_block,
+            to_block,
+        });
+    }
+    Ok(())
+}
+
 /// A block range read in adaptive chunks, from either end.
 struct LogScan<'a, P> {
     provider: &'a P,
@@ -342,12 +370,7 @@ impl<'a, P: Provider> LogScan<'a, P> {
         from_block: u64,
         to_block: u64,
     ) -> std::result::Result<Self, ValidationError> {
-        if from_block > to_block {
-            return Err(ValidationError::InvalidBlockRange {
-                from_block,
-                to_block,
-            });
-        }
+        check_block_range(from_block, to_block)?;
         Ok(Self {
             provider,
             filter: filter.clone(),
@@ -885,8 +908,8 @@ mod tests {
         let transfers = token_transfers(
             &node.provider(),
             USDC,
-            &[treasury],
-            &[wallet],
+            Some(&[treasury]),
+            Some(&[wallet]),
             0x1e40_0000,
             0x1e41_0000,
         )
@@ -903,7 +926,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn transfers_are_filtered_by_both_sets_and_an_empty_set_is_any() {
+    async fn transfers_are_filtered_by_both_sets_and_none_is_any() {
         let logs = vec![
             transfer_log(TREASURY, WALLET_A, 100, 10),
             transfer_log(TREASURY, OUTSIDER, 7, 11),
@@ -915,17 +938,17 @@ mod tests {
         let provider = node.provider();
         let wallets = [WALLET_A, WALLET_B];
 
-        let out = token_transfers(&provider, USDC, &[TREASURY], &wallets, 0, 100)
+        let out = token_transfers(&provider, USDC, Some(&[TREASURY]), Some(&wallets), 0, 100)
             .await
             .unwrap();
         assert_eq!(flows(&out), vec![(TREASURY, WALLET_A, U256::from(100), 10)]);
 
-        let back = token_transfers(&provider, USDC, &wallets, &[TREASURY], 0, 100)
+        let back = token_transfers(&provider, USDC, Some(&wallets), Some(&[TREASURY]), 0, 100)
             .await
             .unwrap();
         assert_eq!(flows(&back), vec![(WALLET_B, TREASURY, U256::from(40), 12)]);
 
-        let any_recipient = token_transfers(&provider, USDC, &[TREASURY], &[], 0, 100)
+        let any_recipient = token_transfers(&provider, USDC, Some(&[TREASURY]), None, 0, 100)
             .await
             .unwrap();
         assert_eq!(
@@ -941,8 +964,8 @@ mod tests {
     async fn an_unfiltered_or_zero_token_query_is_refused_before_any_request() {
         let node = FakeNode::new(Vec::new(), u64::MAX);
         let provider = node.provider();
-        for (token, from) in [(USDC, &[][..]), (Address::ZERO, &[TREASURY][..])] {
-            let error = token_transfers(&provider, token, from, &[], 0, 100)
+        for (token, senders) in [(USDC, None), (Address::ZERO, Some(&[TREASURY][..]))] {
+            let error = token_transfers(&provider, token, senders, None, 0, 100)
                 .await
                 .unwrap_err();
             assert!(
@@ -954,6 +977,34 @@ mod tests {
             );
         }
         assert!(node.requests().is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_empty_set_matches_nothing_without_a_request() {
+        let node = FakeNode::new(vec![transfer_log(TREASURY, WALLET_A, 100, 10)], u64::MAX);
+        let provider = node.provider();
+        for (senders, recipients) in [
+            (Some(&[][..]), None),
+            (None, Some(&[][..])),
+            (Some(&[TREASURY][..]), Some(&[][..])),
+        ] {
+            let out = token_transfers(&provider, USDC, senders, recipients, 0, 100)
+                .await
+                .unwrap();
+            assert!(out.is_empty(), "{out:?}");
+        }
+        assert!(node.requests().is_empty());
+
+        let error = token_transfers(&provider, USDC, Some(&[]), None, 100, 0)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                error,
+                PerpCityError::Validation(ValidationError::InvalidBlockRange { .. })
+            ),
+            "{error:?}"
+        );
     }
 
     /// An ERC-721 `Transfer` shares the topic but indexes the token id, so
@@ -971,7 +1022,7 @@ mod tests {
             Bytes::new(),
         );
         let node = FakeNode::new(vec![nft], u64::MAX);
-        let error = token_transfers(&node.provider(), USDC, &[TREASURY], &[], 0, 100)
+        let error = token_transfers(&node.provider(), USDC, Some(&[TREASURY]), None, 0, 100)
             .await
             .unwrap_err();
         assert!(
