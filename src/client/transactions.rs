@@ -235,6 +235,7 @@ impl<'a> TxBuilder<'a> {
         // be rewound or reused (`fail` would). Stop tracking it and flag the
         // doubt; the next send resyncs from chain, which counts the
         // transaction if and only if it is still live.
+        tokio::time::sleep(RECEIPT_POLL_INITIAL_DELAY).await;
         let receipt = match self.client.poll_receipt(tx_hash_b256).await {
             Ok(receipt) => receipt,
             Err(e) => {
@@ -326,7 +327,6 @@ fn preflight_request(
 /// The receipt poll loop behind [`PerpClient::poll_receipt`], generic over
 /// the provider so it is testable against a mocked transport.
 async fn wait_for_receipt<P: Provider>(provider: &P, tx_hash: B256) -> Result<TransactionReceipt> {
-    tokio::time::sleep(RECEIPT_POLL_INITIAL_DELAY).await;
     let deadline = tokio::time::Instant::now() + RECEIPT_TIMEOUT;
     loop {
         match provider.get_transaction_receipt(tx_hash).await {
@@ -373,7 +373,7 @@ impl PerpClient {
         }
     }
 
-    /// Wait for the receipt of `tx_hash`: after a 2 s delay, poll every
+    /// Wait for the receipt of `tx_hash`: poll at once, then every
     /// [`RECEIPT_POLL_INTERVAL`] for up to [`RECEIPT_TIMEOUT`].
     ///
     /// Use it to resolve a send whose outcome is unknown, with the hash from
@@ -381,6 +381,9 @@ impl PerpClient {
     /// [`TransactionError::ReceiptTimeout`] for the same hash, so the call can
     /// repeat. For one look-up with no wait, use
     /// `provider().get_transaction_receipt(tx_hash)`.
+    ///
+    /// The future holds no state, so dropping it only stops the polling;
+    /// wrap it in `tokio::time::timeout` for a shorter deadline.
     ///
     /// It does not touch nonce tracking. A send that returned with a hash
     /// has already stopped tracking the transaction, and a doubtful nonce
@@ -583,7 +586,8 @@ mod tests {
 
     /// A receipt timeout names the transaction on both exits: the deadline
     /// passing with no receipt, and the deadline passing while the node
-    /// errors.
+    /// errors. The wait starts polling at once, so it gives up exactly at
+    /// the timeout: the send path's initial delay is not part of it.
     #[tokio::test(start_paused = true)]
     async fn receipt_timeout_carries_the_hash_on_both_exits() {
         let tx_hash = B256::repeat_byte(0x66);
@@ -593,7 +597,9 @@ mod tests {
             asserter.push_success(&Option::<TransactionReceipt>::None);
         }
         let provider = ProviderBuilder::new().connect_mocked_client(asserter);
+        let start = tokio::time::Instant::now();
         let err = wait_for_receipt(&provider, tx_hash).await.unwrap_err();
+        assert_eq!(start.elapsed(), RECEIPT_TIMEOUT);
         assert!(err.is_transient());
         let PerpCityError::Transaction(err) = err else {
             panic!("expected a transaction error, got {err}");
