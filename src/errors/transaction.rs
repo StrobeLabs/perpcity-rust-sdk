@@ -1,6 +1,7 @@
 //! Transaction lifecycle errors.
 
 use alloy::primitives::FixedBytes;
+use alloy::transports::TransportError;
 use thiserror::Error;
 
 /// Errors arising from the transaction lifecycle: simulation, signing,
@@ -67,6 +68,23 @@ pub enum TransactionError {
         /// Why polling stopped: no receipt by the deadline, or the last
         /// poll's RPC error.
         reason: String,
+    },
+
+    /// The broadcast request failed after the transaction was signed.
+    ///
+    /// The node may still have accepted it: the request can fail after the
+    /// transaction reached the mempool, or after it mined. The send path
+    /// treats its nonce as consumed and resyncs from chain before the next
+    /// send, so look up `tx_hash` to learn whether it landed.
+    ///
+    /// Transient, like the transport error it wraps.
+    #[error("broadcast failed for {tx_hash}: {source}")]
+    BroadcastFailed {
+        /// Hash of the signed transaction.
+        tx_hash: FixedBytes<32>,
+        /// The transport error the broadcast returned.
+        #[source]
+        source: TransportError,
     },
 
     /// Transaction signing failed.

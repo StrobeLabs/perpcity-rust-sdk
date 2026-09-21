@@ -212,16 +212,18 @@ impl<'a> TxBuilder<'a> {
         // mined — and no local bookkeeping can tell which. Releasing or
         // reusing the nonce guesses, and the wrong guess retries a consumed
         // nonce forever. Flag the doubt instead; the next send resyncs from
-        // chain once nothing is in flight.
-        let pending = match self.client.provider.send_tx_envelope(tx_envelope).await {
-            Ok(pending) => pending,
-            Err(e) => {
-                let pipeline = self.client.pipeline.lock().unwrap();
-                pipeline.mark_desynced_prepared();
-                return Err(e.into());
+        // chain once nothing is in flight. The hash is known before the
+        // request, so the caller can still look the transaction up.
+        let tx_hash_b256 = *tx_envelope.tx_hash();
+        if let Err(source) = self.client.provider.send_tx_envelope(tx_envelope).await {
+            let pipeline = self.client.pipeline.lock().unwrap();
+            pipeline.mark_desynced_prepared();
+            return Err(TransactionError::BroadcastFailed {
+                tx_hash: tx_hash_b256,
+                source,
             }
-        };
-        let tx_hash_b256 = *pending.tx_hash();
+            .into());
+        }
         let tx_hash_bytes: [u8; 32] = tx_hash_b256.into();
 
         tracing::debug!(tx_hash = %tx_hash_b256, nonce = prepared.nonce, urgency = ?self.urgency, "tx broadcast");

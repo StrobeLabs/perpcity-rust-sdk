@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Breaking
 
 - **`TransactionError::ReceiptTimeout` carries `tx_hash: FixedBytes<32>`.** The hash was only in `reason`, and a timeout whose last poll hit an RPC error left it out of the string too, so a caller could not look up the receipt. `reason` stays and now says only why polling stopped. Patterns that use `..` are unaffected; exhaustive patterns and constructions must name the new field. `is_transient()` is unchanged (true), and the send path still keeps the timed-out transaction's nonce consumed.
+- **A failed broadcast returns `TransactionError::BroadcastFailed { tx_hash, source }` instead of `PerpCityError::Rpc`.** The node can accept a transaction and still fail the request, so the outcome is unknown; the hash of the signed transaction lets the caller look it up. `source` is the same `TransportError` that `Rpc` carried. `is_transient()` is true for both, so retry loops are unchanged; code that matched `PerpCityError::Rpc` to detect a failed broadcast must match the new variant.
 
 ### Added
 

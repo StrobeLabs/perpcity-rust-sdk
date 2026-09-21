@@ -83,6 +83,9 @@ impl PerpCityError {
     /// gas inside the pinned limit) — is deterministic and never transient;
     /// `GasUnavailable` covers the simulation that got no answer at all.
     ///
+    /// `BroadcastFailed` and `ReceiptTimeout` are transient: the
+    /// transaction may still land, and its hash is on the error.
+    ///
     /// `NonceDesynced` is transient by construction: it clears itself once
     /// in-flight transactions drain and the next send resyncs from chain,
     /// so callers should back off briefly rather than give up.
@@ -100,6 +103,7 @@ impl PerpCityError {
             self,
             Self::Rpc(_)
                 | Self::Transaction(TransactionError::GasUnavailable { .. })
+                | Self::Transaction(TransactionError::BroadcastFailed { .. })
                 | Self::Transaction(TransactionError::ReceiptTimeout { .. })
                 | Self::Transaction(TransactionError::NonceDesynced { .. })
                 | Self::Contract(ContractError::BlockUnavailable { .. })
@@ -184,6 +188,16 @@ mod tests {
         assert!(
             receipt_timeout.is_transient(),
             "the transaction may still mine; the caller reconciles by hash"
+        );
+
+        let broadcast_failed: PerpCityError = TransactionError::BroadcastFailed {
+            tx_hash: [0x33; 32].into(),
+            source: alloy::transports::TransportErrorKind::custom_str("connection reset"),
+        }
+        .into();
+        assert!(
+            broadcast_failed.is_transient(),
+            "a failed broadcast was a transient transport error before it was typed"
         );
     }
 
