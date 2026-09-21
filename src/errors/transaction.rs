@@ -29,7 +29,9 @@ pub enum TransactionError {
     /// Gas was burned.
     #[error("transaction reverted: {reason}")]
     Reverted {
-        /// Human-readable description (typically includes the tx hash).
+        /// Hash of the mined transaction.
+        tx_hash: FixedBytes<32>,
+        /// Human-readable description.
         reason: String,
     },
 

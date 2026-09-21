@@ -180,6 +180,16 @@ mod tests {
             "the server refused this request at its narrowest; a retry gets the same answer"
         );
 
+        let mined_revert: PerpCityError = TransactionError::Reverted {
+            tx_hash: [0x44; 32].into(),
+            reason: "transaction 0x44… reverted".into(),
+        }
+        .into();
+        assert!(
+            !mined_revert.is_transient(),
+            "a mined revert is final; its nonce is consumed"
+        );
+
         let receipt_timeout: PerpCityError = TransactionError::ReceiptTimeout {
             tx_hash: [0x22; 32].into(),
             reason: "no receipt after 30s".into(),

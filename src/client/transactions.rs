@@ -290,7 +290,8 @@ impl<'a> TxBuilder<'a> {
         if !receipt.status() {
             tracing::warn!(tx_hash = %tx_hash_b256, "tx reverted");
             return Err(TransactionError::Reverted {
-                reason: format!("transaction {} reverted", tx_hash_b256),
+                tx_hash: tx_hash_b256,
+                reason: format!("transaction {tx_hash_b256} reverted"),
             }
             .into());
         }
