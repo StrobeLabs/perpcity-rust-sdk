@@ -146,11 +146,7 @@ pub fn band_capacity(
     tick_upper: i32,
     liquidity: u128,
 ) -> Result<Capacity, ValidationError> {
-    let band = Band::new(sqrt_price_x96, tick_lower, tick_upper)?;
-    Ok(Capacity {
-        long_atoms: band.perp_atoms(Side::Long, liquidity)?,
-        short_atoms: band.perp_atoms(Side::Short, liquidity)?,
-    })
+    Band::new(sqrt_price_x96, tick_lower, tick_upper)?.capacity(liquidity)
 }
 
 /// The least liquidity over `[tick_lower, tick_upper]` whose capacity on
@@ -167,7 +163,9 @@ pub fn band_capacity(
 ///   band's edge on `side`, so no liquidity in the band backs that side
 /// - [`ValidationError::InvalidTickRange`] and
 ///   [`ValidationError::InvalidPrice`] as for [`band_capacity`]
-/// - [`ValidationError::Overflow`] if the liquidity exceeds `u128`
+/// - [`ValidationError::Overflow`] if the liquidity exceeds `u128`, or if
+///   either side of the band's capacity at that liquidity does, where the
+///   contract's `toUint128` reverts
 pub fn liquidity_for_capacity(
     sqrt_price_x96: U256,
     tick_lower: i32,
@@ -201,7 +199,11 @@ pub fn liquidity_for_capacity(
             context: "liquidity for capacity exceeds u128".into(),
         });
     }
-    Ok(liquidity.to::<u128>())
+    let liquidity = liquidity.to::<u128>();
+    // Capacity grows with liquidity, so if this band cannot be opened
+    // because a side overflows `u128`, no liquidity reaching the target can.
+    band.capacity(liquidity)?;
+    Ok(liquidity)
 }
 
 /// A validated band with the pool price clamped into it.
@@ -246,6 +248,13 @@ impl Band {
             Side::Long => (self.sqrt_clamped, self.sqrt_upper),
             Side::Short => (self.sqrt_lower, self.sqrt_clamped),
         }
+    }
+
+    fn capacity(&self, liquidity: u128) -> Result<Capacity, ValidationError> {
+        Ok(Capacity {
+            long_atoms: self.perp_atoms(Side::Long, liquidity)?,
+            short_atoms: self.perp_atoms(Side::Short, liquidity)?,
+        })
     }
 
     fn perp_atoms(&self, side: Side, liquidity: u128) -> Result<u128, ValidationError> {
@@ -507,6 +516,19 @@ mod tests {
             liquidity_for_capacity(sqrt_price, 20_000, 30_000, Side::Long, 0).unwrap(),
             0
         );
+    }
+
+    /// Below a price of one a unit of liquidity backs more than one perp
+    /// atom, so the least liquidity for a `u128::MAX` target fits in
+    /// `u128` but its capacity does not. The contract would revert on
+    /// `toUint128`, so the inverse reports the overflow.
+    #[test]
+    fn liquidity_for_capacity_rejects_a_capacity_past_u128() {
+        let sqrt_price = get_sqrt_ratio_at_tick(1_000).unwrap();
+        assert!(matches!(
+            liquidity_for_capacity(sqrt_price, MIN_TICK, 0, Side::Short, u128::MAX),
+            Err(ValidationError::Overflow { .. })
+        ));
     }
 
     #[test]
