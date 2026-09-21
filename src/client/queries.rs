@@ -13,7 +13,7 @@
 use std::collections::BTreeMap;
 
 use alloy::eips::BlockId;
-use alloy::primitives::{Address, B256, U256};
+use alloy::primitives::{Address, B256, Bytes, U256};
 use alloy::providers::Provider;
 use alloy::sol_types::{SolCall, SolValue};
 
@@ -53,6 +53,22 @@ pub(super) fn registered_module(addr: Address, module: &str) -> Result<Address> 
     Ok(addr)
 }
 
+/// A Perp view for [`PerpClient::perp_views`]: its signature, which names
+/// it in errors, and its calldata.
+pub(super) fn view_call<C: SolCall>(call: C) -> (&'static str, Vec<u8>) {
+    (C::SIGNATURE, call.abi_encode())
+}
+
+/// Decode one view's return data from a [`PerpClient::perp_views`] batch.
+pub(super) fn decode_view<C: SolCall>(data: &[u8]) -> Result<C::Return> {
+    C::abi_decode_returns(data).map_err(|e| {
+        ValidationError::DecodeFailed {
+            context: format!("failed to decode {}: {e}", C::SIGNATURE),
+        }
+        .into()
+    })
+}
+
 /// The contract's `EMA_WINDOW` (seconds) narrowed to the width
 /// `calculate_emas` takes.
 pub(super) fn ema_window_secs(ema_window: U256) -> Result<u64> {
@@ -89,6 +105,55 @@ impl PerpClient {
     /// Cache key for this client's market: the `Perp` address left-padded to 32 bytes.
     fn market_key(&self) -> [u8; 32] {
         self.deployments.perp.into_word().0
+    }
+
+    /// Read Perp views in one all-or-nothing Multicall3 `aggregate3` at
+    /// `block`, returning each view's return data in call order.
+    pub(super) async fn perp_views(
+        &self,
+        calls: Vec<(&'static str, Vec<u8>)>,
+        block: BlockId,
+    ) -> Result<Vec<Bytes>> {
+        let (names, calls): (Vec<_>, Vec<_>) = calls
+            .into_iter()
+            .map(|(name, calldata)| {
+                let call = IMulticall3::Call3 {
+                    target: self.deployments.perp,
+                    allowFailure: false,
+                    callData: calldata.into(),
+                };
+                (name, call)
+            })
+            .unzip();
+        let results = IMulticall3::new(MULTICALL3, &self.provider)
+            .aggregate3(calls)
+            .block(block)
+            .call()
+            .await?;
+        if results.len() != names.len() {
+            return Err(ContractError::MulticallFailed {
+                reason: format!(
+                    "Perp multicall returned {} results, expected {}",
+                    results.len(),
+                    names.len()
+                ),
+            }
+            .into());
+        }
+        results
+            .into_iter()
+            .zip(names)
+            .map(|(result, name)| {
+                if result.success {
+                    Ok(result.returnData)
+                } else {
+                    Err(ContractError::MulticallFailed {
+                        reason: format!("Perp multicall: {name} failed"),
+                    }
+                    .into())
+                }
+            })
+            .collect()
     }
 
     /// Fetch and cache the deployment-fixed values the taker book loader
@@ -693,73 +758,23 @@ impl PerpClient {
     ///
     /// Returns `(PerpData, PerpSnapshot)` — static config and live market data.
     pub async fn get_perp_snapshot(&self) -> Result<(PerpData, PerpSnapshot)> {
-        let perp_addr = self.deployments.perp;
-
-        let calls = vec![
-            IMulticall3::Call3 {
-                target: perp_addr,
-                allowFailure: false,
-                callData: Perp::modulesCall {}.abi_encode().into(),
-            },
-            IMulticall3::Call3 {
-                target: perp_addr,
-                allowFailure: false,
-                callData: Perp::poolKeyCall {}.abi_encode().into(),
-            },
-            IMulticall3::Call3 {
-                target: perp_addr,
-                allowFailure: false,
-                callData: Perp::poolStateCall {}.abi_encode().into(),
-            },
-            IMulticall3::Call3 {
-                target: perp_addr,
-                allowFailure: false,
-                callData: Perp::ratesCall {}.abi_encode().into(),
-            },
-            IMulticall3::Call3 {
-                target: perp_addr,
-                allowFailure: false,
-                callData: Perp::openInterestCall {}.abi_encode().into(),
-            },
-        ];
-
-        let multicall = IMulticall3::new(MULTICALL3, &self.provider);
-        let results = multicall.aggregate3(calls).call().await?;
-
-        let call_names = ["modules", "poolKey", "poolState", "rates", "openInterest"];
-        if results.len() != call_names.len() {
-            return Err(ContractError::MulticallFailed {
-                reason: format!(
-                    "perp snapshot multicall returned {} results, expected {}",
-                    results.len(),
-                    call_names.len()
-                ),
-            }
-            .into());
-        }
-        for (i, name) in call_names.iter().enumerate() {
-            if !results[i].success {
-                return Err(ContractError::MulticallFailed {
-                    reason: format!("perp snapshot multicall: {name} call failed"),
-                }
-                .into());
-            }
-        }
-
-        let decode_err = |name: &str, e: alloy::sol_types::Error| ValidationError::DecodeFailed {
-            context: format!("failed to decode {name}: {e}"),
-        };
-
-        let modules = Perp::modulesCall::abi_decode_returns(&results[0].returnData)
-            .map_err(|e| decode_err("modules", e))?;
-        let pool_key = Perp::poolKeyCall::abi_decode_returns(&results[1].returnData)
-            .map_err(|e| decode_err("poolKey", e))?;
-        let pool_state = Perp::poolStateCall::abi_decode_returns(&results[2].returnData)
-            .map_err(|e| decode_err("poolState", e))?;
-        let rates = Perp::ratesCall::abi_decode_returns(&results[3].returnData)
-            .map_err(|e| decode_err("rates", e))?;
-        let oi = Perp::openInterestCall::abi_decode_returns(&results[4].returnData)
-            .map_err(|e| decode_err("openInterest", e))?;
+        let data = self
+            .perp_views(
+                vec![
+                    view_call(Perp::modulesCall {}),
+                    view_call(Perp::poolKeyCall {}),
+                    view_call(Perp::poolStateCall {}),
+                    view_call(Perp::ratesCall {}),
+                    view_call(Perp::openInterestCall {}),
+                ],
+                BlockId::latest(),
+            )
+            .await?;
+        let modules = decode_view::<Perp::modulesCall>(&data[0])?;
+        let pool_key = decode_view::<Perp::poolKeyCall>(&data[1])?;
+        let pool_state = decode_view::<Perp::poolStateCall>(&data[2])?;
+        let rates = decode_view::<Perp::ratesCall>(&data[3])?;
+        let oi = decode_view::<Perp::openInterestCall>(&data[4])?;
 
         let mark = price_x96_to_f64(pool_state.ammPrice)?;
         let funding_rate_daily = funding_per_day_to_f64(rates.fundingPerDay);
@@ -776,7 +791,7 @@ impl PerpClient {
         let bounds = self.get_or_fetch_bounds(modules.marginRatios).await?;
 
         let perp_data = PerpData {
-            perp: perp_addr,
+            perp: self.deployments.perp,
             tick_spacing: i24_to_i32(pool_key.tickSpacing),
             mark,
             beacon: modules.beacon,
