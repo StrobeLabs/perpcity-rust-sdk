@@ -13,8 +13,9 @@
 use std::collections::BTreeMap;
 
 use alloy::eips::BlockId;
-use alloy::primitives::{Address, B256, Bytes, U256};
-use alloy::providers::Provider;
+use alloy::network::Ethereum;
+use alloy::primitives::{Address, B256, U256};
+use alloy::providers::{Empty, MulticallBuilder, MulticallError, Provider, RootProvider};
 use alloy::sol_types::{SolCall, SolValue};
 
 use crate::constants::{
@@ -26,7 +27,7 @@ use crate::contracts::{
     Position,
 };
 use crate::convert::{margin_ratio_to_leverage, price_x96_to_f64, scale_from_6dec};
-use crate::errors::{ContractError, Result, ValidationError};
+use crate::errors::{ContractError, PerpCityError, Result, ValidationError};
 use crate::hft::state_cache::{CachedBounds, CachedFees};
 use crate::math::BlockContext;
 use crate::math::capacity::MarketCapacity;
@@ -55,20 +56,23 @@ pub(super) fn registered_module(addr: Address, module: &str) -> Result<Address> 
     Ok(addr)
 }
 
-/// A Perp view for [`PerpClient::perp_views`]: its signature, which names
-/// it in errors, and its calldata.
-pub(super) fn view_call<C: SolCall>(call: C) -> (&'static str, Vec<u8>) {
-    (C::SIGNATURE, call.abi_encode())
-}
-
-/// Decode one view's return data from a [`PerpClient::perp_views`] batch.
-pub(super) fn decode_view<C: SolCall>(data: &[u8]) -> Result<C::Return> {
-    C::abi_decode_returns(data).map_err(|e| {
-        ValidationError::DecodeFailed {
-            context: format!("failed to decode {}: {e}", C::SIGNATURE),
+/// Map a failed [`PerpClient::multicall_at`] batch onto the SDK's errors.
+///
+/// A transport failure keeps the classification a contract call gets
+/// ([`PerpCityError::Abi`]): a view that reverts reaches the client as a
+/// node error response, and retrying it cannot help.
+pub(super) fn multicall_error(e: MulticallError) -> PerpCityError {
+    match e {
+        MulticallError::TransportError(e) => alloy::contract::Error::TransportError(e).into(),
+        MulticallError::DecodeError(e) => ValidationError::DecodeFailed {
+            context: format!("failed to decode a multicall result: {e}"),
         }
-        .into()
-    })
+        .into(),
+        e => ContractError::MulticallFailed {
+            reason: e.to_string(),
+        }
+        .into(),
+    }
 }
 
 /// The contract's `EMA_WINDOW` (seconds) narrowed to the width
@@ -123,53 +127,14 @@ impl PerpClient {
         self.deployments.perp.into_word().0
     }
 
-    /// Read Perp views in one all-or-nothing Multicall3 `aggregate3` at
-    /// `block`, returning each view's return data in call order.
-    pub(super) async fn perp_views(
+    /// A typed Multicall3 batch pinned to `block`. Add calls with `add`
+    /// and read them with `aggregate`, which fails as a whole if any call
+    /// reverts (map its error with [`multicall_error`]).
+    pub(super) fn multicall_at(
         &self,
-        calls: Vec<(&'static str, Vec<u8>)>,
         block: BlockId,
-    ) -> Result<Vec<Bytes>> {
-        let (names, calls): (Vec<_>, Vec<_>) = calls
-            .into_iter()
-            .map(|(name, calldata)| {
-                let call = IMulticall3::Call3 {
-                    target: self.deployments.perp,
-                    allowFailure: false,
-                    callData: calldata.into(),
-                };
-                (name, call)
-            })
-            .unzip();
-        let results = IMulticall3::new(MULTICALL3, &self.provider)
-            .aggregate3(calls)
-            .block(block)
-            .call()
-            .await?;
-        if results.len() != names.len() {
-            return Err(ContractError::MulticallFailed {
-                reason: format!(
-                    "Perp multicall returned {} results, expected {}",
-                    results.len(),
-                    names.len()
-                ),
-            }
-            .into());
-        }
-        results
-            .into_iter()
-            .zip(names)
-            .map(|(result, name)| {
-                if result.success {
-                    Ok(result.returnData)
-                } else {
-                    Err(ContractError::MulticallFailed {
-                        reason: format!("Perp multicall: {name} failed"),
-                    }
-                    .into())
-                }
-            })
-            .collect()
+    ) -> MulticallBuilder<Empty, &RootProvider<Ethereum>, Ethereum> {
+        self.provider.multicall().address(MULTICALL3).block(block)
     }
 
     /// Fetch and cache the deployment-fixed values the taker book loader
@@ -252,30 +217,26 @@ impl PerpClient {
     /// from the serving replica.
     pub async fn get_fair_price(&self) -> Result<FairPrice> {
         let (block, block_id) = self.lagged_snapshot_block().await?;
-        let data = self
-            .perp_views(
-                vec![
-                    view_call(Perp::modulesCall {}),
-                    view_call(Perp::poolStateCall {}),
-                    view_call(Perp::emasCall {}),
-                    view_call(Perp::ratesCall {}),
-                    view_call(Perp::EMA_WINDOWCall {}),
-                ],
-                block_id,
-            )
-            .await?;
-        let stored_emas = decode_view::<Perp::emasCall>(&data[2])?;
+        let perp = Perp::new(self.deployments.perp, &self.provider);
+        let (modules, pool_state, stored_emas, rates, ema_window) = self
+            .multicall_at(block_id)
+            .add(perp.modules())
+            .add(perp.poolState())
+            .add(perp.emas())
+            .add(perp.rates())
+            .add(perp.EMA_WINDOW())
+            .aggregate()
+            .await
+            .map_err(multicall_error)?;
         let views = MarkViews {
-            beacon: decode_view::<Perp::modulesCall>(&data[0])?.beacon,
-            amm_price_x96: decode_view::<Perp::poolStateCall>(&data[1])?.ammPrice,
+            beacon: modules.beacon,
+            amm_price_x96: pool_state.ammPrice,
             stored_emas: PricePair {
                 amm: stored_emas.ammPrice,
                 index: stored_emas.index,
             },
-            last_touch: decode_view::<Perp::ratesCall>(&data[3])?
-                .lastTouch
-                .to::<u64>(),
-            ema_window: decode_view::<Perp::EMA_WINDOWCall>(&data[4])?,
+            last_touch: rates.lastTouch.to::<u64>(),
+            ema_window,
         };
         let price_x96 = self.contract_mark_x96(&block, views).await?;
         Ok(FairPrice { block, price_x96 })
@@ -681,17 +642,14 @@ impl PerpClient {
     /// from the serving replica.
     pub async fn get_capacity(&self) -> Result<MarketCapacity> {
         let (block, block_id) = self.lagged_snapshot_block().await?;
-        let data = self
-            .perp_views(
-                vec![
-                    view_call(Perp::capacityCall {}),
-                    view_call(Perp::openInterestCall {}),
-                ],
-                block_id,
-            )
-            .await?;
-        let capacity = decode_view::<Perp::capacityCall>(&data[0])?;
-        let oi = decode_view::<Perp::openInterestCall>(&data[1])?;
+        let perp = Perp::new(self.deployments.perp, &self.provider);
+        let (capacity, oi) = self
+            .multicall_at(block_id)
+            .add(perp.capacity())
+            .add(perp.openInterest())
+            .aggregate()
+            .await
+            .map_err(multicall_error)?;
         Ok(MarketCapacity {
             block,
             capacity: capacity.into(),
@@ -884,23 +842,17 @@ impl PerpClient {
     ///
     /// Returns `(PerpData, PerpSnapshot)` — static config and live market data.
     pub async fn get_perp_snapshot(&self) -> Result<(PerpData, PerpSnapshot)> {
-        let data = self
-            .perp_views(
-                vec![
-                    view_call(Perp::modulesCall {}),
-                    view_call(Perp::poolKeyCall {}),
-                    view_call(Perp::poolStateCall {}),
-                    view_call(Perp::ratesCall {}),
-                    view_call(Perp::openInterestCall {}),
-                ],
-                BlockId::latest(),
-            )
-            .await?;
-        let modules = decode_view::<Perp::modulesCall>(&data[0])?;
-        let pool_key = decode_view::<Perp::poolKeyCall>(&data[1])?;
-        let pool_state = decode_view::<Perp::poolStateCall>(&data[2])?;
-        let rates = decode_view::<Perp::ratesCall>(&data[3])?;
-        let oi = decode_view::<Perp::openInterestCall>(&data[4])?;
+        let perp = Perp::new(self.deployments.perp, &self.provider);
+        let (modules, pool_key, pool_state, rates, oi) = self
+            .multicall_at(BlockId::latest())
+            .add(perp.modules())
+            .add(perp.poolKey())
+            .add(perp.poolState())
+            .add(perp.rates())
+            .add(perp.openInterest())
+            .aggregate()
+            .await
+            .map_err(multicall_error)?;
 
         let mark = price_x96_to_f64(pool_state.ammPrice)?;
         let funding_rate_daily = funding_per_day_to_f64(rates.fundingPerDay);
