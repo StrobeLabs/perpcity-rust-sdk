@@ -2,6 +2,8 @@
 //!
 //! [`get_logs_chunked`] reads every log that matches a filter across a
 //! block range, whatever limits the provider puts on `eth_getLogs`.
+//! [`beacon_prints`] and [`latest_beacon_prints`] build a beacon's index
+//! series, `(block, timestamp, index)`, on top of it.
 //!
 //! Providers cap `eth_getLogs` by block span, by result count, or by
 //! response size, and each words the rejection differently, so the scan
@@ -17,13 +19,158 @@
 //! connections, HTTP 429) are returned at once: a smaller range does not
 //! fix them, and the caller owns the retry policy
 //! ([`PerpCityError::is_transient`](crate::PerpCityError::is_transient)).
+//!
+//! The deployed beacons expose no last-update getter (`index()` returns
+//! the value alone), so a beacon's newest `IndexUpdated` log is the only
+//! record of when it last printed: `latest_beacon_prints(.., 1)` reads it.
 
+use std::collections::{BTreeSet, HashMap};
+
+use alloy::primitives::{Address, U256};
 use alloy::providers::Provider;
 use alloy::rpc::types::{Filter, Log};
+use alloy::sol_types::SolEvent;
 use alloy::transports::{RpcError, TransportError, TransportErrorKind};
+use futures_util::stream::{self, StreamExt, TryStreamExt};
+use serde::{Deserialize, Serialize};
 
 use crate::constants::{LOG_SCAN_INITIAL_SPAN, LOG_SCAN_MAX_SPAN};
-use crate::errors::{Result, ValidationError};
+use crate::contracts::IBeacon;
+use crate::convert::price_x96_to_f64;
+use crate::errors::{ContractError, PerpCityError, Result, ValidationError};
+use crate::feeds::events::decode_raw;
+
+/// Concurrent header reads when a provider omits log timestamps.
+const HEADER_READ_CONCURRENCY: usize = 4;
+
+/// One index value a beacon published.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IndexPrint {
+    /// Block the print landed in.
+    pub block_number: u64,
+    /// Position of the print's log in its block.
+    pub log_index: u64,
+    /// Unix timestamp of the block.
+    pub timestamp: u64,
+    /// The printed index, Q96 fixed-point, as the beacon emitted it.
+    pub index_x96: U256,
+}
+
+impl IndexPrint {
+    /// The printed index as a float.
+    ///
+    /// # Errors
+    ///
+    /// As [`price_x96_to_f64`]: a zero print, or one beyond the safe f64
+    /// range.
+    pub fn index(&self) -> std::result::Result<f64, ValidationError> {
+        price_x96_to_f64(self.index_x96)
+    }
+}
+
+/// Every index print `beacon` published in blocks `from_block..=to_block`,
+/// oldest first.
+///
+/// # Errors
+///
+/// [`ValidationError::InvalidConfig`] for the zero address,
+/// [`ValidationError::InvalidBlockRange`] if `from_block > to_block`,
+/// [`ContractError::BlockUnavailable`] if a print's block header is missing
+/// when the provider omits log timestamps, or the RPC error that stopped
+/// the scan.
+pub async fn beacon_prints<P: Provider>(
+    provider: &P,
+    beacon: Address,
+    from_block: u64,
+    to_block: u64,
+) -> Result<Vec<IndexPrint>> {
+    let filter = index_updated_filter(beacon)?;
+    let logs = get_logs_chunked(provider, &filter, from_block, to_block).await?;
+    with_timestamps(provider, &logs).await
+}
+
+/// The newest `limit` index prints `beacon` published in blocks
+/// `from_block..=to_block`, oldest first.
+///
+/// Reads backward from `to_block` and stops once it holds `limit` prints,
+/// so `from_block` is only a floor: a beacon's creation block, or any
+/// block known to be before it, is safe.
+///
+/// # Errors
+///
+/// As [`beacon_prints`].
+pub async fn latest_beacon_prints<P: Provider>(
+    provider: &P,
+    beacon: Address,
+    from_block: u64,
+    to_block: u64,
+    limit: usize,
+) -> Result<Vec<IndexPrint>> {
+    let filter = index_updated_filter(beacon)?;
+    let mut scan = LogScan::new(provider, &filter, from_block, to_block)?;
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
+    let mut newest_first = Vec::new();
+    let mut held = 0;
+    while held < limit
+        && let Some(chunk) = scan.next_chunk(End::Newest).await?
+    {
+        held += chunk.len();
+        newest_first.push(chunk);
+    }
+    let logs: Vec<Log> = newest_first.into_iter().rev().flatten().collect();
+    let skip = logs.len().saturating_sub(limit);
+    with_timestamps(provider, &logs[skip..]).await
+}
+
+fn index_updated_filter(beacon: Address) -> std::result::Result<Filter, ValidationError> {
+    if beacon.is_zero() {
+        return Err(ValidationError::InvalidConfig {
+            reason: "beacon address is zero".into(),
+        });
+    }
+    Ok(Filter::new()
+        .address(beacon)
+        .event_signature(IBeacon::IndexUpdated::SIGNATURE_HASH))
+}
+
+/// Decodes `IndexUpdated` logs into prints, reading the block header for
+/// any log that arrived without a timestamp.
+async fn with_timestamps<P: Provider>(provider: &P, logs: &[Log]) -> Result<Vec<IndexPrint>> {
+    let missing: BTreeSet<u64> = logs
+        .iter()
+        .filter(|log| log.block_timestamp.is_none())
+        .filter_map(|log| log.block_number)
+        .collect();
+    let headers: HashMap<u64, u64> = stream::iter(missing)
+        .map(|number| async move {
+            let block = provider
+                .get_block_by_number(number.into())
+                .await?
+                .ok_or(ContractError::BlockUnavailable { number })?;
+            Ok::<_, PerpCityError>((number, block.header.timestamp))
+        })
+        .buffered(HEADER_READ_CONCURRENCY)
+        .try_collect()
+        .await?;
+    Ok(logs
+        .iter()
+        .filter_map(|log| {
+            let block_number = log.block_number?;
+            let timestamp = log
+                .block_timestamp
+                .or_else(|| headers.get(&block_number).copied())?;
+            let event = decode_raw::<IBeacon::IndexUpdated>(log)?;
+            Some(IndexPrint {
+                block_number,
+                log_index: log.log_index?,
+                timestamp,
+                index_x96: event.index,
+            })
+        })
+        .collect())
+}
 
 /// Every log matching `filter` in blocks `from_block..=to_block`, in chain
 /// order.
@@ -43,14 +190,14 @@ pub async fn get_logs_chunked<P: Provider>(
 ) -> Result<Vec<Log>> {
     let mut scan = LogScan::new(provider, filter, from_block, to_block)?;
     let mut logs = Vec::new();
-    while let Some(chunk) = scan.next_oldest().await? {
+    while let Some(chunk) = scan.next_chunk(End::Oldest).await? {
         logs.extend(chunk);
     }
     Ok(logs)
 }
 
-/// A block range read in adaptive chunks.
-pub(crate) struct LogScan<'a, P> {
+/// A block range read in adaptive chunks, from either end.
+struct LogScan<'a, P> {
     provider: &'a P,
     filter: Filter,
     /// Blocks not yet read, inclusive; `None` once the range is done.
@@ -64,7 +211,7 @@ pub(crate) struct LogScan<'a, P> {
 }
 
 impl<'a, P: Provider> LogScan<'a, P> {
-    pub(crate) fn new(
+    fn new(
         provider: &'a P,
         filter: &Filter,
         from_block: u64,
@@ -86,19 +233,25 @@ impl<'a, P: Provider> LogScan<'a, P> {
         })
     }
 
-    /// The logs of the oldest unread chunk, or `None` once the range is
+    /// The logs of the unread chunk at `end`, or `None` once the range is
     /// read.
-    pub(crate) async fn next_oldest(&mut self) -> Result<Option<Vec<Log>>> {
+    async fn next_chunk(&mut self, end: End) -> Result<Option<Vec<Log>>> {
         let Some((low, high)) = self.remaining else {
             return Ok(None);
         };
         loop {
             let reach = self.span - 1;
-            let (from, to) = (low, low.saturating_add(reach).min(high));
+            let (from, to) = match end {
+                End::Oldest => (low, low.saturating_add(reach).min(high)),
+                End::Newest => (high.saturating_sub(reach).max(low), high),
+            };
             let filter = self.filter.clone().from_block(from).to_block(to);
             match self.provider.get_logs(&filter).await {
                 Ok(logs) => {
-                    self.remaining = (to < high).then(|| (to + 1, high));
+                    self.remaining = match end {
+                        End::Oldest => (to < high).then(|| (to + 1, high)),
+                        End::Newest => (from > low).then(|| (low, from - 1)),
+                    };
                     self.accepted(to - from + 1);
                     return Ok(Some(logs));
                 }
@@ -148,6 +301,12 @@ impl<'a, P: Provider> LogScan<'a, P> {
     }
 }
 
+#[derive(Clone, Copy)]
+enum End {
+    Oldest,
+    Newest,
+}
+
 /// Whether the server answered the request with a rejection that a
 /// narrower range may avoid: a JSON-RPC error, or an HTTP error status
 /// other than 429 (a gateway timing out a wide scan answers 504).
@@ -161,11 +320,11 @@ fn is_range_rejection(error: &TransportError) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use alloy::primitives::{Address, B256, Bytes};
+    use alloy::primitives::{Address, B256, Bytes, U256, address, b256, bytes};
 
     use super::*;
-    use crate::PerpCityError;
-    use crate::test_support::{FakeNode, Mode, mined_log};
+    use crate::constants::Q96;
+    use crate::test_support::{FakeNode, Mode, mined_log, timestamp_of};
 
     const EMITTER: Address = Address::repeat_byte(0xAA);
     const TOPIC: B256 = B256::repeat_byte(0x11);
@@ -233,6 +392,159 @@ mod tests {
         // Four halvings from 100k to an accepted 6,250, then two probes
         // between the accepted and rejected widths; none after that.
         assert_eq!(rejected.len(), 6, "rejected requests: {requests:?}");
+    }
+
+    #[tokio::test]
+    async fn newest_first_reads_the_same_range_from_the_top() {
+        let node = FakeNode::new(logs_every(500, 60_000), 7_000);
+        let provider = node.provider();
+        let mut scan = LogScan::new(&provider, &filter(), 1_000, 60_000).unwrap();
+        let mut seen = Vec::new();
+        while let Some(chunk) = scan.next_chunk(End::Newest).await.unwrap() {
+            let chunk = blocks(&chunk);
+            if let (Some(last), Some(first)) = (seen.last(), chunk.first()) {
+                assert!(first < last, "chunks must arrive newest first");
+            }
+            seen.extend(chunk.into_iter().rev());
+        }
+        seen.reverse();
+        assert_eq!(seen, (1_000..=60_000).step_by(500).collect::<Vec<_>>());
+        let accepted: Vec<_> = node
+            .requests()
+            .into_iter()
+            .filter(|(from, to)| to - from < 7_000)
+            .collect();
+        assert_tiles(&accepted, 1_000, 60_000);
+    }
+
+    const BEACON: Address = Address::repeat_byte(0xBE);
+
+    fn print_log(block: u64, index: u64, value: U256, timestamp: Option<u64>) -> Log {
+        let mut log = mined_log(
+            BEACON,
+            IBeacon::IndexUpdated::SIGNATURE_HASH,
+            value.to_be_bytes_vec().into(),
+            block,
+            index,
+        );
+        log.block_timestamp = timestamp;
+        log
+    }
+
+    #[tokio::test]
+    async fn prints_take_log_timestamps_and_read_each_missing_header_once() {
+        let logs = vec![
+            print_log(10, 0, Q96, Some(42)),
+            print_log(20, 1, Q96 * U256::from(2), None),
+            print_log(20, 4, Q96 * U256::from(3), None),
+            print_log(30, 0, Q96 * U256::from(4), None),
+        ];
+        let node = FakeNode::new(logs, u64::MAX);
+        let prints = beacon_prints(&node.provider(), BEACON, 0, 100)
+            .await
+            .unwrap();
+
+        let rows: Vec<_> = prints
+            .iter()
+            .map(|p| (p.block_number, p.log_index, p.timestamp, p.index().unwrap()))
+            .collect();
+        assert_eq!(
+            rows,
+            vec![
+                (10, 0, 42, 1.0),
+                (20, 1, timestamp_of(20), 2.0),
+                (20, 4, timestamp_of(20), 3.0),
+                (30, 0, timestamp_of(30), 4.0),
+            ]
+        );
+        assert_eq!(node.header_reads(), vec![20, 30]);
+    }
+
+    /// A real `IndexUpdated` log from the Arbitrum One beacon
+    /// 0x0a33ea45fe9011029641ef63ce8e1c94a8a29990, as the node returned it
+    /// (tx 0x598da8ad…, which carries `blockTimestamp`).
+    #[tokio::test]
+    async fn a_mainnet_print_decodes_to_its_block_and_value() {
+        let beacon = address!("0a33ea45fe9011029641ef63ce8e1c94a8a29990");
+        let mut log = mined_log(
+            beacon,
+            b256!("acfc085c9be45d2b3f9e5c09a19d4a95749cc16939519c13e090de3a4cb192c6"),
+            bytes!("0000000000000000000000000000000000000010edbd439f2076368fba399c29"),
+            0x1e2c_c005,
+            3,
+        );
+        log.block_timestamp = Some(0x6aac_7525);
+        let node = FakeNode::new(vec![log], u64::MAX);
+        let prints = beacon_prints(&node.provider(), beacon, 0x1e2c_0000, 0x1e2d_0000)
+            .await
+            .unwrap();
+        assert_eq!(prints.len(), 1);
+        let print = prints[0];
+        assert_eq!(
+            (print.block_number, print.log_index, print.timestamp),
+            (506_249_221, 3, 1_789_687_077)
+        );
+        assert!((print.index().unwrap() - 16.928669).abs() < 1e-6);
+        assert!(node.header_reads().is_empty());
+    }
+
+    #[tokio::test]
+    async fn latest_prints_read_back_only_as_far_as_the_limit_needs() {
+        let logs = (0..=600_000)
+            .step_by(500)
+            .map(|block| print_log(block, 0, Q96 * U256::from(block + 1), Some(block)))
+            .collect();
+        let node = FakeNode::new(logs, 7_000);
+        let prints = latest_beacon_prints(&node.provider(), BEACON, 0, 600_000, 5)
+            .await
+            .unwrap();
+        let blocks: Vec<u64> = prints.iter().map(|p| p.block_number).collect();
+        assert_eq!(blocks, vec![598_000, 598_500, 599_000, 599_500, 600_000]);
+        let served: Vec<_> = node
+            .requests()
+            .into_iter()
+            .filter(|(from, to)| to - from < 7_000)
+            .collect();
+        assert_eq!(
+            served.len(),
+            1,
+            "one served chunk holds five prints: {served:?}"
+        );
+        assert!(
+            served[0].0 > 590_000,
+            "read further back than needed: {served:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_zero_limit_or_zero_beacon_reads_nothing() {
+        let node = FakeNode::new(vec![print_log(1, 0, Q96, Some(1))], u64::MAX);
+        let provider = node.provider();
+        assert!(
+            latest_beacon_prints(&provider, BEACON, 0, 10, 0)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let error = beacon_prints(&provider, Address::ZERO, 0, 10)
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            PerpCityError::Validation(ValidationError::InvalidConfig { .. })
+        ));
+        assert!(node.requests().is_empty());
+    }
+
+    #[test]
+    fn a_zero_print_has_no_float_index() {
+        let print = IndexPrint {
+            block_number: 1,
+            log_index: 0,
+            timestamp: 1,
+            index_x96: U256::ZERO,
+        };
+        assert!(print.index().is_err());
     }
 
     #[tokio::test]

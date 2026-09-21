@@ -15,7 +15,7 @@ use alloy::rpc::client::RpcClient;
 use alloy::rpc::json_rpc::{
     ErrorPayload, RequestPacket, Response, ResponsePacket, ResponsePayload,
 };
-use alloy::rpc::types::{Filter, Log};
+use alloy::rpc::types::{Block, Filter, Log};
 use alloy::transports::{TransportError, TransportErrorKind, TransportFut};
 use serde_json::value::RawValue;
 use tower::Service;
@@ -32,6 +32,7 @@ pub(crate) enum Mode {
 #[derive(Debug, Default)]
 struct State {
     requests: Vec<(u64, u64)>,
+    header_reads: Vec<u64>,
 }
 
 /// In-memory node. Clones share the request log.
@@ -69,8 +70,22 @@ impl FakeNode {
         self.state.lock().unwrap().requests.clone()
     }
 
+    /// Every block whose header was read, in order.
+    pub(crate) fn header_reads(&self) -> Vec<u64> {
+        self.state.lock().unwrap().header_reads.clone()
+    }
+
     fn answer(&self, method: &str, params: &RawValue) -> Result<ResponsePayload, TransportError> {
         match method {
+            "eth_getBlockByNumber" => {
+                let (tag, _full): (String, bool) = serde_json::from_str(params.get()).unwrap();
+                let number = parse_quantity(&tag);
+                self.state.lock().unwrap().header_reads.push(number);
+                let mut block = Block::<B256>::default();
+                block.header.inner.number = number;
+                block.header.inner.timestamp = timestamp_of(number);
+                Ok(success(&block))
+            }
             "eth_getLogs" => {
                 let (filter,): (Filter,) = serde_json::from_str(params.get()).unwrap();
                 let from = filter.get_from_block().unwrap();
@@ -124,6 +139,11 @@ impl Service<RequestPacket> for FakeNode {
     }
 }
 
+/// The timestamp the node reports for a block.
+pub(crate) fn timestamp_of(block: u64) -> u64 {
+    1_700_000_000 + block / 4
+}
+
 /// A mined log from `address` with one topic, the given data, and no
 /// block timestamp.
 pub(crate) fn mined_log(
@@ -150,4 +170,8 @@ pub(crate) fn mined_log(
 
 fn success<T: serde::Serialize>(value: &T) -> ResponsePayload {
     ResponsePayload::Success(serde_json::value::to_raw_value(value).unwrap())
+}
+
+fn parse_quantity(hex: &str) -> u64 {
+    u64::from_str_radix(hex.trim_start_matches("0x"), 16).unwrap()
 }

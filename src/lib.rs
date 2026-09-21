@@ -13,7 +13,7 @@
 //! | [`errors`] | SDK-wide error types using `thiserror` |
 //! | [`feeds`] | Live data feeds over WebSocket: market events, block headers, event decoding |
 //! | [`hft`] | HFT infrastructure: nonce, gas, pipeline, state cache, latency, positions |
-//! | [`history`] | Historical log reads over block ranges of any length |
+//! | [`history`] | Historical log reads over block ranges of any length; beacon index print series |
 //! | [`math`] | Pure math: tick ↔ price, liquidity, positions, EMAs, the deployed fair price, taker swap simulation, maker settle previews |
 //! | [`prelude`] | Everyday public surface, bundled for `use perpcity_sdk::prelude::*;` |
 //! | [`transport`] | Multi-endpoint RPC transport with health-aware routing |

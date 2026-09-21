@@ -526,7 +526,7 @@ pub fn decode_log(log: &Log) -> Option<MarketEvent> {
 }
 
 /// Decode a typed event from a raw log's topics + data.
-fn decode_raw<E: SolEvent>(log: &Log) -> Option<E> {
+pub(crate) fn decode_raw<E: SolEvent>(log: &Log) -> Option<E> {
     E::decode_raw_log(
         log.inner.data.topics().iter().copied(),
         log.inner.data.data.as_ref(),
