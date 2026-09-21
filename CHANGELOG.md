@@ -10,6 +10,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - **`PerpFactoryRedeployEvents::PerpCreated`** — the `PerpCreated` shape of the redeployed factory (perpcity-contracts `IPerpFactory` since #283): adds `uint32 latency`, drops the position-NFT `name`/`symbol`/`tokenUri` strings. No factory emits it yet; it is declared so discovery reads a new factory from its first block while the old factory's perps stay live. Both factory shapes and `IBeacon::IndexUpdated` have their topic0 locked in `abi_lock` against the live chain.
+- **`history::get_logs_chunked(provider, filter, from_block, to_block)`** — every log matching a filter across a block range of any length, in chain order. Providers cap `eth_getLogs` by span, result count or response size and word the rejection differently, so the scan does not parse messages: it halves a range the server rejects (a JSON-RPC error or an HTTP error other than 429), doubles the span after each accepted range, and after the first rejection narrows in on the limit between the widest accepted and narrowest rejected span. A single block that is still rejected, and any failure with no server answer (timeout, dropped connection, 429), is returned as the error.
+- **`ValidationError::InvalidBlockRange { from_block, to_block }`** (new variant on the `#[non_exhaustive]` enum) — a range whose start is after its end. Not `is_transient()`.
 
 ## [0.4.0] - 2026-09-08
 

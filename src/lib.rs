@@ -13,6 +13,7 @@
 //! | [`errors`] | SDK-wide error types using `thiserror` |
 //! | [`feeds`] | Live data feeds over WebSocket: market events, block headers, event decoding |
 //! | [`hft`] | HFT infrastructure: nonce, gas, pipeline, state cache, latency, positions |
+//! | [`history`] | Historical log reads over block ranges of any length |
 //! | [`math`] | Pure math: tick ↔ price, liquidity, positions, EMAs, the deployed fair price, taker swap simulation, maker settle previews |
 //! | [`prelude`] | Everyday public surface, bundled for `use perpcity_sdk::prelude::*;` |
 //! | [`transport`] | Multi-endpoint RPC transport with health-aware routing |
@@ -42,9 +43,12 @@ pub mod convert;
 pub mod errors;
 pub mod feeds;
 pub mod hft;
+pub mod history;
 pub mod math;
 pub mod prelude;
 pub(crate) mod storage;
+#[cfg(test)]
+pub(crate) mod test_support;
 pub mod transport;
 pub mod types;
 

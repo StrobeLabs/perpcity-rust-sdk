@@ -154,6 +154,13 @@ mod tests {
             "the send evicts the estimate, so a retry is the caller's call — not a backoff loop's"
         );
         assert!(revert.is_simulation_revert());
+
+        let range: PerpCityError = ValidationError::InvalidBlockRange {
+            from_block: 2,
+            to_block: 1,
+        }
+        .into();
+        assert!(!range.is_transient(), "a reversed range stays reversed");
     }
 
     /// Typed revert matching compares raw selectors, not strings, so it
