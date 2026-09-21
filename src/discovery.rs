@@ -20,7 +20,10 @@
 //! whether a market is listed is an off-chain decision this module does
 //! not make.
 //!
-//! [`list_perps`] reads the history.
+//! [`list_perps`] reads the history; [`PerpCreatedFeed`](crate::feeds::PerpCreatedFeed)
+//! streams new creations over the same list. To follow a factory list
+//! without a gap, subscribe first, then list, and merge by
+//! [`PerpCreation::perp`].
 
 use alloy::primitives::{Address, B256, U256};
 use alloy::providers::Provider;

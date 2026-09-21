@@ -73,7 +73,8 @@ pub use contracts::{
 
 #[doc(inline)]
 pub use feeds::{
-    BlockHeaderFeed, LiveTakerMarket, LiveTakerMarketPublisher, MarketEvent, MarketFeed, decode_log,
+    BlockHeaderFeed, LiveTakerMarket, LiveTakerMarketPublisher, MarketEvent, MarketFeed,
+    PerpCreatedFeed, decode_log,
 };
 
 #[doc(inline)]
