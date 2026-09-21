@@ -377,7 +377,7 @@ impl PerpClient {
     /// [`RECEIPT_POLL_INTERVAL`] for up to [`RECEIPT_TIMEOUT`].
     ///
     /// Use it to resolve a send whose outcome is unknown, with the hash from
-    /// [`TransactionError::tx_hash`]. On timeout it returns
+    /// [`PerpCityError::tx_hash`](crate::PerpCityError::tx_hash). On timeout it returns
     /// [`TransactionError::ReceiptTimeout`] for the same hash, so the call can
     /// repeat. For one look-up with no wait, use
     /// `provider().get_transaction_receipt(tx_hash)`.

@@ -22,6 +22,7 @@ pub use contract::ContractError;
 pub use transaction::TransactionError;
 pub use validation::ValidationError;
 
+use alloy::primitives::FixedBytes;
 use thiserror::Error;
 
 /// Central error type for the PerpCity SDK.
@@ -113,6 +114,20 @@ impl PerpCityError {
                 })
         )
     }
+
+    /// Hash of the signed transaction when the failure came at or after
+    /// the broadcast; see [`TransactionError::tx_hash`].
+    ///
+    /// For an error from [`TxBuilder::send`](crate::TxBuilder::send),
+    /// `None` means nothing was broadcast, whatever the variant: a
+    /// `Some` hash may have landed, so look up its receipt before treating
+    /// the send's effect as absent.
+    pub fn tx_hash(&self) -> Option<FixedBytes<32>> {
+        match self {
+            Self::Transaction(e) => e.tx_hash(),
+            _ => None,
+        }
+    }
 }
 
 /// Convenience alias used throughout the SDK.
@@ -120,7 +135,6 @@ pub type Result<T> = std::result::Result<T, PerpCityError>;
 
 #[cfg(test)]
 mod tests {
-    use alloy::primitives::FixedBytes;
     use alloy::transports::TransportErrorKind;
 
     use super::*;
@@ -258,6 +272,16 @@ mod tests {
         for err in &unsent {
             assert_eq!(err.tx_hash(), None, "{err}");
         }
+
+        let wrapped: PerpCityError = sent.into_iter().next().unwrap().into();
+        assert_eq!(wrapped.tx_hash(), Some(hash));
+        let pre_broadcast_rpc: PerpCityError =
+            TransportErrorKind::custom_str("nonce count read failed").into();
+        assert_eq!(
+            pre_broadcast_rpc.tx_hash(),
+            None,
+            "a send's Rpc error comes before the broadcast"
+        );
     }
 
     /// Typed revert matching compares raw selectors, not strings, so it
