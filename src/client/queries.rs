@@ -213,13 +213,12 @@ impl PerpClient {
     pub(super) async fn contract_mark_x96(
         &self,
         block: &BlockContext,
-        block_id: BlockId,
         views: MarkViews,
     ) -> Result<U256> {
         let beacon = registered_module(views.beacon, "IBeacon")?;
         let index = IBeacon::new(beacon, &self.provider)
             .index()
-            .block(block_id)
+            .block(BlockId::hash(block.hash))
             .call()
             .await?;
         let emas = calculate_emas(
@@ -278,7 +277,7 @@ impl PerpClient {
                 .to::<u64>(),
             ema_window: decode_view::<Perp::EMA_WINDOWCall>(&data[4])?,
         };
-        let price_x96 = self.contract_mark_x96(&block, block_id, views).await?;
+        let price_x96 = self.contract_mark_x96(&block, views).await?;
         Ok(FairPrice { block, price_x96 })
     }
 
