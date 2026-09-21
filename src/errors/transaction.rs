@@ -60,8 +60,9 @@ pub enum TransactionError {
 
     /// Receipt polling timed out before the transaction was confirmed.
     ///
-    /// The transaction was broadcast and may still mine, so its nonce stays
-    /// consumed. Look up `tx_hash` later (for example with
+    /// The transaction was broadcast and may still mine, so the send path
+    /// never reuses its nonce; the next send resyncs it from chain. Look up
+    /// `tx_hash` later (for example with
     /// [`PerpClient::poll_receipt`](crate::PerpClient::poll_receipt)) to
     /// learn the outcome.
     #[error("receipt timeout for {tx_hash}: {reason}")]
