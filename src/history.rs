@@ -596,7 +596,9 @@ fn is_rate_limit(payload: &ErrorPayload) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use alloy::primitives::{Address, B256, Bytes, LogData, U256, address, b256, bytes};
+    use alloy::primitives::{
+        Address, B256, Bytes, Log as PrimitiveLog, LogData, U256, address, b256, bytes,
+    };
 
     use super::*;
     use crate::constants::Q96;
@@ -908,48 +910,56 @@ mod tests {
             .collect()
     }
 
-    /// A real USDC transfer from the Arbitrum One fleet treasury
-    /// 0xc3da549e…89f5 to a wallet it funds (tx 0xa55d3cc1…, 89.999998 USDC).
+    /// A real Arbitrum One USDC transfer of 89.999998 USDC, as the node
+    /// returned it in the receipt of tx 0xa55d3cc1…e26e.
     #[tokio::test]
     async fn a_mainnet_usdc_transfer_decodes_to_its_parties_and_value() {
-        let treasury = address!("c3da549ee508386a12f3908d5bf3060fd04b89f5");
-        let wallet = address!("e4fb292b59e3d2cdcc16a332035058f9796b5786");
-        let mut log = mined_log(
-            USDC,
-            b256!("ddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"),
-            bytes!("00000000000000000000000000000000000000000000000000000000055d4a7e"),
-            0x1e40_09af,
-            0,
-        );
-        log.inner.data = LogData::new_unchecked(
-            vec![
-                log.inner.data.topics()[0],
-                b256!("000000000000000000000000c3da549ee508386a12f3908d5bf3060fd04b89f5"),
-                b256!("000000000000000000000000e4fb292b59e3d2cdcc16a332035058f9796b5786"),
-            ],
-            log.inner.data.data.clone(),
-        );
-        log.transaction_hash = Some(b256!(
-            "a55d3cc1c657e72ac6d34f47fc20ad1ac7dce3de2c497b3bcf1d559057e6e26e"
-        ));
+        let sender = address!("c3da549ee508386a12f3908d5bf3060fd04b89f5");
+        let recipient = address!("e4fb292b59e3d2cdcc16a332035058f9796b5786");
+        let tx_hash = b256!("a55d3cc1c657e72ac6d34f47fc20ad1ac7dce3de2c497b3bcf1d559057e6e26e");
+        let log = Log {
+            inner: PrimitiveLog {
+                address: USDC,
+                data: LogData::new_unchecked(
+                    vec![
+                        b256!("ddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"),
+                        b256!("000000000000000000000000c3da549ee508386a12f3908d5bf3060fd04b89f5"),
+                        b256!("000000000000000000000000e4fb292b59e3d2cdcc16a332035058f9796b5786"),
+                    ],
+                    bytes!("00000000000000000000000000000000000000000000000000000000055d4a7e"),
+                ),
+            },
+            block_hash: Some(b256!(
+                "5414fbeaa040956c8fce9279e1253bbf0772f9a472030ebd72f9c04fb5d90071"
+            )),
+            block_number: Some(0x1e40_09af),
+            block_timestamp: Some(0x6ab1_68d8),
+            transaction_hash: Some(tx_hash),
+            transaction_index: Some(1),
+            log_index: Some(0),
+            removed: false,
+        };
         let node = FakeNode::new(vec![log], u64::MAX);
         let transfers = token_transfers(
             &node.provider(),
             USDC,
-            Some(&[treasury]),
-            Some(&[wallet]),
+            Some(&[sender]),
+            Some(&[recipient]),
             0x1e40_0000,
             0x1e41_0000,
         )
         .await
         .unwrap();
         assert_eq!(
-            flows(&transfers),
-            vec![(treasury, wallet, U256::from(89_999_998u64), 507_513_263)]
-        );
-        assert_eq!(
-            transfers[0].tx_hash,
-            b256!("a55d3cc1c657e72ac6d34f47fc20ad1ac7dce3de2c497b3bcf1d559057e6e26e")
+            transfers,
+            vec![TokenTransfer {
+                block_number: 507_513_263,
+                log_index: 0,
+                tx_hash,
+                from: sender,
+                to: recipient,
+                value: U256::from(89_999_998u64),
+            }]
         );
     }
 
