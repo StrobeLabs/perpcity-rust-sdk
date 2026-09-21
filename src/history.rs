@@ -20,9 +20,10 @@
 //! start of a scan and a logarithmic number after. A single block that the
 //! server still rejects is returned as the error.
 //!
-//! Failures where the server gave no answer (timeouts, dropped
-//! connections, HTTP 429) are returned at once: a smaller range does not
-//! fix them, and the caller owns the retry policy
+//! Failures that a smaller range does not fix are returned at once: no
+//! answer (timeouts, dropped connections), a rate limit (HTTP 429 or 503,
+//! or a JSON-RPC error that alloy's retry rules call one), a method or
+//! parse error, and HTTP 401 or 403. The caller owns the retry policy
 //! ([`PerpCityError::is_transient`](crate::PerpCityError::is_transient)).
 //! A scan sends its requests back to back, so against a rate-limited
 //! endpoint put the backoff in the transport (alloy's `RetryBackoffLayer`,
@@ -36,6 +37,7 @@ use std::collections::{BTreeSet, HashMap};
 
 use alloy::primitives::{Address, U256};
 use alloy::providers::Provider;
+use alloy::rpc::json_rpc::ErrorPayload;
 use alloy::rpc::types::{Filter, Log};
 use alloy::sol_types::SolEvent;
 use alloy::transports::{RpcError, TransportError, TransportErrorKind};
@@ -256,7 +258,7 @@ impl<'a, P: Provider> LogScan<'a, P> {
                     self.widths.accepted(to - from + 1);
                     return Ok(Some(logs));
                 }
-                Err(error) if to > from && is_range_rejection(&error) => {
+                Err(error) if to > from && classify(&error) == Failure::Range => {
                     tracing::debug!(from, to, %error, "eth_getLogs range rejected; narrowing");
                     self.widths.rejected(to - from + 1);
                 }
@@ -364,15 +366,51 @@ enum End {
     Newest,
 }
 
-/// Whether the server answered the request with a rejection that a
-/// narrower range may avoid: a JSON-RPC error, or an HTTP error status
-/// other than 429 (a gateway timing out a wide scan answers 504).
-fn is_range_rejection(error: &TransportError) -> bool {
+/// What a failed `eth_getLogs` request tells the scan.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Failure {
+    /// The server refused the range; a narrower one may pass.
+    Range,
+    /// The server refused the request for a reason no range fixes.
+    Refused,
+    /// The server gave no answer, or asked the client to slow down.
+    Unanswered,
+}
+
+/// Classifies a failed request.
+///
+/// Providers word range rejections differently and reuse codes for them
+/// (Infura's `-32005` is both "more than 10000 results" and a rate limit),
+/// so any server error is a range rejection unless it is a rate limit, a
+/// method or parse error, or an auth or availability status.
+fn classify(error: &TransportError) -> Failure {
     match error {
-        RpcError::ErrorResp(_) => true,
-        RpcError::Transport(TransportErrorKind::HttpError(http)) => http.status != 429,
-        _ => false,
+        RpcError::ErrorResp(payload) if is_rate_limit(payload) => Failure::Unanswered,
+        RpcError::ErrorResp(payload) if matches!(payload.code, -32_601 | -32_700) => {
+            Failure::Refused
+        }
+        RpcError::ErrorResp(_) => Failure::Range,
+        RpcError::Transport(TransportErrorKind::HttpError(http)) => match http.status {
+            429 | 503 => Failure::Unanswered,
+            401 | 403 => Failure::Refused,
+            _ => Failure::Range,
+        },
+        _ => Failure::Unanswered,
     }
+}
+
+/// Whether a JSON-RPC error is a rate limit, per alloy's retry rules, with
+/// `-32005` a rate limit only when its message says so.
+fn is_rate_limit(payload: &ErrorPayload) -> bool {
+    if payload.code != -32_005 {
+        return payload.is_retry_err();
+    }
+    ErrorPayload::<()> {
+        code: 0,
+        message: payload.message.clone(),
+        data: None,
+    }
+    .is_retry_err()
 }
 
 #[cfg(test)]
@@ -660,13 +698,52 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_rate_limit_is_returned_without_shrinking() {
-        let node = FakeNode::new(Vec::new(), u64::MAX).with_mode(Mode::RateLimited);
-        let error = get_logs_chunked(&node.provider(), &filter(), 0, 500_000)
-            .await
-            .unwrap_err();
+    async fn failures_no_narrower_range_fixes_are_returned_at_once() {
+        let modes = [
+            Mode::Http(429),
+            Mode::Http(503),
+            Mode::Http(401),
+            Mode::Http(403),
+            Mode::RpcError(
+                429,
+                "Your app has exceeded its compute units per second capacity",
+            ),
+            Mode::RpcError(
+                -32_005,
+                "daily request count exceeded, request rate limited",
+            ),
+            Mode::RpcError(-32_601, "the method eth_getLogs does not exist"),
+            Mode::RpcError(-32_700, "parse error"),
+        ];
+        for mode in modes {
+            let node = FakeNode::new(Vec::new(), u64::MAX).with_mode(mode);
+            get_logs_chunked(&node.provider(), &filter(), 0, 500_000)
+                .await
+                .unwrap_err();
+            assert_eq!(node.requests(), vec![(0, 99_999)], "{mode:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn range_rejections_narrow_to_a_single_block() {
+        let modes = [
+            Mode::Http(504),
+            Mode::RpcError(-32_005, "query returned more than 10000 results"),
+            Mode::RpcError(-32_602, "Log response size exceeded"),
+        ];
+        for mode in modes {
+            let node = FakeNode::new(Vec::new(), u64::MAX).with_mode(mode);
+            get_logs_chunked(&node.provider(), &filter(), 0, 3)
+                .await
+                .unwrap_err();
+            assert_eq!(node.requests().last(), Some(&(0, 0)), "{mode:?}");
+        }
+    }
+
+    #[test]
+    fn a_rate_limit_error_is_transient() {
+        let error: PerpCityError = TransportErrorKind::http_error(429, String::new()).into();
         assert!(error.is_transient());
-        assert_eq!(node.requests(), vec![(0, 99_999)]);
     }
 
     #[tokio::test]

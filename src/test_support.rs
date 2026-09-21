@@ -25,8 +25,10 @@ use tower::Service;
 pub(crate) enum Mode {
     /// Serve the logs in range.
     Serve,
-    /// Fail every request with HTTP 429.
-    RateLimited,
+    /// Fail every request with this HTTP status.
+    Http(u16),
+    /// Answer every request with this JSON-RPC error code and message.
+    RpcError(i64, &'static str),
 }
 
 #[derive(Debug, Default)]
@@ -113,8 +115,18 @@ impl FakeNode {
                 let from = filter.get_from_block().unwrap();
                 let to = filter.get_to_block().unwrap();
                 self.state.lock().unwrap().requests.push((from, to));
-                if let Mode::RateLimited = self.mode {
-                    return Err(TransportErrorKind::http_error(429, "rate limited".into()));
+                match self.mode {
+                    Mode::Serve => {}
+                    Mode::Http(status) => {
+                        return Err(TransportErrorKind::http_error(status, String::new()));
+                    }
+                    Mode::RpcError(code, message) => {
+                        return Ok(ResponsePayload::Failure(ErrorPayload {
+                            code,
+                            message: message.into(),
+                            data: None,
+                        }));
+                    }
                 }
                 if to - from + 1 > self.max_span {
                     return Ok(ResponsePayload::Failure(ErrorPayload {
