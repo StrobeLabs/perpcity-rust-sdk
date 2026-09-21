@@ -545,7 +545,6 @@ impl PerpClient {
         let mark_price_x96 = self
             .contract_mark_x96(
                 &block,
-                block_id,
                 MarkViews {
                     beacon: modules.beacon,
                     amm_price_x96: pool_state.ammPrice,
