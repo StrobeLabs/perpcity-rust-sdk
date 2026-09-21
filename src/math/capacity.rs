@@ -518,6 +518,60 @@ mod tests {
         );
     }
 
+    /// The inverse at the contract's branch edges: with the price exactly on
+    /// the lower tick the whole band backs longs, exactly on the upper tick
+    /// the whole band backs shorts, and the empty side is rejected.
+    #[test]
+    fn liquidity_for_capacity_at_band_edges() {
+        let sqrt_lower = get_sqrt_ratio_at_tick(30_000).unwrap();
+        let sqrt_upper = get_sqrt_ratio_at_tick(38_000).unwrap();
+        for target in [1, 1_000_000, u64::MAX as u128] {
+            assert_least(sqrt_lower, 30_000, 38_000, Side::Long, target);
+            assert_least(sqrt_upper, 30_000, 38_000, Side::Short, target);
+        }
+        assert!(matches!(
+            liquidity_for_capacity(sqrt_lower, 30_000, 38_000, Side::Short, 1),
+            Err(ValidationError::NoBandCapacity {
+                side: Side::Short,
+                ..
+            })
+        ));
+        assert!(matches!(
+            liquidity_for_capacity(sqrt_upper, 30_000, 38_000, Side::Long, 1),
+            Err(ValidationError::NoBandCapacity {
+                side: Side::Long,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn liquidity_for_capacity_of_zero_is_zero() {
+        let sqrt_price = get_sqrt_ratio_at_tick(34_000).unwrap();
+        for side in [Side::Long, Side::Short] {
+            assert_eq!(
+                liquidity_for_capacity(sqrt_price, 30_000, 38_000, side, 0).unwrap(),
+                0
+            );
+        }
+    }
+
+    /// The largest target that still fits reaches it exactly: the inverse
+    /// of a band's full-range capacity at `u128::MAX` liquidity is that
+    /// liquidity.
+    #[test]
+    fn liquidity_for_capacity_at_the_largest_target() {
+        let sqrt_price = get_sqrt_ratio_at_tick(MAX_TICK).unwrap();
+        let full = band_capacity(sqrt_price, 0, MAX_TICK, u128::MAX)
+            .unwrap()
+            .short_atoms;
+        assert_least(sqrt_price, 0, MAX_TICK, Side::Short, full);
+        assert_eq!(
+            liquidity_for_capacity(sqrt_price, 0, MAX_TICK, Side::Short, full).unwrap(),
+            u128::MAX
+        );
+    }
+
     /// Below a price of one a unit of liquidity backs more than one perp
     /// atom, so the least liquidity for a `u128::MAX` target fits in
     /// `u128` but its capacity does not. The contract would revert on
