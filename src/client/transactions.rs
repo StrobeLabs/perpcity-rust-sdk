@@ -19,21 +19,16 @@ use alloy::primitives::{Address, B256, Bytes, U256};
 use alloy::providers::Provider;
 use alloy::rpc::types::{TransactionReceipt, TransactionRequest};
 
+use crate::constants::{RECEIPT_POLL_INTERVAL, RECEIPT_TIMEOUT};
 use crate::errors::{Result, TransactionError, ValidationError, decode};
 use crate::hft::gas::{Urgency, is_out_of_gas};
 use crate::hft::pipeline::TxRequest;
 
 use super::PerpClient;
 
-/// Default receipt polling timeout.
-const RECEIPT_TIMEOUT: Duration = Duration::from_secs(30);
-
 /// Delay before the first receipt poll — a just-broadcast transaction
 /// rarely has a receipt sooner, so an earlier poll is a wasted call.
 const RECEIPT_POLL_INITIAL_DELAY: Duration = Duration::from_secs(2);
-
-/// Interval between receipt polls.
-const RECEIPT_POLL_INTERVAL: Duration = Duration::from_secs(2);
 
 // ── TxBuilder ───────────────────────────────────────────────────────
 
@@ -378,8 +373,8 @@ impl PerpClient {
         }
     }
 
-    /// Wait for the receipt of `tx_hash`: after a 2 s delay, poll every 2 s
-    /// for up to 30 s.
+    /// Wait for the receipt of `tx_hash`: after a 2 s delay, poll every
+    /// [`RECEIPT_POLL_INTERVAL`] for up to [`RECEIPT_TIMEOUT`].
     ///
     /// Use it to resolve a send whose outcome is unknown, with the hash from
     /// [`TransactionError::tx_hash`]. On timeout it returns
