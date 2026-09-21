@@ -88,8 +88,9 @@ impl IndexPrint {
 /// [`ValidationError::InvalidConfig`] for the zero address,
 /// [`ValidationError::InvalidBlockRange`] if `from_block > to_block`,
 /// [`ContractError::BlockUnavailable`] if a print's block header is missing
-/// when the provider omits log timestamps, or an error from
-/// [`get_logs_chunked`].
+/// when the provider omits log timestamps,
+/// [`ValidationError::DecodeFailed`] for an `IndexUpdated` log that does
+/// not decode, or an error from [`get_logs_chunked`].
 pub async fn beacon_prints<P: Provider>(
     provider: &P,
     beacon: Address,
@@ -163,25 +164,38 @@ async fn with_timestamps<P: Provider>(provider: &P, logs: &[Log]) -> Result<Vec<
                 .ok_or(ContractError::BlockUnavailable { number })?;
             Ok::<_, PerpCityError>((number, block.header.timestamp))
         })
-        .buffered(HEADER_READ_CONCURRENCY)
+        .buffer_unordered(HEADER_READ_CONCURRENCY)
         .try_collect()
         .await?;
-    Ok(logs
-        .iter()
-        .filter_map(|log| {
-            let block_number = log.block_number?;
-            let timestamp = log
-                .block_timestamp
-                .or_else(|| headers.get(&block_number).copied())?;
-            let event = decode_raw::<IBeacon::IndexUpdated>(log)?;
-            Some(IndexPrint {
+    logs.iter()
+        .map(|log| {
+            let decoded = log
+                .block_number
+                .zip(log.log_index)
+                .and_then(|(block, index)| {
+                    let event = decode_raw::<IBeacon::IndexUpdated>(log)?;
+                    Some((block, index, event.index))
+                });
+            let (block_number, log_index, index_x96) =
+                decoded.ok_or_else(|| ValidationError::DecodeFailed {
+                    context: format!(
+                        "IndexUpdated log from {} in tx {:?}",
+                        log.address(),
+                        log.transaction_hash
+                    ),
+                })?;
+            let timestamp = match log.block_timestamp {
+                Some(timestamp) => timestamp,
+                None => headers[&block_number],
+            };
+            Ok(IndexPrint {
                 block_number,
-                log_index: log.log_index?,
+                log_index,
                 timestamp,
-                index_x96: event.index,
+                index_x96,
             })
         })
-        .collect())
+        .collect()
 }
 
 /// Every log matching `filter` in blocks `from_block..=to_block`, in chain
@@ -428,7 +442,7 @@ fn is_rate_limit(payload: &ErrorPayload) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use alloy::primitives::{Address, B256, Bytes, U256, address, b256, bytes};
+    use alloy::primitives::{Address, B256, Bytes, LogData, U256, address, b256, bytes};
 
     use super::*;
     use crate::constants::Q96;
@@ -687,6 +701,20 @@ mod tests {
             PerpCityError::Validation(ValidationError::InvalidConfig { .. })
         ));
         assert!(node.requests().is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_undecodable_print_is_an_error_not_a_gap() {
+        let mut short = print_log(20, 0, Q96, Some(20));
+        short.inner.data = LogData::new_unchecked(short.topics().to_vec(), Bytes::new());
+        let node = FakeNode::new(vec![print_log(10, 0, Q96, Some(10)), short], u64::MAX);
+        let error = beacon_prints(&node.provider(), BEACON, 0, 100)
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            PerpCityError::Validation(ValidationError::DecodeFailed { .. })
+        ));
     }
 
     #[test]
