@@ -131,6 +131,17 @@ pub(crate) fn sub_u(a: U256, b: U256, context: &'static str) -> Result<U256, Val
     })
 }
 
+/// `value / denominator` rounded up, in 512 bits. The caller guarantees a
+/// non-zero `denominator`.
+pub(crate) fn div_ceil_512(value: U512, denominator: U512) -> U512 {
+    let q = value / denominator;
+    if value % denominator == U512::ZERO {
+        q
+    } else {
+        q + U512::ONE
+    }
+}
+
 /// Narrow a 512-bit value to `U256`, erroring instead of truncating.
 pub(crate) fn u512_to_u256(value: U512) -> Result<U256, ValidationError> {
     if value > U512::from(U256::MAX) {
