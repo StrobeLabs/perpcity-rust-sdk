@@ -76,11 +76,14 @@ pub enum TransactionError {
     /// The broadcast request failed after the transaction was signed.
     ///
     /// The node may still have accepted it: the request can fail after the
-    /// transaction reached the mempool, or after it mined. The send path
-    /// treats its nonce as consumed and resyncs from chain before the next
-    /// send, so look up `tx_hash` (for example with
+    /// transaction reached the mempool, or after it mined. An error response
+    /// is no proof either: the transport resends the same signed bytes after
+    /// a timeout, so a rejection such as `nonce too low` or `already known`
+    /// can answer a copy that already landed. `source` keeps the node's
+    /// answer; look up `tx_hash` (for example with
     /// [`PerpClient::poll_receipt`](crate::PerpClient::poll_receipt)) to
-    /// learn whether it landed.
+    /// learn the outcome. The send path neither reuses nor releases the
+    /// nonce; the next send resyncs it from chain.
     ///
     /// Transient, like the transport error it wraps.
     #[error("broadcast failed for {tx_hash}: {source}")]
