@@ -120,6 +120,9 @@ pub type Result<T> = std::result::Result<T, PerpCityError>;
 
 #[cfg(test)]
 mod tests {
+    use alloy::primitives::FixedBytes;
+    use alloy::transports::TransportErrorKind;
+
     use super::*;
 
     /// Consumers key retry behaviour off this classification (backoff loops
@@ -202,13 +205,59 @@ mod tests {
 
         let broadcast_failed: PerpCityError = TransactionError::BroadcastFailed {
             tx_hash: [0x33; 32].into(),
-            source: alloy::transports::TransportErrorKind::custom_str("connection reset"),
+            source: TransportErrorKind::custom_str("connection reset"),
         }
         .into();
         assert!(
             broadcast_failed.is_transient(),
             "a failed broadcast was a transient transport error before it was typed"
         );
+    }
+
+    /// Callers reconcile an unknown outcome by receipt, so every error after
+    /// the broadcast must expose its hash, and no pre-broadcast error may.
+    #[test]
+    fn tx_hash_is_set_exactly_from_the_broadcast_onward() {
+        let hash = FixedBytes::<32>::repeat_byte(0x55);
+        let sent = [
+            TransactionError::BroadcastFailed {
+                tx_hash: hash,
+                source: TransportErrorKind::custom_str("connection reset"),
+            },
+            TransactionError::ReceiptTimeout {
+                tx_hash: hash,
+                reason: "no receipt after 30s".into(),
+            },
+            TransactionError::Reverted {
+                tx_hash: hash,
+                reason: "reverted".into(),
+            },
+            TransactionError::OutOfGas {
+                tx_hash: hash,
+                gas_used: 100,
+                gas_limit: 100,
+            },
+        ];
+        for err in &sent {
+            assert_eq!(err.tx_hash(), Some(hash), "{err}");
+        }
+
+        let unsent = [
+            TransactionError::SimulationFailed {
+                reason: "execution reverted".into(),
+            },
+            TransactionError::GasUnavailable {
+                reason: "down".into(),
+            },
+            TransactionError::SigningFailed {
+                reason: "kms".into(),
+            },
+            TransactionError::NonceDesynced { in_flight: 1 },
+            TransactionError::TooManyInFlight { count: 4, max: 4 },
+        ];
+        for err in &unsent {
+            assert_eq!(err.tx_hash(), None, "{err}");
+        }
     }
 
     /// Typed revert matching compares raw selectors, not strings, so it
@@ -246,9 +295,9 @@ mod tests {
 
         let transport: PerpCityError = ContractError::StorageReadFailed {
             context: "tick 60 funding".into(),
-            source: Some(std::sync::Arc::new(
-                alloy::transports::TransportErrorKind::custom_str("replica dropped the read"),
-            )),
+            source: Some(std::sync::Arc::new(TransportErrorKind::custom_str(
+                "replica dropped the read",
+            ))),
         }
         .into();
         assert!(transport.is_transient(), "transport-caused reads retry");

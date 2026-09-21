@@ -145,6 +145,23 @@ pub enum TransactionError {
 }
 
 impl TransactionError {
+    /// Hash of the signed transaction, for every failure from the broadcast
+    /// onward: `BroadcastFailed`, `ReceiptTimeout`, `Reverted` and
+    /// `OutOfGas`. `None` means nothing was sent.
+    ///
+    /// A `Some` hash may have landed on chain even when the error says the
+    /// send failed, so look up its receipt before treating the effect as
+    /// absent.
+    pub fn tx_hash(&self) -> Option<FixedBytes<32>> {
+        match self {
+            Self::BroadcastFailed { tx_hash, .. }
+            | Self::ReceiptTimeout { tx_hash, .. }
+            | Self::Reverted { tx_hash, .. }
+            | Self::OutOfGas { tx_hash, .. } => Some(*tx_hash),
+            _ => None,
+        }
+    }
+
     /// Whether this error is a [`Self::SimulationReverted`] carrying the
     /// typed contract error `E`, compared by 4-byte selector — no string
     /// matching.
