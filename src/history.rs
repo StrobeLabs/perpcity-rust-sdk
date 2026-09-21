@@ -18,12 +18,14 @@
 //! time the limit holds, the run before the next test doubles. A provider
 //! with a fixed span limit therefore costs a few rejected requests at the
 //! start of a scan and a logarithmic number after. A single block that the
-//! server still rejects is returned as the error.
+//! server still rejects is returned as [`ContractError::LogsRejected`].
 //!
 //! Failures that a smaller range does not fix are returned at once: no
 //! answer (timeouts, dropped connections), a rate limit (HTTP 429 or 503,
 //! or a JSON-RPC error that alloy's retry rules call one), a method or
-//! parse error, and HTTP 401 or 403. The caller owns the retry policy
+//! parse error, and HTTP 401 or 403. A refusal (method, parse, auth) is
+//! [`ContractError::LogsRejected`], which is not transient; the rest keep
+//! the transport error, which is. The caller owns the retry policy
 //! ([`PerpCityError::is_transient`](crate::PerpCityError::is_transient)).
 //! A scan sends its requests back to back, so against a rate-limited
 //! endpoint put the backoff in the transport (alloy's `RetryBackoffLayer`,
@@ -86,8 +88,8 @@ impl IndexPrint {
 /// [`ValidationError::InvalidConfig`] for the zero address,
 /// [`ValidationError::InvalidBlockRange`] if `from_block > to_block`,
 /// [`ContractError::BlockUnavailable`] if a print's block header is missing
-/// when the provider omits log timestamps, or the RPC error that stopped
-/// the scan.
+/// when the provider omits log timestamps, or an error from
+/// [`get_logs_chunked`].
 pub async fn beacon_prints<P: Provider>(
     provider: &P,
     beacon: Address,
@@ -190,8 +192,9 @@ async fn with_timestamps<P: Provider>(provider: &P, logs: &[Log]) -> Result<Vec<
 ///
 /// # Errors
 ///
-/// [`ValidationError::InvalidBlockRange`] if `from_block > to_block`, or
-/// the RPC error for the first request the scan cannot shrink or retry.
+/// [`ValidationError::InvalidBlockRange`] if `from_block > to_block`,
+/// [`ContractError::LogsRejected`] for a request the server refuses at any
+/// width, or the transport error for a request it did not answer.
 pub async fn get_logs_chunked<P: Provider>(
     provider: &P,
     filter: &Filter,
@@ -258,11 +261,21 @@ impl<'a, P: Provider> LogScan<'a, P> {
                     self.widths.accepted(to - from + 1);
                     return Ok(Some(logs));
                 }
-                Err(error) if to > from && classify(&error) == Failure::Range => {
-                    tracing::debug!(from, to, %error, "eth_getLogs range rejected; narrowing");
-                    self.widths.rejected(to - from + 1);
-                }
-                Err(error) => return Err(error.into()),
+                Err(error) => match classify(&error) {
+                    Failure::Range if to > from => {
+                        tracing::debug!(from, to, %error, "eth_getLogs range rejected; narrowing");
+                        self.widths.rejected(to - from + 1);
+                    }
+                    Failure::Range | Failure::Refused => {
+                        return Err(ContractError::LogsRejected {
+                            from_block: from,
+                            to_block: to,
+                            source: error,
+                        }
+                        .into());
+                    }
+                    Failure::Unanswered => return Err(error.into()),
+                },
             }
         }
     }
@@ -693,17 +706,23 @@ mod tests {
         let error = get_logs_chunked(&node.provider(), &filter(), 0, 3)
             .await
             .unwrap_err();
-        assert!(matches!(error, PerpCityError::Rpc(RpcError::ErrorResp(_))));
+        assert!(matches!(
+            error,
+            PerpCityError::Contract(ContractError::LogsRejected {
+                from_block: 0,
+                to_block: 0,
+                ..
+            })
+        ));
+        assert!(!error.is_transient());
         assert_eq!(node.requests().last(), Some(&(0, 0)));
     }
 
     #[tokio::test]
     async fn failures_no_narrower_range_fixes_are_returned_at_once() {
-        let modes = [
+        let unanswered = [
             Mode::Http(429),
             Mode::Http(503),
-            Mode::Http(401),
-            Mode::Http(403),
             Mode::RpcError(
                 429,
                 "Your app has exceeded its compute units per second capacity",
@@ -712,14 +731,23 @@ mod tests {
                 -32_005,
                 "daily request count exceeded, request rate limited",
             ),
+        ];
+        let refused = [
+            Mode::Http(401),
+            Mode::Http(403),
             Mode::RpcError(-32_601, "the method eth_getLogs does not exist"),
             Mode::RpcError(-32_700, "parse error"),
         ];
-        for mode in modes {
+        let cases = unanswered
+            .into_iter()
+            .map(|mode| (mode, true))
+            .chain(refused.into_iter().map(|mode| (mode, false)));
+        for (mode, transient) in cases {
             let node = FakeNode::new(Vec::new(), u64::MAX).with_mode(mode);
-            get_logs_chunked(&node.provider(), &filter(), 0, 500_000)
+            let error = get_logs_chunked(&node.provider(), &filter(), 0, 500_000)
                 .await
                 .unwrap_err();
+            assert_eq!(error.is_transient(), transient, "{mode:?}: {error}");
             assert_eq!(node.requests(), vec![(0, 99_999)], "{mode:?}");
         }
     }
@@ -738,12 +766,6 @@ mod tests {
                 .unwrap_err();
             assert_eq!(node.requests().last(), Some(&(0, 0)), "{mode:?}");
         }
-    }
-
-    #[test]
-    fn a_rate_limit_error_is_transient() {
-        let error: PerpCityError = TransportErrorKind::http_error(429, String::new()).into();
-        assert!(error.is_transient());
     }
 
     #[tokio::test]

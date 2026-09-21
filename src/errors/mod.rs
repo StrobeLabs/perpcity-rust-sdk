@@ -92,6 +92,9 @@ impl PerpCityError {
     /// stale-replica / network conditions — retryable. A
     /// `StorageReadFailed` without a source means the response had an
     /// unexpected shape, which retrying will not fix.
+    ///
+    /// `LogsRejected` is a server's refusal of an `eth_getLogs` request at
+    /// its narrowest, so it is not transient.
     pub fn is_transient(&self) -> bool {
         matches!(
             self,
@@ -161,6 +164,17 @@ mod tests {
         }
         .into();
         assert!(!range.is_transient(), "a reversed range stays reversed");
+
+        let refused: PerpCityError = ContractError::LogsRejected {
+            from_block: 7,
+            to_block: 7,
+            source: alloy::transports::TransportErrorKind::http_error(403, String::new()),
+        }
+        .into();
+        assert!(
+            !refused.is_transient(),
+            "the server refused this request at its narrowest; a retry gets the same answer"
+        );
     }
 
     /// Typed revert matching compares raw selectors, not strings, so it
