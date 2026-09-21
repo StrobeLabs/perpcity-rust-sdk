@@ -138,6 +138,7 @@ mod tests {
     use alloy::transports::TransportErrorKind;
 
     use super::*;
+    use crate::types::Side;
 
     /// Consumers key retry behaviour off this classification (backoff loops
     /// treat transients as "retry politely"), so it is API surface, not an
@@ -281,6 +282,16 @@ mod tests {
             pre_broadcast_rpc.tx_hash(),
             None,
             "a send's Rpc error comes before the broadcast"
+
+        let no_capacity: PerpCityError = ValidationError::NoBandCapacity {
+            lower: 20_000,
+            upper: 30_000,
+            side: Side::Long,
+        }
+        .into();
+        assert!(
+            !no_capacity.is_transient(),
+            "a band's shape against the price does not change on retry"
         );
     }
 
