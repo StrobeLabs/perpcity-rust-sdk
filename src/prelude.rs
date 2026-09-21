@@ -13,9 +13,11 @@
 //! (`OpenTakerParams`, `OpenResult`, ...), the maker-equity types
 //! (`MakerEquityBreakdown`, `MakerState`, ...), the market's margin-ratio
 //! thresholds (`MarginRatios`, `MarginRatioTriple`), liquidity sizing
-//! (`estimate_liquidity`, `liquidity_for_target_ratio`), the deployed fair
-//! price (`fair_price`, `fair_price_x96`), and tick/price conversion
-//! (`price_to_tick`, `tick_to_price`, ...).
+//! (`estimate_liquidity`, `liquidity_for_target_ratio`,
+//! `amounts_for_liquidity`), taker capacity (`Side`, `Capacity`,
+//! `MarketCapacity`, `band_capacity`, `liquidity_for_capacity`), the
+//! deployed fair price (`FairPrice`, `fair_price`, `fair_price_x96`), and
+//! tick/price conversion (`price_to_tick`, `tick_to_price`, ...).
 //!
 //! It re-exports exactly that set, nothing more: lower-level ABI/
 //! contract-interface types (`contracts::*`) and the fine-grained
@@ -27,14 +29,15 @@ pub use crate::{
     ARBITRUM_CHAIN_ID, ARBITRUM_POOL_MANAGER, ARBITRUM_SEPOLIA_CHAIN_ID,
     ARBITRUM_SEPOLIA_PERP_FACTORY, ARBITRUM_SEPOLIA_POOL_MANAGER, ARBITRUM_SEPOLIA_USDC,
     ARBITRUM_USDC, AccrualInputs, AccruedMakerSnapshot, AdjustMakerParams, AdjustMakerResult,
-    AdjustTakerParams, AdjustTakerResult, BlockContext, BlockHeaderFeed, Bounds, ContractError,
-    Deployments, ExactAdjustTakerParams, ExactOpenTakerParams, Fees, GasLimits, HftTransport,
-    LiveTakerMarket, LiveTakerMarketPublisher, MAX_MAKER_EQUITY_BATCH, MakerEquityBreakdown,
-    MakerEquityKind, MakerEquityOutcome, MakerMarketSnapshot, MakerState, MarginRatioTriple,
-    MarginRatios, MarketEvent, MarketFeed, OpenInterest, OpenMakerParams, OpenResult,
-    OpenTakerParams, PerpCityError, PerpClient, PerpData, PerpSnapshot, PriceImpactPoint, Result,
-    TickFunding, TransactionError, TransportConfig, TxBuilder, Urgency, ValidationError,
-    align_tick_down, align_tick_up, decode_log, estimate_liquidity, fair_price, fair_price_x96,
-    get_sqrt_ratio_at_tick, get_tick_at_sqrt_ratio, liquidity_for_target_ratio, price_to_tick,
-    tick_to_price,
+    AdjustTakerParams, AdjustTakerResult, BlockContext, BlockHeaderFeed, Bounds, Capacity,
+    ContractError, Deployments, ExactAdjustTakerParams, ExactOpenTakerParams, FairPrice, Fees,
+    GasLimits, HftTransport, LiveTakerMarket, LiveTakerMarketPublisher, MAX_MAKER_EQUITY_BATCH,
+    MakerEquityBreakdown, MakerEquityKind, MakerEquityOutcome, MakerMarketSnapshot, MakerState,
+    MarginRatioTriple, MarginRatios, MarketCapacity, MarketEvent, MarketFeed, OpenInterest,
+    OpenMakerParams, OpenResult, OpenTakerParams, PerpCityError, PerpClient, PerpData,
+    PerpSnapshot, PriceImpactPoint, Result, Side, TickFunding, TransactionError, TransportConfig,
+    TxBuilder, Urgency, ValidationError, align_tick_down, align_tick_up, amounts_for_liquidity,
+    band_capacity, decode_log, estimate_liquidity, fair_price, fair_price_x96,
+    get_sqrt_ratio_at_tick, get_tick_at_sqrt_ratio, liquidity_for_capacity,
+    liquidity_for_target_ratio, price_to_tick, tick_to_price,
 };
