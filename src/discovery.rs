@@ -30,6 +30,7 @@ use alloy::providers::Provider;
 use alloy::rpc::types::{Filter, Log};
 use alloy::sol_types::SolEvent;
 
+use crate::constants::SNAPSHOT_BLOCK_LAG;
 use crate::contracts::{Modules, PerpFactory, PerpFactoryRedeployEvents};
 use crate::errors::{Result, ValidationError};
 use crate::feeds::events::decode_raw;
@@ -135,11 +136,15 @@ pub fn decode_perp_created(log: &Log) -> Option<PerpCreation> {
     }
 }
 
-/// Every perp the `factories` created from `from_block` to the chain head,
-/// oldest first.
+/// Every perp the `factories` created from `from_block` to
+/// [`SNAPSHOT_BLOCK_LAG`] blocks behind the head, oldest first.
 ///
 /// Reads with [`get_logs_chunked`], so the range may span the chain's
-/// whole history.
+/// whole history. The lag keeps a load-balanced replica that has not yet
+/// indexed the newest blocks from silently omitting a creation; the
+/// newest blocks belong to
+/// [`PerpCreatedFeed`](crate::feeds::PerpCreatedFeed). A `from_block`
+/// inside the lag window lists nothing.
 ///
 /// # Errors
 ///
@@ -153,7 +158,18 @@ pub async fn list_perps<P: Provider>(
 ) -> Result<Vec<PerpCreation>> {
     let filter = perp_created_filter(factories)?;
     let head = provider.get_block_number().await?;
-    let logs = get_logs_chunked(provider, &filter, from_block, head).await?;
+    if from_block > head {
+        return Err(ValidationError::InvalidBlockRange {
+            from_block,
+            to_block: head,
+        }
+        .into());
+    }
+    let to_block = head.saturating_sub(SNAPSHOT_BLOCK_LAG);
+    if from_block > to_block {
+        return Ok(Vec::new());
+    }
+    let logs = get_logs_chunked(provider, &filter, from_block, to_block).await?;
     Ok(logs
         .iter()
         .filter_map(|log| {
@@ -306,7 +322,30 @@ mod tests {
             found,
             vec![(OLD_FACTORY, 486_214_447), (NEW_FACTORY, 600_000_000)]
         );
-        assert_eq!(node.requests().last().map(|r| r.1), Some(650_000_000));
+        assert_eq!(
+            node.requests().last().map(|r| r.1),
+            Some(650_000_000 - SNAPSHOT_BLOCK_LAG)
+        );
+    }
+
+    #[tokio::test]
+    async fn the_newest_blocks_are_left_to_the_feed() {
+        let node = FakeNode::new(vec![mainnet_log()], u64::MAX).with_head(486_214_450);
+        let provider = node.provider();
+        assert!(
+            list_perps(&provider, &[OLD_FACTORY], 486_214_447)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(node.requests().is_empty());
+        let error = list_perps(&provider, &[OLD_FACTORY], 486_214_451)
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            PerpCityError::Validation(ValidationError::InvalidBlockRange { .. })
+        ));
     }
 
     #[tokio::test]
