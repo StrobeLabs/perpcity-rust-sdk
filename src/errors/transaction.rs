@@ -62,7 +62,8 @@ pub enum TransactionError {
     ///
     /// The transaction was broadcast and may still mine, so its nonce stays
     /// consumed. Look up `tx_hash` later (for example with
-    /// `PerpClient::poll_receipt`) to learn the outcome.
+    /// [`PerpClient::poll_receipt`](crate::PerpClient::poll_receipt)) to
+    /// learn the outcome.
     #[error("receipt timeout for {tx_hash}: {reason}")]
     ReceiptTimeout {
         /// Hash of the broadcast transaction.
@@ -77,7 +78,9 @@ pub enum TransactionError {
     /// The node may still have accepted it: the request can fail after the
     /// transaction reached the mempool, or after it mined. The send path
     /// treats its nonce as consumed and resyncs from chain before the next
-    /// send, so look up `tx_hash` to learn whether it landed.
+    /// send, so look up `tx_hash` (for example with
+    /// [`PerpClient::poll_receipt`](crate::PerpClient::poll_receipt)) to
+    /// learn whether it landed.
     ///
     /// Transient, like the transport error it wraps.
     #[error("broadcast failed for {tx_hash}: {source}")]
