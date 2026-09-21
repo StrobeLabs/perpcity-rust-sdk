@@ -567,11 +567,13 @@ sol! {
     // ═══════════════════════════════════════════════════════════════════
 
     /// Beacon interface — emits `IndexUpdated` when the oracle index changes.
-    /// Note: `index()` is state-mutating (not a pure view) per the beacons lib.
+    ///
+    /// `index()` is a read: the deployed beacons answer it under
+    /// `STATICCALL`, and it returns the value alone, with no update time.
     #[sol(rpc)]
     interface IBeacon {
         event IndexUpdated(uint256 index);
-        function index() external returns (uint256);
+        function index() external view returns (uint256);
     }
 
     // ═══════════════════════════════════════════════════════════════════
@@ -768,6 +770,11 @@ mod abi_lock {
         // index 0x2dc0f47dc4c7764d34d2f6a88f).
         assert_eq!(Perp::emasCall::SIGNATURE, "emas()");
         assert_eq!(Perp::emasCall::SELECTOR, [0x6a, 0xb8, 0x0a, 0x34]);
+        // Both live beacon bytecodes (Arbitrum One 0x1b37de2b…ef884 and
+        // 0x0a33ea45…29990) answer 0x2986c0e5 under STATICCALL with one
+        // 32-byte word, so the read is `view` and returns no update time.
+        assert_eq!(IBeacon::indexCall::SIGNATURE, "index()");
+        assert_eq!(IBeacon::indexCall::SELECTOR, [0x29, 0x86, 0xc0, 0xe5]);
     }
 
     /// Event signatures (all params) — drives `topic0`; catches event drift.
