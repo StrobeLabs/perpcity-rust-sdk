@@ -69,11 +69,6 @@ pub const ACCOUNTING_TOKEN_SUPPLY: U256 = U256::from_limbs([u64::MAX, u64::MAX >
 /// Maximum protocol fee: 5% scaled by 1e6 (50_000).
 pub const MAX_PROTOCOL_FEE: u32 = 50_000;
 
-/// Utilization the Perp reports for a side with zero capacity:
-/// `type(uint24).max`. Otherwise utilization is open interest over
-/// capacity scaled by 1e6, at most [`SCALE_1E6`].
-pub const UTILIZATION_E6_NO_CAPACITY: u32 = 16_777_215;
-
 /// Maximum absolute error when decoding a Q96 fixed-point value to f64.
 ///
 /// The conversion `(value * 1e6) / Q96` uses integer division, which
@@ -146,11 +141,6 @@ mod tests {
     #[test]
     fn wad_one_percent_value() {
         assert_eq!(WAD_ONE_PERCENT, U256::from(10u64).pow(U256::from(16)));
-    }
-
-    #[test]
-    fn no_capacity_utilization_is_uint24_max() {
-        assert_eq!(UTILIZATION_E6_NO_CAPACITY, (1 << 24) - 1);
     }
 
     #[test]
