@@ -1,9 +1,9 @@
 //! An in-memory JSON-RPC node for testing the log readers.
 //!
 //! [`FakeNode`] answers `eth_getLogs` from a fixed log set, rejects any
-//! range wider than its span limit the way a capped provider does, and
-//! records every range it was asked for, so tests can check that a scan
-//! covers its range exactly once.
+//! range wider than its span limit or holding more logs than its result
+//! limit the way a capped provider does, and records every range it was
+//! asked for, so tests can check that a scan covers its range exactly once.
 
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
@@ -40,6 +40,7 @@ struct State {
 pub(crate) struct FakeNode {
     logs: Arc<Vec<Log>>,
     max_span: u64,
+    max_results: usize,
     head: u64,
     mode: Mode,
     state: Arc<Mutex<State>>,
@@ -52,6 +53,7 @@ impl FakeNode {
         Self {
             logs: Arc::new(logs),
             max_span,
+            max_results: usize::MAX,
             head: 0,
             mode: Mode::Serve,
             state: Arc::default(),
@@ -61,6 +63,12 @@ impl FakeNode {
     /// Set the block number `eth_blockNumber` reports.
     pub(crate) fn with_head(mut self, head: u64) -> Self {
         self.head = head;
+        self
+    }
+
+    /// Reject any range that holds more than `max_results` logs.
+    pub(crate) fn with_max_results(mut self, max_results: usize) -> Self {
+        self.max_results = max_results;
         self
     }
 
@@ -125,6 +133,14 @@ impl FakeNode {
                             && filter.matches_topics(log.topics())
                     })
                     .collect();
+                if logs.len() > self.max_results {
+                    return Ok(ResponsePayload::Failure(ErrorPayload {
+                        code: -32_005,
+                        message: format!("query returned more than {} results", self.max_results)
+                            .into(),
+                        data: None,
+                    }));
+                }
                 Ok(success(&logs))
             }
             other => panic!("FakeNode does not serve {other}"),

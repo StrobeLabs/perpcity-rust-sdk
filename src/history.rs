@@ -11,9 +11,14 @@
 //! error, the scan halves the range and asks again. After an accepted
 //! range it doubles the span until the first rejection, then narrows in on
 //! the limit between the widest accepted and the narrowest rejected span.
-//! A provider with a fixed limit therefore costs a few rejected requests at
-//! the start of a scan and none after. A single block that the server
-//! still rejects is returned as the error.
+//! A rejection of a span the server accepted before shows a result-count
+//! or size cap in a denser stretch; the scan then drops what it learned
+//! and halves again. After a run of accepted requests it tests the
+//! rejected span once more, so it widens again past a dense stretch; each
+//! time the limit holds, the run before the next test doubles. A provider
+//! with a fixed span limit therefore costs a few rejected requests at the
+//! start of a scan and a logarithmic number after. A single block that the
+//! server still rejects is returned as the error.
 //!
 //! Failures where the server gave no answer (timeouts, dropped
 //! connections, HTTP 429) are returned at once: a smaller range does not
@@ -205,12 +210,7 @@ struct LogScan<'a, P> {
     filter: Filter,
     /// Blocks not yet read, inclusive; `None` once the range is done.
     remaining: Option<(u64, u64)>,
-    /// Width of the next request.
-    span: u64,
-    /// Widest request the server has accepted so far.
-    accepted_span: u64,
-    /// Narrowest request the server has rejected so far.
-    rejected_span: u64,
+    widths: WidthSearch,
 }
 
 impl<'a, P: Provider> LogScan<'a, P> {
@@ -230,9 +230,7 @@ impl<'a, P: Provider> LogScan<'a, P> {
             provider,
             filter: filter.clone(),
             remaining: Some((from_block, to_block)),
-            span: LOG_SCAN_INITIAL_SPAN,
-            accepted_span: 0,
-            rejected_span: u64::MAX,
+            widths: WidthSearch::new(),
         })
     }
 
@@ -243,7 +241,7 @@ impl<'a, P: Provider> LogScan<'a, P> {
             return Ok(None);
         };
         loop {
-            let reach = self.span - 1;
+            let reach = self.widths.next - 1;
             let (from, to) = match end {
                 End::Oldest => (low, low.saturating_add(reach).min(high)),
                 End::Newest => (high.saturating_sub(reach).max(low), high),
@@ -255,52 +253,108 @@ impl<'a, P: Provider> LogScan<'a, P> {
                         End::Oldest => (to < high).then(|| (to + 1, high)),
                         End::Newest => (from > low).then(|| (low, from - 1)),
                     };
-                    self.accepted(to - from + 1);
+                    self.widths.accepted(to - from + 1);
                     return Ok(Some(logs));
                 }
                 Err(error) if to > from && is_range_rejection(&error) => {
                     tracing::debug!(from, to, %error, "eth_getLogs range rejected; narrowing");
-                    self.rejected(to - from + 1);
+                    self.widths.rejected(to - from + 1);
                 }
                 Err(error) => return Err(error.into()),
             }
         }
     }
+}
+
+/// Accepted requests in a row after which the scan tests a width it saw
+/// rejected again, and the cap on that interval as it doubles.
+const RETEST_AFTER: (u32, u32) = (16, 1_024);
+
+/// The width of the next `eth_getLogs` request, learned from the server's
+/// answers.
+///
+/// Holds `accepted < rejected` whenever both are known: an answer that
+/// breaks it shows the cap is on result count or response size, not on
+/// span, so the contradicted bound is dropped.
+#[derive(Debug)]
+struct WidthSearch {
+    /// Width of the next request; at least 1.
+    next: u64,
+    /// Widest width accepted since the last contradiction.
+    accepted: Option<u64>,
+    /// Narrowest width rejected since the last retest.
+    rejected: Option<u64>,
+    /// Accepted requests since the last rejection.
+    accepted_run: u32,
+    /// Accepted run length that triggers a retest of `rejected`.
+    retest_after: u32,
+}
+
+impl WidthSearch {
+    fn new() -> Self {
+        Self {
+            next: LOG_SCAN_INITIAL_SPAN,
+            accepted: None,
+            rejected: None,
+            accepted_run: 0,
+            retest_after: RETEST_AFTER.0,
+        }
+    }
 
     fn accepted(&mut self, width: u64) {
-        self.accepted_span = self.accepted_span.max(width);
-        if self.accepted_span >= self.rejected_span {
-            // The rejection came from a result-count or response-size cap
-            // in a denser stretch of the range; the span limit is unknown
-            // again.
-            self.rejected_span = u64::MAX;
+        let accepted = self.accepted.map_or(width, |a| a.max(width));
+        self.accepted = Some(accepted);
+        self.accepted_run += 1;
+        match self.rejected {
+            Some(rejected) if accepted >= rejected => {
+                // A denser stretch caused the rejection; this one is sparser.
+                self.rejected = None;
+                self.retest_after = RETEST_AFTER.0;
+            }
+            Some(_) if self.accepted_run >= self.retest_after => {
+                // A result or size cap may have moved since the rejection;
+                // test it again, less often each time it holds.
+                self.rejected = None;
+                self.accepted_run = 0;
+                self.retest_after = (self.retest_after * 2).min(RETEST_AFTER.1);
+            }
+            _ => {}
         }
-        self.span = if self.rejected_span == u64::MAX {
-            self.span.saturating_mul(2).min(LOG_SCAN_MAX_SPAN)
-        } else {
-            self.probe_span()
+        self.next = match self.rejected {
+            None => self
+                .next
+                .max(width)
+                .saturating_mul(2)
+                .min(LOG_SCAN_MAX_SPAN),
+            Some(rejected) => probe(accepted, rejected),
         };
     }
 
     fn rejected(&mut self, width: u64) {
-        self.rejected_span = self.rejected_span.min(width);
-        self.span = if self.accepted_span == 0 {
-            width / 2
-        } else {
-            self.probe_span()
+        self.accepted_run = 0;
+        if self.accepted.is_some_and(|accepted| width <= accepted) {
+            // A width accepted elsewhere: the cap is on result count or
+            // response size, and this stretch is denser.
+            self.accepted = None;
+            self.retest_after = RETEST_AFTER.0;
+        }
+        let rejected = self.rejected.map_or(width, |r| r.min(width));
+        self.rejected = Some(rejected);
+        self.next = match self.accepted {
+            None => width / 2,
+            Some(accepted) => probe(accepted, rejected),
         };
     }
+}
 
-    /// The midpoint between the widest accepted and the narrowest rejected
-    /// span, or the accepted span once the two are within an eighth of it.
-    fn probe_span(&self) -> u64 {
-        let accepted = self.accepted_span.min(self.rejected_span - 1);
-        let gap = self.rejected_span - accepted;
-        if gap <= (accepted / 8).max(1) {
-            accepted
-        } else {
-            accepted + gap / 2
-        }
+/// The midpoint of `accepted..rejected`, or `accepted` once the gap is
+/// within an eighth of it.
+fn probe(accepted: u64, rejected: u64) -> u64 {
+    let gap = rejected - accepted;
+    if gap <= (accepted / 8).max(1) {
+        accepted
+    } else {
+        accepted + gap / 2
     }
 }
 
@@ -395,6 +449,51 @@ mod tests {
         // Four halvings from 100k to an accepted 6,250, then two probes
         // between the accepted and rejected widths; none after that.
         assert_eq!(rejected.len(), 6, "rejected requests: {requests:?}");
+    }
+
+    #[tokio::test]
+    async fn a_dense_stretch_under_a_result_cap_is_narrowed_by_halving() {
+        let sparse = logs_every(1_000, 400_000)
+            .into_iter()
+            .filter(|log| !(300_000..=310_000).contains(&log.block_number.unwrap()));
+        let dense =
+            (300_000..=310_000).map(|block| mined_log(EMITTER, TOPIC, Bytes::new(), block, 0));
+        let mut logs: Vec<Log> = sparse.chain(dense).collect();
+        logs.sort_by_key(|log| log.block_number);
+        let expected = blocks(&logs);
+        let node = FakeNode::new(logs, u64::MAX).with_max_results(1_000);
+
+        let read = get_logs_chunked(&node.provider(), &filter(), 0, 400_000)
+            .await
+            .unwrap();
+        assert_eq!(blocks(&read), expected);
+        let requests = node.requests();
+        // Eleven chunks are the least that fit the dense stretch under the
+        // cap; the rest is the halving into it and the regrowth after it.
+        assert!(
+            requests.len() < 40,
+            "{} requests to read one dense stretch: {requests:?}",
+            requests.len()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_long_capped_scan_retests_the_limit_ever_less_often() {
+        let cap = 10_000;
+        let node = FakeNode::new(logs_every(5_000, 3_000_000), cap);
+        let logs = get_logs_chunked(&node.provider(), &filter(), 0, 3_000_000)
+            .await
+            .unwrap();
+        assert_eq!(logs.len(), 601);
+        let requests = node.requests();
+        let (accepted, rejected): (Vec<_>, Vec<_>) =
+            requests.iter().partition(|(from, to)| to - from < cap);
+        assert_tiles(&accepted, 0, 3_000_000);
+        // 300 chunks at the cap is the floor. Six rejections learn the
+        // limit; each retest (after 16, 32, 64, 128 and 256 accepted
+        // chunks) costs about three more.
+        assert!(accepted.len() <= 330, "{} accepted", accepted.len());
+        assert!(rejected.len() <= 24, "rejected requests: {rejected:?}");
     }
 
     #[tokio::test]
