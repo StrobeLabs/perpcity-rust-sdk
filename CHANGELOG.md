@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`PerpFactoryRedeployEvents::PerpCreated`** — the `PerpCreated` shape of the redeployed factory (perpcity-contracts `IPerpFactory` since #283): adds `uint32 latency`, drops the position-NFT `name`/`symbol`/`tokenUri` strings. No factory emits it yet; it is declared so discovery reads a new factory from its first block while the old factory's perps stay live. Both factory shapes and `IBeacon::IndexUpdated` have their topic0 locked in `abi_lock` against the live chain.
+
 ## [0.4.0] - 2026-09-08
 
 ### Breaking
