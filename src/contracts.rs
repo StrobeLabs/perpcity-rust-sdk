@@ -748,6 +748,14 @@ mod abi_lock {
         // 32-byte word, so the read is `view` and returns no update time.
         assert_eq!(IBeacon::indexCall::SIGNATURE, "index()");
         assert_eq!(IBeacon::indexCall::SELECTOR, [0x29, 0x86, 0xc0, 0xe5]);
+
+        // `get_capacity` reads these two. eth_call on HORMUZ-TRAFFIC at
+        // block 507526321: capacity() returned (60883605, 51603209) and
+        // openInterest() (37772806, 42582564).
+        assert_eq!(Perp::capacityCall::SIGNATURE, "capacity()");
+        assert_eq!(Perp::capacityCall::SELECTOR, [0x5c, 0xfc, 0x1a, 0x51]);
+        assert_eq!(Perp::openInterestCall::SIGNATURE, "openInterest()");
+        assert_eq!(Perp::openInterestCall::SELECTOR, [0xfa, 0x5a, 0x2e, 0x62]);
     }
 
     /// Event signatures (all params) — drives `topic0`; catches event drift.
