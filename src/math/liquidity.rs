@@ -168,6 +168,28 @@ pub fn liquidity_for_target_ratio(
 /// bounds may come in either order. The price is clamped into the band: at
 /// or below it the band holds only perps, at or above it only USDC.
 ///
+/// # Examples
+///
+/// The perps a band holds at a float price. It equals the band's long
+/// capacity at that price:
+///
+/// ```
+/// use alloy::primitives::U256;
+/// use perpcity_sdk::convert::price_to_sqrt_price_x96;
+/// use perpcity_sdk::{amounts_for_liquidity, band_capacity, get_sqrt_ratio_at_tick};
+///
+/// let sqrt_price = price_to_sqrt_price_x96(35.0)?;
+/// let (perp_atoms, _usdc_atoms) = amounts_for_liquidity(
+///     sqrt_price,
+///     get_sqrt_ratio_at_tick(27_090)?,
+///     get_sqrt_ratio_at_tick(38_100)?,
+///     1_757_959,
+/// )?;
+/// let capacity = band_capacity(sqrt_price, 27_090, 38_100, 1_757_959)?;
+/// assert_eq!(perp_atoms, U256::from(capacity.long_atoms));
+/// # Ok::<(), perpcity_sdk::ValidationError>(())
+/// ```
+///
 /// # Errors
 ///
 /// - [`ValidationError::InvalidPrice`] if any sqrt price is zero
