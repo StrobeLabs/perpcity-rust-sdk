@@ -56,9 +56,16 @@ pub enum TransactionError {
     },
 
     /// Receipt polling timed out before the transaction was confirmed.
-    #[error("receipt timeout: {reason}")]
+    ///
+    /// The transaction was broadcast and may still mine, so its nonce stays
+    /// consumed. Look up `tx_hash` later (for example with
+    /// `PerpClient::poll_receipt`) to learn the outcome.
+    #[error("receipt timeout for {tx_hash}: {reason}")]
     ReceiptTimeout {
-        /// Description including the tx hash.
+        /// Hash of the broadcast transaction.
+        tx_hash: FixedBytes<32>,
+        /// Why polling stopped: no receipt by the deadline, or the last
+        /// poll's RPC error.
         reason: String,
     },
 

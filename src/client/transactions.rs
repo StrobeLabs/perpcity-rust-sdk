@@ -353,7 +353,8 @@ impl PerpClient {
                 Ok(None) => {
                     if tokio::time::Instant::now() >= deadline {
                         return Err(TransactionError::ReceiptTimeout {
-                            reason: format!("receipt timeout for {tx_hash}"),
+                            tx_hash,
+                            reason: format!("no receipt after {}s", RECEIPT_TIMEOUT.as_secs()),
                         }
                         .into());
                     }
@@ -362,7 +363,8 @@ impl PerpClient {
                 Err(e) => {
                     if tokio::time::Instant::now() >= deadline {
                         return Err(TransactionError::ReceiptTimeout {
-                            reason: format!("failed to get receipt: {e}"),
+                            tx_hash,
+                            reason: format!("last receipt poll failed: {e}"),
                         }
                         .into());
                     }

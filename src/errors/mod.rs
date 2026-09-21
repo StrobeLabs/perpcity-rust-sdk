@@ -175,6 +175,16 @@ mod tests {
             !refused.is_transient(),
             "the server refused this request at its narrowest; a retry gets the same answer"
         );
+
+        let receipt_timeout: PerpCityError = TransactionError::ReceiptTimeout {
+            tx_hash: [0x22; 32].into(),
+            reason: "no receipt after 30s".into(),
+        }
+        .into();
+        assert!(
+            receipt_timeout.is_transient(),
+            "the transaction may still mine; the caller reconciles by hash"
+        );
     }
 
     /// Typed revert matching compares raw selectors, not strings, so it

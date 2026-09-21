@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Breaking
+
+- **`TransactionError::ReceiptTimeout` carries `tx_hash: FixedBytes<32>`.** The hash was only in `reason`, and a timeout whose last poll hit an RPC error left it out of the string too, so a caller could not look up the receipt. `reason` stays and now says only why polling stopped. Patterns that use `..` are unaffected; exhaustive patterns and constructions must name the new field. `is_transient()` is unchanged (true), and the send path still keeps the timed-out transaction's nonce consumed.
+
 ### Added
 
 - **`history::get_logs_chunked(provider, filter, from_block, to_block)`** — every log matching a filter across a block range of any length, in chain order. Providers cap `eth_getLogs` by span, result count or response size and word the rejection differently, so the scan does not parse range messages: it halves a range the server rejects, doubles the span after each accepted range, and narrows in on the limit between the widest accepted and narrowest rejected span. A rejection of a span accepted before (a result cap in a dense stretch) drops what was learned, and a rejected span is retested after a run of accepted requests, so the scan widens again past a dense stretch. Failures no narrower range fixes are returned at once: no answer, a rate limit (HTTP 429/503, or a JSON-RPC error alloy's retry rules call one; `-32005` only when its message says so), a method or parse error (`-32601`, `-32700`), and HTTP 401/403. A single block that is still rejected, and a method, parse or auth refusal, is returned as `ContractError::LogsRejected`.
