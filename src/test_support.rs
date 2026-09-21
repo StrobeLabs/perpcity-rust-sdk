@@ -2,7 +2,8 @@
 //!
 //! [`FakeNode`] answers `eth_getLogs` from a fixed log set, rejects any
 //! range wider than its span limit or holding more logs than its result
-//! limit the way a capped provider does, and records every range it was
+//! limit the way a capped provider does, rejects a topic position with
+//! more than 1,000 values as geth does, and records every range it was
 //! asked for, so tests can check that a scan covers its range exactly once.
 
 use std::sync::{Arc, Mutex};
@@ -118,6 +119,13 @@ impl FakeNode {
                             data: None,
                         }));
                     }
+                }
+                if filter.topics.iter().any(|topic| topic.len() > 1_000) {
+                    return Ok(ResponsePayload::Failure(ErrorPayload {
+                        code: -32_602,
+                        message: "exceed max addresses or topics per search position".into(),
+                        data: None,
+                    }));
                 }
                 if to - from + 1 > self.max_span {
                     return Ok(ResponsePayload::Failure(ErrorPayload {

@@ -97,6 +97,10 @@ pub(crate) const LOG_SCAN_INITIAL_SPAN: u64 = 100_000;
 /// Largest block span a chunked log scan requests, however sparse the logs.
 pub(crate) const LOG_SCAN_MAX_SPAN: u64 = 10_000_000;
 
+/// Most values one topic position of an `eth_getLogs` filter may hold;
+/// geth, and so Arbitrum Nitro, rejects a longer list.
+pub(crate) const LOG_FILTER_MAX_TOPIC_VALUES: usize = 1_000;
+
 #[cfg(test)]
 mod tests {
     use super::*;
