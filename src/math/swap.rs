@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use crate::constants::{MAX_SWAP_SQRT_PRICE_X96, MIN_SWAP_SQRT_PRICE_X96, Q96};
 use crate::errors::ValidationError;
 use crate::math::BlockContext;
-use crate::math::fixed_point::{Rounding, mul_div, u512_to_u256};
+use crate::math::fixed_point::{Rounding, div_ceil_512, mul_div, u512_to_u256};
 use crate::math::tick::{
     UNISWAP_MAX_TICK, UNISWAP_MIN_TICK, get_sqrt_ratio_at_tick, get_tick_at_sqrt_ratio,
 };
@@ -554,15 +554,6 @@ fn div(value: U256, denominator: U256, rounding: Rounding) -> U256 {
         q + U256::ONE
     } else {
         q
-    }
-}
-
-fn div_ceil_512(value: U512, denominator: U512) -> U512 {
-    let q = value / denominator;
-    if value % denominator == U512::ZERO {
-        q
-    } else {
-        q + U512::ONE
     }
 }
 
