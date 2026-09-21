@@ -28,13 +28,16 @@
 //!
 //! A taker trade or a liquidity removal that would leave a side's open
 //! interest above its capacity reverts with `LongUtilizationExceeded` /
-//! `ShortUtilizationExceeded`.
+//! `ShortUtilizationExceeded`. [`MarketCapacity`] holds both totals and
+//! derives each side's headroom and utilization.
 
 use alloy::primitives::{U256, U512};
 use serde::{Deserialize, Serialize};
 
-use crate::constants::{MAX_TICK, MIN_TICK, Q96};
+use crate::constants::{MAX_TICK, MIN_TICK, Q96, SCALE_1E6, UTILIZATION_E6_NO_CAPACITY};
+use crate::contracts;
 use crate::errors::ValidationError;
+use crate::math::BlockContext;
 use crate::math::fixed_point::{Rounding, div_ceil_512};
 use crate::math::swap::amount0_delta;
 use crate::math::tick::get_sqrt_ratio_at_tick;
@@ -57,6 +60,63 @@ impl Capacity {
             Side::Long => self.long_atoms,
             Side::Short => self.short_atoms,
         }
+    }
+}
+
+impl From<contracts::Capacity> for Capacity {
+    fn from(cap: contracts::Capacity) -> Self {
+        Self {
+            long_atoms: cap.long,
+            short_atoms: cap.short,
+        }
+    }
+}
+
+/// A market's taker capacity and the open interest drawing on it, read at
+/// one block by [`PerpClient::get_capacity`](crate::PerpClient::get_capacity).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MarketCapacity {
+    /// The block both totals were read at.
+    pub block: BlockContext,
+    /// `capacity()`: the sum of every band's capacity snapshot.
+    pub capacity: Capacity,
+    /// `openInterest().long`, in 6-decimal perp atoms.
+    pub long_open_interest_atoms: u128,
+    /// `openInterest().short`, in 6-decimal perp atoms.
+    pub short_open_interest_atoms: u128,
+}
+
+impl MarketCapacity {
+    /// Taker open interest on one side.
+    pub fn open_interest_atoms(&self, side: Side) -> u128 {
+        match side {
+            Side::Long => self.long_open_interest_atoms,
+            Side::Short => self.short_open_interest_atoms,
+        }
+    }
+
+    /// Open interest `side` can still add before a trade reverts with
+    /// `LongUtilizationExceeded` / `ShortUtilizationExceeded`.
+    pub fn headroom_atoms(&self, side: Side) -> u128 {
+        self.capacity
+            .side(side)
+            .saturating_sub(self.open_interest_atoms(side))
+    }
+
+    /// Utilization on one side as the Perp passes it to the fees module:
+    /// `openInterest * 1e6 / capacity`, rounded down, or
+    /// [`UTILIZATION_E6_NO_CAPACITY`] when the side has no capacity.
+    ///
+    /// Chain state never exceeds [`SCALE_1E6`] (100%), because the contract
+    /// reverts any change that leaves open interest above capacity. A
+    /// hand-built value above `u32::MAX` saturates.
+    pub fn utilization_e6(&self, side: Side) -> u32 {
+        let capacity = self.capacity.side(side);
+        if capacity == 0 {
+            return UTILIZATION_E6_NO_CAPACITY;
+        }
+        let scaled = U256::from(self.open_interest_atoms(side)) * U256::from(SCALE_1E6);
+        (scaled / U256::from(capacity)).saturating_to::<u32>()
     }
 }
 
@@ -190,7 +250,7 @@ impl Band {
 
 #[cfg(test)]
 mod tests {
-    use alloy::primitives::uint;
+    use alloy::primitives::{B256, uint};
 
     use super::*;
 
@@ -290,6 +350,53 @@ mod tests {
             band_capacity(Q96, -600, 600, 0).unwrap(),
             Capacity::default()
         );
+    }
+
+    /// HORMUZ-TRAFFIC `capacity()` and `openInterest()` at block
+    /// 507526321.
+    const HORMUZ_TRAFFIC: MarketCapacity = MarketCapacity {
+        block: BlockContext {
+            number: 507_526_321,
+            hash: B256::ZERO,
+            timestamp: 0,
+        },
+        capacity: Capacity {
+            long_atoms: 60_883_605,
+            short_atoms: 51_603_209,
+        },
+        long_open_interest_atoms: 37_772_806,
+        short_open_interest_atoms: 42_582_564,
+    };
+
+    #[test]
+    fn market_utilization_matches_the_contract_formula() {
+        // floor(37772806e6 / 60883605) and floor(42582564e6 / 51603209).
+        assert_eq!(HORMUZ_TRAFFIC.utilization_e6(Side::Long), 620_410);
+        assert_eq!(HORMUZ_TRAFFIC.utilization_e6(Side::Short), 825_192);
+        assert_eq!(HORMUZ_TRAFFIC.headroom_atoms(Side::Long), 23_110_799);
+        assert_eq!(HORMUZ_TRAFFIC.headroom_atoms(Side::Short), 9_020_645);
+        assert_eq!(HORMUZ_TRAFFIC.open_interest_atoms(Side::Short), 42_582_564);
+    }
+
+    #[test]
+    fn market_utilization_edges() {
+        let empty = MarketCapacity::default();
+        assert_eq!(empty.utilization_e6(Side::Long), UTILIZATION_E6_NO_CAPACITY);
+        assert_eq!(empty.headroom_atoms(Side::Short), 0);
+
+        let full = MarketCapacity {
+            block: BlockContext::default(),
+            capacity: Capacity {
+                long_atoms: u128::MAX,
+                short_atoms: 1,
+            },
+            long_open_interest_atoms: u128::MAX,
+            short_open_interest_atoms: u128::MAX,
+        };
+        assert_eq!(full.utilization_e6(Side::Long), SCALE_1E6);
+        assert_eq!(full.headroom_atoms(Side::Long), 0);
+        assert_eq!(full.utilization_e6(Side::Short), u32::MAX);
+        assert_eq!(full.headroom_atoms(Side::Short), 0);
     }
 
     #[test]
