@@ -114,4 +114,4 @@ pub use math::swap::{
 };
 
 #[doc(inline)]
-pub use math::liquidity::{estimate_liquidity, liquidity_for_target_ratio};
+pub use math::liquidity::{amounts_for_liquidity, estimate_liquidity, liquidity_for_target_ratio};

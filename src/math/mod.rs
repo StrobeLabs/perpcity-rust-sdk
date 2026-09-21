@@ -6,7 +6,7 @@
 //! | Module | Purpose |
 //! |---|---|
 //! | [`tick`] | Tick ↔ price conversions, tick alignment, `getSqrtRatioAtTick` |
-//! | [`liquidity`] | Liquidity estimation for maker positions |
+//! | [`liquidity`] | Liquidity sizing and band token amounts for maker positions |
 //! | [`position`] | Entry price, size, value, leverage, liquidation price |
 //! | [`ema`] | Contract-exact EMA advancement (Solady `expWad` port) |
 //! | [`pricing`] | The deployed pricing module's fair price (the contract's mark) |
