@@ -31,6 +31,7 @@ use crate::hft::state_cache::{CachedBounds, CachedFees};
 use crate::math::BlockContext;
 use crate::math::capacity::MarketCapacity;
 use crate::math::ema::{PricePair, calculate_emas};
+use crate::math::pricing::{FairPrice, fair_price_x96};
 use crate::math::swap::{TakerMarketSnapshot, TickLiquidity};
 use crate::storage::{perp_emas_slot, v4_tick_bitmap_slot, v4_tick_slot};
 use crate::types::{
@@ -79,6 +80,20 @@ pub(super) fn ema_window_secs(ema_window: U256) -> Result<u64> {
         }
         .into()
     })
+}
+
+/// The Perp views the contract's mark depends on, read at one block.
+pub(super) struct MarkViews {
+    /// `modules().beacon`.
+    pub(super) beacon: Address,
+    /// `poolState().ammPrice`.
+    pub(super) amm_price_x96: U256,
+    /// `emas()`: the stored pair as of `last_touch`.
+    pub(super) stored_emas: PricePair,
+    /// `rates().lastTouch`.
+    pub(super) last_touch: u64,
+    /// `EMA_WINDOW()`.
+    pub(super) ema_window: U256,
 }
 
 /// Perp/pool values fixed at deployment, cached after the first taker book
@@ -185,6 +200,86 @@ impl PerpClient {
                 })
             })
             .await
+    }
+
+    /// The contract's mark at `block`, as `PerpLogic.accrue` sets it: the
+    /// deployed fair price of the pool price and the beacon index, with the
+    /// stored EMAs advanced to the block timestamp.
+    ///
+    /// `index()` mutates on chain; an `eth_call` pinned to the block reads
+    /// it without sending. The beacon guard names the missing interface on
+    /// a perp with no beacon, where the bare call returns an opaque
+    /// ABI-decode error.
+    pub(super) async fn contract_mark_x96(
+        &self,
+        block: &BlockContext,
+        block_id: BlockId,
+        views: MarkViews,
+    ) -> Result<U256> {
+        let beacon = registered_module(views.beacon, "IBeacon")?;
+        let index = IBeacon::new(beacon, &self.provider)
+            .index()
+            .block(block_id)
+            .call()
+            .await?;
+        let emas = calculate_emas(
+            views.stored_emas,
+            PricePair::try_from_x96(views.amm_price_x96, index)?,
+            views.last_touch,
+            block.timestamp,
+            ema_window_secs(views.ema_window)?,
+        )?;
+        Ok(fair_price_x96(
+            views.amm_price_x96,
+            index,
+            U256::from(emas.amm),
+            U256::from(emas.index),
+        ))
+    }
+
+    /// Read the contract's mark: the deployed fair price
+    /// ([`fair_price_x96`]) of the pool price, the beacon index and the
+    /// EMAs advanced to the block, pinned to one lagged block (see
+    /// [`SNAPSHOT_BLOCK_LAG`]).
+    ///
+    /// This is the price every health check, `valPnl` and utilization
+    /// accrual uses, and the mark [`Self::get_maker_equities`] prices at.
+    /// [`Self::get_mark_price`] returns the pool price instead.
+    ///
+    /// # Errors
+    ///
+    /// [`ContractError::ModuleNotRegistered`] when the perp has no beacon;
+    /// [`ContractError::BlockUnavailable`] when the pinned header is missing
+    /// from the serving replica.
+    pub async fn get_fair_price(&self) -> Result<FairPrice> {
+        let (block, block_id) = self.lagged_snapshot_block().await?;
+        let data = self
+            .perp_views(
+                vec![
+                    view_call(Perp::modulesCall {}),
+                    view_call(Perp::poolStateCall {}),
+                    view_call(Perp::emasCall {}),
+                    view_call(Perp::ratesCall {}),
+                    view_call(Perp::EMA_WINDOWCall {}),
+                ],
+                block_id,
+            )
+            .await?;
+        let stored_emas = decode_view::<Perp::emasCall>(&data[2])?;
+        let views = MarkViews {
+            beacon: decode_view::<Perp::modulesCall>(&data[0])?.beacon,
+            amm_price_x96: decode_view::<Perp::poolStateCall>(&data[1])?.ammPrice,
+            stored_emas: PricePair {
+                amm: stored_emas.ammPrice,
+                index: stored_emas.index,
+            },
+            last_touch: decode_view::<Perp::ratesCall>(&data[3])?
+                .lastTouch
+                .to::<u64>(),
+            ema_window: decode_view::<Perp::EMA_WINDOWCall>(&data[4])?,
+        };
+        let price_x96 = self.contract_mark_x96(&block, block_id, views).await?;
+        Ok(FairPrice { block, price_x96 })
     }
 
     /// Resolve the lagged, reorg-safe block that snapshot reads pin to.

@@ -94,7 +94,7 @@ pub use types::{
 pub use math::BlockContext;
 
 #[doc(inline)]
-pub use math::pricing::{fair_price, fair_price_x96};
+pub use math::pricing::{FairPrice, fair_price, fair_price_x96};
 
 #[doc(inline)]
 pub use math::maker_equity::{

@@ -21,22 +21,21 @@ use alloy::transports::{TransportError, TransportErrorKind};
 use futures_util::stream::{self, StreamExt};
 
 use crate::constants::MULTICALL3;
-use crate::contracts::{IBeacon, IMulticall3, IPoolManagerState, Maker, Perp, Position};
+use crate::contracts::{IMulticall3, IPoolManagerState, Maker, Perp, Position};
 use crate::convert::unpack_balance_delta;
 use crate::errors::{ContractError, PerpCityError, Result, ValidationError};
-use crate::math::ema::{PricePair, calculate_emas};
+use crate::math::ema::PricePair;
 use crate::math::maker_equity::{
     AccrualInputs, AccruedMakerSnapshot, MakerEquityBreakdown, MakerMarketSnapshot, MakerState,
     TickFunding, fee_growth_inside1,
 };
-use crate::math::pricing::fair_price_x96;
 use crate::math::tick::get_sqrt_ratio_at_tick;
 use crate::storage::{
     perp_tick_funding_slots, v4_fee_growth_global1_slot, v4_position_fee_growth_inside1_slot,
     v4_tick_fee_growth_outside1_slot,
 };
 
-use super::queries::{decode_view, ema_window_secs, registered_module, view_call};
+use super::queries::{MarkViews, decode_view, view_call};
 use super::{PerpClient, i24_to_i32, u24_to_u32};
 
 /// Concurrency bound for the `eth_getStorageAt` fallback when the endpoint
@@ -339,7 +338,8 @@ impl PerpClient {
     /// every chunk pinned to the same block.
     ///
     /// The mark that prices `valPnl` and the accrual replay is the
-    /// contract's own: the deployed fair price ([`fair_price_x96`]) of the
+    /// contract's own, the value [`Self::get_fair_price`] reads: the
+    /// deployed fair price ([`crate::math::pricing::fair_price_x96`]) of the
     /// pinned block's `poolState().ammPrice`, beacon index, and EMAs
     /// advanced to the block timestamp — exactly what `PerpLogic.accrue`
     /// sets as `markPrice` when it touches the market, so
@@ -542,35 +542,22 @@ impl PerpClient {
         let stored_emas = decode_view::<Perp::emasCall>(&data[7])?;
         let ema_window = decode_view::<Perp::EMA_WINDOWCall>(&data[8])?;
 
-        // The contract's mark for this block, as `PerpLogic.accrue` sets
-        // it: the deployed fair price of the spot pair and the EMAs
-        // advanced to the block timestamp. `index()` mutates on chain;
-        // an eth_call pinned to the block reads it without sending. The
-        // guard names the missing interface on a perp with no beacon,
-        // where the bare call returns an opaque ABI-decode error.
-        let beacon = registered_module(modules.beacon, "IBeacon")?;
-        let index = IBeacon::new(beacon, &self.provider)
-            .index()
-            .block(block_id)
-            .call()
+        let mark_price_x96 = self
+            .contract_mark_x96(
+                &block,
+                block_id,
+                MarkViews {
+                    beacon: modules.beacon,
+                    amm_price_x96: pool_state.ammPrice,
+                    stored_emas: PricePair {
+                        amm: stored_emas.ammPrice,
+                        index: stored_emas.index,
+                    },
+                    last_touch: rates.lastTouch.to::<u64>(),
+                    ema_window,
+                },
+            )
             .await?;
-        let spot = PricePair::try_from_x96(pool_state.ammPrice, index)?;
-        let emas = calculate_emas(
-            PricePair {
-                amm: stored_emas.ammPrice,
-                index: stored_emas.index,
-            },
-            spot,
-            rates.lastTouch.to::<u64>(),
-            block.timestamp,
-            ema_window_secs(ema_window)?,
-        )?;
-        let mark_price_x96 = fair_price_x96(
-            pool_state.ammPrice,
-            index,
-            U256::from(emas.amm),
-            U256::from(emas.index),
-        );
 
         let market = MakerMarketSnapshot {
             block,
