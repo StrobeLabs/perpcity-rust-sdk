@@ -19,6 +19,9 @@
 //! connections, HTTP 429) are returned at once: a smaller range does not
 //! fix them, and the caller owns the retry policy
 //! ([`PerpCityError::is_transient`](crate::PerpCityError::is_transient)).
+//! A scan sends its requests back to back, so against a rate-limited
+//! endpoint put the backoff in the transport (alloy's `RetryBackoffLayer`,
+//! or [`HftTransport`](crate::HftTransport)'s read retries).
 //!
 //! The deployed beacons expose no last-update getter (`index()` returns
 //! the value alone), so a beacon's newest `IndexUpdated` log is the only

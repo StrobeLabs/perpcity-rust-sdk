@@ -40,6 +40,7 @@ struct State {
 pub(crate) struct FakeNode {
     logs: Arc<Vec<Log>>,
     max_span: u64,
+    head: u64,
     mode: Mode,
     state: Arc<Mutex<State>>,
 }
@@ -51,9 +52,16 @@ impl FakeNode {
         Self {
             logs: Arc::new(logs),
             max_span,
+            head: 0,
             mode: Mode::Serve,
             state: Arc::default(),
         }
+    }
+
+    /// Set the block number `eth_blockNumber` reports.
+    pub(crate) fn with_head(mut self, head: u64) -> Self {
+        self.head = head;
+        self
     }
 
     pub(crate) fn with_mode(mut self, mode: Mode) -> Self {
@@ -75,10 +83,16 @@ impl FakeNode {
         self.state.lock().unwrap().header_reads.clone()
     }
 
-    fn answer(&self, method: &str, params: &RawValue) -> Result<ResponsePayload, TransportError> {
+    fn answer(
+        &self,
+        method: &str,
+        params: Option<&RawValue>,
+    ) -> Result<ResponsePayload, TransportError> {
         match method {
+            "eth_blockNumber" => Ok(success(&format!("0x{:x}", self.head))),
             "eth_getBlockByNumber" => {
-                let (tag, _full): (String, bool) = serde_json::from_str(params.get()).unwrap();
+                let (tag, _full): (String, bool) =
+                    serde_json::from_str(params.unwrap().get()).unwrap();
                 let number = parse_quantity(&tag);
                 self.state.lock().unwrap().header_reads.push(number);
                 let mut block = Block::<B256>::default();
@@ -87,7 +101,7 @@ impl FakeNode {
                 Ok(success(&block))
             }
             "eth_getLogs" => {
-                let (filter,): (Filter,) = serde_json::from_str(params.get()).unwrap();
+                let (filter,): (Filter,) = serde_json::from_str(params.unwrap().get()).unwrap();
                 let from = filter.get_from_block().unwrap();
                 let to = filter.get_to_block().unwrap();
                 self.state.lock().unwrap().requests.push((from, to));
@@ -131,7 +145,7 @@ impl Service<RequestPacket> for FakeNode {
         let RequestPacket::Single(req) = req else {
             panic!("FakeNode does not serve batches");
         };
-        let answer = self.answer(req.method(), req.params().unwrap());
+        let answer = self.answer(req.method(), req.params());
         let id = req.id().clone();
         Box::pin(
             async move { answer.map(|payload| ResponsePacket::Single(Response { id, payload })) },

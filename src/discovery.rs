@@ -19,13 +19,18 @@
 //! count. Test perps and abandoned deploys also emit `PerpCreated`;
 //! whether a market is listed is an off-chain decision this module does
 //! not make.
+//!
+//! [`list_perps`] reads the history.
 
 use alloy::primitives::{Address, B256, U256};
-use alloy::rpc::types::Log;
+use alloy::providers::Provider;
+use alloy::rpc::types::{Filter, Log};
 use alloy::sol_types::SolEvent;
 
 use crate::contracts::{Modules, PerpFactory, PerpFactoryRedeployEvents};
+use crate::errors::{Result, ValidationError};
 use crate::feeds::events::decode_raw;
+use crate::history::get_logs_chunked;
 
 /// Name, symbol and token URI of a market's position NFT, as its factory
 /// announced them.
@@ -127,13 +132,72 @@ pub fn decode_perp_created(log: &Log) -> Option<PerpCreation> {
     }
 }
 
+/// Every perp the `factories` created from `from_block` to the chain head,
+/// oldest first.
+///
+/// Reads with [`get_logs_chunked`], so the range may span the chain's
+/// whole history.
+///
+/// # Errors
+///
+/// [`ValidationError::InvalidConfig`] for an empty factory list or a zero
+/// address in it, [`ValidationError::InvalidBlockRange`] if `from_block`
+/// is past the head, or the RPC error that stopped the scan.
+pub async fn list_perps<P: Provider>(
+    provider: &P,
+    factories: &[Address],
+    from_block: u64,
+) -> Result<Vec<PerpCreation>> {
+    let filter = perp_created_filter(factories)?;
+    let head = provider.get_block_number().await?;
+    let logs = get_logs_chunked(provider, &filter, from_block, head).await?;
+    Ok(logs
+        .iter()
+        .filter_map(|log| {
+            let created = decode_perp_created(log);
+            if created.is_none() {
+                tracing::warn!(
+                    factory = %log.address(),
+                    tx = ?log.transaction_hash,
+                    "undecodable PerpCreated log from a listed factory"
+                );
+            }
+            created
+        })
+        .collect())
+}
+
+/// The log filter for both `PerpCreated` shapes from `factories`.
+pub(crate) fn perp_created_filter(
+    factories: &[Address],
+) -> std::result::Result<Filter, ValidationError> {
+    if factories.is_empty() {
+        return Err(ValidationError::InvalidConfig {
+            reason: "factory list is empty".into(),
+        });
+    }
+    if factories.iter().any(|factory| factory.is_zero()) {
+        return Err(ValidationError::InvalidConfig {
+            reason: "factory list contains the zero address".into(),
+        });
+    }
+    Ok(Filter::new()
+        .address(factories.to_vec())
+        .event_signature(vec![
+            PerpFactory::PerpCreated::SIGNATURE_HASH,
+            PerpFactoryRedeployEvents::PerpCreated::SIGNATURE_HASH,
+        ]))
+}
+
 #[cfg(test)]
 mod tests {
     use alloy::primitives::{Signed, U160, Uint, address, b256, uint};
 
     use super::*;
+    use crate::PerpCityError;
     use crate::contracts::IBeacon;
     use crate::convert::price_x96_to_f64;
+    use crate::test_support::FakeNode;
 
     const MAINNET_LOG: &str = include_str!("../tests/fixtures/perp_created_arbitrum_one.json");
 
@@ -187,6 +251,19 @@ mod tests {
     /// from the binding; the topic0 it produces is locked in `abi_lock`.
     #[test]
     fn decodes_the_redeploy_shape_with_latency_and_no_metadata() {
+        let log = redeploy_log(Address::repeat_byte(0x7E), 600_000_000);
+        let created = decode_perp_created(&log).expect("redeploy PerpCreated");
+        assert_eq!(created.perp, Address::repeat_byte(0x01));
+        assert_eq!(created.latency, Some(300));
+        assert_eq!(created.metadata, None);
+        assert_eq!(created.ema_window, 900);
+        assert_eq!(created.protocol_fee, U256::from(10_000u64));
+        assert_eq!(created.tick, -60);
+        assert_eq!(created.modules, modules());
+    }
+
+    /// A redeploy-shaped creation emitted by `factory` at `block`.
+    fn redeploy_log(factory: Address, block: u64) -> Log {
         let event = PerpFactoryRedeployEvents::PerpCreated {
             perp: Address::repeat_byte(0x01),
             poolId: B256::repeat_byte(0x02),
@@ -200,16 +277,48 @@ mod tests {
             owner: Address::repeat_byte(0x03),
         };
         let mut log = mainnet_log();
+        log.inner.address = factory;
         log.inner.data = event.encode_log_data();
+        log.block_number = Some(block);
+        log
+    }
 
-        let created = decode_perp_created(&log).expect("redeploy PerpCreated");
-        assert_eq!(created.perp, Address::repeat_byte(0x01));
-        assert_eq!(created.latency, Some(300));
-        assert_eq!(created.metadata, None);
-        assert_eq!(created.ema_window, 900);
-        assert_eq!(created.protocol_fee, U256::from(10_000u64));
-        assert_eq!(created.tick, -60);
-        assert_eq!(created.modules, modules());
+    const OLD_FACTORY: Address = address!("ce0c5f65a5eda69a1dfb3f3273749b649abc4ec6");
+    const NEW_FACTORY: Address = Address::repeat_byte(0x7E);
+
+    #[tokio::test]
+    async fn lists_both_factories_in_chain_order_and_ignores_impostors() {
+        let impostor = redeploy_log(Address::repeat_byte(0x66), 500_000_000);
+        let logs = vec![
+            mainnet_log(),
+            impostor,
+            redeploy_log(NEW_FACTORY, 600_000_000),
+        ];
+        let node = FakeNode::new(logs, u64::MAX).with_head(650_000_000);
+        let perps = list_perps(&node.provider(), &[OLD_FACTORY, NEW_FACTORY], 480_000_000)
+            .await
+            .unwrap();
+        let found: Vec<_> = perps.iter().map(|p| (p.factory, p.block_number)).collect();
+        assert_eq!(
+            found,
+            vec![(OLD_FACTORY, 486_214_447), (NEW_FACTORY, 600_000_000)]
+        );
+        assert_eq!(node.requests().last().map(|r| r.1), Some(650_000_000));
+    }
+
+    #[tokio::test]
+    async fn an_empty_or_zero_factory_list_is_rejected() {
+        let node = FakeNode::new(Vec::new(), u64::MAX).with_head(10);
+        for factories in [&[][..], &[OLD_FACTORY, Address::ZERO][..]] {
+            let error = list_perps(&node.provider(), factories, 0)
+                .await
+                .unwrap_err();
+            assert!(matches!(
+                error,
+                PerpCityError::Validation(ValidationError::InvalidConfig { .. })
+            ));
+        }
+        assert!(node.requests().is_empty());
     }
 
     #[test]
