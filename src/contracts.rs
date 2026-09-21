@@ -884,8 +884,9 @@ mod abi_lock {
                 "7ba2344e48465255b15f10af80d238b8d45c229a658105ec94ff4b68da35a710"
             )
         );
-        // Redeployed factory shape (perpcity-contracts `IPerpFactory`, since
-        // #283). No factory on either chain has emitted it yet.
+        // Redeployed factory shape (perpcity-contracts main `IPerpFactory`:
+        // `latency` added, NFT metadata strings dropped). No factory on
+        // either chain has emitted it yet.
         assert_eq!(
             PerpFactoryRedeployEvents::PerpCreated::SIGNATURE,
             "PerpCreated(address,bytes32,(address,address,address,address,address,address),uint256,uint24,uint32,uint256,uint160,int24,address)"
