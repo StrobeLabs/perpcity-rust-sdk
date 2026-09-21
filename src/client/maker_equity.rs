@@ -35,7 +35,7 @@ use crate::storage::{
     v4_tick_fee_growth_outside1_slot,
 };
 
-use super::queries::{MarkViews, decode_view, view_call};
+use super::queries::{MarkViews, multicall_error};
 use super::{PerpClient, i24_to_i32, u24_to_u32};
 
 /// Concurrency bound for the `eth_getStorageAt` fallback when the endpoint
@@ -516,31 +516,21 @@ impl PerpClient {
         // ── Market-wide state: one multicall, all-or-nothing ────────
         // (without a consistent market snapshot no position's equity can
         // be computed.)
-        let data = self
-            .perp_views(
-                vec![
-                    view_call(Perp::cumulativesCall {}),
-                    view_call(Perp::ratesCall {}),
-                    view_call(Perp::poolStateCall {}),
-                    view_call(Perp::capacityCall {}),
-                    view_call(Perp::openInterestCall {}),
-                    view_call(Perp::POOL_IDCall {}),
-                    view_call(Perp::modulesCall {}),
-                    view_call(Perp::emasCall {}),
-                    view_call(Perp::EMA_WINDOWCall {}),
-                ],
-                block_id,
-            )
-            .await?;
-        let cumls = decode_view::<Perp::cumulativesCall>(&data[0])?;
-        let rates = decode_view::<Perp::ratesCall>(&data[1])?;
-        let pool_state = decode_view::<Perp::poolStateCall>(&data[2])?;
-        let capacity = decode_view::<Perp::capacityCall>(&data[3])?;
-        let oi = decode_view::<Perp::openInterestCall>(&data[4])?;
-        let pool_id = decode_view::<Perp::POOL_IDCall>(&data[5])?;
-        let modules = decode_view::<Perp::modulesCall>(&data[6])?;
-        let stored_emas = decode_view::<Perp::emasCall>(&data[7])?;
-        let ema_window = decode_view::<Perp::EMA_WINDOWCall>(&data[8])?;
+        let perp = Perp::new(self.deployments.perp, &self.provider);
+        let (cumls, rates, pool_state, capacity, oi, pool_id, modules, stored_emas, ema_window) =
+            self.multicall_at(block_id)
+                .add(perp.cumulatives())
+                .add(perp.rates())
+                .add(perp.poolState())
+                .add(perp.capacity())
+                .add(perp.openInterest())
+                .add(perp.POOL_ID())
+                .add(perp.modules())
+                .add(perp.emas())
+                .add(perp.EMA_WINDOW())
+                .aggregate()
+                .await
+                .map_err(multicall_error)?;
 
         let mark_price_x96 = self
             .contract_mark_x96(
