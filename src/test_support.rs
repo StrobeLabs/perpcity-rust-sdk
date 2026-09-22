@@ -43,7 +43,6 @@ pub(crate) struct FakeNode {
     logs: Arc<Vec<Log>>,
     max_span: u64,
     max_results: usize,
-    head: u64,
     mode: Mode,
     state: Arc<Mutex<State>>,
 }
@@ -56,16 +55,9 @@ impl FakeNode {
             logs: Arc::new(logs),
             max_span,
             max_results: usize::MAX,
-            head: 0,
             mode: Mode::Serve,
             state: Arc::default(),
         }
-    }
-
-    /// Set the block number `eth_blockNumber` reports.
-    pub(crate) fn with_head(mut self, head: u64) -> Self {
-        self.head = head;
-        self
     }
 
     /// Reject any range that holds more than `max_results` logs.
@@ -99,7 +91,6 @@ impl FakeNode {
         params: Option<&RawValue>,
     ) -> Result<ResponsePayload, TransportError> {
         match method {
-            "eth_blockNumber" => Ok(success(&format!("0x{:x}", self.head))),
             "eth_getBlockByNumber" => {
                 let (tag, _full): (String, bool) =
                     serde_json::from_str(params.unwrap().get()).unwrap();

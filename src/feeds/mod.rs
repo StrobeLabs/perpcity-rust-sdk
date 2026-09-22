@@ -4,7 +4,6 @@
 //! |------|--------|---------|
 //! | [`MarketFeed`] | Contract event logs | Trading events (positions, index updates) |
 //! | [`BlockHeaderFeed`] | `newHeads` subscription | Block headers (base fee for gas pricing) |
-//! | [`PerpCreatedFeed`] | Factory `PerpCreated` logs | New perp markets from a factory list |
 //!
 //! The [`events`] submodule provides the [`MarketEvent`] type and
 //! [`decode_log`] function used by [`MarketFeed`] to decode raw logs.
@@ -12,11 +11,9 @@
 pub mod block;
 pub mod events;
 pub mod market;
-pub mod perp_created;
 pub mod taker;
 
 pub use block::BlockHeaderFeed;
 pub use events::{MarketEvent, decode_log};
 pub use market::MarketFeed;
-pub use perp_created::PerpCreatedFeed;
 pub use taker::{LiveTakerMarket, LiveTakerMarketPublisher};

@@ -10,7 +10,6 @@
 //! | [`constants`] | Protocol constants mirrored from on-chain `Constants.sol` |
 //! | [`contracts`] | ABI bindings via Alloy `sol!` — structs, events, errors, functions |
 //! | [`convert`] | Conversions between client f64 values and on-chain representations |
-//! | [`discovery`] | Market discovery: decoding `PerpCreated` from a caller-supplied factory list |
 //! | [`errors`] | SDK-wide error types using `thiserror` |
 //! | [`feeds`] | Live data feeds over WebSocket: market events, block headers, event decoding |
 //! | [`hft`] | HFT infrastructure: nonce, gas, pipeline, state cache, latency, positions |
@@ -41,7 +40,6 @@ pub mod client;
 pub mod constants;
 pub mod contracts;
 pub mod convert;
-pub mod discovery;
 pub mod errors;
 pub mod feeds;
 pub mod hft;
@@ -67,14 +65,12 @@ pub use contracts::{
     AdjustMakerParams as ContractAdjustMakerParams, AdjustTakerParams as ContractAdjustTakerParams,
     IBeacon, IERC20, IFees, IFunding, IMarginRatios, IMulticall3, IPoolManagerState, IPriceImpact,
     IPricing, Modules, OpenMakerParams as ContractOpenMakerParams,
-    OpenTakerParams as ContractOpenTakerParams, Perp, PerpDeployedEvents, PerpFactory,
-    PerpFactoryRedeployEvents, PoolKey,
+    OpenTakerParams as ContractOpenTakerParams, Perp, PerpDeployedEvents, PerpFactory, PoolKey,
 };
 
 #[doc(inline)]
 pub use feeds::{
-    BlockHeaderFeed, LiveTakerMarket, LiveTakerMarketPublisher, MarketEvent, MarketFeed,
-    PerpCreatedFeed, decode_log,
+    BlockHeaderFeed, LiveTakerMarket, LiveTakerMarketPublisher, MarketEvent, MarketFeed, decode_log,
 };
 
 #[doc(inline)]

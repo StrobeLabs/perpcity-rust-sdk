@@ -12,9 +12,7 @@
 //! perps emit `MakerClosed`/`MakerConverted` shapes with
 //! `liqFee`/`isLiquidation` tails and no `MakerLiquidated` event.
 //! [`PerpDeployedEvents`] declares those shapes so `decode_log` recognizes
-//! both. The factory has the same split in the other direction:
-//! [`PerpFactoryRedeployEvents`] declares the `PerpCreated` shape of the
-//! redeployed factory, which no live factory emits yet.
+//! both.
 //!
 //! Architecture: `PerpFactory` creates `Perp` contracts. There is no
 //! `PerpManager` — each market is its own `Perp` contract (ERC721 for position
@@ -115,7 +113,6 @@ sol! {
     }
 
     /// Module addresses for a Perp market.
-    #[derive(Debug, PartialEq, Eq)]
     struct Modules {
         address beacon;
         address fees;
@@ -505,10 +502,7 @@ sol! {
 
     #[sol(rpc)]
     interface PerpFactory {
-        /// Emitted when a new perp market is created, in the shape the live
-        /// factories emit. `poolId` is a Uniswap V4 `PoolId` (bytes32).
-        /// [`PerpFactoryRedeployEvents`] declares the redeployed factory's
-        /// shape.
+        /// Emitted when a new perp market is created. `poolId` is a Uniswap V4 `PoolId` (bytes32).
         event PerpCreated(
             address perp,
             bytes32 poolId,
@@ -539,27 +533,6 @@ sol! {
             uint24 emaWindow,
             bytes32 salt
         ) external returns (address perp);
-    }
-
-    /// `PerpCreated` as the redeployed factory emits it: `latency` (the
-    /// maximum beacon index age the perp accepts, in seconds) is added and
-    /// the position-NFT `name`/`symbol`/`tokenUri` strings are gone, since
-    /// those perps are not ERC721s. The signature hash differs from
-    /// [`PerpFactory::PerpCreated`], and a redeploy leaves the old factory's
-    /// perps live, so market discovery must recognize both shapes.
-    interface PerpFactoryRedeployEvents {
-        event PerpCreated(
-            address perp,
-            bytes32 poolId,
-            Modules modules,
-            uint256 initialIndex,
-            uint24 emaWindow,
-            uint32 latency,
-            uint256 protocolFee,
-            uint160 sqrtPriceX96,
-            int24 tick,
-            address owner
-        );
     }
 
     // ═══════════════════════════════════════════════════════════════════
@@ -874,34 +847,6 @@ mod abi_lock {
             IBeacon::IndexUpdated::SIGNATURE_HASH,
             alloy::primitives::b256!(
                 "acfc085c9be45d2b3f9e5c09a19d4a95749cc16939519c13e090de3a4cb192c6"
-            )
-        );
-        // Deployed factory shape: the topic0 of every `PerpCreated` log from
-        // the live factories — 48 on Arbitrum One
-        // (0xCE0c5f65A5eDa69A1dFb3f3273749B649abc4eC6) and 127 on Arbitrum
-        // Sepolia (0xa54F81e7BD5C0d52d6fdE2ba40d0B1123d53E7a7 plus the older
-        // 0x01adB470A948061F35f88972d78D5bE9A9eF2682).
-        assert_eq!(
-            PerpFactory::PerpCreated::SIGNATURE,
-            "PerpCreated(address,bytes32,(address,address,address,address,address,address),uint256,uint24,uint256,uint160,int24,address,string,string,string)"
-        );
-        assert_eq!(
-            PerpFactory::PerpCreated::SIGNATURE_HASH,
-            alloy::primitives::b256!(
-                "7ba2344e48465255b15f10af80d238b8d45c229a658105ec94ff4b68da35a710"
-            )
-        );
-        // Redeployed factory shape (perpcity-contracts main `IPerpFactory`:
-        // `latency` added, NFT metadata strings dropped). No factory on
-        // either chain has emitted it yet.
-        assert_eq!(
-            PerpFactoryRedeployEvents::PerpCreated::SIGNATURE,
-            "PerpCreated(address,bytes32,(address,address,address,address,address,address),uint256,uint24,uint32,uint256,uint160,int24,address)"
-        );
-        assert_eq!(
-            PerpFactoryRedeployEvents::PerpCreated::SIGNATURE_HASH,
-            alloy::primitives::b256!(
-                "9e1124db88459a4e932f32dd28acc4bc6f1a1a2c4dde3f2778ef3dfd90189b6d"
             )
         );
         // The topic0 the live PoolManager (0x360e68faccca8ca495c1b759fd9eee466db9fb32,
