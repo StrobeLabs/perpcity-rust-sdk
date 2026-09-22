@@ -226,15 +226,14 @@ pub struct TokenTransfer {
 /// comes out empty reads nothing rather than every transfer. At least one
 /// side must be `Some`: an unfiltered query reads every transfer the token
 /// ever made. The sets go to the node as topic filters, so the scan
-/// returns only matching logs. Geth-based nodes (Arbitrum Nitro among
-/// them) cap a topic filter at 1,000 values, so a larger set is split into
-/// several scans of the range, one per pair of sender and recipient
-/// chunks, run one after another.
+/// returns only matching logs, in one scan of the range.
 ///
 /// # Errors
 ///
-/// [`ValidationError::InvalidConfig`] for the zero token or two `None`
-/// sets, [`ValidationError::InvalidBlockRange`] if
+/// [`ValidationError::InvalidConfig`] for the zero token, two `None`
+/// sets, or a set of more than 1,000 addresses (the most one topic position
+/// of a filter holds on geth-based nodes, Arbitrum Nitro among them),
+/// [`ValidationError::InvalidBlockRange`] if
 /// `from_block > to_block`, [`ValidationError::DecodeFailed`] for a log
 /// that does not decode as an ERC-20 `Transfer` (for example, an ERC-721
 /// `Transfer`, which shares the topic but indexes its third argument), or
@@ -247,28 +246,25 @@ pub async fn token_transfers<P: Provider>(
     from_block: u64,
     to_block: u64,
 ) -> Result<Vec<TokenTransfer>> {
-    let filters = transfer_filters(token, senders, recipients, from_block, to_block)?;
-    let mut transfers = Vec::new();
-    for filter in &filters {
-        for log in get_logs_chunked(provider, filter, from_block, to_block).await? {
-            transfers.push(decode_transfer(&log)?);
-        }
-    }
-    if filters.len() > 1 {
-        transfers.sort_unstable_by_key(|t| (t.block_number, t.log_index));
-    }
-    Ok(transfers)
+    let Some(filter) = transfer_filter(token, senders, recipients, from_block, to_block)? else {
+        return Ok(Vec::new());
+    };
+    get_logs_chunked(provider, &filter, from_block, to_block)
+        .await?
+        .iter()
+        .map(decode_transfer)
+        .collect()
 }
 
-/// The filters for [`token_transfers`], one per pair of sender and
-/// recipient chunks; none when an empty set means nothing can match.
-fn transfer_filters(
+/// The filter for [`token_transfers`]; `None` when an empty set means
+/// nothing can match.
+fn transfer_filter(
     token: Address,
     senders: Option<&[Address]>,
     recipients: Option<&[Address]>,
     from_block: u64,
     to_block: u64,
-) -> std::result::Result<Vec<Filter>, ValidationError> {
+) -> std::result::Result<Option<Filter>, ValidationError> {
     if token.is_zero() {
         return Err(ValidationError::InvalidConfig {
             reason: "token address is zero".into(),
@@ -280,43 +276,43 @@ fn transfer_filters(
         });
     }
     check_block_range(from_block, to_block)?;
-    let base = Filter::new()
+    let (senders, recipients) = (topic_values(senders)?, topic_values(recipients)?);
+    if senders.as_ref().is_some_and(Vec::is_empty) || recipients.as_ref().is_some_and(Vec::is_empty)
+    {
+        return Ok(None);
+    }
+    let mut filter = Filter::new()
         .address(token)
         .event_signature(IERC20::Transfer::SIGNATURE_HASH);
-    let recipient_chunks = topic_chunks(recipients);
-    let mut filters = Vec::new();
-    for sender_chunk in topic_chunks(senders) {
-        for recipient_chunk in &recipient_chunks {
-            let mut filter = base.clone();
-            if let Some(chunk) = &sender_chunk {
-                filter = filter.topic1(chunk.clone());
-            }
-            if let Some(chunk) = recipient_chunk {
-                filter = filter.topic2(chunk.clone());
-            }
-            filters.push(filter);
-        }
+    if let Some(senders) = senders {
+        filter = filter.topic1(senders);
     }
-    Ok(filters)
+    if let Some(recipients) = recipients {
+        filter = filter.topic2(recipients);
+    }
+    Ok(Some(filter))
 }
 
-/// An address set as topic-filter values: `[None]` (any address) for no
-/// set, otherwise the distinct addresses in chunks a node accepts, so the
-/// chunks never overlap and an empty set has none.
-fn topic_chunks(set: Option<&[Address]>) -> Vec<Option<Vec<B256>>> {
+/// An address set as topic-filter values; `None` (any address) for no
+/// set. A set over the node's per-position limit is refused, since one
+/// filter cannot carry it.
+fn topic_values(
+    set: Option<&[Address]>,
+) -> std::result::Result<Option<Vec<B256>>, ValidationError> {
     let Some(set) = set else {
-        return vec![None];
+        return Ok(None);
     };
-    let words: Vec<B256> = set
-        .iter()
-        .map(|address| address.into_word())
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect();
-    words
-        .chunks(LOG_FILTER_MAX_TOPIC_VALUES)
-        .map(|chunk| Some(chunk.to_vec()))
-        .collect()
+    if set.len() > LOG_FILTER_MAX_TOPIC_VALUES {
+        return Err(ValidationError::InvalidConfig {
+            reason: format!(
+                "{} addresses exceed the {LOG_FILTER_MAX_TOPIC_VALUES} a log filter position accepts",
+                set.len()
+            ),
+        });
+    }
+    Ok(Some(
+        set.iter().map(|address| address.into_word()).collect(),
+    ))
 }
 
 fn decode_transfer(log: &Log) -> Result<TokenTransfer> {
@@ -1045,45 +1041,30 @@ mod tests {
         );
     }
 
-    /// 1,500 senders exceed a node's 1,000-value topic limit, so the scan
-    /// is split in two; the halves merge back into chain order, and a
-    /// sender listed twice is read once.
+    /// A set over the 1,000-value topic limit is refused before any
+    /// request; a set at the limit is sent.
     #[tokio::test]
-    async fn a_set_over_the_topic_limit_is_split_and_merged_in_chain_order() {
-        let senders: Vec<Address> = (1..=1_500u64)
+    async fn a_set_over_the_topic_limit_is_refused() {
+        let senders: Vec<Address> = (1..=1_001u64)
             .map(|i| Address::from_word(U256::from(i).into()))
             .collect();
-        let (low, high) = (senders[2], senders[1_399]);
-        let node = FakeNode::new(
-            vec![
-                transfer_log(high, WALLET_A, 1, 5),
-                transfer_log(low, WALLET_A, 2, 9),
-                transfer_log(high, WALLET_A, 3, 12),
-                transfer_log(low, WALLET_B, 4, 13),
-            ],
-            u64::MAX,
+        let node = FakeNode::new(vec![], u64::MAX);
+        let provider = node.provider();
+        let error = token_transfers(&provider, USDC, Some(&senders), Some(&[WALLET_A]), 0, 100)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                error,
+                PerpCityError::Validation(ValidationError::InvalidConfig { .. })
+            ),
+            "{error:?}"
         );
-        let mut listed = senders.clone();
-        listed.push(low);
-        let out = token_transfers(
-            &node.provider(),
-            USDC,
-            Some(&listed),
-            Some(&[WALLET_A]),
-            0,
-            100,
-        )
-        .await
-        .unwrap();
-        assert_eq!(
-            flows(&out),
-            vec![
-                (high, WALLET_A, U256::from(1), 5),
-                (low, WALLET_A, U256::from(2), 9),
-                (high, WALLET_A, U256::from(3), 12),
-            ]
-        );
-        assert_eq!(node.requests(), vec![(0, 100), (0, 100)]);
+        assert!(node.requests().is_empty());
+        token_transfers(&provider, USDC, Some(&senders[..1_000]), None, 0, 100)
+            .await
+            .unwrap();
+        assert_eq!(node.requests(), vec![(0, 100)]);
     }
 
     /// An ERC-721 `Transfer` shares the topic but indexes the token id, so
