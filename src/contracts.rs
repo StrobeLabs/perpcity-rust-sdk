@@ -540,11 +540,13 @@ sol! {
     // ═══════════════════════════════════════════════════════════════════
 
     /// Beacon interface — emits `IndexUpdated` when the oracle index changes.
-    /// Note: `index()` is state-mutating (not a pure view) per the beacons lib.
+    ///
+    /// `index()` is a read: the deployed beacons answer it under
+    /// `STATICCALL`, and it returns the value alone, with no update time.
     #[sol(rpc)]
     interface IBeacon {
         event IndexUpdated(uint256 index);
-        function index() external returns (uint256);
+        function index() external view returns (uint256);
     }
 
     // ═══════════════════════════════════════════════════════════════════
@@ -741,6 +743,11 @@ mod abi_lock {
         // index 0x2dc0f47dc4c7764d34d2f6a88f).
         assert_eq!(Perp::emasCall::SIGNATURE, "emas()");
         assert_eq!(Perp::emasCall::SELECTOR, [0x6a, 0xb8, 0x0a, 0x34]);
+        // Both live beacon bytecodes (Arbitrum One 0x1b37de2b…ef884 and
+        // 0x0a33ea45…29990) answer 0x2986c0e5 under STATICCALL with one
+        // 32-byte word, so the read is `view` and returns no update time.
+        assert_eq!(IBeacon::indexCall::SIGNATURE, "index()");
+        assert_eq!(IBeacon::indexCall::SELECTOR, [0x29, 0x86, 0xc0, 0xe5]);
     }
 
     /// Event signatures (all params) — drives `topic0`; catches event drift.
@@ -834,6 +841,14 @@ mod abi_lock {
             "TicksCrossed(int24,int24,bool)"
         );
         assert_eq!(IBeacon::IndexUpdated::SIGNATURE, "IndexUpdated(uint256)");
+        // The topic0 of every `IndexUpdated` log from the live Arbitrum One
+        // beacons (e.g. 0x0a33ea45fe9011029641ef63ce8e1c94a8a29990).
+        assert_eq!(
+            IBeacon::IndexUpdated::SIGNATURE_HASH,
+            alloy::primitives::b256!(
+                "acfc085c9be45d2b3f9e5c09a19d4a95749cc16939519c13e090de3a4cb192c6"
+            )
+        );
         // The topic0 the live PoolManager (0x360e68faccca8ca495c1b759fd9eee466db9fb32,
         // Arbitrum One) emits for every perp pool's liquidity change.
         assert_eq!(

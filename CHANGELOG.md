@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`history::get_logs_chunked(provider, filter, from_block, to_block)`** — every log matching a filter across a block range of any length, in chain order. Providers cap `eth_getLogs` by span, result count or response size and word the rejection differently, so the scan does not parse range messages: it halves a range the server rejects, doubles the span after each accepted range, and narrows in on the limit between the widest accepted and narrowest rejected span. A rejection of a span accepted before (a result cap in a dense stretch) drops what was learned, and a rejected span is retested after a run of accepted requests, so the scan widens again past a dense stretch. Failures no narrower range fixes are returned at once: no answer, a rate limit (HTTP 429/503, or a JSON-RPC error alloy's retry rules call one; `-32005` only when its message says so), a method or parse error (`-32601`, `-32700`), and HTTP 401/403. A single block that is still rejected, and a method, parse or auth refusal, is returned as `ContractError::LogsRejected`.
+- **Beacon print series.** `history::beacon_prints(provider, beacon, from_block, to_block)` returns every `IndexUpdated` print in a range, and `history::latest_beacon_prints(provider, beacon, from_block, to_block, limit)` the newest `limit`, reading backward from `to_block` and stopping once it has them (so `from_block` is only a floor). Both return `IndexPrint { block_number, log_index, timestamp, index_x96 }` oldest first, with `index()` for the float value. Timestamps come from the log's `blockTimestamp` when the provider sends it; otherwise each distinct block's header is read once, with bounded concurrency. A print log that does not decode is `ValidationError::DecodeFailed`, not a silent gap. The deployed beacons have no last-update getter (`index()` returns the value alone), so `latest_beacon_prints(.., 1)` is how to read when a beacon last printed.
+- **`ContractError::LogsRejected { from_block, to_block, source }`** (new variant on the `#[non_exhaustive]` enum) — the server refused an `eth_getLogs` request that no narrower range fixes. Not `is_transient()`, so a retry loop keyed on it stops; rate limits and unanswered requests stay transient `PerpCityError::Rpc`.
+- **`ValidationError::InvalidBlockRange { from_block, to_block }`** (new variant on the `#[non_exhaustive]` enum) — a range whose start is after its end. Not `is_transient()`.
+
 ## [0.4.0] - 2026-09-08
 
 ### Breaking

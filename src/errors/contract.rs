@@ -58,6 +58,20 @@ pub enum ContractError {
         number: u64,
     },
 
+    /// The RPC endpoint refused an `eth_getLogs` request that no narrower
+    /// range fixes: a single block it still rejects, or a method, parse or
+    /// auth error. Retrying the same request gets the same answer.
+    #[error("eth_getLogs rejected for blocks {from_block}..={to_block}")]
+    LogsRejected {
+        /// First block of the refused request.
+        from_block: u64,
+        /// Last block of the refused request.
+        to_block: u64,
+        /// The server's answer.
+        #[source]
+        source: alloy::transports::TransportError,
+    },
+
     /// A raw storage read (`eth_getProof`, `eth_getStorageAt`, `extsload`)
     /// failed or returned an unexpected shape.
     ///

@@ -64,6 +64,15 @@ pub enum ValidationError {
         context: String,
     },
 
+    /// A block range whose start is after its end.
+    #[error("invalid block range: {from_block}..={to_block}")]
+    InvalidBlockRange {
+        /// First block of the range.
+        from_block: u64,
+        /// Last block of the range.
+        to_block: u64,
+    },
+
     /// A configuration value is invalid or missing.
     #[error("invalid config: {reason}")]
     InvalidConfig {

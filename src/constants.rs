@@ -90,6 +90,13 @@ pub const ERC721_SYMBOL: &str = "PERPCITY";
 /// staleness.
 pub const SNAPSHOT_BLOCK_LAG: u64 = 8;
 
+/// Block span of the first `eth_getLogs` request in a chunked log scan,
+/// which adapts it to the provider's limits from there.
+pub(crate) const LOG_SCAN_INITIAL_SPAN: u64 = 100_000;
+
+/// Largest block span a chunked log scan requests, however sparse the logs.
+pub(crate) const LOG_SCAN_MAX_SPAN: u64 = 10_000_000;
+
 #[cfg(test)]
 mod tests {
     use super::*;
