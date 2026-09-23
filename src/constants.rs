@@ -1,9 +1,11 @@
 //! Protocol constants from `perpcity-contracts/src/libraries/Constants.sol`,
-//! plus a small set of SDK read-policy constants at the end.
+//! plus a small set of SDK read- and send-policy constants at the end.
 //!
 //! The protocol values are exact mirrors of the on-chain constants. Scaling
 //! factors use the same names as the Solidity source to eliminate any
 //! ambiguity.
+
+use std::time::Duration;
 
 use alloy::primitives::{Address, U256, address, uint};
 
@@ -100,6 +102,15 @@ pub(crate) const LOG_SCAN_MAX_SPAN: u64 = 10_000_000;
 /// Most values one topic position of an `eth_getLogs` filter may hold;
 /// geth, and so Arbitrum Nitro, rejects a longer list.
 pub(crate) const LOG_FILTER_MAX_TOPIC_VALUES: usize = 1_000;
+
+// ── SDK send policy ────────────────────────────────────────────────────
+
+/// How long a receipt wait polls before it returns
+/// [`TransactionError::ReceiptTimeout`](crate::TransactionError::ReceiptTimeout).
+pub const RECEIPT_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Interval between receipt polls.
+pub const RECEIPT_POLL_INTERVAL: Duration = Duration::from_secs(2);
 
 #[cfg(test)]
 mod tests {

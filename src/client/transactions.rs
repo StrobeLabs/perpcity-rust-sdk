@@ -17,23 +17,18 @@ use std::time::Duration;
 use alloy::network::TransactionBuilder;
 use alloy::primitives::{Address, B256, Bytes, U256};
 use alloy::providers::Provider;
-use alloy::rpc::types::TransactionRequest;
+use alloy::rpc::types::{TransactionReceipt, TransactionRequest};
 
+use crate::constants::{RECEIPT_POLL_INTERVAL, RECEIPT_TIMEOUT};
 use crate::errors::{Result, TransactionError, ValidationError, decode};
 use crate::hft::gas::{Urgency, is_out_of_gas};
 use crate::hft::pipeline::TxRequest;
 
 use super::PerpClient;
 
-/// Default receipt polling timeout.
-const RECEIPT_TIMEOUT: Duration = Duration::from_secs(30);
-
 /// Delay before the first receipt poll — a just-broadcast transaction
 /// rarely has a receipt sooner, so an earlier poll is a wasted call.
 const RECEIPT_POLL_INITIAL_DELAY: Duration = Duration::from_secs(2);
-
-/// Interval between receipt polls.
-const RECEIPT_POLL_INTERVAL: Duration = Duration::from_secs(2);
 
 // ── TxBuilder ───────────────────────────────────────────────────────
 
@@ -83,7 +78,7 @@ impl<'a> TxBuilder<'a> {
     /// `eth_call` preflight) provides both the limit and the simulation. An
     /// explicit `gas_limit` skips only the estimation — the `eth_call`
     /// preflight still runs so reverts decode into typed errors.
-    pub async fn send(self) -> Result<alloy::rpc::types::TransactionReceipt> {
+    pub async fn send(self) -> Result<TransactionReceipt> {
         let now = super::now_ms();
 
         // If a previous send left the nonce sequence in doubt (failed
@@ -212,16 +207,18 @@ impl<'a> TxBuilder<'a> {
         // mined — and no local bookkeeping can tell which. Releasing or
         // reusing the nonce guesses, and the wrong guess retries a consumed
         // nonce forever. Flag the doubt instead; the next send resyncs from
-        // chain once nothing is in flight.
-        let pending = match self.client.provider.send_tx_envelope(tx_envelope).await {
-            Ok(pending) => pending,
-            Err(e) => {
-                let pipeline = self.client.pipeline.lock().unwrap();
-                pipeline.mark_desynced_prepared();
-                return Err(e.into());
+        // chain once nothing is in flight. The hash is known before the
+        // request, so the caller can still look the transaction up.
+        let tx_hash_b256 = *tx_envelope.tx_hash();
+        if let Err(source) = self.client.provider.send_tx_envelope(tx_envelope).await {
+            let pipeline = self.client.pipeline.lock().unwrap();
+            pipeline.mark_desynced_prepared();
+            return Err(TransactionError::BroadcastFailed {
+                tx_hash: tx_hash_b256,
+                source,
             }
-        };
-        let tx_hash_b256 = *pending.tx_hash();
+            .into());
+        }
         let tx_hash_bytes: [u8; 32] = tx_hash_b256.into();
 
         tracing::debug!(tx_hash = %tx_hash_b256, nonce = prepared.nonce, urgency = ?self.urgency, "tx broadcast");
@@ -238,6 +235,7 @@ impl<'a> TxBuilder<'a> {
         // be rewound or reused (`fail` would). Stop tracking it and flag the
         // doubt; the next send resyncs from chain, which counts the
         // transaction if and only if it is still live.
+        tokio::time::sleep(RECEIPT_POLL_INITIAL_DELAY).await;
         let receipt = match self.client.poll_receipt(tx_hash_b256).await {
             Ok(receipt) => receipt,
             Err(e) => {
@@ -288,7 +286,8 @@ impl<'a> TxBuilder<'a> {
         if !receipt.status() {
             tracing::warn!(tx_hash = %tx_hash_b256, "tx reverted");
             return Err(TransactionError::Reverted {
-                reason: format!("transaction {} reverted", tx_hash_b256),
+                tx_hash: tx_hash_b256,
+                reason: format!("transaction {tx_hash_b256} reverted"),
             }
             .into());
         }
@@ -325,6 +324,37 @@ fn preflight_request(
     }
 }
 
+/// The receipt poll loop behind [`PerpClient::poll_receipt`], generic over
+/// the provider so it is testable against a mocked transport.
+async fn wait_for_receipt<P: Provider>(provider: &P, tx_hash: B256) -> Result<TransactionReceipt> {
+    let deadline = tokio::time::Instant::now() + RECEIPT_TIMEOUT;
+    loop {
+        match provider.get_transaction_receipt(tx_hash).await {
+            Ok(Some(receipt)) => return Ok(receipt),
+            Ok(None) => {
+                if tokio::time::Instant::now() >= deadline {
+                    return Err(TransactionError::ReceiptTimeout {
+                        tx_hash,
+                        reason: format!("no receipt after {}s", RECEIPT_TIMEOUT.as_secs()),
+                    }
+                    .into());
+                }
+            }
+            Err(e) => {
+                if tokio::time::Instant::now() >= deadline {
+                    return Err(TransactionError::ReceiptTimeout {
+                        tx_hash,
+                        reason: format!("last receipt poll failed: {e}"),
+                    }
+                    .into());
+                }
+                tracing::warn!(tx_hash = %tx_hash, error = %e, "receipt poll RPC error, retrying");
+            }
+        }
+        tokio::time::sleep(RECEIPT_POLL_INTERVAL).await;
+    }
+}
+
 // ── PerpClient transaction methods ──────────────────────────────────
 
 impl PerpClient {
@@ -343,34 +373,24 @@ impl PerpClient {
         }
     }
 
-    /// Poll for a transaction receipt on a ~2s cadence.
-    async fn poll_receipt(&self, tx_hash: B256) -> Result<alloy::rpc::types::TransactionReceipt> {
-        tokio::time::sleep(RECEIPT_POLL_INITIAL_DELAY).await;
-        let deadline = tokio::time::Instant::now() + RECEIPT_TIMEOUT;
-        loop {
-            match self.provider.get_transaction_receipt(tx_hash).await {
-                Ok(Some(receipt)) => return Ok(receipt),
-                Ok(None) => {
-                    if tokio::time::Instant::now() >= deadline {
-                        return Err(TransactionError::ReceiptTimeout {
-                            reason: format!("receipt timeout for {tx_hash}"),
-                        }
-                        .into());
-                    }
-                    tokio::time::sleep(RECEIPT_POLL_INTERVAL).await;
-                }
-                Err(e) => {
-                    if tokio::time::Instant::now() >= deadline {
-                        return Err(TransactionError::ReceiptTimeout {
-                            reason: format!("failed to get receipt: {e}"),
-                        }
-                        .into());
-                    }
-                    tracing::warn!(tx_hash = %tx_hash, error = %e, "receipt poll RPC error, retrying");
-                    tokio::time::sleep(RECEIPT_POLL_INTERVAL).await;
-                }
-            }
-        }
+    /// Wait for the receipt of `tx_hash`: poll at once, then every
+    /// [`RECEIPT_POLL_INTERVAL`] for up to [`RECEIPT_TIMEOUT`].
+    ///
+    /// Use it to resolve a send whose outcome is unknown, with the hash from
+    /// [`PerpCityError::tx_hash`](crate::PerpCityError::tx_hash). On timeout it returns
+    /// [`TransactionError::ReceiptTimeout`] for the same hash, so the call can
+    /// repeat. For one look-up with no wait, use
+    /// `provider().get_transaction_receipt(tx_hash)`.
+    ///
+    /// The future holds no state, so dropping it only stops the polling;
+    /// wrap it in `tokio::time::timeout` for a shorter deadline.
+    ///
+    /// It does not touch nonce tracking. A send that returned with a hash
+    /// has already stopped tracking the transaction, and a doubtful nonce
+    /// resyncs from chain before the next send whether or not this is
+    /// called.
+    pub async fn poll_receipt(&self, tx_hash: B256) -> Result<TransactionReceipt> {
+        wait_for_receipt(&self.provider, tx_hash).await
     }
 
     /// Run an `eth_call` simulation to verify a transaction won't revert.
@@ -538,7 +558,11 @@ fn classify_simulation_failure(
 
 #[cfg(test)]
 mod tests {
+    use alloy::providers::ProviderBuilder;
+    use alloy::transports::mock::Asserter;
+
     use super::*;
+    use crate::errors::PerpCityError;
 
     /// The explicit-limit path exists for operations (liquidations) where
     /// `eth_estimateGas` has passed while the real execution ran out of gas.
@@ -558,6 +582,45 @@ mod tests {
 
         let unpinned = preflight_request(from, to, &calldata, 0, None);
         assert_eq!(unpinned.gas, None, "no limit means the node default cap");
+    }
+
+    /// A receipt timeout names the transaction on both exits: the deadline
+    /// passing with no receipt, and the deadline passing while the node
+    /// errors. The wait starts polling at once, so it gives up exactly at
+    /// the timeout: the send path's initial delay is not part of it.
+    #[tokio::test(start_paused = true)]
+    async fn receipt_timeout_carries_the_hash_on_both_exits() {
+        let tx_hash = B256::repeat_byte(0x66);
+
+        let asserter = Asserter::new();
+        for _ in 0..32 {
+            asserter.push_success(&Option::<TransactionReceipt>::None);
+        }
+        let provider = ProviderBuilder::new().connect_mocked_client(asserter);
+        let start = tokio::time::Instant::now();
+        let err = wait_for_receipt(&provider, tx_hash).await.unwrap_err();
+        assert_eq!(start.elapsed(), RECEIPT_TIMEOUT);
+        assert!(err.is_transient());
+        let PerpCityError::Transaction(err) = err else {
+            panic!("expected a transaction error, got {err}");
+        };
+        assert_eq!(err.tx_hash(), Some(tx_hash));
+        assert!(
+            matches!(&err, TransactionError::ReceiptTimeout { reason, .. } if reason.starts_with("no receipt")),
+            "{err}"
+        );
+
+        // An empty asserter answers every poll with an RPC error.
+        let provider = ProviderBuilder::new().connect_mocked_client(Asserter::new());
+        let err = wait_for_receipt(&provider, tx_hash).await.unwrap_err();
+        let PerpCityError::Transaction(err) = err else {
+            panic!("expected a transaction error, got {err}");
+        };
+        assert_eq!(err.tx_hash(), Some(tx_hash));
+        assert!(
+            matches!(&err, TransactionError::ReceiptTimeout { reason, .. } if reason.starts_with("last receipt poll failed")),
+            "{err}"
+        );
     }
 
     fn error_resp(code: i64, message: &'static str) -> alloy::transports::TransportError {
@@ -612,9 +675,9 @@ mod tests {
             "{timeout}"
         );
 
-        let transient: crate::errors::PerpCityError = timeout.into();
+        let transient: PerpCityError = timeout.into();
         assert!(transient.is_transient());
-        let deterministic: crate::errors::PerpCityError = empty_revert.into();
+        let deterministic: PerpCityError = empty_revert.into();
         assert!(!deterministic.is_transient());
     }
 }

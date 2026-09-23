@@ -1,6 +1,7 @@
 //! Transaction lifecycle errors.
 
 use alloy::primitives::FixedBytes;
+use alloy::transports::TransportError;
 use thiserror::Error;
 
 /// Errors arising from the transaction lifecycle: simulation, signing,
@@ -28,7 +29,9 @@ pub enum TransactionError {
     /// Gas was burned.
     #[error("transaction reverted: {reason}")]
     Reverted {
-        /// Human-readable description (typically includes the tx hash).
+        /// Hash of the mined transaction.
+        tx_hash: FixedBytes<32>,
+        /// Human-readable description.
         reason: String,
     },
 
@@ -56,10 +59,41 @@ pub enum TransactionError {
     },
 
     /// Receipt polling timed out before the transaction was confirmed.
-    #[error("receipt timeout: {reason}")]
+    ///
+    /// The transaction was broadcast and may still mine, so the send path
+    /// never reuses its nonce; the next send resyncs it from chain. Look up
+    /// `tx_hash` later (for example with
+    /// [`PerpClient::poll_receipt`](crate::PerpClient::poll_receipt)) to
+    /// learn the outcome.
+    #[error("receipt timeout for {tx_hash}: {reason}")]
     ReceiptTimeout {
-        /// Description including the tx hash.
+        /// Hash of the broadcast transaction.
+        tx_hash: FixedBytes<32>,
+        /// Why polling stopped: no receipt by the deadline, or the last
+        /// poll's RPC error.
         reason: String,
+    },
+
+    /// The broadcast request failed after the transaction was signed.
+    ///
+    /// The node may still have accepted it: the request can fail after the
+    /// transaction reached the mempool, or after it mined. An error response
+    /// is no proof either: the transport resends the same signed bytes after
+    /// a timeout, so a rejection such as `nonce too low` or `already known`
+    /// can answer a copy that already landed. `source` keeps the node's
+    /// answer; look up `tx_hash` (for example with
+    /// [`PerpClient::poll_receipt`](crate::PerpClient::poll_receipt)) to
+    /// learn the outcome. The send path neither reuses nor releases the
+    /// nonce; the next send resyncs it from chain.
+    ///
+    /// Transient, like the transport error it wraps.
+    #[error("broadcast failed for {tx_hash}: {source}")]
+    BroadcastFailed {
+        /// Hash of the signed transaction.
+        tx_hash: FixedBytes<32>,
+        /// The transport error the broadcast returned.
+        #[source]
+        source: TransportError,
     },
 
     /// Transaction signing failed.
@@ -118,6 +152,23 @@ pub enum TransactionError {
 }
 
 impl TransactionError {
+    /// Hash of the signed transaction, for every failure from the broadcast
+    /// onward: `BroadcastFailed`, `ReceiptTimeout`, `Reverted` and
+    /// `OutOfGas`. `None` means nothing was sent.
+    ///
+    /// A `Some` hash may have landed on chain even when the error says the
+    /// send failed, so look up its receipt before treating the effect as
+    /// absent.
+    pub fn tx_hash(&self) -> Option<FixedBytes<32>> {
+        match self {
+            Self::BroadcastFailed { tx_hash, .. }
+            | Self::ReceiptTimeout { tx_hash, .. }
+            | Self::Reverted { tx_hash, .. }
+            | Self::OutOfGas { tx_hash, .. } => Some(*tx_hash),
+            _ => None,
+        }
+    }
+
     /// Whether this error is a [`Self::SimulationReverted`] carrying the
     /// typed contract error `E`, compared by 4-byte selector — no string
     /// matching.

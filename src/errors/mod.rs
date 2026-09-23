@@ -22,6 +22,7 @@ pub use contract::ContractError;
 pub use transaction::TransactionError;
 pub use validation::ValidationError;
 
+use alloy::primitives::FixedBytes;
 use thiserror::Error;
 
 /// Central error type for the PerpCity SDK.
@@ -83,6 +84,9 @@ impl PerpCityError {
     /// gas inside the pinned limit) — is deterministic and never transient;
     /// `GasUnavailable` covers the simulation that got no answer at all.
     ///
+    /// `BroadcastFailed` and `ReceiptTimeout` are transient: the
+    /// transaction may still land, and its hash is on the error.
+    ///
     /// `NonceDesynced` is transient by construction: it clears itself once
     /// in-flight transactions drain and the next send resyncs from chain,
     /// so callers should back off briefly rather than give up.
@@ -100,6 +104,7 @@ impl PerpCityError {
             self,
             Self::Rpc(_)
                 | Self::Transaction(TransactionError::GasUnavailable { .. })
+                | Self::Transaction(TransactionError::BroadcastFailed { .. })
                 | Self::Transaction(TransactionError::ReceiptTimeout { .. })
                 | Self::Transaction(TransactionError::NonceDesynced { .. })
                 | Self::Contract(ContractError::BlockUnavailable { .. })
@@ -109,6 +114,20 @@ impl PerpCityError {
                 })
         )
     }
+
+    /// Hash of the signed transaction when the failure came at or after
+    /// the broadcast; see [`TransactionError::tx_hash`].
+    ///
+    /// For an error from [`TxBuilder::send`](crate::TxBuilder::send),
+    /// `None` means nothing was broadcast, whatever the variant: a
+    /// `Some` hash may have landed, so look up its receipt before treating
+    /// the send's effect as absent.
+    pub fn tx_hash(&self) -> Option<FixedBytes<32>> {
+        match self {
+            Self::Transaction(e) => e.tx_hash(),
+            _ => None,
+        }
+    }
 }
 
 /// Convenience alias used throughout the SDK.
@@ -116,6 +135,8 @@ pub type Result<T> = std::result::Result<T, PerpCityError>;
 
 #[cfg(test)]
 mod tests {
+    use alloy::transports::TransportErrorKind;
+
     use super::*;
 
     /// Consumers key retry behaviour off this classification (backoff loops
@@ -175,6 +196,92 @@ mod tests {
             !refused.is_transient(),
             "the server refused this request at its narrowest; a retry gets the same answer"
         );
+
+        let mined_revert: PerpCityError = TransactionError::Reverted {
+            tx_hash: [0x44; 32].into(),
+            reason: "transaction 0x44… reverted".into(),
+        }
+        .into();
+        assert!(
+            !mined_revert.is_transient(),
+            "a mined revert is final; its nonce is consumed"
+        );
+
+        let receipt_timeout: PerpCityError = TransactionError::ReceiptTimeout {
+            tx_hash: [0x22; 32].into(),
+            reason: "no receipt after 30s".into(),
+        }
+        .into();
+        assert!(
+            receipt_timeout.is_transient(),
+            "the transaction may still mine; the caller reconciles by hash"
+        );
+
+        let broadcast_failed: PerpCityError = TransactionError::BroadcastFailed {
+            tx_hash: [0x33; 32].into(),
+            source: TransportErrorKind::custom_str("connection reset"),
+        }
+        .into();
+        assert!(
+            broadcast_failed.is_transient(),
+            "a failed broadcast was a transient transport error before it was typed"
+        );
+    }
+
+    /// Callers reconcile an unknown outcome by receipt, so every error after
+    /// the broadcast must expose its hash, and no pre-broadcast error may.
+    #[test]
+    fn tx_hash_is_set_exactly_from_the_broadcast_onward() {
+        let hash = FixedBytes::<32>::repeat_byte(0x55);
+        let sent = [
+            TransactionError::BroadcastFailed {
+                tx_hash: hash,
+                source: TransportErrorKind::custom_str("connection reset"),
+            },
+            TransactionError::ReceiptTimeout {
+                tx_hash: hash,
+                reason: "no receipt after 30s".into(),
+            },
+            TransactionError::Reverted {
+                tx_hash: hash,
+                reason: "reverted".into(),
+            },
+            TransactionError::OutOfGas {
+                tx_hash: hash,
+                gas_used: 100,
+                gas_limit: 100,
+            },
+        ];
+        for err in &sent {
+            assert_eq!(err.tx_hash(), Some(hash), "{err}");
+        }
+
+        let unsent = [
+            TransactionError::SimulationFailed {
+                reason: "execution reverted".into(),
+            },
+            TransactionError::GasUnavailable {
+                reason: "down".into(),
+            },
+            TransactionError::SigningFailed {
+                reason: "kms".into(),
+            },
+            TransactionError::NonceDesynced { in_flight: 1 },
+            TransactionError::TooManyInFlight { count: 4, max: 4 },
+        ];
+        for err in &unsent {
+            assert_eq!(err.tx_hash(), None, "{err}");
+        }
+
+        let wrapped: PerpCityError = sent.into_iter().next().unwrap().into();
+        assert_eq!(wrapped.tx_hash(), Some(hash));
+        let pre_broadcast_rpc: PerpCityError =
+            TransportErrorKind::custom_str("nonce count read failed").into();
+        assert_eq!(
+            pre_broadcast_rpc.tx_hash(),
+            None,
+            "a send's Rpc error comes before the broadcast"
+        );
     }
 
     /// Typed revert matching compares raw selectors, not strings, so it
@@ -212,9 +319,9 @@ mod tests {
 
         let transport: PerpCityError = ContractError::StorageReadFailed {
             context: "tick 60 funding".into(),
-            source: Some(std::sync::Arc::new(
-                alloy::transports::TransportErrorKind::custom_str("replica dropped the read"),
-            )),
+            source: Some(std::sync::Arc::new(TransportErrorKind::custom_str(
+                "replica dropped the read",
+            ))),
         }
         .into();
         assert!(transport.is_transient(), "transport-caused reads retry");
