@@ -3,7 +3,10 @@
 //! [`get_logs_chunked`] reads every log that matches a filter across a
 //! block range, whatever limits the provider puts on `eth_getLogs`.
 //! [`beacon_prints`] and [`latest_beacon_prints`] build a beacon's index
-//! series, `(block, timestamp, index)`, on top of it.
+//! series, `(block, timestamp, index)`, on top of it, and
+//! [`token_transfers`] reads an ERC-20's `Transfer` events between address
+//! sets (for example, every USDC transfer between a treasury and its
+//! wallets).
 //!
 //! Providers cap `eth_getLogs` by block span, by result count, or by
 //! response size, and each words the rejection differently, so the scan
@@ -37,7 +40,7 @@
 
 use std::collections::{BTreeSet, HashMap};
 
-use alloy::primitives::{Address, U256};
+use alloy::primitives::{Address, B256, U256};
 use alloy::providers::Provider;
 use alloy::rpc::json_rpc::ErrorPayload;
 use alloy::rpc::types::{Filter, Log};
@@ -46,8 +49,8 @@ use alloy::transports::{RpcError, TransportError, TransportErrorKind};
 use futures_util::stream::{self, StreamExt, TryStreamExt};
 use serde::{Deserialize, Serialize};
 
-use crate::constants::{LOG_SCAN_INITIAL_SPAN, LOG_SCAN_MAX_SPAN};
-use crate::contracts::IBeacon;
+use crate::constants::{LOG_FILTER_MAX_TOPIC_VALUES, LOG_SCAN_INITIAL_SPAN, LOG_SCAN_MAX_SPAN};
+use crate::contracts::{IBeacon, IERC20};
 use crate::convert::price_x96_to_f64;
 use crate::errors::{ContractError, PerpCityError, Result, ValidationError};
 use crate::feeds::events::decode_raw;
@@ -198,6 +201,148 @@ async fn with_timestamps<P: Provider>(provider: &P, logs: &[Log]) -> Result<Vec<
         .collect()
 }
 
+/// One ERC-20 `Transfer` event.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TokenTransfer {
+    /// Block the transfer landed in.
+    pub block_number: u64,
+    /// Position of the transfer's log in its block.
+    pub log_index: u64,
+    /// Transaction that emitted the transfer.
+    pub tx_hash: B256,
+    /// Sender.
+    pub from: Address,
+    /// Recipient.
+    pub to: Address,
+    /// Amount in the token's smallest unit.
+    pub value: U256,
+}
+
+/// Every `Transfer` of `token` in blocks `from_block..=to_block` whose
+/// sender is in `senders` and whose recipient is in `recipients`, in chain
+/// order.
+///
+/// `None` matches any address and `Some(&[])` matches none, so a set that
+/// comes out empty reads nothing rather than every transfer. At least one
+/// side must be `Some`: an unfiltered query reads every transfer the token
+/// ever made. The sets go to the node as topic filters, so the scan
+/// returns only matching logs, in one scan of the range.
+///
+/// # Errors
+///
+/// [`ValidationError::InvalidConfig`] for the zero token, two `None`
+/// sets, or a set of more than 1,000 addresses (the most one topic position
+/// of a filter holds on geth-based nodes, Arbitrum Nitro among them),
+/// [`ValidationError::InvalidBlockRange`] if
+/// `from_block > to_block`, [`ValidationError::DecodeFailed`] for a log
+/// that does not decode as an ERC-20 `Transfer` (for example, an ERC-721
+/// `Transfer`, which shares the topic but indexes its third argument), or
+/// an error from [`get_logs_chunked`]. Any error fails the whole call.
+pub async fn token_transfers<P: Provider>(
+    provider: &P,
+    token: Address,
+    senders: Option<&[Address]>,
+    recipients: Option<&[Address]>,
+    from_block: u64,
+    to_block: u64,
+) -> Result<Vec<TokenTransfer>> {
+    let Some(filter) = transfer_filter(token, senders, recipients, from_block, to_block)? else {
+        return Ok(Vec::new());
+    };
+    get_logs_chunked(provider, &filter, from_block, to_block)
+        .await?
+        .iter()
+        .map(decode_transfer)
+        .collect()
+}
+
+/// The filter for [`token_transfers`]; `None` when an empty set means
+/// nothing can match.
+fn transfer_filter(
+    token: Address,
+    senders: Option<&[Address]>,
+    recipients: Option<&[Address]>,
+    from_block: u64,
+    to_block: u64,
+) -> std::result::Result<Option<Filter>, ValidationError> {
+    if token.is_zero() {
+        return Err(ValidationError::InvalidConfig {
+            reason: "token address is zero".into(),
+        });
+    }
+    if senders.is_none() && recipients.is_none() {
+        return Err(ValidationError::InvalidConfig {
+            reason: "a transfer query needs a sender or a recipient set".into(),
+        });
+    }
+    check_block_range(from_block, to_block)?;
+    let (senders, recipients) = (topic_values(senders)?, topic_values(recipients)?);
+    if senders.as_ref().is_some_and(Vec::is_empty) || recipients.as_ref().is_some_and(Vec::is_empty)
+    {
+        return Ok(None);
+    }
+    let mut filter = Filter::new()
+        .address(token)
+        .event_signature(IERC20::Transfer::SIGNATURE_HASH);
+    if let Some(senders) = senders {
+        filter = filter.topic1(senders);
+    }
+    if let Some(recipients) = recipients {
+        filter = filter.topic2(recipients);
+    }
+    Ok(Some(filter))
+}
+
+/// An address set as topic-filter values; `None` (any address) for no
+/// set. A set over the node's per-position limit is refused, since one
+/// filter cannot carry it.
+fn topic_values(
+    set: Option<&[Address]>,
+) -> std::result::Result<Option<Vec<B256>>, ValidationError> {
+    let Some(set) = set else {
+        return Ok(None);
+    };
+    if set.len() > LOG_FILTER_MAX_TOPIC_VALUES {
+        return Err(ValidationError::InvalidConfig {
+            reason: format!(
+                "{} addresses exceed the {LOG_FILTER_MAX_TOPIC_VALUES} a log filter position accepts",
+                set.len()
+            ),
+        });
+    }
+    Ok(Some(
+        set.iter().map(|address| address.into_word()).collect(),
+    ))
+}
+
+fn decode_transfer(log: &Log) -> Result<TokenTransfer> {
+    let decoded = log
+        .block_number
+        .zip(log.log_index)
+        .zip(log.transaction_hash)
+        .and_then(|((block, index), tx_hash)| {
+            let event = decode_raw::<IERC20::Transfer>(log)?;
+            Some(TokenTransfer {
+                block_number: block,
+                log_index: index,
+                tx_hash,
+                from: event.from,
+                to: event.to,
+                value: event.value,
+            })
+        });
+    decoded.ok_or_else(|| {
+        ValidationError::DecodeFailed {
+            context: format!(
+                "Transfer log from {} in tx {:?}",
+                log.address(),
+                log.transaction_hash
+            ),
+        }
+        .into()
+    })
+}
+
 /// Every log matching `filter` in blocks `from_block..=to_block`, in chain
 /// order.
 ///
@@ -223,6 +368,16 @@ pub async fn get_logs_chunked<P: Provider>(
     Ok(logs)
 }
 
+fn check_block_range(from_block: u64, to_block: u64) -> std::result::Result<(), ValidationError> {
+    if from_block > to_block {
+        return Err(ValidationError::InvalidBlockRange {
+            from_block,
+            to_block,
+        });
+    }
+    Ok(())
+}
+
 /// A block range read in adaptive chunks, from either end.
 struct LogScan<'a, P> {
     provider: &'a P,
@@ -239,12 +394,7 @@ impl<'a, P: Provider> LogScan<'a, P> {
         from_block: u64,
         to_block: u64,
     ) -> std::result::Result<Self, ValidationError> {
-        if from_block > to_block {
-            return Err(ValidationError::InvalidBlockRange {
-                from_block,
-                to_block,
-            });
-        }
+        check_block_range(from_block, to_block)?;
         Ok(Self {
             provider,
             filter: filter.clone(),
@@ -442,7 +592,9 @@ fn is_rate_limit(payload: &ErrorPayload) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use alloy::primitives::{Address, B256, Bytes, LogData, U256, address, b256, bytes};
+    use alloy::primitives::{
+        Address, B256, Bytes, Log as PrimitiveLog, LogData, U256, address, b256, bytes,
+    };
 
     use super::*;
     use crate::constants::Q96;
@@ -726,6 +878,220 @@ mod tests {
             index_x96: U256::ZERO,
         };
         assert!(print.index().is_err());
+    }
+
+    const USDC: Address = address!("af88d065e77c8cc2239327c5edb3a432268e5831");
+    const TREASURY: Address = Address::repeat_byte(0x01);
+    const WALLET_A: Address = Address::repeat_byte(0x0A);
+    const WALLET_B: Address = Address::repeat_byte(0x0B);
+    const OUTSIDER: Address = Address::repeat_byte(0x0C);
+
+    fn transfer_log(from: Address, to: Address, value: u64, block: u64) -> Log {
+        let mut log = mined_log(USDC, B256::ZERO, Bytes::new(), block, 0);
+        log.inner.data = LogData::new_unchecked(
+            vec![
+                IERC20::Transfer::SIGNATURE_HASH,
+                from.into_word(),
+                to.into_word(),
+            ],
+            U256::from(value).to_be_bytes_vec().into(),
+        );
+        log
+    }
+
+    fn flows(transfers: &[TokenTransfer]) -> Vec<(Address, Address, U256, u64)> {
+        transfers
+            .iter()
+            .map(|t| (t.from, t.to, t.value, t.block_number))
+            .collect()
+    }
+
+    /// A real Arbitrum One USDC transfer of 89.999998 USDC, as the node
+    /// returned it in the receipt of tx 0xa55d3cc1…e26e.
+    #[tokio::test]
+    async fn a_mainnet_usdc_transfer_decodes_to_its_parties_and_value() {
+        let sender = address!("c3da549ee508386a12f3908d5bf3060fd04b89f5");
+        let recipient = address!("e4fb292b59e3d2cdcc16a332035058f9796b5786");
+        let tx_hash = b256!("a55d3cc1c657e72ac6d34f47fc20ad1ac7dce3de2c497b3bcf1d559057e6e26e");
+        let log = Log {
+            inner: PrimitiveLog {
+                address: USDC,
+                data: LogData::new_unchecked(
+                    vec![
+                        b256!("ddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"),
+                        b256!("000000000000000000000000c3da549ee508386a12f3908d5bf3060fd04b89f5"),
+                        b256!("000000000000000000000000e4fb292b59e3d2cdcc16a332035058f9796b5786"),
+                    ],
+                    bytes!("00000000000000000000000000000000000000000000000000000000055d4a7e"),
+                ),
+            },
+            block_hash: Some(b256!(
+                "5414fbeaa040956c8fce9279e1253bbf0772f9a472030ebd72f9c04fb5d90071"
+            )),
+            block_number: Some(0x1e40_09af),
+            block_timestamp: Some(0x6ab1_68d8),
+            transaction_hash: Some(tx_hash),
+            transaction_index: Some(1),
+            log_index: Some(0),
+            removed: false,
+        };
+        let node = FakeNode::new(vec![log], u64::MAX);
+        let transfers = token_transfers(
+            &node.provider(),
+            USDC,
+            Some(&[sender]),
+            Some(&[recipient]),
+            0x1e40_0000,
+            0x1e41_0000,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            transfers,
+            vec![TokenTransfer {
+                block_number: 507_513_263,
+                log_index: 0,
+                tx_hash,
+                from: sender,
+                to: recipient,
+                value: U256::from(89_999_998u64),
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn transfers_are_filtered_by_both_sets_and_none_is_any() {
+        let logs = vec![
+            transfer_log(TREASURY, WALLET_A, 100, 10),
+            transfer_log(TREASURY, OUTSIDER, 7, 11),
+            transfer_log(WALLET_B, TREASURY, 40, 12),
+            transfer_log(OUTSIDER, TREASURY, 5, 13),
+            transfer_log(WALLET_A, WALLET_B, 1, 14),
+        ];
+        let node = FakeNode::new(logs, u64::MAX);
+        let provider = node.provider();
+        let wallets = [WALLET_A, WALLET_B];
+
+        let out = token_transfers(&provider, USDC, Some(&[TREASURY]), Some(&wallets), 0, 100)
+            .await
+            .unwrap();
+        assert_eq!(flows(&out), vec![(TREASURY, WALLET_A, U256::from(100), 10)]);
+
+        let back = token_transfers(&provider, USDC, Some(&wallets), Some(&[TREASURY]), 0, 100)
+            .await
+            .unwrap();
+        assert_eq!(flows(&back), vec![(WALLET_B, TREASURY, U256::from(40), 12)]);
+
+        let any_recipient = token_transfers(&provider, USDC, Some(&[TREASURY]), None, 0, 100)
+            .await
+            .unwrap();
+        assert_eq!(
+            flows(&any_recipient),
+            vec![
+                (TREASURY, WALLET_A, U256::from(100), 10),
+                (TREASURY, OUTSIDER, U256::from(7), 11),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unfiltered_or_zero_token_query_is_refused_before_any_request() {
+        let node = FakeNode::new(Vec::new(), u64::MAX);
+        let provider = node.provider();
+        for (token, senders) in [(USDC, None), (Address::ZERO, Some(&[TREASURY][..]))] {
+            let error = token_transfers(&provider, token, senders, None, 0, 100)
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(
+                    error,
+                    PerpCityError::Validation(ValidationError::InvalidConfig { .. })
+                ),
+                "{error:?}"
+            );
+        }
+        assert!(node.requests().is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_empty_set_matches_nothing_without_a_request() {
+        let node = FakeNode::new(vec![transfer_log(TREASURY, WALLET_A, 100, 10)], u64::MAX);
+        let provider = node.provider();
+        for (senders, recipients) in [
+            (Some(&[][..]), None),
+            (None, Some(&[][..])),
+            (Some(&[TREASURY][..]), Some(&[][..])),
+        ] {
+            let out = token_transfers(&provider, USDC, senders, recipients, 0, 100)
+                .await
+                .unwrap();
+            assert!(out.is_empty(), "{out:?}");
+        }
+        assert!(node.requests().is_empty());
+
+        let error = token_transfers(&provider, USDC, Some(&[]), None, 100, 0)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                error,
+                PerpCityError::Validation(ValidationError::InvalidBlockRange { .. })
+            ),
+            "{error:?}"
+        );
+    }
+
+    /// A set over the 1,000-value topic limit is refused before any
+    /// request; a set at the limit is sent.
+    #[tokio::test]
+    async fn a_set_over_the_topic_limit_is_refused() {
+        let senders: Vec<Address> = (1..=1_001u64)
+            .map(|i| Address::from_word(U256::from(i).into()))
+            .collect();
+        let node = FakeNode::new(vec![], u64::MAX);
+        let provider = node.provider();
+        let error = token_transfers(&provider, USDC, Some(&senders), Some(&[WALLET_A]), 0, 100)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                error,
+                PerpCityError::Validation(ValidationError::InvalidConfig { .. })
+            ),
+            "{error:?}"
+        );
+        assert!(node.requests().is_empty());
+        token_transfers(&provider, USDC, Some(&senders[..1_000]), None, 0, 100)
+            .await
+            .unwrap();
+        assert_eq!(node.requests(), vec![(0, 100)]);
+    }
+
+    /// An ERC-721 `Transfer` shares the topic but indexes the token id, so
+    /// it has no data to decode as a value.
+    #[tokio::test]
+    async fn a_transfer_that_does_not_decode_is_an_error_not_a_gap() {
+        let mut nft = transfer_log(TREASURY, WALLET_A, 0, 10);
+        nft.inner.data = LogData::new_unchecked(
+            vec![
+                IERC20::Transfer::SIGNATURE_HASH,
+                TREASURY.into_word(),
+                WALLET_A.into_word(),
+                B256::with_last_byte(9),
+            ],
+            Bytes::new(),
+        );
+        let node = FakeNode::new(vec![nft], u64::MAX);
+        let error = token_transfers(&node.provider(), USDC, Some(&[TREASURY]), None, 0, 100)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                error,
+                PerpCityError::Validation(ValidationError::DecodeFailed { .. })
+            ),
+            "{error:?}"
+        );
     }
 
     #[tokio::test]
