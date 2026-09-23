@@ -87,14 +87,14 @@ pub use types::{
     AdjustMakerParams, AdjustMakerResult, AdjustTakerParams, AdjustTakerResult, Bounds,
     Deployments, ExactAdjustTakerParams, ExactOpenTakerParams, Fees, MarginRatioTriple,
     MarginRatios, OpenInterest, OpenMakerParams, OpenResult, OpenTakerParams, PerpData,
-    PerpSnapshot, PriceImpactPoint,
+    PerpSnapshot, PriceImpactPoint, Side,
 };
 
 #[doc(inline)]
 pub use math::BlockContext;
 
 #[doc(inline)]
-pub use math::pricing::{fair_price, fair_price_x96};
+pub use math::pricing::{FairPrice, fair_price, fair_price_x96};
 
 #[doc(inline)]
 pub use math::maker_equity::{
@@ -114,4 +114,7 @@ pub use math::swap::{
 };
 
 #[doc(inline)]
-pub use math::liquidity::{estimate_liquidity, liquidity_for_target_ratio};
+pub use math::capacity::{Capacity, MarketCapacity, band_capacity, liquidity_for_capacity};
+
+#[doc(inline)]
+pub use math::liquidity::{amounts_for_liquidity, estimate_liquidity, liquidity_for_target_ratio};

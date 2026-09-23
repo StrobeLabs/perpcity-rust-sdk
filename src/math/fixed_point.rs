@@ -38,10 +38,10 @@ pub(crate) fn mul_div(
     }
     let product: U512 = a.widening_mul(b);
     let divisor = U512::from(d);
-    let mut q = product / divisor;
-    if rounding == Rounding::Up && product % divisor != U512::ZERO {
-        q += U512::ONE;
-    }
+    let q = match rounding {
+        Rounding::Up => product.div_ceil(divisor),
+        Rounding::TowardZero => product / divisor,
+    };
     u512_to_u256(q)
 }
 

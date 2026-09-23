@@ -6,7 +6,8 @@
 //! | Module | Purpose |
 //! |---|---|
 //! | [`tick`] | Tick ↔ price conversions, tick alignment, `getSqrtRatioAtTick` |
-//! | [`liquidity`] | Liquidity estimation for maker positions |
+//! | [`capacity`] | Taker capacity a maker band adds, and the liquidity for a target capacity |
+//! | [`liquidity`] | Liquidity sizing and band token amounts for maker positions |
 //! | [`position`] | Entry price, size, value, leverage, liquidation price |
 //! | [`ema`] | Contract-exact EMA advancement (Solady `expWad` port) |
 //! | [`pricing`] | The deployed pricing module's fair price (the contract's mark) |
@@ -19,6 +20,7 @@
 use alloy::primitives::B256;
 use serde::{Deserialize, Serialize};
 
+pub mod capacity;
 pub mod ema;
 pub(crate) mod fixed_point;
 pub mod liquidity;

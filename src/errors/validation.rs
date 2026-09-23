@@ -5,6 +5,8 @@
 
 use thiserror::Error;
 
+use crate::types::Side;
+
 /// Errors from validating user-supplied parameters.
 #[derive(Error, Debug)]
 #[non_exhaustive]
@@ -37,6 +39,18 @@ pub enum ValidationError {
         lower: i32,
         /// Upper tick.
         upper: i32,
+    },
+
+    /// A maker band backs no capacity on the requested side at the given
+    /// price: the price sits at or beyond the band's edge on that side.
+    #[error("band [{lower}, {upper}] backs no {side} capacity at this price")]
+    NoBandCapacity {
+        /// Lower tick of the band.
+        lower: i32,
+        /// Upper tick of the band.
+        upper: i32,
+        /// The side that was requested.
+        side: Side,
     },
 
     /// Margin ratio is outside the allowed window.

@@ -544,25 +544,14 @@ fn next_sqrt_from_amount0(
             context: "zero sqrt denominator".into(),
         });
     }
-    let value = div_ceil_512(numerator.widening_mul(sqrt), denominator);
+    let value = numerator.widening_mul(sqrt).div_ceil(denominator);
     u512_to_u256(value)
 }
 
 fn div(value: U256, denominator: U256, rounding: Rounding) -> U256 {
-    let q = value / denominator;
-    if rounding == Rounding::Up && value % denominator != U256::ZERO {
-        q + U256::ONE
-    } else {
-        q
-    }
-}
-
-fn div_ceil_512(value: U512, denominator: U512) -> U512 {
-    let q = value / denominator;
-    if value % denominator == U512::ZERO {
-        q
-    } else {
-        q + U512::ONE
+    match rounding {
+        Rounding::Up => value.div_ceil(denominator),
+        Rounding::TowardZero => value / denominator,
     }
 }
 

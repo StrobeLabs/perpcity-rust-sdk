@@ -21,22 +21,21 @@ use alloy::transports::{TransportError, TransportErrorKind};
 use futures_util::stream::{self, StreamExt};
 
 use crate::constants::MULTICALL3;
-use crate::contracts::{IBeacon, IMulticall3, IPoolManagerState, Maker, Perp, Position};
+use crate::contracts::{IMulticall3, IPoolManagerState, Maker, Perp, Position};
 use crate::convert::unpack_balance_delta;
 use crate::errors::{ContractError, PerpCityError, Result, ValidationError};
-use crate::math::ema::{PricePair, calculate_emas};
+use crate::math::ema::PricePair;
 use crate::math::maker_equity::{
     AccrualInputs, AccruedMakerSnapshot, MakerEquityBreakdown, MakerMarketSnapshot, MakerState,
     TickFunding, fee_growth_inside1,
 };
-use crate::math::pricing::fair_price_x96;
 use crate::math::tick::get_sqrt_ratio_at_tick;
 use crate::storage::{
     perp_tick_funding_slots, v4_fee_growth_global1_slot, v4_position_fee_growth_inside1_slot,
     v4_tick_fee_growth_outside1_slot,
 };
 
-use super::queries::{ema_window_secs, registered_module};
+use super::queries::{MarkViews, multicall_error};
 use super::{PerpClient, i24_to_i32, u24_to_u32};
 
 /// Concurrency bound for the `eth_getStorageAt` fallback when the endpoint
@@ -339,7 +338,8 @@ impl PerpClient {
     /// every chunk pinned to the same block.
     ///
     /// The mark that prices `valPnl` and the accrual replay is the
-    /// contract's own: the deployed fair price ([`fair_price_x96`]) of the
+    /// contract's own, the value [`Self::get_fair_price`] reads: the
+    /// deployed fair price ([`crate::math::pricing::fair_price_x96`]) of the
     /// pinned block's `poolState().ammPrice`, beacon index, and EMAs
     /// advanced to the block timestamp — exactly what `PerpLogic.accrue`
     /// sets as `markPrice` when it touches the market, so
@@ -505,7 +505,6 @@ impl PerpClient {
         &self,
         mark_override_x96: Option<U256>,
     ) -> Result<(AccruedMakerSnapshot, B256, BlockId)> {
-        let perp_addr = self.deployments.perp;
         // A lagging replica may briefly miss the pinned header. That is a
         // failed read, not a degraded one: pinning by bare number would drop
         // the reorg protection, and substituting the local wall clock for
@@ -514,108 +513,40 @@ impl PerpClient {
         // quietly degrade — fail and let the caller retry.
         let (block, block_id) = self.lagged_snapshot_block().await?;
 
-        let market_call = |calldata: Vec<u8>| IMulticall3::Call3 {
-            target: perp_addr,
-            allowFailure: false,
-            callData: calldata.into(),
-        };
-
         // ── Market-wide state: one multicall, all-or-nothing ────────
-        // (allowFailure: false — without a consistent market snapshot no
-        // position's equity can be computed.)
-        let calls = vec![
-            market_call(Perp::cumulativesCall {}.abi_encode()),
-            market_call(Perp::ratesCall {}.abi_encode()),
-            market_call(Perp::poolStateCall {}.abi_encode()),
-            market_call(Perp::capacityCall {}.abi_encode()),
-            market_call(Perp::openInterestCall {}.abi_encode()),
-            market_call(Perp::POOL_IDCall {}.abi_encode()),
-            market_call(Perp::modulesCall {}.abi_encode()),
-            market_call(Perp::emasCall {}.abi_encode()),
-            market_call(Perp::EMA_WINDOWCall {}.abi_encode()),
-        ];
-        let multicall = IMulticall3::new(MULTICALL3, &self.provider);
-        let results = multicall.aggregate3(calls).block(block_id).call().await?;
-        let call_names = [
-            "cumulatives",
-            "rates",
-            "poolState",
-            "capacity",
-            "openInterest",
-            "POOL_ID",
-            "modules",
-            "emas",
-            "EMA_WINDOW",
-        ];
-        if results.len() != call_names.len() {
-            return Err(ContractError::MulticallFailed {
-                reason: format!(
-                    "maker equity market multicall returned {} results, expected {}",
-                    results.len(),
-                    call_names.len()
-                ),
-            }
-            .into());
-        }
-        for (result, name) in results.iter().zip(call_names) {
-            if !result.success {
-                return Err(ContractError::MulticallFailed {
-                    reason: format!("maker equity market multicall: {name} call failed"),
-                }
-                .into());
-            }
-        }
-        let decode_err = |name: &str, e: alloy::sol_types::Error| ValidationError::DecodeFailed {
-            context: format!("failed to decode {name}: {e}"),
-        };
-        let cumls = Perp::cumulativesCall::abi_decode_returns(&results[0].returnData)
-            .map_err(|e| decode_err("cumulatives", e))?;
-        let rates = Perp::ratesCall::abi_decode_returns(&results[1].returnData)
-            .map_err(|e| decode_err("rates", e))?;
-        let pool_state = Perp::poolStateCall::abi_decode_returns(&results[2].returnData)
-            .map_err(|e| decode_err("poolState", e))?;
-        let capacity = Perp::capacityCall::abi_decode_returns(&results[3].returnData)
-            .map_err(|e| decode_err("capacity", e))?;
-        let oi = Perp::openInterestCall::abi_decode_returns(&results[4].returnData)
-            .map_err(|e| decode_err("openInterest", e))?;
-        let pool_id = Perp::POOL_IDCall::abi_decode_returns(&results[5].returnData)
-            .map_err(|e| decode_err("POOL_ID", e))?;
-        let modules = Perp::modulesCall::abi_decode_returns(&results[6].returnData)
-            .map_err(|e| decode_err("modules", e))?;
-        let stored_emas = Perp::emasCall::abi_decode_returns(&results[7].returnData)
-            .map_err(|e| decode_err("emas", e))?;
-        let ema_window = Perp::EMA_WINDOWCall::abi_decode_returns(&results[8].returnData)
-            .map_err(|e| decode_err("EMA_WINDOW", e))?;
+        // (without a consistent market snapshot no position's equity can
+        // be computed.)
+        let perp = Perp::new(self.deployments.perp, &self.provider);
+        let (cumls, rates, pool_state, capacity, oi, pool_id, modules, stored_emas, ema_window) =
+            self.multicall_at(block_id)
+                .add(perp.cumulatives())
+                .add(perp.rates())
+                .add(perp.poolState())
+                .add(perp.capacity())
+                .add(perp.openInterest())
+                .add(perp.POOL_ID())
+                .add(perp.modules())
+                .add(perp.emas())
+                .add(perp.EMA_WINDOW())
+                .aggregate()
+                .await
+                .map_err(multicall_error)?;
 
-        // The contract's mark for this block, as `PerpLogic.accrue` sets
-        // it: the deployed fair price of the spot pair and the EMAs
-        // advanced to the block timestamp. `index()` mutates on chain;
-        // an eth_call pinned to the block reads it without sending. The
-        // guard names the missing interface on a perp with no beacon,
-        // where the bare call returns an opaque ABI-decode error.
-        let beacon = registered_module(modules.beacon, "IBeacon")?;
-        let index = IBeacon::new(beacon, &self.provider)
-            .index()
-            .block(block_id)
-            .call()
+        let mark_price_x96 = self
+            .contract_mark_x96(
+                &block,
+                MarkViews {
+                    beacon: modules.beacon,
+                    amm_price_x96: pool_state.ammPrice,
+                    stored_emas: PricePair {
+                        amm: stored_emas.ammPrice,
+                        index: stored_emas.index,
+                    },
+                    last_touch: rates.lastTouch.to::<u64>(),
+                    ema_window,
+                },
+            )
             .await?;
-        let spot = PricePair::try_from_x96(pool_state.ammPrice, index)?;
-        let emas = calculate_emas(
-            PricePair {
-                amm: stored_emas.ammPrice,
-                index: stored_emas.index,
-            },
-            spot,
-            rates.lastTouch.to::<u64>(),
-            block.timestamp,
-            ema_window_secs(ema_window)?,
-        )?;
-        let mark_price_x96 = fair_price_x96(
-            pool_state.ammPrice,
-            index,
-            U256::from(emas.amm),
-            U256::from(emas.index),
-        );
 
         let market = MakerMarketSnapshot {
             block,

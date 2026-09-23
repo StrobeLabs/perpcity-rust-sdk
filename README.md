@@ -114,6 +114,9 @@ let (config, snapshot) = client.get_perp_snapshot().await?;
 let mark     = client.get_mark_price().await?;        // f64 price
 let funding  = client.get_funding_rate().await?;      // daily rate
 let oi       = client.get_open_interest().await?;      // long/short OI
+let cap      = client.get_capacity().await?;           // capacity + OI at one block
+let headroom = cap.headroom_atoms(Side::Short);        // short OI still openable, perp atoms
+let fair     = client.get_fair_price().await?;         // the contract's mark (X96)
 let position = client.get_position(open.pos_id).await?; // raw on-chain Position
 
 // Batch balances — N addresses in 1 multicall (1 CU instead of 2N)
@@ -233,6 +236,11 @@ use perpcity_sdk::math::liquidity::estimate_liquidity;
 let tick = price_to_tick(50.0)?;
 let price = tick_to_price(tick)?;
 let liq = estimate_liquidity(tick_lower, tick_upper, margin_scaled)?;
+
+// Taker capacity a maker band adds at the pool price, and its inverse
+use perpcity_sdk::{Side, band_capacity, liquidity_for_capacity};
+let cap = band_capacity(sqrt_price_x96, tick_lower, tick_upper, liquidity)?;
+let liq = liquidity_for_capacity(sqrt_price_x96, tick_lower, tick_upper, Side::Short, 1_000_000)?;
 ```
 
 All math functions are pure, `O(1)`, and ported faithfully from PerpCity's Solidity contracts and Uniswap V4's `TickMath`.

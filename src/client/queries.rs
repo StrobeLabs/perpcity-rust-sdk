@@ -13,8 +13,9 @@
 use std::collections::BTreeMap;
 
 use alloy::eips::BlockId;
+use alloy::network::Ethereum;
 use alloy::primitives::{Address, B256, U256};
-use alloy::providers::Provider;
+use alloy::providers::{Empty, MulticallBuilder, MulticallError, Provider, RootProvider};
 use alloy::sol_types::{SolCall, SolValue};
 
 use crate::constants::{
@@ -26,10 +27,12 @@ use crate::contracts::{
     Position,
 };
 use crate::convert::{margin_ratio_to_leverage, price_x96_to_f64, scale_from_6dec};
-use crate::errors::{ContractError, Result, ValidationError};
+use crate::errors::{ContractError, PerpCityError, Result, ValidationError};
 use crate::hft::state_cache::{CachedBounds, CachedFees};
 use crate::math::BlockContext;
+use crate::math::capacity::MarketCapacity;
 use crate::math::ema::{PricePair, calculate_emas};
+use crate::math::pricing::{FairPrice, fair_price_x96};
 use crate::math::swap::{TakerMarketSnapshot, TickLiquidity};
 use crate::storage::{perp_emas_slot, v4_tick_bitmap_slot, v4_tick_slot};
 use crate::types::{
@@ -53,6 +56,25 @@ pub(super) fn registered_module(addr: Address, module: &str) -> Result<Address> 
     Ok(addr)
 }
 
+/// Map a failed [`PerpClient::multicall_at`] batch onto the SDK's errors.
+///
+/// A transport failure keeps the classification a contract call gets
+/// ([`PerpCityError::Abi`]): a view that reverts reaches the client as a
+/// node error response, and retrying it cannot help.
+pub(super) fn multicall_error(e: MulticallError) -> PerpCityError {
+    match e {
+        MulticallError::TransportError(e) => alloy::contract::Error::TransportError(e).into(),
+        MulticallError::DecodeError(e) => ValidationError::DecodeFailed {
+            context: format!("failed to decode a multicall result: {e}"),
+        }
+        .into(),
+        e => ContractError::MulticallFailed {
+            reason: e.to_string(),
+        }
+        .into(),
+    }
+}
+
 /// The contract's `EMA_WINDOW` (seconds) narrowed to the width
 /// `calculate_emas` takes.
 pub(super) fn ema_window_secs(ema_window: U256) -> Result<u64> {
@@ -62,6 +84,20 @@ pub(super) fn ema_window_secs(ema_window: U256) -> Result<u64> {
         }
         .into()
     })
+}
+
+/// The Perp views the contract's mark depends on, read at one block.
+pub(super) struct MarkViews {
+    /// `modules().beacon`.
+    pub(super) beacon: Address,
+    /// `poolState().ammPrice`.
+    pub(super) amm_price_x96: U256,
+    /// `emas()`: the stored pair as of `last_touch`.
+    pub(super) stored_emas: PricePair,
+    /// `rates().lastTouch`.
+    pub(super) last_touch: u64,
+    /// `EMA_WINDOW()`.
+    pub(super) ema_window: U256,
 }
 
 /// Perp/pool values fixed at deployment, cached after the first taker book
@@ -89,6 +125,16 @@ impl PerpClient {
     /// Cache key for this client's market: the `Perp` address left-padded to 32 bytes.
     fn market_key(&self) -> [u8; 32] {
         self.deployments.perp.into_word().0
+    }
+
+    /// A typed Multicall3 batch pinned to `block`. Add calls with `add`
+    /// and read them with `aggregate`, which fails as a whole if any call
+    /// reverts (map its error with [`multicall_error`]).
+    pub(super) fn multicall_at(
+        &self,
+        block: BlockId,
+    ) -> MulticallBuilder<Empty, &RootProvider<Ethereum>, Ethereum> {
+        self.provider.multicall().address(MULTICALL3).block(block)
     }
 
     /// Fetch and cache the deployment-fixed values the taker book loader
@@ -119,6 +165,81 @@ impl PerpClient {
                 })
             })
             .await
+    }
+
+    /// The contract's mark at `block`, as `PerpLogic.accrue` sets it: the
+    /// deployed fair price of the pool price and the beacon index, with the
+    /// stored EMAs advanced to the block timestamp.
+    ///
+    /// `index()` mutates on chain; an `eth_call` pinned to the block reads
+    /// it without sending. The beacon guard names the missing interface on
+    /// a perp with no beacon, where the bare call returns an opaque
+    /// ABI-decode error.
+    pub(super) async fn contract_mark_x96(
+        &self,
+        block: &BlockContext,
+        views: MarkViews,
+    ) -> Result<U256> {
+        let beacon = registered_module(views.beacon, "IBeacon")?;
+        let index = IBeacon::new(beacon, &self.provider)
+            .index()
+            .block(BlockId::hash(block.hash))
+            .call()
+            .await?;
+        let emas = calculate_emas(
+            views.stored_emas,
+            PricePair::try_from_x96(views.amm_price_x96, index)?,
+            views.last_touch,
+            block.timestamp,
+            ema_window_secs(views.ema_window)?,
+        )?;
+        Ok(fair_price_x96(
+            views.amm_price_x96,
+            index,
+            U256::from(emas.amm),
+            U256::from(emas.index),
+        ))
+    }
+
+    /// Read the contract's mark: the deployed fair price
+    /// ([`fair_price_x96`]) of the pool price, the beacon index and the
+    /// EMAs advanced to the block, pinned to one lagged block (see
+    /// [`SNAPSHOT_BLOCK_LAG`]).
+    ///
+    /// This is the price every health check, `valPnl` and utilization
+    /// accrual uses, and the mark [`Self::get_maker_equities`] prices at.
+    /// [`Self::get_mark_price`] returns the pool price instead.
+    ///
+    /// # Errors
+    ///
+    /// [`ContractError::ModuleNotRegistered`] when the perp has no beacon;
+    /// [`ContractError::BlockUnavailable`] when the pinned header is missing
+    /// from the serving replica.
+    pub async fn get_fair_price(&self) -> Result<FairPrice> {
+        let (block, block_id) = self.lagged_snapshot_block().await?;
+        let perp = Perp::new(self.deployments.perp, &self.provider);
+        let (modules, pool_state, stored_emas, rates, ema_window) = self
+            .multicall_at(block_id)
+            .add(perp.modules())
+            .add(perp.poolState())
+            .add(perp.emas())
+            .add(perp.rates())
+            .add(perp.EMA_WINDOW())
+            .aggregate()
+            .await
+            .map_err(multicall_error)?;
+        let views = MarkViews {
+            beacon: modules.beacon,
+            amm_price_x96: pool_state.ammPrice,
+            stored_emas: PricePair {
+                amm: stored_emas.ammPrice,
+                index: stored_emas.index,
+            },
+            last_touch: rates.lastTouch.to::<u64>(),
+            ema_window,
+        };
+        let price_x96 = self.contract_mark_x96(&block, views).await?;
+        Ok(FairPrice { block, price_x96 })
     }
 
     /// Resolve the lagged, reorg-safe block that snapshot reads pin to.
@@ -498,7 +619,11 @@ impl PerpClient {
         })
     }
 
-    /// Get taker open interest for the market.
+    /// Get taker open interest for the market, in perp tokens.
+    ///
+    /// Reads the latest block, not the lagged snapshot block. For open
+    /// interest in atoms at a known block, next to the capacity it draws
+    /// on, use [`Self::get_capacity`].
     pub async fn get_open_interest(&self) -> Result<OpenInterest> {
         let perp = Perp::new(self.deployments.perp, &self.provider);
         let oi = perp.openInterest().call().await?;
@@ -506,6 +631,34 @@ impl PerpClient {
         Ok(OpenInterest {
             long_oi: oi.long as f64 / SCALE_F64,
             short_oi: oi.short as f64 / SCALE_F64,
+        })
+    }
+
+    /// Read the market's taker capacity and open interest, pinned to one
+    /// lagged block (see [`SNAPSHOT_BLOCK_LAG`]).
+    ///
+    /// [`MarketCapacity`] derives each side's headroom (open interest a
+    /// taker can still add) and utilization as the contract computes it.
+    ///
+    /// # Errors
+    ///
+    /// [`ContractError::BlockUnavailable`] when the pinned header is missing
+    /// from the serving replica.
+    pub async fn get_capacity(&self) -> Result<MarketCapacity> {
+        let (block, block_id) = self.lagged_snapshot_block().await?;
+        let perp = Perp::new(self.deployments.perp, &self.provider);
+        let (capacity, oi) = self
+            .multicall_at(block_id)
+            .add(perp.capacity())
+            .add(perp.openInterest())
+            .aggregate()
+            .await
+            .map_err(multicall_error)?;
+        Ok(MarketCapacity {
+            block,
+            capacity: capacity.into(),
+            long_open_interest_atoms: oi.long,
+            short_open_interest_atoms: oi.short,
         })
     }
 
@@ -692,74 +845,23 @@ impl PerpClient {
     /// several individual RPCs.
     ///
     /// Returns `(PerpData, PerpSnapshot)` — static config and live market data.
+    ///
+    /// Unlike the pinned reads ([`Self::get_capacity`],
+    /// [`Self::get_fair_price`]), this reads the latest block, and the
+    /// multicall and the beacon read are separate calls, so a trade between
+    /// them can put the index one block after the pool state.
     pub async fn get_perp_snapshot(&self) -> Result<(PerpData, PerpSnapshot)> {
-        let perp_addr = self.deployments.perp;
-
-        let calls = vec![
-            IMulticall3::Call3 {
-                target: perp_addr,
-                allowFailure: false,
-                callData: Perp::modulesCall {}.abi_encode().into(),
-            },
-            IMulticall3::Call3 {
-                target: perp_addr,
-                allowFailure: false,
-                callData: Perp::poolKeyCall {}.abi_encode().into(),
-            },
-            IMulticall3::Call3 {
-                target: perp_addr,
-                allowFailure: false,
-                callData: Perp::poolStateCall {}.abi_encode().into(),
-            },
-            IMulticall3::Call3 {
-                target: perp_addr,
-                allowFailure: false,
-                callData: Perp::ratesCall {}.abi_encode().into(),
-            },
-            IMulticall3::Call3 {
-                target: perp_addr,
-                allowFailure: false,
-                callData: Perp::openInterestCall {}.abi_encode().into(),
-            },
-        ];
-
-        let multicall = IMulticall3::new(MULTICALL3, &self.provider);
-        let results = multicall.aggregate3(calls).call().await?;
-
-        let call_names = ["modules", "poolKey", "poolState", "rates", "openInterest"];
-        if results.len() != call_names.len() {
-            return Err(ContractError::MulticallFailed {
-                reason: format!(
-                    "perp snapshot multicall returned {} results, expected {}",
-                    results.len(),
-                    call_names.len()
-                ),
-            }
-            .into());
-        }
-        for (i, name) in call_names.iter().enumerate() {
-            if !results[i].success {
-                return Err(ContractError::MulticallFailed {
-                    reason: format!("perp snapshot multicall: {name} call failed"),
-                }
-                .into());
-            }
-        }
-
-        let decode_err = |name: &str, e: alloy::sol_types::Error| ValidationError::DecodeFailed {
-            context: format!("failed to decode {name}: {e}"),
-        };
-
-        let modules = Perp::modulesCall::abi_decode_returns(&results[0].returnData)
-            .map_err(|e| decode_err("modules", e))?;
-        let pool_key = Perp::poolKeyCall::abi_decode_returns(&results[1].returnData)
-            .map_err(|e| decode_err("poolKey", e))?;
-        let pool_state = Perp::poolStateCall::abi_decode_returns(&results[2].returnData)
-            .map_err(|e| decode_err("poolState", e))?;
-        let rates = Perp::ratesCall::abi_decode_returns(&results[3].returnData)
-            .map_err(|e| decode_err("rates", e))?;
-        let oi = Perp::openInterestCall::abi_decode_returns(&results[4].returnData)
-            .map_err(|e| decode_err("openInterest", e))?;
+        let perp = Perp::new(self.deployments.perp, &self.provider);
+        let (modules, pool_key, pool_state, rates, oi) = self
+            .multicall_at(BlockId::latest())
+            .add(perp.modules())
+            .add(perp.poolKey())
+            .add(perp.poolState())
+            .add(perp.rates())
+            .add(perp.openInterest())
+            .aggregate()
+            .await
+            .map_err(multicall_error)?;
 
         let mark = price_x96_to_f64(pool_state.ammPrice)?;
         let funding_rate_daily = funding_per_day_to_f64(rates.fundingPerDay);
@@ -776,7 +878,7 @@ impl PerpClient {
         let bounds = self.get_or_fetch_bounds(modules.marginRatios).await?;
 
         let perp_data = PerpData {
-            perp: perp_addr,
+            perp: self.deployments.perp,
             tick_spacing: i24_to_i32(pool_key.tickSpacing),
             mark,
             beacon: modules.beacon,
