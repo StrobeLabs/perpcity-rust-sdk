@@ -227,6 +227,17 @@ mod tests {
             broadcast_failed.is_transient(),
             "a failed broadcast was a transient transport error before it was typed"
         );
+
+        let no_capacity: PerpCityError = ValidationError::NoBandCapacity {
+            lower: 20_000,
+            upper: 30_000,
+            side: Side::Long,
+        }
+        .into();
+        assert!(
+            !no_capacity.is_transient(),
+            "a band's shape against the price does not change on retry"
+        );
     }
 
     /// Callers reconcile an unknown outcome by receipt, so every error after
@@ -282,16 +293,6 @@ mod tests {
             pre_broadcast_rpc.tx_hash(),
             None,
             "a send's Rpc error comes before the broadcast"
-
-        let no_capacity: PerpCityError = ValidationError::NoBandCapacity {
-            lower: 20_000,
-            upper: 30_000,
-            side: Side::Long,
-        }
-        .into();
-        assert!(
-            !no_capacity.is_transient(),
-            "a band's shape against the price does not change on retry"
         );
     }
 
