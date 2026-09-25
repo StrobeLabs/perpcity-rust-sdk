@@ -12,8 +12,15 @@ use alloy::rpc::json_rpc::{RequestPacket, ResponsePacket};
 use alloy::transports::http::Http;
 use alloy::transports::{RpcError, TransportError, TransportErrorKind, TransportFut};
 
+/// Label used when an endpoint string does not parse as a URL with a host.
+const UNPARSEABLE: &str = "<unparseable endpoint>";
+
 /// Reduce an endpoint URL to its host (and port), dropping the scheme,
 /// userinfo, path, query and fragment, any of which may hold an API key.
+///
+/// The URL is parsed the same way the transport parses it (so `\` counts as a
+/// path separator for http/ws URLs). Anything without a host becomes a fixed
+/// placeholder rather than echoing the input.
 ///
 /// ```
 /// use perpcity_sdk::transport::redact_url;
@@ -23,9 +30,14 @@ use alloy::transports::{RpcError, TransportError, TransportErrorKind, TransportF
 /// );
 /// ```
 pub fn redact_url(url: &str) -> String {
-    let rest = url.split_once("://").map_or(url, |(_, rest)| rest);
-    let host = rest.split(['/', '?', '#']).next().unwrap_or(rest);
-    host.rsplit_once('@').map_or(host, |(_, h)| h).to_string()
+    let Ok(parsed) = url::Url::parse(url) else {
+        return UNPARSEABLE.to_string();
+    };
+    match (parsed.host_str(), parsed.port()) {
+        (Some(host), Some(port)) => format!("{host}:{port}"),
+        (Some(host), None) => host.to_string(),
+        (None, _) => UNPARSEABLE.to_string(),
+    }
 }
 
 /// Replace every occurrence of `url` in `msg` with its redacted form. For
@@ -103,8 +115,27 @@ mod tests {
             "host.example:8546"
         );
         assert_eq!(redact_url("https://host.example?apikey=k"), "host.example");
-        assert_eq!(redact_url("localhost:8545"), "localhost:8545");
-        assert_eq!(redact_url(""), "");
+        assert_eq!(redact_url("http://127.0.0.1:8545"), "127.0.0.1:8545");
+    }
+
+    #[test]
+    fn redact_url_treats_backslash_as_a_path_separator() {
+        let out = redact_url(&format!("https://host.example\\v2\\{KEY}"));
+        assert_eq!(out, "host.example");
+    }
+
+    #[test]
+    fn redact_url_never_echoes_unparseable_input() {
+        for input in [
+            format!("https://host.example:99999\\v2\\{KEY}"),
+            format!("not a url/{KEY}"),
+            format!("localhost:8545/{KEY}"),
+            String::new(),
+        ] {
+            let out = redact_url(&input);
+            assert!(!out.contains(KEY), "{input:?} -> {out}");
+            assert_eq!(out, UNPARSEABLE, "{input:?}");
+        }
     }
 
     #[test]
