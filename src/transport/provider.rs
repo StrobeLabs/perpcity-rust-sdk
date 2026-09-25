@@ -78,8 +78,11 @@ struct ManagedEndpoint {
     /// Per-endpoint health state (circuit breaker + latency). Protected by Mutex
     /// for mutations only; reads use atomic mirrors below.
     health: Mutex<EndpointHealth>,
-    /// The endpoint URL (for diagnostics).
+    /// The endpoint URL. Holds credentials for hosted providers: never log it,
+    /// log `label` instead.
     url: String,
+    /// Host-only form of `url`, safe for logs and `Debug`.
+    label: String,
     // ── Lock-free mirrors (eventually consistent with Mutex state) ──
     // Updated after every health mutation. Reads never take locks.
     // Follows the evmap pattern: reads are lock-free, writes sync atomics.
@@ -107,7 +110,7 @@ impl ManagedEndpoint {
             .store(pack_state(new_state), Ordering::Relaxed);
         if old_state != new_state {
             tracing::debug!(
-                endpoint = %self.url,
+                endpoint = %self.label,
                 from = ?old_state,
                 to = ?new_state,
                 "circuit breaker state changed"
@@ -127,7 +130,7 @@ impl ManagedEndpoint {
         // Latency is not updated on failure (EMA stays the same).
         if old_state != new_state {
             tracing::warn!(
-                endpoint = %self.url,
+                endpoint = %self.label,
                 from = ?old_state,
                 to = ?new_state,
                 consecutive_failures = h.status().consecutive_failures,
@@ -140,7 +143,7 @@ impl ManagedEndpoint {
 impl std::fmt::Debug for ManagedEndpoint {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ManagedEndpoint")
-            .field("url", &self.url)
+            .field("endpoint", &self.label)
             .finish_non_exhaustive()
     }
 }
@@ -169,15 +172,19 @@ impl EndpointPool {
             .map(|url| {
                 let parsed: url::Url = url.parse().map_err(|e: url::ParseError| {
                     crate::errors::ValidationError::InvalidConfig {
-                        reason: format!("invalid endpoint URL '{url}': {e}"),
+                        reason: format!(
+                            "invalid endpoint URL for host '{}': {e}",
+                            super::redact_url(url)
+                        ),
                     }
                 })?;
-                let http = alloy::transports::http::Http::new(parsed);
+                let http = super::redact::UrlStrippingHttp::new(parsed);
                 let boxed = alloy::transports::BoxTransport::new(http);
                 Ok(ManagedEndpoint {
                     transport: boxed,
                     health: Mutex::new(EndpointHealth::new(cb_config)),
                     url: url.clone(),
+                    label: super::redact_url(url),
                     atomic_latency_ns: AtomicU64::new(0),
                     atomic_state: AtomicU64::new(TAG_CLOSED),
                 })
@@ -376,9 +383,9 @@ impl EndpointPool {
         self.endpoints[idx].transport.clone()
     }
 
-    /// URL of endpoint `idx` (for diagnostics/tracing).
-    fn url(&self, idx: usize) -> &str {
-        &self.endpoints[idx].url
+    /// Host-only label of endpoint `idx`, safe for tracing.
+    fn label(&self, idx: usize) -> &str {
+        &self.endpoints[idx].label
     }
 
     /// Number of endpoints currently in Closed (healthy) state.
@@ -399,7 +406,8 @@ impl EndpointPool {
             .collect()
     }
 
-    /// URLs of all endpoints in this pool.
+    /// URLs of all endpoints in this pool, credentials included. Never log
+    /// these; use [`redact_url`](super::redact_url) for diagnostics.
     pub fn endpoint_urls(&self) -> Vec<&str> {
         self.endpoints.iter().map(|ep| ep.url.as_str()).collect()
     }
@@ -592,13 +600,13 @@ impl Router {
                             tracing::warn!(
                                 attempt = attempt + 1,
                                 max_attempts,
-                                endpoint = %pool.url(idx),
+                                endpoint = %pool.label(idx),
                                 error_code = response.first_error_code(),
                                 "write rejected pre-mempool, retrying"
                             );
                         } else {
                             tracing::warn!(
-                                endpoint = %pool.url(idx),
+                                endpoint = %pool.label(idx),
                                 error_code = response.first_error_code(),
                                 "write rejected after all retries exhausted"
                             );
@@ -615,7 +623,7 @@ impl Router {
                     tracing::warn!(
                         attempt = attempt + 1,
                         max_attempts,
-                        endpoint = %pool.url(idx),
+                        endpoint = %pool.label(idx),
                         error = %e,
                         is_write,
                         "transport error"
@@ -627,7 +635,7 @@ impl Router {
                     tracing::warn!(
                         attempt = attempt + 1,
                         max_attempts,
-                        endpoint = %pool.url(idx),
+                        endpoint = %pool.label(idx),
                         is_write,
                         "request timed out"
                     );
