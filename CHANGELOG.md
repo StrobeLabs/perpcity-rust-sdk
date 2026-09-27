@@ -17,6 +17,14 @@ The changes below break the public API, so the next release is 0.5.0 (a minor bu
 
 ### Added
 
+- **`history::test_support` under the new `test-utils` feature** — the
+  in-memory JSON-RPC node the history readers' own tests run against
+  (`FakeNode`: serves `eth_getLogs` from a fixed log set, rejects ranges
+  the way a capped provider does, records every requested range), public
+  so a crate building on the readers can test its scans against the same
+  node. The `history` module is now a directory (`scan`, `beacon`,
+  `transfers` submodules); its public API is unchanged and re-exported
+  from `history` as before.
 - **`TransactionError::tx_hash()`** — the signed transaction's hash for every failure from the broadcast onward (`BroadcastFailed`, `ReceiptTimeout`, `Reverted`, `OutOfGas`), `None` when nothing was sent. A caller with an unknown outcome reconciles by receipt instead of waiting out a fixed window.
 - **`PerpCityError::tx_hash()`** — the same hash on the top-level error, `None` for every other variant. For an error from `TxBuilder::send`, `None` means nothing was broadcast: after this release an `Rpc` error from a send always comes before the broadcast.
 - **`PerpClient::poll_receipt(tx_hash)` is public** — the send path's receipt wait without its initial 2 s delay (a hash to reconcile is rarely fresh): it polls at once, then every 2 s for up to 30 s, returning `ReceiptTimeout` for the same hash on timeout so the call can repeat. It does not touch nonce tracking: a send that returned a hash has already stopped tracking it, and a doubtful nonce resyncs from chain before the next send either way.

@@ -4,6 +4,9 @@
 //! range wider than its span limit or holding more logs than its result
 //! limit the way a capped provider does, and records every range it was
 //! asked for, so tests can check that a scan covers its range exactly once.
+//!
+//! Public under the `test-utils` feature, so a crate building on the
+//! history readers can test its own scans against the same node.
 
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
@@ -22,7 +25,7 @@ use tower::Service;
 
 /// How the node answers an `eth_getLogs` range it accepts.
 #[derive(Debug, Clone, Copy)]
-pub(crate) enum Mode {
+pub enum Mode {
     /// Serve the logs in range.
     Serve,
     /// Fail every request with this HTTP status.
@@ -39,7 +42,7 @@ struct State {
 
 /// In-memory node. Clones share the request log.
 #[derive(Debug, Clone)]
-pub(crate) struct FakeNode {
+pub struct FakeNode {
     logs: Arc<Vec<Log>>,
     max_span: u64,
     max_results: usize,
@@ -50,7 +53,7 @@ pub(crate) struct FakeNode {
 impl FakeNode {
     /// A node holding `logs` that accepts ranges of at most `max_span`
     /// blocks.
-    pub(crate) fn new(logs: Vec<Log>, max_span: u64) -> Self {
+    pub fn new(logs: Vec<Log>, max_span: u64) -> Self {
         Self {
             logs: Arc::new(logs),
             max_span,
@@ -61,27 +64,29 @@ impl FakeNode {
     }
 
     /// Reject any range that holds more than `max_results` logs.
-    pub(crate) fn with_max_results(mut self, max_results: usize) -> Self {
+    pub fn with_max_results(mut self, max_results: usize) -> Self {
         self.max_results = max_results;
         self
     }
 
-    pub(crate) fn with_mode(mut self, mode: Mode) -> Self {
+    /// Answer every accepted range per `mode` instead of serving logs.
+    pub fn with_mode(mut self, mode: Mode) -> Self {
         self.mode = mode;
         self
     }
 
-    pub(crate) fn provider(&self) -> RootProvider<Ethereum> {
+    /// An alloy provider backed by this node.
+    pub fn provider(&self) -> RootProvider<Ethereum> {
         RootProvider::new(RpcClient::new(self.clone(), true))
     }
 
     /// Every `eth_getLogs` range requested, in order.
-    pub(crate) fn requests(&self) -> Vec<(u64, u64)> {
+    pub fn requests(&self) -> Vec<(u64, u64)> {
         self.state.lock().unwrap().requests.clone()
     }
 
     /// Every block whose header was read, in order.
-    pub(crate) fn header_reads(&self) -> Vec<u64> {
+    pub fn header_reads(&self) -> Vec<u64> {
         self.state.lock().unwrap().header_reads.clone()
     }
 
@@ -173,19 +178,13 @@ impl Service<RequestPacket> for FakeNode {
 }
 
 /// The timestamp the node reports for a block.
-pub(crate) fn timestamp_of(block: u64) -> u64 {
+pub fn timestamp_of(block: u64) -> u64 {
     1_700_000_000 + block / 4
 }
 
 /// A mined log from `address` with one topic, the given data, and no
 /// block timestamp.
-pub(crate) fn mined_log(
-    address: Address,
-    topic0: B256,
-    data: Bytes,
-    block: u64,
-    index: u64,
-) -> Log {
+pub fn mined_log(address: Address, topic0: B256, data: Bytes, block: u64, index: u64) -> Log {
     Log {
         inner: PrimitiveLog {
             address,

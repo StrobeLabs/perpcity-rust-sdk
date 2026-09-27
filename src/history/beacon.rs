@@ -1,0 +1,163 @@
+//! A beacon's index series, rebuilt from its `IndexUpdated` logs.
+
+use std::collections::{BTreeSet, HashMap};
+
+use alloy::primitives::{Address, U256};
+use alloy::providers::Provider;
+use alloy::rpc::types::{Filter, Log};
+use alloy::sol_types::SolEvent;
+use futures_util::stream::{self, StreamExt, TryStreamExt};
+use serde::{Deserialize, Serialize};
+
+use crate::contracts::IBeacon;
+use crate::convert::price_x96_to_f64;
+use crate::errors::{ContractError, PerpCityError, Result, ValidationError};
+use crate::feeds::events::decode_raw;
+
+use super::scan::{End, LogScan, get_logs_chunked};
+
+/// Concurrent header reads when a provider omits log timestamps.
+const HEADER_READ_CONCURRENCY: usize = 4;
+
+/// One index value a beacon published.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IndexPrint {
+    /// Block the print landed in.
+    pub block_number: u64,
+    /// Position of the print's log in its block.
+    pub log_index: u64,
+    /// Unix timestamp of the block.
+    pub timestamp: u64,
+    /// The printed index, Q96 fixed-point, as the beacon emitted it.
+    pub index_x96: U256,
+}
+
+impl IndexPrint {
+    /// The printed index as a float.
+    ///
+    /// # Errors
+    ///
+    /// As [`price_x96_to_f64`]: a zero print, or one beyond the safe f64
+    /// range.
+    pub fn index(&self) -> std::result::Result<f64, ValidationError> {
+        price_x96_to_f64(self.index_x96)
+    }
+}
+
+/// Every index print `beacon` published in blocks `from_block..=to_block`,
+/// oldest first.
+///
+/// # Errors
+///
+/// [`ValidationError::InvalidConfig`] for the zero address,
+/// [`ValidationError::InvalidBlockRange`] if `from_block > to_block`,
+/// [`ContractError::BlockUnavailable`] if a print's block header is missing
+/// when the provider omits log timestamps,
+/// [`ValidationError::DecodeFailed`] for an `IndexUpdated` log that does
+/// not decode, or an error from [`get_logs_chunked`].
+pub async fn beacon_prints<P: Provider>(
+    provider: &P,
+    beacon: Address,
+    from_block: u64,
+    to_block: u64,
+) -> Result<Vec<IndexPrint>> {
+    let filter = index_updated_filter(beacon)?;
+    let logs = get_logs_chunked(provider, &filter, from_block, to_block).await?;
+    with_timestamps(provider, &logs).await
+}
+
+/// The newest `limit` index prints `beacon` published in blocks
+/// `from_block..=to_block`, oldest first.
+///
+/// Reads backward from `to_block` and stops once it holds `limit` prints,
+/// so `from_block` is only a floor: a beacon's creation block, or any
+/// block known to be before it, is safe.
+///
+/// # Errors
+///
+/// As [`beacon_prints`].
+pub async fn latest_beacon_prints<P: Provider>(
+    provider: &P,
+    beacon: Address,
+    from_block: u64,
+    to_block: u64,
+    limit: usize,
+) -> Result<Vec<IndexPrint>> {
+    let filter = index_updated_filter(beacon)?;
+    let mut scan = LogScan::new(provider, &filter, from_block, to_block)?;
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
+    let mut newest_first = Vec::new();
+    let mut held = 0;
+    while held < limit
+        && let Some(chunk) = scan.next_chunk(End::Newest).await?
+    {
+        held += chunk.len();
+        newest_first.push(chunk);
+    }
+    let logs: Vec<Log> = newest_first.into_iter().rev().flatten().collect();
+    let skip = logs.len().saturating_sub(limit);
+    with_timestamps(provider, &logs[skip..]).await
+}
+
+fn index_updated_filter(beacon: Address) -> std::result::Result<Filter, ValidationError> {
+    if beacon.is_zero() {
+        return Err(ValidationError::InvalidConfig {
+            reason: "beacon address is zero".into(),
+        });
+    }
+    Ok(Filter::new()
+        .address(beacon)
+        .event_signature(IBeacon::IndexUpdated::SIGNATURE_HASH))
+}
+
+/// Decodes `IndexUpdated` logs into prints, reading the block header for
+/// any log that arrived without a timestamp.
+async fn with_timestamps<P: Provider>(provider: &P, logs: &[Log]) -> Result<Vec<IndexPrint>> {
+    let missing: BTreeSet<u64> = logs
+        .iter()
+        .filter(|log| log.block_timestamp.is_none())
+        .filter_map(|log| log.block_number)
+        .collect();
+    let headers: HashMap<u64, u64> = stream::iter(missing)
+        .map(|number| async move {
+            let block = provider
+                .get_block_by_number(number.into())
+                .await?
+                .ok_or(ContractError::BlockUnavailable { number })?;
+            Ok::<_, PerpCityError>((number, block.header.timestamp))
+        })
+        .buffer_unordered(HEADER_READ_CONCURRENCY)
+        .try_collect()
+        .await?;
+    logs.iter()
+        .map(|log| {
+            let decoded = log
+                .block_number
+                .zip(log.log_index)
+                .and_then(|(block, index)| {
+                    let event = decode_raw::<IBeacon::IndexUpdated>(log)?;
+                    Some((block, index, event.index))
+                });
+            let (block_number, log_index, index_x96) =
+                decoded.ok_or_else(|| ValidationError::DecodeFailed {
+                    context: format!(
+                        "IndexUpdated log from {} in tx {:?}",
+                        log.address(),
+                        log.transaction_hash
+                    ),
+                })?;
+            let timestamp = match log.block_timestamp {
+                Some(timestamp) => timestamp,
+                None => headers[&block_number],
+            };
+            Ok(IndexPrint {
+                block_number,
+                log_index,
+                timestamp,
+                index_x96,
+            })
+        })
+        .collect()
+}

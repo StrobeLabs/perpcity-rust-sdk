@@ -18,6 +18,9 @@ exclude = ["CLAUDE.md"]
 # can sign with a KMS asymmetric secp256k1 key that never leaves AWS.
 # See examples/aws_kms_signer.rs.
 aws = ["alloy/signer-aws"]
+# The history readers' in-memory JSON-RPC node (history::test_support), for
+# crates that test their own scans against a capped provider.
+test-utils = []
 
 [dependencies]
 alloy = { version = "1", features = ["full", "sol-types", "json-rpc", "rpc-client"] }
