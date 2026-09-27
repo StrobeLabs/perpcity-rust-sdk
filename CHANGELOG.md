@@ -50,6 +50,17 @@ The changes below break the public API, so the next release is 0.5.0 (a minor bu
   `Provider` (reading history needs no signer); `PerpClient::history()`
   wraps the client's own provider. The free functions are unchanged:
   sequential, learning per call.
+- **`history::ScanStats` and `History::stats()`** — cumulative counters
+  over every `eth_getLogs` request a handle's scans have sent: requests,
+  rejections, logs returned, total time awaiting answers (summed across
+  concurrent requests, so it can exceed wall time), and the width the
+  search currently believes. Counted where the scan workers already
+  synchronize, so it costs nothing measurable; no callbacks, no tracing
+  dependency. Sample before and after a stretch of work and diff to
+  meter it — a long-lived collector's answer to "is the provider
+  degrading, did the learned width collapse, how much budget goes to
+  rejections". The free functions report nothing: their width search,
+  and these counters with it, live only for the call.
 - **`history::test_support` under the new `test-utils` feature** — the
   in-memory JSON-RPC node the history readers' own tests run against
   (`FakeNode`: serves `eth_getLogs` from a fixed log set, rejects ranges
