@@ -17,6 +17,18 @@ The changes below break the public API, so the next release is 0.5.0 (a minor bu
 
 ### Added
 
+- **`history::History<P: Provider>`** — a handle over the historical
+  readers that owns what one-shot calls cannot: the block-lag policy and
+  the learned request width. Every method takes `to_block: Option<u64>`;
+  `None` reads to the head minus the handle's lag (`SNAPSHOT_BLOCK_LAG`
+  blocks, or `with_lag`), so a lagging replica is never asked for a block
+  whose logs it may not hold yet — previously each caller invented its
+  own policy. The learned `eth_getLogs` width persists across the
+  handle's scans, so a process that scans repeatedly pays the width
+  search once instead of per call. Built from any `Provider` (reading
+  history needs no signer); `PerpClient::history()` wraps the client's
+  own provider. The free functions are unchanged and still learn per
+  call.
 - **`history::test_support` under the new `test-utils` feature** — the
   in-memory JSON-RPC node the history readers' own tests run against
   (`FakeNode`: serves `eth_getLogs` from a fixed log set, rejects ranges

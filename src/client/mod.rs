@@ -379,6 +379,12 @@ impl PerpClient {
         &self.provider
     }
 
+    /// A [`History`](crate::history::History) handle over this client's
+    /// provider, for historical reads with the default lag policy.
+    pub fn history(&self) -> crate::history::History<&RootProvider<Ethereum>> {
+        crate::history::History::new(&self.provider)
+    }
+
     /// The signing wallet (for building signed transactions outside the SDK).
     pub fn wallet(&self) -> &EthereumWallet {
         &self.wallet

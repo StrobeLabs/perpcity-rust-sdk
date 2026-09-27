@@ -47,6 +47,7 @@ pub struct FakeNode {
     max_span: u64,
     max_results: usize,
     mode: Mode,
+    head: Option<u64>,
     state: Arc<Mutex<State>>,
 }
 
@@ -59,8 +60,16 @@ impl FakeNode {
             max_span,
             max_results: usize::MAX,
             mode: Mode::Serve,
+            head: None,
             state: Arc::default(),
         }
+    }
+
+    /// The chain head the node reports to `eth_blockNumber`; without one
+    /// it reports the highest stored log's block, or 0 with no logs.
+    pub fn with_head(mut self, head: u64) -> Self {
+        self.head = Some(head);
+        self
     }
 
     /// Reject any range that holds more than `max_results` logs.
@@ -96,6 +105,16 @@ impl FakeNode {
         params: Option<&RawValue>,
     ) -> Result<ResponsePayload, TransportError> {
         match method {
+            "eth_blockNumber" => {
+                let head = self.head.unwrap_or_else(|| {
+                    self.logs
+                        .iter()
+                        .filter_map(|log| log.block_number)
+                        .max()
+                        .unwrap_or(0)
+                });
+                Ok(success(&format!("0x{head:x}")))
+            }
             "eth_getBlockByNumber" => {
                 let (tag, _full): (String, bool) =
                     serde_json::from_str(params.unwrap().get()).unwrap();

@@ -11,7 +11,7 @@ use crate::contracts::IERC20;
 use crate::errors::{Result, ValidationError};
 use crate::feeds::events::decode_raw;
 
-use super::scan::{check_block_range, get_logs_chunked};
+use super::scan::{WidthSearch, check_block_range, get_logs_chunked_with};
 
 /// One ERC-20 `Transfer` event.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -49,7 +49,8 @@ pub struct TokenTransfer {
 /// `from_block > to_block`, [`ValidationError::DecodeFailed`] for a log
 /// that does not decode as an ERC-20 `Transfer` (for example, an ERC-721
 /// `Transfer`, which shares the topic but indexes its third argument), or
-/// an error from [`get_logs_chunked`]. Any error fails the whole call.
+/// an error from [`get_logs_chunked`](super::get_logs_chunked). Any error
+/// fails the whole call.
 pub async fn token_transfers<P: Provider>(
     provider: &P,
     token: Address,
@@ -58,10 +59,33 @@ pub async fn token_transfers<P: Provider>(
     from_block: u64,
     to_block: u64,
 ) -> Result<Vec<TokenTransfer>> {
+    let mut widths = WidthSearch::new();
+    token_transfers_with(
+        provider,
+        token,
+        senders,
+        recipients,
+        from_block,
+        to_block,
+        &mut widths,
+    )
+    .await
+}
+
+/// [`token_transfers`] over a caller-held width search.
+pub(super) async fn token_transfers_with<P: Provider>(
+    provider: &P,
+    token: Address,
+    senders: Option<&[Address]>,
+    recipients: Option<&[Address]>,
+    from_block: u64,
+    to_block: u64,
+    widths: &mut WidthSearch,
+) -> Result<Vec<TokenTransfer>> {
     let Some(filter) = transfer_filter(token, senders, recipients, from_block, to_block)? else {
         return Ok(Vec::new());
     };
-    get_logs_chunked(provider, &filter, from_block, to_block)
+    get_logs_chunked_with(provider, &filter, from_block, to_block, widths)
         .await?
         .iter()
         .map(decode_transfer)

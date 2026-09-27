@@ -53,3 +53,148 @@ mod tests;
 pub use beacon::{IndexPrint, beacon_prints, latest_beacon_prints};
 pub use scan::get_logs_chunked;
 pub use transfers::{TokenTransfer, token_transfers};
+
+use alloy::primitives::Address;
+use alloy::providers::Provider;
+use alloy::rpc::types::{Filter, Log};
+
+use crate::constants::SNAPSHOT_BLOCK_LAG;
+use crate::errors::Result;
+
+/// A handle over historical reads that owns what one-shot calls cannot:
+/// the block-lag policy and the learned request width.
+///
+/// **Lag.** Every reader takes `to_block: Option<u64>`; `None` reads to
+/// the head minus the handle's lag ([`SNAPSHOT_BLOCK_LAG`] blocks unless
+/// [`Self::with_lag`] says otherwise), so a lagging replica is never asked
+/// for a block whose logs it may not have yet. Pass `Some(block)` to pin
+/// a range instead — an already-final block needs no lag.
+///
+/// **Width.** The free functions re-learn the provider's `eth_getLogs`
+/// limits on every call; the handle keeps the learned width across calls,
+/// so a process that scans repeatedly (a collector) pays the search once.
+///
+/// Constructed from any [`Provider`] — reading history needs no signer.
+/// A [`PerpClient`](crate::PerpClient) exposes its provider through
+/// [`history()`](crate::PerpClient::history).
+#[derive(Debug)]
+pub struct History<P> {
+    provider: P,
+    lag: u64,
+    widths: scan::WidthSearch,
+}
+
+impl<P: Provider> History<P> {
+    /// A handle over `provider` with the default lag of
+    /// [`SNAPSHOT_BLOCK_LAG`] blocks.
+    pub fn new(provider: P) -> Self {
+        Self {
+            provider,
+            lag: SNAPSHOT_BLOCK_LAG,
+            widths: scan::WidthSearch::new(),
+        }
+    }
+
+    /// The handle with a different lag; `0` reads to the raw head.
+    pub fn with_lag(mut self, blocks: u64) -> Self {
+        self.lag = blocks;
+        self
+    }
+
+    /// The newest block the handle reads by default: head minus the lag.
+    ///
+    /// # Errors
+    ///
+    /// The transport error from the head read.
+    pub async fn tip(&self) -> Result<u64> {
+        let head = self.provider.get_block_number().await?;
+        Ok(head.saturating_sub(self.lag))
+    }
+
+    async fn resolve(&self, to_block: Option<u64>) -> Result<u64> {
+        match to_block {
+            Some(block) => Ok(block),
+            None => self.tip().await,
+        }
+    }
+
+    /// [`get_logs_chunked`], to `to_block` or the lagged head.
+    ///
+    /// # Errors
+    ///
+    /// As [`get_logs_chunked`].
+    pub async fn logs(
+        &mut self,
+        filter: &Filter,
+        from_block: u64,
+        to_block: Option<u64>,
+    ) -> Result<Vec<Log>> {
+        let to = self.resolve(to_block).await?;
+        scan::get_logs_chunked_with(&self.provider, filter, from_block, to, &mut self.widths).await
+    }
+
+    /// [`beacon_prints`], to `to_block` or the lagged head.
+    ///
+    /// # Errors
+    ///
+    /// As [`beacon_prints`].
+    pub async fn beacon_prints(
+        &mut self,
+        beacon: Address,
+        from_block: u64,
+        to_block: Option<u64>,
+    ) -> Result<Vec<IndexPrint>> {
+        let to = self.resolve(to_block).await?;
+        beacon::beacon_prints_with(&self.provider, beacon, from_block, to, &mut self.widths).await
+    }
+
+    /// [`latest_beacon_prints`], to `to_block` or the lagged head.
+    ///
+    /// # Errors
+    ///
+    /// As [`latest_beacon_prints`].
+    pub async fn latest_beacon_prints(
+        &mut self,
+        beacon: Address,
+        from_block: u64,
+        to_block: Option<u64>,
+        limit: usize,
+    ) -> Result<Vec<IndexPrint>> {
+        let to = self.resolve(to_block).await?;
+        beacon::latest_beacon_prints_with(
+            &self.provider,
+            beacon,
+            from_block,
+            to,
+            limit,
+            &mut self.widths,
+        )
+        .await
+    }
+
+    /// [`token_transfers`], to `to_block` or the lagged head.
+    ///
+    /// # Errors
+    ///
+    /// As [`token_transfers`].
+    pub async fn token_transfers(
+        &mut self,
+        token: Address,
+        senders: Option<&[Address]>,
+        recipients: Option<&[Address]>,
+        from_block: u64,
+        to_block: Option<u64>,
+    ) -> Result<Vec<TokenTransfer>> {
+        let to = self.resolve(to_block).await?;
+        transfers::token_transfers_with(
+            &self.provider,
+            token,
+            senders,
+            recipients,
+            from_block,
+            to,
+            &mut self.widths,
+        )
+        .await
+    }
+}

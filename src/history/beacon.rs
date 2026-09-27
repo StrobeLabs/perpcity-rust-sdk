@@ -14,7 +14,7 @@ use crate::convert::price_x96_to_f64;
 use crate::errors::{ContractError, PerpCityError, Result, ValidationError};
 use crate::feeds::events::decode_raw;
 
-use super::scan::{End, LogScan, get_logs_chunked};
+use super::scan::{End, LogScan, WidthSearch, get_logs_chunked_with};
 
 /// Concurrent header reads when a provider omits log timestamps.
 const HEADER_READ_CONCURRENCY: usize = 4;
@@ -54,15 +54,33 @@ impl IndexPrint {
 /// [`ContractError::BlockUnavailable`] if a print's block header is missing
 /// when the provider omits log timestamps,
 /// [`ValidationError::DecodeFailed`] for an `IndexUpdated` log that does
-/// not decode, or an error from [`get_logs_chunked`].
+/// not decode, or an error from [`get_logs_chunked`](super::get_logs_chunked).
 pub async fn beacon_prints<P: Provider>(
     provider: &P,
     beacon: Address,
     from_block: u64,
     to_block: u64,
 ) -> Result<Vec<IndexPrint>> {
+    beacon_prints_with(
+        provider,
+        beacon,
+        from_block,
+        to_block,
+        &mut WidthSearch::new(),
+    )
+    .await
+}
+
+/// [`beacon_prints`] over a caller-held width search.
+pub(super) async fn beacon_prints_with<P: Provider>(
+    provider: &P,
+    beacon: Address,
+    from_block: u64,
+    to_block: u64,
+    widths: &mut WidthSearch,
+) -> Result<Vec<IndexPrint>> {
     let filter = index_updated_filter(beacon)?;
-    let logs = get_logs_chunked(provider, &filter, from_block, to_block).await?;
+    let logs = get_logs_chunked_with(provider, &filter, from_block, to_block, widths).await?;
     with_timestamps(provider, &logs).await
 }
 
@@ -83,8 +101,21 @@ pub async fn latest_beacon_prints<P: Provider>(
     to_block: u64,
     limit: usize,
 ) -> Result<Vec<IndexPrint>> {
+    let mut widths = WidthSearch::new();
+    latest_beacon_prints_with(provider, beacon, from_block, to_block, limit, &mut widths).await
+}
+
+/// [`latest_beacon_prints`] over a caller-held width search.
+pub(super) async fn latest_beacon_prints_with<P: Provider>(
+    provider: &P,
+    beacon: Address,
+    from_block: u64,
+    to_block: u64,
+    limit: usize,
+    widths: &mut WidthSearch,
+) -> Result<Vec<IndexPrint>> {
     let filter = index_updated_filter(beacon)?;
-    let mut scan = LogScan::new(provider, &filter, from_block, to_block)?;
+    let mut scan = LogScan::new(provider, &filter, from_block, to_block, widths)?;
     if limit == 0 {
         return Ok(Vec::new());
     }

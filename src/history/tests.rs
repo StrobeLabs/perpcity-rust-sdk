@@ -7,7 +7,7 @@ use alloy::primitives::{
 use alloy::rpc::types::{Filter, Log};
 use alloy::sol_types::SolEvent;
 
-use super::scan::{End, LogScan};
+use super::scan::{End, LogScan, WidthSearch};
 use super::test_support::{FakeNode, Mode, mined_log, timestamp_of};
 use super::*;
 use crate::constants::Q96;
@@ -130,7 +130,8 @@ async fn a_long_capped_scan_retests_the_limit_ever_less_often() {
 async fn newest_first_reads_the_same_range_from_the_top() {
     let node = FakeNode::new(logs_every(500, 60_000), 7_000);
     let provider = node.provider();
-    let mut scan = LogScan::new(&provider, &filter(), 1_000, 60_000).unwrap();
+    let mut widths = WidthSearch::new();
+    let mut scan = LogScan::new(&provider, &filter(), 1_000, 60_000, &mut widths).unwrap();
     let mut seen = Vec::new();
     while let Some(chunk) = scan.next_chunk(End::Newest).await.unwrap() {
         let chunk = blocks(&chunk);
@@ -573,6 +574,47 @@ async fn range_rejections_narrow_to_a_single_block() {
             .unwrap_err();
         assert_eq!(node.requests().last(), Some(&(0, 0)), "{mode:?}");
     }
+}
+
+#[tokio::test]
+async fn a_history_handle_keeps_the_learned_width_across_scans() {
+    let cap = 10_000;
+    let node = FakeNode::new(logs_every(777, 120_000), cap);
+    let mut history = History::new(node.provider());
+    history.logs(&filter(), 0, Some(120_000)).await.unwrap();
+    let after_first = node.requests().len();
+
+    // A second scan starts at the learned width instead of re-paying the
+    // halvings from the initial span.
+    history
+        .logs(&filter(), 120_001, Some(240_000))
+        .await
+        .unwrap();
+    let second: Vec<_> = node.requests().into_iter().skip(after_first).collect();
+    let (first_from, first_to) = second[0];
+    assert!(
+        first_to - first_from < cap,
+        "second scan re-learned the width from scratch: {second:?}"
+    );
+    // The only rejections left are one periodic retest re-narrowing
+    // (a few probes each, as the long-scan budget test prices them),
+    // not the initial halvings from the 100k span.
+    let rejected = second.iter().filter(|(from, to)| to - from >= cap).count();
+    assert!(
+        rejected <= 4,
+        "more than a periodic retest was rejected: {second:?}"
+    );
+}
+
+#[tokio::test]
+async fn the_handle_reads_to_the_lagged_head_by_default() {
+    let node = FakeNode::new(logs_every(1_000, 100_000), u64::MAX).with_head(100_000);
+    let mut history = History::new(node.provider()).with_lag(8);
+    assert_eq!(history.tip().await.unwrap(), 99_992);
+
+    let logs = history.logs(&filter(), 0, None).await.unwrap();
+    assert_eq!(node.requests(), vec![(0, 99_992)]);
+    assert_eq!(logs.last().unwrap().block_number.unwrap(), 99_000);
 }
 
 #[tokio::test]

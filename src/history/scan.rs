@@ -26,7 +26,20 @@ pub async fn get_logs_chunked<P: Provider>(
     from_block: u64,
     to_block: u64,
 ) -> Result<Vec<Log>> {
-    let mut scan = LogScan::new(provider, filter, from_block, to_block)?;
+    let mut widths = WidthSearch::new();
+    get_logs_chunked_with(provider, filter, from_block, to_block, &mut widths).await
+}
+
+/// [`get_logs_chunked`] over a caller-held [`WidthSearch`], so repeated
+/// scans (a [`History`](super::History) handle) keep the learned width.
+pub(super) async fn get_logs_chunked_with<P: Provider>(
+    provider: &P,
+    filter: &Filter,
+    from_block: u64,
+    to_block: u64,
+    widths: &mut WidthSearch,
+) -> Result<Vec<Log>> {
+    let mut scan = LogScan::new(provider, filter, from_block, to_block, widths)?;
     let mut logs = Vec::new();
     while let Some(chunk) = scan.next_chunk(End::Oldest).await? {
         logs.extend(chunk);
@@ -53,7 +66,8 @@ pub(super) struct LogScan<'a, P> {
     filter: Filter,
     /// Blocks not yet read, inclusive; `None` once the range is done.
     remaining: Option<(u64, u64)>,
-    widths: WidthSearch,
+    /// Caller-held so the learned width outlives one scan.
+    widths: &'a mut WidthSearch,
 }
 
 impl<'a, P: Provider> LogScan<'a, P> {
@@ -62,13 +76,14 @@ impl<'a, P: Provider> LogScan<'a, P> {
         filter: &Filter,
         from_block: u64,
         to_block: u64,
+        widths: &'a mut WidthSearch,
     ) -> std::result::Result<Self, ValidationError> {
         check_block_range(from_block, to_block)?;
         Ok(Self {
             provider,
             filter: filter.clone(),
             remaining: Some((from_block, to_block)),
-            widths: WidthSearch::new(),
+            widths,
         })
     }
 
@@ -125,7 +140,7 @@ const RETEST_AFTER: (u32, u32) = (16, 1_024);
 /// breaks it shows the cap is on result count or response size, not on
 /// span, so the contradicted bound is dropped.
 #[derive(Debug)]
-struct WidthSearch {
+pub(super) struct WidthSearch {
     /// Width of the next request; at least 1.
     next: u64,
     /// Widest width accepted since the last contradiction.
@@ -139,7 +154,7 @@ struct WidthSearch {
 }
 
 impl WidthSearch {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         Self {
             next: LOG_SCAN_INITIAL_SPAN,
             accepted: None,
