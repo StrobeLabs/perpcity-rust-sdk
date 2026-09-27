@@ -17,6 +17,20 @@ The changes below break the public API, so the next release is 0.5.0 (a minor bu
 
 ### Added
 
+- **The market-event tape.** `history::market_events(provider, perp,
+  from_block, to_block)` replays every event a perp emitted, in chain
+  order, and `history::latest_market_events(.., limit)` the newest
+  `limit`, reading backward (skipped logs do not count against the
+  limit). Each row is a `TapeEvent { block_number, log_index, timestamp,
+  tx_hash, event: MarketEvent }` — the same `MarketEvent` the live feed
+  streams, decoded by the same `feeds::events::decode_log`, so replayed
+  history and live subscription carry one vocabulary. Logs the decoder
+  does not recognize (ERC-721 approvals, admin events) are skipped, as
+  the live feed skips them. The tape includes
+  `MarketEvent::PositionTransferred` — the position NFT's mint, burn and
+  mid-life transfers — so a position id maps to its owner over time
+  without a separate reader. `examples/tape.rs` is the worked example
+  (read-only; no signer).
 - **`history::History<P: Provider>`** — a handle over the historical
   readers that owns what one-shot calls cannot: the block-lag policy and
   the learned request width. Every method takes `to_block: Option<u64>`;

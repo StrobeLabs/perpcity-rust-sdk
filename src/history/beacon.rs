@@ -1,23 +1,17 @@
 //! A beacon's index series, rebuilt from its `IndexUpdated` logs.
 
-use std::collections::{BTreeSet, HashMap};
-
 use alloy::primitives::{Address, U256};
 use alloy::providers::Provider;
 use alloy::rpc::types::{Filter, Log};
 use alloy::sol_types::SolEvent;
-use futures_util::stream::{self, StreamExt, TryStreamExt};
 use serde::{Deserialize, Serialize};
 
 use crate::contracts::IBeacon;
 use crate::convert::price_x96_to_f64;
-use crate::errors::{ContractError, PerpCityError, Result, ValidationError};
+use crate::errors::{Result, ValidationError};
 use crate::feeds::events::decode_raw;
 
-use super::scan::{End, LogScan, WidthSearch, get_logs_chunked_with};
-
-/// Concurrent header reads when a provider omits log timestamps.
-const HEADER_READ_CONCURRENCY: usize = 4;
+use super::scan::{End, LogScan, WidthSearch, block_timestamps, get_logs_chunked_with};
 
 /// One index value a beacon published.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -51,7 +45,8 @@ impl IndexPrint {
 ///
 /// [`ValidationError::InvalidConfig`] for the zero address,
 /// [`ValidationError::InvalidBlockRange`] if `from_block > to_block`,
-/// [`ContractError::BlockUnavailable`] if a print's block header is missing
+/// [`ContractError::BlockUnavailable`](crate::errors::ContractError::BlockUnavailable)
+/// if a print's block header is missing
 /// when the provider omits log timestamps,
 /// [`ValidationError::DecodeFailed`] for an `IndexUpdated` log that does
 /// not decode, or an error from [`get_logs_chunked`](super::get_logs_chunked).
@@ -146,22 +141,7 @@ fn index_updated_filter(beacon: Address) -> std::result::Result<Filter, Validati
 /// Decodes `IndexUpdated` logs into prints, reading the block header for
 /// any log that arrived without a timestamp.
 async fn with_timestamps<P: Provider>(provider: &P, logs: &[Log]) -> Result<Vec<IndexPrint>> {
-    let missing: BTreeSet<u64> = logs
-        .iter()
-        .filter(|log| log.block_timestamp.is_none())
-        .filter_map(|log| log.block_number)
-        .collect();
-    let headers: HashMap<u64, u64> = stream::iter(missing)
-        .map(|number| async move {
-            let block = provider
-                .get_block_by_number(number.into())
-                .await?
-                .ok_or(ContractError::BlockUnavailable { number })?;
-            Ok::<_, PerpCityError>((number, block.header.timestamp))
-        })
-        .buffer_unordered(HEADER_READ_CONCURRENCY)
-        .try_collect()
-        .await?;
+    let headers = block_timestamps(provider, logs.iter()).await?;
     logs.iter()
         .map(|log| {
             let decoded = log

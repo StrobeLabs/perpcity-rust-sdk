@@ -1,0 +1,177 @@
+//! The market-event tape: a perp's event history, replayed through the
+//! same decoder the live feed uses.
+//!
+//! A [`TapeEvent`] is a [`MarketEvent`] with its chain position, so a
+//! stored tape row and a live feed event carry the same vocabulary — the
+//! only difference is which transport delivered the log. Logs the decoder
+//! does not recognize (ERC-721 approvals, admin events) are skipped, as
+//! the live feed skips them.
+//!
+//! The tape covers what the perp itself emits. That includes
+//! [`MarketEvent::PositionTransferred`] — the position NFT's mint, burn
+//! and mid-life transfers, which is how a position id maps to its owner
+//! over time. It does not include [`MarketEvent::IndexUpdated`] (the
+//! beacon's address — see [`beacon_prints`](super::beacon_prints)) or
+//! [`MarketEvent::ModifyLiquidity`] (the PoolManager's address).
+
+use alloy::primitives::{Address, B256};
+use alloy::providers::Provider;
+use alloy::rpc::types::{Filter, Log};
+use serde::{Deserialize, Serialize};
+
+use crate::errors::{Result, ValidationError};
+use crate::feeds::events::{MarketEvent, decode_log};
+
+use super::scan::{End, LogScan, WidthSearch, block_timestamps, get_logs_chunked_with};
+
+/// One market event with its chain position.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct TapeEvent {
+    /// Block the event landed in.
+    pub block_number: u64,
+    /// Position of the event's log in its block.
+    pub log_index: u64,
+    /// Unix timestamp of the block.
+    pub timestamp: u64,
+    /// Transaction that emitted the event.
+    pub tx_hash: B256,
+    /// The decoded event, as the live feed would have streamed it.
+    pub event: MarketEvent,
+}
+
+/// Every market event `perp` emitted in blocks `from_block..=to_block`,
+/// in chain order.
+///
+/// # Errors
+///
+/// [`ValidationError::InvalidConfig`] for the zero address,
+/// [`ValidationError::InvalidBlockRange`] if `from_block > to_block`,
+/// [`ContractError::BlockUnavailable`](crate::errors::ContractError::BlockUnavailable)
+/// if an event's block header is missing when the provider omits log
+/// timestamps, [`ValidationError::DecodeFailed`] for a recognized event
+/// log missing its mined position, or an error from
+/// [`get_logs_chunked`](super::get_logs_chunked).
+pub async fn market_events<P: Provider>(
+    provider: &P,
+    perp: Address,
+    from_block: u64,
+    to_block: u64,
+) -> Result<Vec<TapeEvent>> {
+    market_events_with(
+        provider,
+        perp,
+        from_block,
+        to_block,
+        &mut WidthSearch::new(),
+    )
+    .await
+}
+
+/// [`market_events`] over a caller-held width search.
+pub(super) async fn market_events_with<P: Provider>(
+    provider: &P,
+    perp: Address,
+    from_block: u64,
+    to_block: u64,
+    widths: &mut WidthSearch,
+) -> Result<Vec<TapeEvent>> {
+    let filter = perp_filter(perp)?;
+    let logs = get_logs_chunked_with(provider, &filter, from_block, to_block, widths).await?;
+    decode_tape(provider, &logs).await
+}
+
+/// The newest `limit` market events `perp` emitted in blocks
+/// `from_block..=to_block`, oldest first.
+///
+/// Reads backward from `to_block` and stops once it holds `limit`
+/// decodable events (skipped logs do not count), so `from_block` is only
+/// a floor.
+///
+/// # Errors
+///
+/// As [`market_events`].
+pub async fn latest_market_events<P: Provider>(
+    provider: &P,
+    perp: Address,
+    from_block: u64,
+    to_block: u64,
+    limit: usize,
+) -> Result<Vec<TapeEvent>> {
+    let mut widths = WidthSearch::new();
+    latest_market_events_with(provider, perp, from_block, to_block, limit, &mut widths).await
+}
+
+/// [`latest_market_events`] over a caller-held width search.
+pub(super) async fn latest_market_events_with<P: Provider>(
+    provider: &P,
+    perp: Address,
+    from_block: u64,
+    to_block: u64,
+    limit: usize,
+    widths: &mut WidthSearch,
+) -> Result<Vec<TapeEvent>> {
+    let filter = perp_filter(perp)?;
+    let mut scan = LogScan::new(provider, &filter, from_block, to_block, widths)?;
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
+    let mut newest_first = Vec::new();
+    let mut held = 0;
+    while held < limit
+        && let Some(chunk) = scan.next_chunk(End::Newest).await?
+    {
+        held += chunk.iter().filter(|log| decode_log(log).is_some()).count();
+        newest_first.push(chunk);
+    }
+    let logs: Vec<Log> = newest_first.into_iter().rev().flatten().collect();
+    let mut events = decode_tape(provider, &logs).await?;
+    let skip = events.len().saturating_sub(limit);
+    Ok(events.split_off(skip))
+}
+
+fn perp_filter(perp: Address) -> std::result::Result<Filter, ValidationError> {
+    if perp.is_zero() {
+        return Err(ValidationError::InvalidConfig {
+            reason: "perp address is zero".into(),
+        });
+    }
+    Ok(Filter::new().address(perp))
+}
+
+/// Decodes logs into tape events, skipping unrecognized ones and reading
+/// the block header for any recognized event without a timestamp.
+async fn decode_tape<P: Provider>(provider: &P, logs: &[Log]) -> Result<Vec<TapeEvent>> {
+    let decoded: Vec<(&Log, MarketEvent)> = logs
+        .iter()
+        .filter_map(|log| decode_log(log).map(|event| (log, event)))
+        .collect();
+    let headers = block_timestamps(provider, decoded.iter().map(|(log, _)| *log)).await?;
+    decoded
+        .into_iter()
+        .map(|(log, event)| {
+            let position = log
+                .block_number
+                .zip(log.log_index)
+                .zip(log.transaction_hash);
+            let ((block_number, log_index), tx_hash) =
+                position.ok_or_else(|| ValidationError::DecodeFailed {
+                    context: format!(
+                        "market event log from {} in tx {:?}",
+                        log.address(),
+                        log.transaction_hash
+                    ),
+                })?;
+            let timestamp = match log.block_timestamp {
+                Some(timestamp) => timestamp,
+                None => headers[&block_number],
+            };
+            Ok(TapeEvent {
+                block_number,
+                log_index,
+                timestamp,
+                tx_hash,
+                event,
+            })
+        })
+        .collect()
+}

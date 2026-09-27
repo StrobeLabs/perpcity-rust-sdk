@@ -1,13 +1,47 @@
 //! The adaptive `eth_getLogs` scan: chunking, width learning, and failure
 //! classification. See the [module docs](super) for the strategy.
 
+use std::collections::{BTreeSet, HashMap};
+
 use alloy::providers::Provider;
 use alloy::rpc::json_rpc::ErrorPayload;
 use alloy::rpc::types::{Filter, Log};
 use alloy::transports::{RpcError, TransportError, TransportErrorKind};
+use futures_util::stream::{self, StreamExt, TryStreamExt};
 
 use crate::constants::{LOG_SCAN_INITIAL_SPAN, LOG_SCAN_MAX_SPAN};
-use crate::errors::{ContractError, Result, ValidationError};
+use crate::errors::{ContractError, PerpCityError, Result, ValidationError};
+
+/// Concurrent header reads when a provider omits log timestamps.
+const HEADER_READ_CONCURRENCY: usize = 4;
+
+/// The timestamp of every block among `logs` that arrived without one,
+/// read from its header once, with bounded concurrency.
+///
+/// # Errors
+///
+/// [`ContractError::BlockUnavailable`] for a header the provider does not
+/// hold, or the transport error from a header read.
+pub(super) async fn block_timestamps<'a, P: Provider>(
+    provider: &P,
+    logs: impl Iterator<Item = &'a Log>,
+) -> Result<HashMap<u64, u64>> {
+    let missing: BTreeSet<u64> = logs
+        .filter(|log| log.block_timestamp.is_none())
+        .filter_map(|log| log.block_number)
+        .collect();
+    stream::iter(missing)
+        .map(|number| async move {
+            let block = provider
+                .get_block_by_number(number.into())
+                .await?
+                .ok_or(ContractError::BlockUnavailable { number })?;
+            Ok::<_, PerpCityError>((number, block.header.timestamp))
+        })
+        .buffer_unordered(HEADER_READ_CONCURRENCY)
+        .try_collect()
+        .await
+}
 
 /// Every log matching `filter` in blocks `from_block..=to_block`, in chain
 /// order.

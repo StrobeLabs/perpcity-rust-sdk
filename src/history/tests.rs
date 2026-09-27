@@ -11,8 +11,9 @@ use super::scan::{End, LogScan, WidthSearch};
 use super::test_support::{FakeNode, Mode, mined_log, timestamp_of};
 use super::*;
 use crate::constants::Q96;
-use crate::contracts::{IBeacon, IERC20};
+use crate::contracts::{IBeacon, IERC20, Perp, SwapResult};
 use crate::errors::{ContractError, PerpCityError, ValidationError};
+use crate::feeds::events::MarketEvent;
 
 const EMITTER: Address = Address::repeat_byte(0xAA);
 const TOPIC: B256 = B256::repeat_byte(0x11);
@@ -574,6 +575,138 @@ async fn range_rejections_narrow_to_a_single_block() {
             .unwrap_err();
         assert_eq!(node.requests().last(), Some(&(0, 0)), "{mode:?}");
     }
+}
+
+const PERP: Address = Address::repeat_byte(0xF0);
+
+/// A mined log carrying a typed event, as a node would return it.
+fn mined_event_log<E: SolEvent>(
+    event: &E,
+    address: Address,
+    block: u64,
+    index: u64,
+    timestamp: Option<u64>,
+) -> Log {
+    Log {
+        inner: PrimitiveLog {
+            address,
+            data: event.encode_log_data(),
+        },
+        block_hash: Some(B256::with_last_byte(1)),
+        block_number: Some(block),
+        block_timestamp: timestamp,
+        transaction_hash: Some(B256::with_last_byte(3)),
+        transaction_index: Some(0),
+        log_index: Some(index),
+        removed: false,
+    }
+}
+
+/// Pack two int128 amounts into a Uniswap V4 `BalanceDelta` (`int256`).
+fn pack_balance_delta(amount0: i128, amount1: i128) -> alloy::primitives::I256 {
+    let mut bytes = [0u8; 32];
+    bytes[0..16].copy_from_slice(&amount0.to_be_bytes());
+    bytes[16..32].copy_from_slice(&amount1.to_be_bytes());
+    alloy::primitives::I256::from_be_bytes(bytes)
+}
+
+fn taker_opened(pos_id: u64) -> Perp::TakerOpened {
+    Perp::TakerOpened {
+        posId: U256::from(pos_id),
+        sr: SwapResult {
+            delta: pack_balance_delta(100_000_000, -100_000_000),
+            ammPrice: Q96,
+            totalFeeAmt: alloy::primitives::I256::try_from(1_000_000i64).unwrap(),
+            lpFeeAmt: U256::from(700_000u64),
+            protocolFeeAmt: U256::from(100_000u64),
+            creatorFeeAmt: U256::from(100_000u64),
+            insuranceFeeAmt: U256::from(100_000u64),
+        },
+    }
+}
+
+fn position_mint(owner: Address, pos_id: u64) -> Perp::Transfer {
+    Perp::Transfer {
+        from: Address::ZERO,
+        to: owner,
+        tokenId: U256::from(pos_id),
+    }
+}
+
+#[tokio::test]
+async fn the_tape_replays_a_perps_events_and_skips_what_the_feed_skips() {
+    let owner = Address::repeat_byte(0x0D);
+    let logs = vec![
+        mined_event_log(&position_mint(owner, 7), PERP, 10, 2, Some(41)),
+        // A log the decoder does not recognize (an approval, say): the
+        // live feed skips it, so the tape does too.
+        mined_log(PERP, TOPIC, Bytes::new(), 15, 0),
+        mined_event_log(&taker_opened(7), PERP, 20, 1, None),
+    ];
+    let node = FakeNode::new(logs, u64::MAX);
+    let tape = market_events(&node.provider(), PERP, 0, 100).await.unwrap();
+
+    assert_eq!(tape.len(), 2, "the stranger log must be skipped: {tape:?}");
+    let mint = &tape[0];
+    assert_eq!(
+        (mint.block_number, mint.log_index, mint.timestamp),
+        (10, 2, 41)
+    );
+    assert!(matches!(
+        mint.event,
+        MarketEvent::PositionTransferred { from, to, pos_id }
+            if from == Address::ZERO && to == owner && pos_id == U256::from(7)
+    ));
+    let open = &tape[1];
+    assert_eq!(
+        (open.block_number, open.log_index, open.timestamp),
+        (20, 1, timestamp_of(20))
+    );
+    assert!(matches!(
+        open.event,
+        MarketEvent::TakerOpened { pos_id, swap }
+            if pos_id == U256::from(7) && (swap.perp_delta - 100.0).abs() < 1e-9
+    ));
+    // Only the recognized event without a log timestamp cost a header read.
+    assert_eq!(node.header_reads(), vec![20]);
+}
+
+#[tokio::test]
+async fn latest_market_events_counts_events_not_skipped_logs() {
+    // Recognized events on even blocks, strangers on odd ones.
+    let mut logs = Vec::new();
+    for block in 1..=10u64 {
+        if block % 2 == 0 {
+            logs.push(mined_event_log(
+                &position_mint(Address::repeat_byte(0x0D), block),
+                PERP,
+                block,
+                0,
+                Some(block),
+            ));
+        } else {
+            logs.push(mined_log(PERP, TOPIC, Bytes::new(), block, 0));
+        }
+    }
+    let node = FakeNode::new(logs, u64::MAX);
+    let tape = latest_market_events(&node.provider(), PERP, 0, 10, 2)
+        .await
+        .unwrap();
+    let blocks: Vec<u64> = tape.iter().map(|t| t.block_number).collect();
+    assert_eq!(blocks, vec![8, 10], "newest two events, oldest first");
+}
+
+#[tokio::test]
+async fn a_zero_perp_reads_no_tape() {
+    let node = FakeNode::new(Vec::new(), u64::MAX);
+    let error = market_events(&node.provider(), Address::ZERO, 0, 10)
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        PerpCityError::Validation(ValidationError::InvalidConfig { .. })
+    ));
+    assert!(node.requests().is_empty());
 }
 
 #[tokio::test]

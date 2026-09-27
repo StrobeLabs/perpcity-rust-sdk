@@ -1,12 +1,16 @@
 //! Historical chain reads over block ranges of any length.
 //!
 //! [`get_logs_chunked`] reads every log that matches a filter across a
-//! block range, whatever limits the provider puts on `eth_getLogs`.
-//! [`beacon_prints`] and [`latest_beacon_prints`] build a beacon's index
-//! series, `(block, timestamp, index)`, on top of it, and
-//! [`token_transfers`] reads an ERC-20's `Transfer` events between address
-//! sets (for example, every USDC transfer between a treasury and its
-//! wallets).
+//! block range, whatever limits the provider puts on `eth_getLogs`. On
+//! top of it: [`beacon_prints`] and [`latest_beacon_prints`] build a
+//! beacon's index series, `(block, timestamp, index)`;
+//! [`market_events`] and [`latest_market_events`] replay a perp's whole
+//! event history — the tape — through the same decoder the live feed
+//! uses ([`crate::feeds::events::decode_log`]), position-NFT transfers
+//! included; and [`token_transfers`] reads an ERC-20's `Transfer` events
+//! between address sets (for example, every USDC transfer between a
+//! treasury and its wallets). [`History`] wraps them all with a uniform
+//! block-lag policy and a request width learned once across scans.
 //!
 //! Providers cap `eth_getLogs` by block span, by result count, or by
 //! response size, and each words the rejection differently, so the scan
@@ -42,6 +46,7 @@
 
 mod beacon;
 mod scan;
+mod tape;
 mod transfers;
 
 #[cfg(any(test, feature = "test-utils"))]
@@ -52,6 +57,7 @@ mod tests;
 
 pub use beacon::{IndexPrint, beacon_prints, latest_beacon_prints};
 pub use scan::get_logs_chunked;
+pub use tape::{TapeEvent, latest_market_events, market_events};
 pub use transfers::{TokenTransfer, token_transfers};
 
 use alloy::primitives::Address;
@@ -164,6 +170,45 @@ impl<P: Provider> History<P> {
         beacon::latest_beacon_prints_with(
             &self.provider,
             beacon,
+            from_block,
+            to,
+            limit,
+            &mut self.widths,
+        )
+        .await
+    }
+
+    /// [`market_events`], to `to_block` or the lagged head.
+    ///
+    /// # Errors
+    ///
+    /// As [`market_events`].
+    pub async fn market_events(
+        &mut self,
+        perp: Address,
+        from_block: u64,
+        to_block: Option<u64>,
+    ) -> Result<Vec<TapeEvent>> {
+        let to = self.resolve(to_block).await?;
+        tape::market_events_with(&self.provider, perp, from_block, to, &mut self.widths).await
+    }
+
+    /// [`latest_market_events`], to `to_block` or the lagged head.
+    ///
+    /// # Errors
+    ///
+    /// As [`latest_market_events`].
+    pub async fn latest_market_events(
+        &mut self,
+        perp: Address,
+        from_block: u64,
+        to_block: Option<u64>,
+        limit: usize,
+    ) -> Result<Vec<TapeEvent>> {
+        let to = self.resolve(to_block).await?;
+        tape::latest_market_events_with(
+            &self.provider,
+            perp,
             from_block,
             to,
             limit,
