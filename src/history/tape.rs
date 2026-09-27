@@ -22,7 +22,9 @@ use serde::{Deserialize, Serialize};
 use crate::errors::{Result, ValidationError};
 use crate::feeds::events::{MarketEvent, decode_log};
 
-use super::scan::{End, LogScan, WidthSearch, block_timestamps, get_logs_chunked_with};
+use futures_util::TryStreamExt;
+
+use super::scan::{SharedWidths, block_timestamps, check_block_range, scan_all, scan_newest};
 
 /// One market event with its chain position.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -62,21 +64,24 @@ pub async fn market_events<P: Provider>(
         perp,
         from_block,
         to_block,
-        &mut WidthSearch::new(),
+        &SharedWidths::new(),
+        1,
     )
     .await
 }
 
-/// [`market_events`] over a caller-held width search.
+/// [`market_events`] over a caller-held width search, with up to
+/// `in_flight` window requests outstanding.
 pub(super) async fn market_events_with<P: Provider>(
     provider: &P,
     perp: Address,
     from_block: u64,
     to_block: u64,
-    widths: &mut WidthSearch,
+    widths: &SharedWidths,
+    in_flight: usize,
 ) -> Result<Vec<TapeEvent>> {
     let filter = perp_filter(perp)?;
-    let logs = get_logs_chunked_with(provider, &filter, from_block, to_block, widths).await?;
+    let logs = scan_all(provider, &filter, from_block, to_block, widths, in_flight).await?;
     decode_tape(provider, &logs).await
 }
 
@@ -97,8 +102,15 @@ pub async fn latest_market_events<P: Provider>(
     to_block: u64,
     limit: usize,
 ) -> Result<Vec<TapeEvent>> {
-    let mut widths = WidthSearch::new();
-    latest_market_events_with(provider, perp, from_block, to_block, limit, &mut widths).await
+    latest_market_events_with(
+        provider,
+        perp,
+        from_block,
+        to_block,
+        limit,
+        &SharedWidths::new(),
+    )
+    .await
 }
 
 /// [`latest_market_events`] over a caller-held width search.
@@ -108,17 +120,18 @@ pub(super) async fn latest_market_events_with<P: Provider>(
     from_block: u64,
     to_block: u64,
     limit: usize,
-    widths: &mut WidthSearch,
+    widths: &SharedWidths,
 ) -> Result<Vec<TapeEvent>> {
     let filter = perp_filter(perp)?;
-    let mut scan = LogScan::new(provider, &filter, from_block, to_block, widths)?;
+    check_block_range(from_block, to_block)?;
     if limit == 0 {
         return Ok(Vec::new());
     }
+    let mut chunks = std::pin::pin!(scan_newest(provider, &filter, from_block, to_block, widths));
     let mut newest_first = Vec::new();
     let mut held = 0;
     while held < limit
-        && let Some(chunk) = scan.next_chunk(End::Newest).await?
+        && let Some(chunk) = chunks.try_next().await?
     {
         held += chunk.iter().filter(|log| decode_log(log).is_some()).count();
         newest_first.push(chunk);

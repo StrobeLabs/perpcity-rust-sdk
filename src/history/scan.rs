@@ -1,13 +1,28 @@
-//! The adaptive `eth_getLogs` scan: chunking, width learning, and failure
-//! classification. See the [module docs](super) for the strategy.
+//! The adaptive `eth_getLogs` scan: chunking, width learning, failure
+//! classification, and the concurrent drivers. See the
+//! [module docs](super) for the strategy.
+//!
+//! A scan carves the range into **windows** at the width the shared
+//! [`WidthSearch`] currently believes and keeps a bounded number of them
+//! in flight; results are delivered in range order. Each window is read
+//! completely by its own worker — a window that turns out too wide
+//! narrows *itself* into sub-requests (reporting to the shared width so
+//! later carves start narrower) without disturbing its siblings. Windows
+//! carved while earlier ones are still in flight use the estimate as it
+//! stands; the learning applies to every carve after an answer lands.
+//!
+//! A newest-first scan ([`scan_newest`]) is not windowed: it exists to
+//! stop early, so it sends one request at a time from the unread top and
+//! lets the caller stop the moment it holds enough.
 
 use std::collections::{BTreeSet, HashMap};
+use std::sync::Mutex;
 
 use alloy::providers::Provider;
 use alloy::rpc::json_rpc::ErrorPayload;
 use alloy::rpc::types::{Filter, Log};
 use alloy::transports::{RpcError, TransportError, TransportErrorKind};
-use futures_util::stream::{self, StreamExt, TryStreamExt};
+use futures_util::stream::{self, Stream, StreamExt, TryStreamExt};
 
 use crate::constants::{LOG_SCAN_INITIAL_SPAN, LOG_SCAN_MAX_SPAN};
 use crate::errors::{ContractError, PerpCityError, Result, ValidationError};
@@ -46,8 +61,10 @@ pub(super) async fn block_timestamps<'a, P: Provider>(
 /// Every log matching `filter` in blocks `from_block..=to_block`, in chain
 /// order.
 ///
-/// The block range of `filter` itself is ignored. See the
-/// [module docs](super) for how the range is split into requests.
+/// The block range of `filter` itself is ignored. Sequential — one
+/// request in flight; a [`History`](super::History) handle scans the same
+/// way with its concurrency budget. See the [module docs](super) for how
+/// the range is split into requests.
 ///
 /// # Errors
 ///
@@ -60,25 +77,140 @@ pub async fn get_logs_chunked<P: Provider>(
     from_block: u64,
     to_block: u64,
 ) -> Result<Vec<Log>> {
-    let mut widths = WidthSearch::new();
-    get_logs_chunked_with(provider, filter, from_block, to_block, &mut widths).await
+    scan_all(
+        provider,
+        filter,
+        from_block,
+        to_block,
+        &SharedWidths::new(),
+        1,
+    )
+    .await
 }
 
-/// [`get_logs_chunked`] over a caller-held [`WidthSearch`], so repeated
-/// scans (a [`History`](super::History) handle) keep the learned width.
-pub(super) async fn get_logs_chunked_with<P: Provider>(
+/// Every log in the range, in chain order, with up to `in_flight` window
+/// requests outstanding at once.
+pub(super) async fn scan_all<P: Provider>(
     provider: &P,
     filter: &Filter,
     from_block: u64,
     to_block: u64,
-    widths: &mut WidthSearch,
+    widths: &SharedWidths,
+    in_flight: usize,
 ) -> Result<Vec<Log>> {
-    let mut scan = LogScan::new(provider, filter, from_block, to_block, widths)?;
+    check_block_range(from_block, to_block)?;
+    let mut chunks = std::pin::pin!(
+        windows_oldest_first(from_block, to_block, widths)
+            .map(|(low, high)| read_window(provider, filter, low, high, widths))
+            .buffered(in_flight.max(1))
+    );
     let mut logs = Vec::new();
-    while let Some(chunk) = scan.next_chunk(End::Oldest).await? {
+    while let Some(chunk) = chunks.try_next().await? {
         logs.extend(chunk);
     }
     Ok(logs)
+}
+
+/// The range's chunks newest first (each chunk's logs in chain order),
+/// one request at a time, anchored at the unread top.
+///
+/// The caller validates the range and stops pulling once it has enough.
+/// Sequential by design: a request sent below the stopping point is pure
+/// waste, and a rejection narrows the request from its top instead of
+/// committing to a whole window.
+pub(super) fn scan_newest<'a, P: Provider>(
+    provider: &'a P,
+    filter: &'a Filter,
+    from_block: u64,
+    to_block: u64,
+    widths: &'a SharedWidths,
+) -> impl Stream<Item = Result<Vec<Log>>> + 'a {
+    stream::try_unfold(Some(to_block), move |high| async move {
+        let Some(high) = high.filter(|&high| high >= from_block) else {
+            return Ok(None);
+        };
+        loop {
+            let low = high.saturating_sub(widths.next() - 1).max(from_block);
+            if let Some(chunk) = attempt(provider, filter, low, high, widths).await? {
+                return Ok(Some((chunk, low.checked_sub(1))));
+            }
+        }
+    })
+}
+
+/// Windows tiling `from..=to` oldest first, each carved at the width the
+/// shared search believes when the driver asks for it.
+fn windows_oldest_first<'a>(
+    from: u64,
+    to: u64,
+    widths: &'a SharedWidths,
+) -> impl Stream<Item = (u64, u64)> + 'a {
+    stream::unfold(Some(from), move |low| {
+        std::future::ready(low.filter(|&low| low <= to).map(|low| {
+            let high = low.saturating_add(widths.next() - 1).min(to);
+            ((low, high), high.checked_add(1))
+        }))
+    })
+}
+
+/// Read the window `from..=to` completely, in chain order.
+///
+/// A range rejection narrows this window's own requests (and the shared
+/// width, so later carves start narrower) without disturbing sibling
+/// windows.
+async fn read_window<P: Provider>(
+    provider: &P,
+    filter: &Filter,
+    from: u64,
+    to: u64,
+    widths: &SharedWidths,
+) -> Result<Vec<Log>> {
+    let mut logs = Vec::new();
+    let mut low = from;
+    loop {
+        let high = low + (widths.next() - 1).min(to - low);
+        if let Some(chunk) = attempt(provider, filter, low, high, widths).await? {
+            logs.extend(chunk);
+            if high == to {
+                return Ok(logs);
+            }
+            low = high + 1;
+        }
+    }
+}
+
+/// One `eth_getLogs` request over `from..=to`, reported to the shared
+/// width. `None` is a range rejection a narrower request may fix (the
+/// width is already narrowed); failures no narrower range fixes are
+/// returned at once.
+async fn attempt<P: Provider>(
+    provider: &P,
+    filter: &Filter,
+    from: u64,
+    to: u64,
+    widths: &SharedWidths,
+) -> Result<Option<Vec<Log>>> {
+    let request = filter.clone().from_block(from).to_block(to);
+    match provider.get_logs(&request).await {
+        Ok(chunk) => {
+            widths.accepted(to - from + 1);
+            Ok(Some(chunk))
+        }
+        Err(error) => match classify(&error) {
+            Failure::Range if to > from => {
+                tracing::debug!(from, to, %error, "eth_getLogs range rejected; narrowing");
+                widths.rejected(to - from + 1);
+                Ok(None)
+            }
+            Failure::Range | Failure::Refused => Err(ContractError::LogsRejected {
+                from_block: from,
+                to_block: to,
+                source: error,
+            }
+            .into()),
+            Failure::Unanswered => Err(error.into()),
+        },
+    }
 }
 
 pub(super) fn check_block_range(
@@ -94,72 +226,28 @@ pub(super) fn check_block_range(
     Ok(())
 }
 
-/// A block range read in adaptive chunks, from either end.
-pub(super) struct LogScan<'a, P> {
-    provider: &'a P,
-    filter: Filter,
-    /// Blocks not yet read, inclusive; `None` once the range is done.
-    remaining: Option<(u64, u64)>,
-    /// Caller-held so the learned width outlives one scan.
-    widths: &'a mut WidthSearch,
-}
+/// A [`WidthSearch`] shared by every worker of a scan (and, on a
+/// [`History`](super::History) handle, across scans). Lock scope is one
+/// bookkeeping call; it is never held across an await.
+#[derive(Debug)]
+pub(super) struct SharedWidths(Mutex<WidthSearch>);
 
-impl<'a, P: Provider> LogScan<'a, P> {
-    pub(super) fn new(
-        provider: &'a P,
-        filter: &Filter,
-        from_block: u64,
-        to_block: u64,
-        widths: &'a mut WidthSearch,
-    ) -> std::result::Result<Self, ValidationError> {
-        check_block_range(from_block, to_block)?;
-        Ok(Self {
-            provider,
-            filter: filter.clone(),
-            remaining: Some((from_block, to_block)),
-            widths,
-        })
+impl SharedWidths {
+    pub(super) fn new() -> Self {
+        Self(Mutex::new(WidthSearch::new()))
     }
 
-    /// The logs of the unread chunk at `end`, or `None` once the range is
-    /// read.
-    pub(super) async fn next_chunk(&mut self, end: End) -> Result<Option<Vec<Log>>> {
-        let Some((low, high)) = self.remaining else {
-            return Ok(None);
-        };
-        loop {
-            let reach = self.widths.next - 1;
-            let (from, to) = match end {
-                End::Oldest => (low, low.saturating_add(reach).min(high)),
-                End::Newest => (high.saturating_sub(reach).max(low), high),
-            };
-            let filter = self.filter.clone().from_block(from).to_block(to);
-            match self.provider.get_logs(&filter).await {
-                Ok(logs) => {
-                    self.remaining = match end {
-                        End::Oldest => (to < high).then(|| (to + 1, high)),
-                        End::Newest => (from > low).then(|| (low, from - 1)),
-                    };
-                    self.widths.accepted(to - from + 1);
-                    return Ok(Some(logs));
-                }
-                Err(error) => match classify(&error) {
-                    Failure::Range if to > from => {
-                        tracing::debug!(from, to, %error, "eth_getLogs range rejected; narrowing");
-                        self.widths.rejected(to - from + 1);
-                    }
-                    Failure::Range | Failure::Refused => {
-                        return Err(ContractError::LogsRejected {
-                            from_block: from,
-                            to_block: to,
-                            source: error,
-                        }
-                        .into());
-                    }
-                    Failure::Unanswered => return Err(error.into()),
-                },
-            }
-        }
+    /// Width for the next carve or request; at least 1.
+    fn next(&self) -> u64 {
+        self.0.lock().unwrap().next
+    }
+
+    fn accepted(&self, width: u64) {
+        self.0.lock().unwrap().accepted(width);
+    }
+
+    fn rejected(&self, width: u64) {
+        self.0.lock().unwrap().rejected(width);
     }
 }
 
@@ -172,9 +260,11 @@ const RETEST_AFTER: (u32, u32) = (16, 1_024);
 ///
 /// Holds `accepted < rejected` whenever both are known: an answer that
 /// breaks it shows the cap is on result count or response size, not on
-/// span, so the contradicted bound is dropped.
+/// span, so the contradicted bound is dropped. Under a concurrent scan
+/// the answers arrive interleaved; the same contradiction handling keeps
+/// the estimate self-correcting.
 #[derive(Debug)]
-pub(super) struct WidthSearch {
+struct WidthSearch {
     /// Width of the next request; at least 1.
     next: u64,
     /// Widest width accepted since the last contradiction.
@@ -188,7 +278,7 @@ pub(super) struct WidthSearch {
 }
 
 impl WidthSearch {
-    pub(super) fn new() -> Self {
+    fn new() -> Self {
         Self {
             next: LOG_SCAN_INITIAL_SPAN,
             accepted: None,
@@ -253,13 +343,6 @@ fn probe(accepted: u64, rejected: u64) -> u64 {
     } else {
         accepted + gap / 2
     }
-}
-
-/// Which end of the unread range the next chunk comes from.
-#[derive(Clone, Copy)]
-pub(super) enum End {
-    Oldest,
-    Newest,
 }
 
 /// What a failed `eth_getLogs` request tells the scan.

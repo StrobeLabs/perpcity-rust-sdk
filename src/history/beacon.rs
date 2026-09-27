@@ -11,7 +11,9 @@ use crate::convert::price_x96_to_f64;
 use crate::errors::{Result, ValidationError};
 use crate::feeds::events::decode_raw;
 
-use super::scan::{End, LogScan, WidthSearch, block_timestamps, get_logs_chunked_with};
+use futures_util::TryStreamExt;
+
+use super::scan::{SharedWidths, block_timestamps, check_block_range, scan_all, scan_newest};
 
 /// One index value a beacon published.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -61,21 +63,24 @@ pub async fn beacon_prints<P: Provider>(
         beacon,
         from_block,
         to_block,
-        &mut WidthSearch::new(),
+        &SharedWidths::new(),
+        1,
     )
     .await
 }
 
-/// [`beacon_prints`] over a caller-held width search.
+/// [`beacon_prints`] over a caller-held width search, with up to
+/// `in_flight` window requests outstanding.
 pub(super) async fn beacon_prints_with<P: Provider>(
     provider: &P,
     beacon: Address,
     from_block: u64,
     to_block: u64,
-    widths: &mut WidthSearch,
+    widths: &SharedWidths,
+    in_flight: usize,
 ) -> Result<Vec<IndexPrint>> {
     let filter = index_updated_filter(beacon)?;
-    let logs = get_logs_chunked_with(provider, &filter, from_block, to_block, widths).await?;
+    let logs = scan_all(provider, &filter, from_block, to_block, widths, in_flight).await?;
     with_timestamps(provider, &logs).await
 }
 
@@ -96,8 +101,15 @@ pub async fn latest_beacon_prints<P: Provider>(
     to_block: u64,
     limit: usize,
 ) -> Result<Vec<IndexPrint>> {
-    let mut widths = WidthSearch::new();
-    latest_beacon_prints_with(provider, beacon, from_block, to_block, limit, &mut widths).await
+    latest_beacon_prints_with(
+        provider,
+        beacon,
+        from_block,
+        to_block,
+        limit,
+        &SharedWidths::new(),
+    )
+    .await
 }
 
 /// [`latest_beacon_prints`] over a caller-held width search.
@@ -107,17 +119,18 @@ pub(super) async fn latest_beacon_prints_with<P: Provider>(
     from_block: u64,
     to_block: u64,
     limit: usize,
-    widths: &mut WidthSearch,
+    widths: &SharedWidths,
 ) -> Result<Vec<IndexPrint>> {
     let filter = index_updated_filter(beacon)?;
-    let mut scan = LogScan::new(provider, &filter, from_block, to_block, widths)?;
+    check_block_range(from_block, to_block)?;
     if limit == 0 {
         return Ok(Vec::new());
     }
+    let mut chunks = std::pin::pin!(scan_newest(provider, &filter, from_block, to_block, widths));
     let mut newest_first = Vec::new();
     let mut held = 0;
     while held < limit
-        && let Some(chunk) = scan.next_chunk(End::Newest).await?
+        && let Some(chunk) = chunks.try_next().await?
     {
         held += chunk.len();
         newest_first.push(chunk);
