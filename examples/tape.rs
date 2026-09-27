@@ -38,7 +38,7 @@ async fn main() -> perpcity_sdk::Result<()> {
         .expect("provider connects");
     // The handle reads to the head minus its lag by default, and keeps the
     // provider's learned eth_getLogs width across calls.
-    let mut history = History::new(provider);
+    let history = History::new(provider);
 
     let tape = history.latest_market_events(perp, 0, None, limit).await?;
     println!("newest {} market events of {perp}:", tape.len());

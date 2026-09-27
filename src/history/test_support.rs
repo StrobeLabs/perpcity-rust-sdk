@@ -10,6 +10,7 @@
 
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
+use std::time::Duration;
 
 use alloy::network::Ethereum;
 use alloy::primitives::{Address, B256, Bytes, Log as PrimitiveLog, LogData};
@@ -38,6 +39,28 @@ pub enum Mode {
 struct State {
     requests: Vec<(u64, u64)>,
     header_reads: Vec<u64>,
+    in_flight: usize,
+    peak_in_flight: usize,
+}
+
+/// Counts a request as in flight until its answer future completes or is
+/// dropped.
+struct InFlight(Arc<Mutex<State>>);
+
+impl InFlight {
+    fn new(state: Arc<Mutex<State>>) -> Self {
+        let mut locked = state.lock().unwrap();
+        locked.in_flight += 1;
+        locked.peak_in_flight = locked.peak_in_flight.max(locked.in_flight);
+        drop(locked);
+        Self(state)
+    }
+}
+
+impl Drop for InFlight {
+    fn drop(&mut self) {
+        self.0.lock().unwrap().in_flight -= 1;
+    }
 }
 
 /// In-memory node. Clones share the request log.
@@ -48,6 +71,7 @@ pub struct FakeNode {
     max_results: usize,
     mode: Mode,
     head: Option<u64>,
+    latency: Option<Duration>,
     state: Arc<Mutex<State>>,
 }
 
@@ -61,8 +85,16 @@ impl FakeNode {
             max_results: usize::MAX,
             mode: Mode::Serve,
             head: None,
+            latency: None,
             state: Arc::default(),
         }
+    }
+
+    /// Delay every answer by `latency` (tokio time, so paused-clock tests
+    /// measure concurrency deterministically).
+    pub fn with_latency(mut self, latency: Duration) -> Self {
+        self.latency = Some(latency);
+        self
     }
 
     /// The chain head the node reports to `eth_blockNumber`; without one
@@ -97,6 +129,11 @@ impl FakeNode {
     /// Every block whose header was read, in order.
     pub fn header_reads(&self) -> Vec<u64> {
         self.state.lock().unwrap().header_reads.clone()
+    }
+
+    /// The most requests that were ever in flight at once.
+    pub fn peak_in_flight(&self) -> usize {
+        self.state.lock().unwrap().peak_in_flight
     }
 
     fn answer(
@@ -188,11 +225,19 @@ impl Service<RequestPacket> for FakeNode {
         let RequestPacket::Single(req) = req else {
             panic!("FakeNode does not serve batches");
         };
+        // Answered at submission so `requests()` records issue order; the
+        // latency and the in-flight window play out in the future.
         let answer = self.answer(req.method(), req.params());
         let id = req.id().clone();
-        Box::pin(
-            async move { answer.map(|payload| ResponsePacket::Single(Response { id, payload })) },
-        )
+        let in_flight = InFlight::new(Arc::clone(&self.state));
+        let latency = self.latency;
+        Box::pin(async move {
+            let _in_flight = in_flight;
+            if let Some(latency) = latency {
+                tokio::time::sleep(latency).await;
+            }
+            answer.map(|payload| ResponsePacket::Single(Response { id, payload }))
+        })
     }
 }
 

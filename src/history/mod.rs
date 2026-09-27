@@ -67,8 +67,15 @@ use alloy::rpc::types::{Filter, Log};
 use crate::constants::SNAPSHOT_BLOCK_LAG;
 use crate::errors::Result;
 
+/// Window requests a [`History`] handle keeps in flight by default: a
+/// meaningful pipeline against typical provider latency while staying
+/// polite to metered endpoints. Raise it with [`History::with_in_flight`]
+/// against a provider you own.
+pub const DEFAULT_IN_FLIGHT: usize = 4;
+
 /// A handle over historical reads that owns what one-shot calls cannot:
-/// the block-lag policy and the learned request width.
+/// the block-lag policy, the learned request width, and the concurrency
+/// budget.
 ///
 /// **Lag.** Every reader takes `to_block: Option<u64>`; `None` reads to
 /// the head minus the handle's lag ([`SNAPSHOT_BLOCK_LAG`] blocks unless
@@ -80,6 +87,13 @@ use crate::errors::Result;
 /// limits on every call; the handle keeps the learned width across calls,
 /// so a process that scans repeatedly (a collector) pays the search once.
 ///
+/// **Concurrency.** The handle keeps up to [`DEFAULT_IN_FLIGHT`] window
+/// requests outstanding per scan ([`Self::with_in_flight`] to change it);
+/// the free functions stay sequential. Results are always delivered in
+/// range order. Newest-first reads (`latest_*`) are sequential on every
+/// path — they exist to stop early, and a request sent below the stopping
+/// point is waste. Rate-limit backoff belongs in the transport, as ever.
+///
 /// Constructed from any [`Provider`] — reading history needs no signer.
 /// A [`PerpClient`](crate::PerpClient) exposes its provider through
 /// [`history()`](crate::PerpClient::history).
@@ -87,23 +101,33 @@ use crate::errors::Result;
 pub struct History<P> {
     provider: P,
     lag: u64,
-    widths: scan::WidthSearch,
+    in_flight: usize,
+    widths: scan::SharedWidths,
 }
 
 impl<P: Provider> History<P> {
     /// A handle over `provider` with the default lag of
-    /// [`SNAPSHOT_BLOCK_LAG`] blocks.
+    /// [`SNAPSHOT_BLOCK_LAG`] blocks and [`DEFAULT_IN_FLIGHT`] concurrent
+    /// window requests.
     pub fn new(provider: P) -> Self {
         Self {
             provider,
             lag: SNAPSHOT_BLOCK_LAG,
-            widths: scan::WidthSearch::new(),
+            in_flight: DEFAULT_IN_FLIGHT,
+            widths: scan::SharedWidths::new(),
         }
     }
 
     /// The handle with a different lag; `0` reads to the raw head.
     pub fn with_lag(mut self, blocks: u64) -> Self {
         self.lag = blocks;
+        self
+    }
+
+    /// The handle with a different concurrency budget; `1` scans
+    /// sequentially, exactly as the free functions do.
+    pub fn with_in_flight(mut self, requests: usize) -> Self {
+        self.in_flight = requests.max(1);
         self
     }
 
@@ -130,13 +154,21 @@ impl<P: Provider> History<P> {
     ///
     /// As [`get_logs_chunked`].
     pub async fn logs(
-        &mut self,
+        &self,
         filter: &Filter,
         from_block: u64,
         to_block: Option<u64>,
     ) -> Result<Vec<Log>> {
         let to = self.resolve(to_block).await?;
-        scan::get_logs_chunked_with(&self.provider, filter, from_block, to, &mut self.widths).await
+        scan::scan_all(
+            &self.provider,
+            filter,
+            from_block,
+            to,
+            &self.widths,
+            self.in_flight,
+        )
+        .await
     }
 
     /// [`beacon_prints`], to `to_block` or the lagged head.
@@ -145,13 +177,21 @@ impl<P: Provider> History<P> {
     ///
     /// As [`beacon_prints`].
     pub async fn beacon_prints(
-        &mut self,
+        &self,
         beacon: Address,
         from_block: u64,
         to_block: Option<u64>,
     ) -> Result<Vec<IndexPrint>> {
         let to = self.resolve(to_block).await?;
-        beacon::beacon_prints_with(&self.provider, beacon, from_block, to, &mut self.widths).await
+        beacon::beacon_prints_with(
+            &self.provider,
+            beacon,
+            from_block,
+            to,
+            &self.widths,
+            self.in_flight,
+        )
+        .await
     }
 
     /// [`latest_beacon_prints`], to `to_block` or the lagged head.
@@ -160,7 +200,7 @@ impl<P: Provider> History<P> {
     ///
     /// As [`latest_beacon_prints`].
     pub async fn latest_beacon_prints(
-        &mut self,
+        &self,
         beacon: Address,
         from_block: u64,
         to_block: Option<u64>,
@@ -173,7 +213,7 @@ impl<P: Provider> History<P> {
             from_block,
             to,
             limit,
-            &mut self.widths,
+            &self.widths,
         )
         .await
     }
@@ -184,13 +224,21 @@ impl<P: Provider> History<P> {
     ///
     /// As [`market_events`].
     pub async fn market_events(
-        &mut self,
+        &self,
         perp: Address,
         from_block: u64,
         to_block: Option<u64>,
     ) -> Result<Vec<TapeEvent>> {
         let to = self.resolve(to_block).await?;
-        tape::market_events_with(&self.provider, perp, from_block, to, &mut self.widths).await
+        tape::market_events_with(
+            &self.provider,
+            perp,
+            from_block,
+            to,
+            &self.widths,
+            self.in_flight,
+        )
+        .await
     }
 
     /// [`latest_market_events`], to `to_block` or the lagged head.
@@ -199,22 +247,15 @@ impl<P: Provider> History<P> {
     ///
     /// As [`latest_market_events`].
     pub async fn latest_market_events(
-        &mut self,
+        &self,
         perp: Address,
         from_block: u64,
         to_block: Option<u64>,
         limit: usize,
     ) -> Result<Vec<TapeEvent>> {
         let to = self.resolve(to_block).await?;
-        tape::latest_market_events_with(
-            &self.provider,
-            perp,
-            from_block,
-            to,
-            limit,
-            &mut self.widths,
-        )
-        .await
+        tape::latest_market_events_with(&self.provider, perp, from_block, to, limit, &self.widths)
+            .await
     }
 
     /// [`token_transfers`], to `to_block` or the lagged head.
@@ -223,7 +264,7 @@ impl<P: Provider> History<P> {
     ///
     /// As [`token_transfers`].
     pub async fn token_transfers(
-        &mut self,
+        &self,
         token: Address,
         senders: Option<&[Address]>,
         recipients: Option<&[Address]>,
@@ -238,7 +279,8 @@ impl<P: Provider> History<P> {
             recipients,
             from_block,
             to,
-            &mut self.widths,
+            &self.widths,
+            self.in_flight,
         )
         .await
     }

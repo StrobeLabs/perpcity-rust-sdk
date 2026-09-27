@@ -1,13 +1,16 @@
 //! Tests for the history readers, over the in-memory
 //! [`FakeNode`](super::test_support::FakeNode).
 
+use std::time::Duration;
+
 use alloy::primitives::{
     Address, B256, Bytes, Log as PrimitiveLog, LogData, U256, address, b256, bytes,
 };
 use alloy::rpc::types::{Filter, Log};
 use alloy::sol_types::SolEvent;
+use futures_util::TryStreamExt;
 
-use super::scan::{End, LogScan, WidthSearch};
+use super::scan::{SharedWidths, scan_newest};
 use super::test_support::{FakeNode, Mode, mined_log, timestamp_of};
 use super::*;
 use crate::constants::Q96;
@@ -131,10 +134,11 @@ async fn a_long_capped_scan_retests_the_limit_ever_less_often() {
 async fn newest_first_reads_the_same_range_from_the_top() {
     let node = FakeNode::new(logs_every(500, 60_000), 7_000);
     let provider = node.provider();
-    let mut widths = WidthSearch::new();
-    let mut scan = LogScan::new(&provider, &filter(), 1_000, 60_000, &mut widths).unwrap();
+    let widths = SharedWidths::new();
+    let filter = filter();
+    let mut chunks = std::pin::pin!(scan_newest(&provider, &filter, 1_000, 60_000, &widths));
     let mut seen = Vec::new();
-    while let Some(chunk) = scan.next_chunk(End::Newest).await.unwrap() {
+    while let Some(chunk) = chunks.try_next().await.unwrap() {
         let chunk = blocks(&chunk);
         if let (Some(last), Some(first)) = (seen.last(), chunk.first()) {
             assert!(first < last, "chunks must arrive newest first");
@@ -713,7 +717,7 @@ async fn a_zero_perp_reads_no_tape() {
 async fn a_history_handle_keeps_the_learned_width_across_scans() {
     let cap = 10_000;
     let node = FakeNode::new(logs_every(777, 120_000), cap);
-    let mut history = History::new(node.provider());
+    let history = History::new(node.provider());
     history.logs(&filter(), 0, Some(120_000)).await.unwrap();
     let after_first = node.requests().len();
 
@@ -739,10 +743,78 @@ async fn a_history_handle_keeps_the_learned_width_across_scans() {
     );
 }
 
+#[tokio::test(start_paused = true)]
+async fn a_handle_reads_windows_concurrently() {
+    let latency = Duration::from_millis(250);
+    let node = FakeNode::new(logs_every(1_000, 350_000), u64::MAX).with_latency(latency);
+    let history = History::new(node.provider());
+    let started = tokio::time::Instant::now();
+    let logs = history.logs(&filter(), 0, Some(350_000)).await.unwrap();
+    assert_eq!(
+        blocks(&logs),
+        (0..=350_000).step_by(1_000).collect::<Vec<_>>()
+    );
+    // Four windows carve at the initial span and fly together, so the
+    // scan takes about one round trip, not four.
+    assert_eq!(node.peak_in_flight(), 4);
+    assert!(
+        started.elapsed() < latency * 2,
+        "windows were read sequentially: {:?}",
+        started.elapsed()
+    );
+    assert_tiles(&node.requests(), 0, 350_000);
+}
+
+#[tokio::test]
+async fn a_concurrent_scan_learns_a_cap_and_still_reads_exactly() {
+    let cap = 10_000;
+    let node = FakeNode::new(logs_every(777, 120_000), cap);
+    let history = History::new(node.provider());
+    let logs = history.logs(&filter(), 0, Some(120_000)).await.unwrap();
+    assert_eq!(
+        blocks(&logs),
+        (0..=120_000).step_by(777).collect::<Vec<_>>()
+    );
+    let requests = node.requests();
+    let (accepted, rejected): (Vec<_>, Vec<_>) =
+        requests.iter().partition(|(from, to)| to - from < cap);
+    assert_tiles(&accepted, 0, 120_000);
+    // The windows in flight when the scan starts each pay their own
+    // rejections at the unlearned widths; the budget must stay the same
+    // order as the sequential search's six.
+    assert!(rejected.len() <= 12, "rejected requests: {requests:?}");
+}
+
+#[tokio::test]
+async fn a_handles_newest_read_stays_sequential_and_tight() {
+    let logs = (0..=600_000)
+        .step_by(500)
+        .map(|block| print_log(block, 0, Q96 * U256::from(block + 1), Some(block)))
+        .collect();
+    let node = FakeNode::new(logs, 7_000);
+    let history = History::new(node.provider()).with_in_flight(8);
+    let prints = history
+        .latest_beacon_prints(BEACON, 0, Some(600_000), 5)
+        .await
+        .unwrap();
+    assert_eq!(prints.len(), 5);
+    assert_eq!(prints.last().unwrap().block_number, 600_000);
+    let served: Vec<_> = node
+        .requests()
+        .into_iter()
+        .filter(|(from, to)| to - from < 7_000)
+        .collect();
+    assert_eq!(
+        served.len(),
+        1,
+        "a newest-first read must not fan out below its limit: {served:?}"
+    );
+}
+
 #[tokio::test]
 async fn the_handle_reads_to_the_lagged_head_by_default() {
     let node = FakeNode::new(logs_every(1_000, 100_000), u64::MAX).with_head(100_000);
-    let mut history = History::new(node.provider()).with_lag(8);
+    let history = History::new(node.provider()).with_lag(8);
     assert_eq!(history.tip().await.unwrap(), 99_992);
 
     let logs = history.logs(&filter(), 0, None).await.unwrap();

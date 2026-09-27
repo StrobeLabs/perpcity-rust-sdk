@@ -22,7 +22,9 @@ use serde::{Deserialize, Serialize};
 use crate::errors::{Result, ValidationError};
 use crate::feeds::events::{MarketEvent, decode_log};
 
-use super::scan::{End, LogScan, WidthSearch, block_timestamps, get_logs_chunked_with};
+use futures_util::TryStreamExt;
+
+use super::scan::{SharedWidths, block_timestamps, check_block_range, scan_all, scan_newest};
 
 /// One market event with its chain position.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -62,22 +64,25 @@ pub async fn market_events<P: Provider>(
         perp,
         from_block,
         to_block,
-        &mut WidthSearch::new(),
+        &SharedWidths::new(),
+        1,
     )
     .await
 }
 
-/// [`market_events`] over a caller-held width search.
+/// [`market_events`] over a caller-held width search, with up to
+/// `in_flight` window requests outstanding.
 pub(super) async fn market_events_with<P: Provider>(
     provider: &P,
     perp: Address,
     from_block: u64,
     to_block: u64,
-    widths: &mut WidthSearch,
+    widths: &SharedWidths,
+    in_flight: usize,
 ) -> Result<Vec<TapeEvent>> {
     let filter = perp_filter(perp)?;
-    let logs = get_logs_chunked_with(provider, &filter, from_block, to_block, widths).await?;
-    decode_tape(provider, &logs).await
+    let logs = scan_all(provider, &filter, from_block, to_block, widths, in_flight).await?;
+    tape_rows(provider, decode_known(logs)).await
 }
 
 /// The newest `limit` market events `perp` emitted in blocks
@@ -97,8 +102,15 @@ pub async fn latest_market_events<P: Provider>(
     to_block: u64,
     limit: usize,
 ) -> Result<Vec<TapeEvent>> {
-    let mut widths = WidthSearch::new();
-    latest_market_events_with(provider, perp, from_block, to_block, limit, &mut widths).await
+    latest_market_events_with(
+        provider,
+        perp,
+        from_block,
+        to_block,
+        limit,
+        &SharedWidths::new(),
+    )
+    .await
 }
 
 /// [`latest_market_events`] over a caller-held width search.
@@ -108,23 +120,25 @@ pub(super) async fn latest_market_events_with<P: Provider>(
     from_block: u64,
     to_block: u64,
     limit: usize,
-    widths: &mut WidthSearch,
+    widths: &SharedWidths,
 ) -> Result<Vec<TapeEvent>> {
     let filter = perp_filter(perp)?;
-    let mut scan = LogScan::new(provider, &filter, from_block, to_block, widths)?;
+    check_block_range(from_block, to_block)?;
     if limit == 0 {
         return Ok(Vec::new());
     }
+    let mut chunks = std::pin::pin!(scan_newest(provider, &filter, from_block, to_block, widths));
     let mut newest_first = Vec::new();
     let mut held = 0;
     while held < limit
-        && let Some(chunk) = scan.next_chunk(End::Newest).await?
+        && let Some(chunk) = chunks.try_next().await?
     {
-        held += chunk.iter().filter(|log| decode_log(log).is_some()).count();
-        newest_first.push(chunk);
+        let decoded = decode_known(chunk);
+        held += decoded.len();
+        newest_first.push(decoded);
     }
-    let logs: Vec<Log> = newest_first.into_iter().rev().flatten().collect();
-    let mut events = decode_tape(provider, &logs).await?;
+    let decoded: Vec<(Log, MarketEvent)> = newest_first.into_iter().rev().flatten().collect();
+    let mut events = tape_rows(provider, decoded).await?;
     let skip = events.len().saturating_sub(limit);
     Ok(events.split_off(skip))
 }
@@ -138,14 +152,20 @@ fn perp_filter(perp: Address) -> std::result::Result<Filter, ValidationError> {
     Ok(Filter::new().address(perp))
 }
 
-/// Decodes logs into tape events, skipping unrecognized ones and reading
-/// the block header for any recognized event without a timestamp.
-async fn decode_tape<P: Provider>(provider: &P, logs: &[Log]) -> Result<Vec<TapeEvent>> {
-    let decoded: Vec<(&Log, MarketEvent)> = logs
-        .iter()
-        .filter_map(|log| decode_log(log).map(|event| (log, event)))
-        .collect();
-    let headers = block_timestamps(provider, decoded.iter().map(|(log, _)| *log)).await?;
+/// Decodes the logs the feed decoder recognizes, each kept with its log.
+fn decode_known(logs: Vec<Log>) -> Vec<(Log, MarketEvent)> {
+    logs.into_iter()
+        .filter_map(|log| decode_log(&log).map(|event| (log, event)))
+        .collect()
+}
+
+/// Builds tape rows from decoded logs, reading the block header for any
+/// event whose log arrived without a timestamp.
+async fn tape_rows<P: Provider>(
+    provider: &P,
+    decoded: Vec<(Log, MarketEvent)>,
+) -> Result<Vec<TapeEvent>> {
+    let headers = block_timestamps(provider, decoded.iter().map(|(log, _)| log)).await?;
     decoded
         .into_iter()
         .map(|(log, event)| {

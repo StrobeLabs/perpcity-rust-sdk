@@ -11,7 +11,7 @@ use crate::contracts::IERC20;
 use crate::errors::{Result, ValidationError};
 use crate::feeds::events::decode_raw;
 
-use super::scan::{WidthSearch, check_block_range, get_logs_chunked_with};
+use super::scan::{SharedWidths, check_block_range, scan_all};
 
 /// One ERC-20 `Transfer` event.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -59,7 +59,6 @@ pub async fn token_transfers<P: Provider>(
     from_block: u64,
     to_block: u64,
 ) -> Result<Vec<TokenTransfer>> {
-    let mut widths = WidthSearch::new();
     token_transfers_with(
         provider,
         token,
@@ -67,12 +66,15 @@ pub async fn token_transfers<P: Provider>(
         recipients,
         from_block,
         to_block,
-        &mut widths,
+        &SharedWidths::new(),
+        1,
     )
     .await
 }
 
-/// [`token_transfers`] over a caller-held width search.
+/// [`token_transfers`] over a caller-held width search, with up to
+/// `in_flight` window requests outstanding.
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn token_transfers_with<P: Provider>(
     provider: &P,
     token: Address,
@@ -80,12 +82,13 @@ pub(super) async fn token_transfers_with<P: Provider>(
     recipients: Option<&[Address]>,
     from_block: u64,
     to_block: u64,
-    widths: &mut WidthSearch,
+    widths: &SharedWidths,
+    in_flight: usize,
 ) -> Result<Vec<TokenTransfer>> {
     let Some(filter) = transfer_filter(token, senders, recipients, from_block, to_block)? else {
         return Ok(Vec::new());
     };
-    get_logs_chunked_with(provider, &filter, from_block, to_block, widths)
+    scan_all(provider, &filter, from_block, to_block, widths, in_flight)
         .await?
         .iter()
         .map(decode_transfer)
