@@ -1,0 +1,245 @@
+//! Historical chain reads over block ranges of any length.
+//!
+//! [`get_logs_chunked`] reads every log that matches a filter across a
+//! block range, whatever limits the provider puts on `eth_getLogs`. On
+//! top of it: [`beacon_prints`] and [`latest_beacon_prints`] build a
+//! beacon's index series, `(block, timestamp, index)`;
+//! [`market_events`] and [`latest_market_events`] replay a perp's whole
+//! event history — the tape — through the same decoder the live feed
+//! uses ([`crate::feeds::events::decode_log`]), position-NFT transfers
+//! included; and [`token_transfers`] reads an ERC-20's `Transfer` events
+//! between address sets (for example, every USDC transfer between a
+//! treasury and its wallets). [`History`] wraps them all with a uniform
+//! block-lag policy and a request width learned once across scans.
+//!
+//! Providers cap `eth_getLogs` by block span, by result count, or by
+//! response size, and each words the rejection differently, so the scan
+//! does not parse error messages. When the server answers a range with an
+//! error, the scan halves the range and asks again. After an accepted
+//! range it doubles the span until the first rejection, then narrows in on
+//! the limit between the widest accepted and the narrowest rejected span.
+//! A rejection of a span the server accepted before shows a result-count
+//! or size cap in a denser stretch; the scan then drops what it learned
+//! and halves again. After a run of accepted requests it tests the
+//! rejected span once more, so it widens again past a dense stretch; each
+//! time the limit holds, the run before the next test doubles. A provider
+//! with a fixed span limit therefore costs a few rejected requests at the
+//! start of a scan and a logarithmic number after. A single block that the
+//! server still rejects is returned as [`ContractError::LogsRejected`].
+//!
+//! Failures that a smaller range does not fix are returned at once: no
+//! answer (timeouts, dropped connections), a rate limit (HTTP 429 or 503,
+//! or a JSON-RPC error that alloy's retry rules call one), a method or
+//! parse error, and HTTP 401 or 403. A refusal (method, parse, auth) is
+//! [`ContractError::LogsRejected`], which is not transient; the rest keep
+//! the transport error, which is. The caller owns the retry policy
+//! ([`PerpCityError::is_transient`](crate::PerpCityError::is_transient)).
+//! A scan sends its requests back to back, so against a rate-limited
+//! endpoint put the backoff in the transport (alloy's `RetryBackoffLayer`,
+//! or [`HftTransport`](crate::HftTransport)'s read retries).
+//!
+//! The deployed beacons expose no last-update getter (`index()` returns
+//! the value alone), so a beacon's newest `IndexUpdated` log is the only
+//! record of when it last printed: `latest_beacon_prints(.., 1)` reads it.
+//!
+//! [`ContractError::LogsRejected`]: crate::errors::ContractError::LogsRejected
+
+mod beacon;
+mod scan;
+mod tape;
+mod transfers;
+
+#[cfg(any(test, feature = "test-utils"))]
+pub mod test_support;
+
+#[cfg(test)]
+mod tests;
+
+pub use beacon::{IndexPrint, beacon_prints, latest_beacon_prints};
+pub use scan::get_logs_chunked;
+pub use tape::{TapeEvent, latest_market_events, market_events};
+pub use transfers::{TokenTransfer, token_transfers};
+
+use alloy::primitives::Address;
+use alloy::providers::Provider;
+use alloy::rpc::types::{Filter, Log};
+
+use crate::constants::SNAPSHOT_BLOCK_LAG;
+use crate::errors::Result;
+
+/// A handle over historical reads that owns what one-shot calls cannot:
+/// the block-lag policy and the learned request width.
+///
+/// **Lag.** Every reader takes `to_block: Option<u64>`; `None` reads to
+/// the head minus the handle's lag ([`SNAPSHOT_BLOCK_LAG`] blocks unless
+/// [`Self::with_lag`] says otherwise), so a lagging replica is never asked
+/// for a block whose logs it may not have yet. Pass `Some(block)` to pin
+/// a range instead — an already-final block needs no lag.
+///
+/// **Width.** The free functions re-learn the provider's `eth_getLogs`
+/// limits on every call; the handle keeps the learned width across calls,
+/// so a process that scans repeatedly (a collector) pays the search once.
+///
+/// Constructed from any [`Provider`] — reading history needs no signer.
+/// A [`PerpClient`](crate::PerpClient) exposes its provider through
+/// [`history()`](crate::PerpClient::history).
+#[derive(Debug)]
+pub struct History<P> {
+    provider: P,
+    lag: u64,
+    widths: scan::WidthSearch,
+}
+
+impl<P: Provider> History<P> {
+    /// A handle over `provider` with the default lag of
+    /// [`SNAPSHOT_BLOCK_LAG`] blocks.
+    pub fn new(provider: P) -> Self {
+        Self {
+            provider,
+            lag: SNAPSHOT_BLOCK_LAG,
+            widths: scan::WidthSearch::new(),
+        }
+    }
+
+    /// The handle with a different lag; `0` reads to the raw head.
+    pub fn with_lag(mut self, blocks: u64) -> Self {
+        self.lag = blocks;
+        self
+    }
+
+    /// The newest block the handle reads by default: head minus the lag.
+    ///
+    /// # Errors
+    ///
+    /// The transport error from the head read.
+    pub async fn tip(&self) -> Result<u64> {
+        let head = self.provider.get_block_number().await?;
+        Ok(head.saturating_sub(self.lag))
+    }
+
+    async fn resolve(&self, to_block: Option<u64>) -> Result<u64> {
+        match to_block {
+            Some(block) => Ok(block),
+            None => self.tip().await,
+        }
+    }
+
+    /// [`get_logs_chunked`], to `to_block` or the lagged head.
+    ///
+    /// # Errors
+    ///
+    /// As [`get_logs_chunked`].
+    pub async fn logs(
+        &mut self,
+        filter: &Filter,
+        from_block: u64,
+        to_block: Option<u64>,
+    ) -> Result<Vec<Log>> {
+        let to = self.resolve(to_block).await?;
+        scan::get_logs_chunked_with(&self.provider, filter, from_block, to, &mut self.widths).await
+    }
+
+    /// [`beacon_prints`], to `to_block` or the lagged head.
+    ///
+    /// # Errors
+    ///
+    /// As [`beacon_prints`].
+    pub async fn beacon_prints(
+        &mut self,
+        beacon: Address,
+        from_block: u64,
+        to_block: Option<u64>,
+    ) -> Result<Vec<IndexPrint>> {
+        let to = self.resolve(to_block).await?;
+        beacon::beacon_prints_with(&self.provider, beacon, from_block, to, &mut self.widths).await
+    }
+
+    /// [`latest_beacon_prints`], to `to_block` or the lagged head.
+    ///
+    /// # Errors
+    ///
+    /// As [`latest_beacon_prints`].
+    pub async fn latest_beacon_prints(
+        &mut self,
+        beacon: Address,
+        from_block: u64,
+        to_block: Option<u64>,
+        limit: usize,
+    ) -> Result<Vec<IndexPrint>> {
+        let to = self.resolve(to_block).await?;
+        beacon::latest_beacon_prints_with(
+            &self.provider,
+            beacon,
+            from_block,
+            to,
+            limit,
+            &mut self.widths,
+        )
+        .await
+    }
+
+    /// [`market_events`], to `to_block` or the lagged head.
+    ///
+    /// # Errors
+    ///
+    /// As [`market_events`].
+    pub async fn market_events(
+        &mut self,
+        perp: Address,
+        from_block: u64,
+        to_block: Option<u64>,
+    ) -> Result<Vec<TapeEvent>> {
+        let to = self.resolve(to_block).await?;
+        tape::market_events_with(&self.provider, perp, from_block, to, &mut self.widths).await
+    }
+
+    /// [`latest_market_events`], to `to_block` or the lagged head.
+    ///
+    /// # Errors
+    ///
+    /// As [`latest_market_events`].
+    pub async fn latest_market_events(
+        &mut self,
+        perp: Address,
+        from_block: u64,
+        to_block: Option<u64>,
+        limit: usize,
+    ) -> Result<Vec<TapeEvent>> {
+        let to = self.resolve(to_block).await?;
+        tape::latest_market_events_with(
+            &self.provider,
+            perp,
+            from_block,
+            to,
+            limit,
+            &mut self.widths,
+        )
+        .await
+    }
+
+    /// [`token_transfers`], to `to_block` or the lagged head.
+    ///
+    /// # Errors
+    ///
+    /// As [`token_transfers`].
+    pub async fn token_transfers(
+        &mut self,
+        token: Address,
+        senders: Option<&[Address]>,
+        recipients: Option<&[Address]>,
+        from_block: u64,
+        to_block: Option<u64>,
+    ) -> Result<Vec<TokenTransfer>> {
+        let to = self.resolve(to_block).await?;
+        transfers::token_transfers_with(
+            &self.provider,
+            token,
+            senders,
+            recipients,
+            from_block,
+            to,
+            &mut self.widths,
+        )
+        .await
+    }
+}

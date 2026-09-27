@@ -17,6 +17,40 @@ The changes below break the public API, so the next release is 0.5.0 (a minor bu
 
 ### Added
 
+- **The market-event tape.** `history::market_events(provider, perp,
+  from_block, to_block)` replays every event a perp emitted, in chain
+  order, and `history::latest_market_events(.., limit)` the newest
+  `limit`, reading backward (skipped logs do not count against the
+  limit). Each row is a `TapeEvent { block_number, log_index, timestamp,
+  tx_hash, event: MarketEvent }` — the same `MarketEvent` the live feed
+  streams, decoded by the same `feeds::events::decode_log`, so replayed
+  history and live subscription carry one vocabulary. Logs the decoder
+  does not recognize (ERC-721 approvals, admin events) are skipped, as
+  the live feed skips them. The tape includes
+  `MarketEvent::PositionTransferred` — the position NFT's mint, burn and
+  mid-life transfers — so a position id maps to its owner over time
+  without a separate reader. `examples/tape.rs` is the worked example
+  (read-only; no signer).
+- **`history::History<P: Provider>`** — a handle over the historical
+  readers that owns what one-shot calls cannot: the block-lag policy and
+  the learned request width. Every method takes `to_block: Option<u64>`;
+  `None` reads to the head minus the handle's lag (`SNAPSHOT_BLOCK_LAG`
+  blocks, or `with_lag`), so a lagging replica is never asked for a block
+  whose logs it may not hold yet — previously each caller invented its
+  own policy. The learned `eth_getLogs` width persists across the
+  handle's scans, so a process that scans repeatedly pays the width
+  search once instead of per call. Built from any `Provider` (reading
+  history needs no signer); `PerpClient::history()` wraps the client's
+  own provider. The free functions are unchanged and still learn per
+  call.
+- **`history::test_support` under the new `test-utils` feature** — the
+  in-memory JSON-RPC node the history readers' own tests run against
+  (`FakeNode`: serves `eth_getLogs` from a fixed log set, rejects ranges
+  the way a capped provider does, records every requested range), public
+  so a crate building on the readers can test its scans against the same
+  node. The `history` module is now a directory (`scan`, `beacon`,
+  `transfers` submodules); its public API is unchanged and re-exported
+  from `history` as before.
 - **`TransactionError::tx_hash()`** — the signed transaction's hash for every failure from the broadcast onward (`BroadcastFailed`, `ReceiptTimeout`, `Reverted`, `OutOfGas`), `None` when nothing was sent. A caller with an unknown outcome reconciles by receipt instead of waiting out a fixed window.
 - **`PerpCityError::tx_hash()`** — the same hash on the top-level error, `None` for every other variant. For an error from `TxBuilder::send`, `None` means nothing was broadcast: after this release an `Rpc` error from a send always comes before the broadcast.
 - **`PerpClient::poll_receipt(tx_hash)` is public** — the send path's receipt wait without its initial 2 s delay (a hash to reconcile is rarely fresh): it polls at once, then every 2 s for up to 30 s, returning `ReceiptTimeout` for the same hash on timeout so the call can repeat. It does not touch nonce tracking: a send that returned a hash has already stopped tracking it, and a doubtful nonce resyncs from chain before the next send either way.
