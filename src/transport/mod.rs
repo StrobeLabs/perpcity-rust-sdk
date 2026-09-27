@@ -38,4 +38,7 @@
 pub mod config;
 pub mod health;
 pub mod provider;
+mod redact;
 pub mod ws;
+
+pub use redact::redact_url;

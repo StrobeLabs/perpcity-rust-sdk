@@ -67,7 +67,10 @@ impl Default for ReconnectConfig {
 /// Wraps an Alloy WebSocket-backed provider with auto-reconnect.
 /// One connection serves all subscription types.
 pub struct WsManager {
+    /// Holds credentials for hosted providers: log `label`, never this.
     url: String,
+    /// Host-only form of `url`, safe for logs and `Debug`.
+    label: String,
     config: ReconnectConfig,
     /// The underlying provider. Uses `RootProvider` (Ethereum network, no fillers)
     /// created via `ProviderBuilder::new().connect_ws(...)`.
@@ -77,7 +80,7 @@ pub struct WsManager {
 impl std::fmt::Debug for WsManager {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("WsManager")
-            .field("url", &self.url)
+            .field("endpoint", &self.label)
             .field("config", &self.config)
             .finish_non_exhaustive()
     }
@@ -97,10 +100,12 @@ impl WsManager {
             .await?;
         let provider = RootProvider::new(rpc_client);
 
-        tracing::debug!(url = %url, "WebSocket connected");
+        let label = super::redact_url(&url);
+        tracing::debug!(endpoint = %label, "WebSocket connected");
 
         Ok(Self {
             url,
+            label,
             config,
             provider: Arc::new(provider),
         })
@@ -115,25 +120,30 @@ impl WsManager {
         let (tx, rx) = mpsc::channel(64);
         let provider = Arc::clone(&self.provider);
         let url = self.url.clone();
+        let label = self.label.clone();
 
-        tracing::debug!(url = %self.url, "subscribing to blocks");
+        tracing::debug!(endpoint = %label, "subscribing to blocks");
 
         tokio::spawn(async move {
             let sub = match provider.subscribe_blocks().await {
                 Ok(sub) => sub,
                 Err(e) => {
-                    tracing::warn!(url = %url, error = %e, "block subscription failed");
+                    tracing::warn!(
+                        endpoint = %label,
+                        error = %super::redact::redact_in(&e.to_string(), &url),
+                        "block subscription failed"
+                    );
                     return;
                 }
             };
-            tracing::debug!(url = %url, "block subscription established");
+            tracing::debug!(endpoint = %label, "block subscription established");
             let mut stream = sub.into_stream();
             while let Some(block) = stream.next().await {
                 if tx.send(block).await.is_err() {
                     break; // receiver dropped
                 }
             }
-            tracing::debug!(url = %url, "block subscription ended");
+            tracing::debug!(endpoint = %label, "block subscription ended");
         });
 
         Ok(rx)
@@ -146,25 +156,30 @@ impl WsManager {
         let (tx, rx) = mpsc::channel(256);
         let provider = Arc::clone(&self.provider);
         let url = self.url.clone();
+        let label = self.label.clone();
 
-        tracing::debug!(url = %self.url, "subscribing to logs");
+        tracing::debug!(endpoint = %label, "subscribing to logs");
 
         tokio::spawn(async move {
             let sub = match provider.subscribe_logs(&filter).await {
                 Ok(sub) => sub,
                 Err(e) => {
-                    tracing::warn!(url = %url, error = %e, "log subscription failed");
+                    tracing::warn!(
+                        endpoint = %label,
+                        error = %super::redact::redact_in(&e.to_string(), &url),
+                        "log subscription failed"
+                    );
                     return;
                 }
             };
-            tracing::debug!(url = %url, "log subscription established");
+            tracing::debug!(endpoint = %label, "log subscription established");
             let mut stream = sub.into_stream();
             while let Some(log) = stream.next().await {
                 if tx.send(log).await.is_err() {
                     break;
                 }
             }
-            tracing::debug!(url = %url, "log subscription ended");
+            tracing::debug!(endpoint = %label, "log subscription ended");
         });
 
         Ok(rx)
@@ -181,27 +196,33 @@ impl WsManager {
         loop {
             attempts += 1;
             if self.config.max_attempts > 0 && attempts > self.config.max_attempts {
-                tracing::warn!(url = %self.url, max_attempts = self.config.max_attempts, "reconnect attempts exhausted");
+                tracing::warn!(endpoint = %self.label, max_attempts = self.config.max_attempts, "reconnect attempts exhausted");
                 return None;
             }
 
-            tracing::debug!(url = %self.url, attempt = attempts, delay_ms = delay.as_millis() as u64, "reconnecting");
+            tracing::debug!(endpoint = %self.label, attempt = attempts, delay_ms = delay.as_millis() as u64, "reconnecting");
             tokio::time::sleep(delay).await;
 
             match Self::connect(self.url.clone(), self.config).await {
                 Ok(new_manager) => {
-                    tracing::debug!(url = %self.url, attempt = attempts, "reconnected");
+                    tracing::debug!(endpoint = %self.label, attempt = attempts, "reconnected");
                     return Some(new_manager);
                 }
                 Err(e) => {
-                    tracing::warn!(url = %self.url, attempt = attempts, error = %e, "reconnect failed");
+                    tracing::warn!(
+                        endpoint = %self.label,
+                        attempt = attempts,
+                        error = %super::redact::redact_in(&e.to_string(), &self.url),
+                        "reconnect failed"
+                    );
                     delay = (delay * self.config.backoff_multiplier).min(self.config.max_backoff);
                 }
             }
         }
     }
 
-    /// The WebSocket URL this manager is connected to.
+    /// The WebSocket URL this manager is connected to, credentials included.
+    /// Never log it; use [`redact_url`](super::redact_url) for diagnostics.
     pub fn url(&self) -> &str {
         &self.url
     }
