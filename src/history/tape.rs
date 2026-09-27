@@ -82,7 +82,7 @@ pub(super) async fn market_events_with<P: Provider>(
 ) -> Result<Vec<TapeEvent>> {
     let filter = perp_filter(perp)?;
     let logs = scan_all(provider, &filter, from_block, to_block, widths, in_flight).await?;
-    decode_tape(provider, &logs).await
+    tape_rows(provider, decode_known(logs)).await
 }
 
 /// The newest `limit` market events `perp` emitted in blocks
@@ -133,11 +133,12 @@ pub(super) async fn latest_market_events_with<P: Provider>(
     while held < limit
         && let Some(chunk) = chunks.try_next().await?
     {
-        held += chunk.iter().filter(|log| decode_log(log).is_some()).count();
-        newest_first.push(chunk);
+        let decoded = decode_known(chunk);
+        held += decoded.len();
+        newest_first.push(decoded);
     }
-    let logs: Vec<Log> = newest_first.into_iter().rev().flatten().collect();
-    let mut events = decode_tape(provider, &logs).await?;
+    let decoded: Vec<(Log, MarketEvent)> = newest_first.into_iter().rev().flatten().collect();
+    let mut events = tape_rows(provider, decoded).await?;
     let skip = events.len().saturating_sub(limit);
     Ok(events.split_off(skip))
 }
@@ -151,14 +152,20 @@ fn perp_filter(perp: Address) -> std::result::Result<Filter, ValidationError> {
     Ok(Filter::new().address(perp))
 }
 
-/// Decodes logs into tape events, skipping unrecognized ones and reading
-/// the block header for any recognized event without a timestamp.
-async fn decode_tape<P: Provider>(provider: &P, logs: &[Log]) -> Result<Vec<TapeEvent>> {
-    let decoded: Vec<(&Log, MarketEvent)> = logs
-        .iter()
-        .filter_map(|log| decode_log(log).map(|event| (log, event)))
-        .collect();
-    let headers = block_timestamps(provider, decoded.iter().map(|(log, _)| *log)).await?;
+/// Decodes the logs the feed decoder recognizes, each kept with its log.
+fn decode_known(logs: Vec<Log>) -> Vec<(Log, MarketEvent)> {
+    logs.into_iter()
+        .filter_map(|log| decode_log(&log).map(|event| (log, event)))
+        .collect()
+}
+
+/// Builds tape rows from decoded logs, reading the block header for any
+/// event whose log arrived without a timestamp.
+async fn tape_rows<P: Provider>(
+    provider: &P,
+    decoded: Vec<(Log, MarketEvent)>,
+) -> Result<Vec<TapeEvent>> {
+    let headers = block_timestamps(provider, decoded.iter().map(|(log, _)| log)).await?;
     decoded
         .into_iter()
         .map(|(log, event)| {
