@@ -17,6 +17,9 @@
 
 use std::collections::{BTreeSet, HashMap};
 use std::sync::Mutex;
+use std::time::Duration;
+
+use tokio::time::Instant;
 
 use alloy::providers::Provider;
 use alloy::rpc::json_rpc::ErrorPayload;
@@ -191,7 +194,10 @@ async fn attempt<P: Provider>(
     widths: &SharedWidths,
 ) -> Result<Option<Vec<Log>>> {
     let request = filter.clone().from_block(from).to_block(to);
-    match provider.get_logs(&request).await {
+    let started = Instant::now();
+    let answer = provider.get_logs(&request).await;
+    widths.tally(&answer, started.elapsed());
+    match answer {
         Ok(chunk) => {
             widths.accepted(to - from + 1);
             Ok(Some(chunk))
@@ -226,28 +232,79 @@ pub(super) fn check_block_range(
     Ok(())
 }
 
-/// A [`WidthSearch`] shared by every worker of a scan (and, on a
-/// [`History`](super::History) handle, across scans). Lock scope is one
-/// bookkeeping call; it is never held across an await.
+/// Counters over the requests a scan driver sent. Cumulative for the
+/// life of the [`History`](super::History) handle that exposes them
+/// ([`History::stats`](super::History::stats)); sample and diff to meter
+/// a stretch of work. The free functions report nothing — their width
+/// search, and these counters with it, live only for the call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ScanStats {
+    /// `eth_getLogs` requests sent.
+    pub requests: u64,
+    /// Requests answered with an error instead of logs: range rejections
+    /// that narrowed the scan, and the failures that ended it.
+    pub rejections: u64,
+    /// Logs returned across all accepted requests.
+    pub logs: u64,
+    /// Width the next request would use, in blocks — the search's
+    /// current belief about the provider's `eth_getLogs` limit.
+    pub learned_width: u64,
+    /// Total time spent awaiting `eth_getLogs` answers. Summed across
+    /// concurrent requests, so it can exceed wall time.
+    pub request_time: Duration,
+}
+
+/// A [`WidthSearch`] and its [`ScanStats`], shared by every worker of a
+/// scan (and, on a [`History`](super::History) handle, across scans).
+/// Lock scope is one bookkeeping call; it is never held across an await.
 #[derive(Debug)]
-pub(super) struct SharedWidths(Mutex<WidthSearch>);
+pub(super) struct SharedWidths(Mutex<State>);
+
+#[derive(Debug)]
+struct State {
+    search: WidthSearch,
+    stats: ScanStats,
+}
 
 impl SharedWidths {
     pub(super) fn new() -> Self {
-        Self(Mutex::new(WidthSearch::new()))
+        Self(Mutex::new(State {
+            search: WidthSearch::new(),
+            stats: ScanStats::default(),
+        }))
     }
 
     /// Width for the next carve or request; at least 1.
     fn next(&self) -> u64 {
-        self.0.lock().unwrap().next
+        self.0.lock().unwrap().search.next
     }
 
     fn accepted(&self, width: u64) {
-        self.0.lock().unwrap().accepted(width);
+        self.0.lock().unwrap().search.accepted(width);
     }
 
     fn rejected(&self, width: u64) {
-        self.0.lock().unwrap().rejected(width);
+        self.0.lock().unwrap().search.rejected(width);
+    }
+
+    /// Counts one request and its answer.
+    fn tally(&self, answer: &std::result::Result<Vec<Log>, TransportError>, elapsed: Duration) {
+        let mut state = self.0.lock().unwrap();
+        state.stats.requests += 1;
+        state.stats.request_time += elapsed;
+        match answer {
+            Ok(chunk) => state.stats.logs += chunk.len() as u64,
+            Err(_) => state.stats.rejections += 1,
+        }
+    }
+
+    /// The counters so far, with the width the search currently believes.
+    pub(super) fn stats(&self) -> ScanStats {
+        let state = self.0.lock().unwrap();
+        ScanStats {
+            learned_width: state.search.next,
+            ..state.stats
+        }
     }
 }
 

@@ -811,6 +811,47 @@ async fn a_handles_newest_read_stays_sequential_and_tight() {
     );
 }
 
+#[tokio::test(start_paused = true)]
+async fn the_handle_accounts_for_every_request_it_sent() {
+    let latency = Duration::from_millis(100);
+    let cap = 10_000;
+    let node = FakeNode::new(logs_every(777, 120_000), cap).with_latency(latency);
+    let history = History::new(node.provider()).with_in_flight(1);
+    // A fresh handle has counted nothing; its width is the initial span.
+    assert_eq!(history.stats().requests, 0);
+    assert_eq!(history.stats().learned_width, 100_000);
+
+    let logs = history.logs(&filter(), 0, Some(120_000)).await.unwrap();
+    let stats = history.stats();
+    let requests = node.requests();
+    assert_eq!(stats.requests, requests.len() as u64);
+    assert_eq!(
+        stats.rejections,
+        requests
+            .iter()
+            .filter(|(from, to)| to - from >= cap)
+            .count() as u64
+    );
+    assert_eq!(stats.logs, logs.len() as u64);
+    assert!(
+        stats.learned_width > 0 && stats.learned_width < cap,
+        "width not learned: {stats:?}"
+    );
+    // Sequential scan under a paused clock: exactly one latency quantum
+    // per request.
+    assert_eq!(stats.request_time, latency * stats.requests as u32);
+
+    // Counters are cumulative across the handle's scans; the second
+    // range holds no logs, so only requests and time move.
+    history
+        .logs(&filter(), 120_001, Some(240_000))
+        .await
+        .unwrap();
+    let later = history.stats();
+    assert!(later.requests > stats.requests);
+    assert_eq!(later.logs, stats.logs);
+}
+
 #[tokio::test]
 async fn the_handle_reads_to_the_lagged_head_by_default() {
     let node = FakeNode::new(logs_every(1_000, 100_000), u64::MAX).with_head(100_000);

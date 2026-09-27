@@ -56,7 +56,7 @@ pub mod test_support;
 mod tests;
 
 pub use beacon::{IndexPrint, beacon_prints, latest_beacon_prints};
-pub use scan::get_logs_chunked;
+pub use scan::{ScanStats, get_logs_chunked};
 pub use tape::{TapeEvent, latest_market_events, market_events};
 pub use transfers::{TokenTransfer, token_transfers};
 
@@ -74,8 +74,8 @@ use crate::errors::Result;
 pub const DEFAULT_IN_FLIGHT: usize = 4;
 
 /// A handle over historical reads that owns what one-shot calls cannot:
-/// the block-lag policy, the learned request width, and the concurrency
-/// budget.
+/// the block-lag policy, the learned request width, the concurrency
+/// budget, and an account of the work done.
 ///
 /// **Lag.** Every reader takes `to_block: Option<u64>`; `None` reads to
 /// the head minus the handle's lag ([`SNAPSHOT_BLOCK_LAG`] blocks unless
@@ -93,6 +93,11 @@ pub const DEFAULT_IN_FLIGHT: usize = 4;
 /// range order. Newest-first reads (`latest_*`) are sequential on every
 /// path — they exist to stop early, and a request sent below the stopping
 /// point is waste. Rate-limit backoff belongs in the transport, as ever.
+///
+/// **Telemetry.** [`Self::stats`] reports cumulative [`ScanStats`] over
+/// every request the handle's scans have sent, so a long-lived process
+/// can meter its reads and watch the provider; the free functions report
+/// nothing.
 ///
 /// Constructed from any [`Provider`] — reading history needs no signer.
 /// A [`PerpClient`](crate::PerpClient) exposes its provider through
@@ -129,6 +134,13 @@ impl<P: Provider> History<P> {
     pub fn with_in_flight(mut self, requests: usize) -> Self {
         self.in_flight = requests.max(1);
         self
+    }
+
+    /// Counters over every request this handle's scans have sent,
+    /// cumulative since construction. Sample before and after a stretch
+    /// of work and diff to meter it.
+    pub fn stats(&self) -> ScanStats {
+        self.widths.stats()
     }
 
     /// The newest block the handle reads by default: head minus the lag.
