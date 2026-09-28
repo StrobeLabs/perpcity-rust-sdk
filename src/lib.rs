@@ -41,6 +41,7 @@ pub mod constants;
 pub mod contracts;
 pub mod convert;
 pub mod errors;
+pub mod events;
 pub mod feeds;
 pub mod hft;
 pub mod history;

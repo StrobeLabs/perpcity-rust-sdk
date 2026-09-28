@@ -1,7 +1,10 @@
-//! Event decoding for `Perp` and `Beacon` contracts.
+//! The market's event vocabulary: what a `Perp` or `Beacon` emitted,
+//! decoded once for either tense.
 //!
-//! Decodes raw [`Log`] entries from WebSocket subscriptions into typed
-//! [`MarketEvent`] values. Consumers get human-readable f64 values for USDC
+//! Decodes a raw [`Log`] into a typed [`MarketEvent`], whatever transport
+//! delivered it — [`crate::feeds`] streams the present over a WebSocket,
+//! [`crate::history`] replays the past from log scans, and both speak
+//! this vocabulary. Consumers get human-readable f64 values for USDC
 //! amounts and prices without touching ABI encoding or Q96 math.
 //!
 //! The new contracts emit lean, per-market events: each `Perp` contract is a

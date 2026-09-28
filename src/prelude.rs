@@ -8,8 +8,9 @@
 //! well-known chain ids/addresses (`ARBITRUM_CHAIN_ID`,
 //! `ARBITRUM_SEPOLIA_USDC`, ...), errors (`PerpCityError`, `Result`,
 //! `ContractError`, `TransactionError`, `ValidationError`), gas/urgency
-//! (`GasLimits`, `Urgency`), feeds (`MarketFeed`, `MarketEvent`,
-//! `decode_log`, ...), the client-facing params/result types
+//! (`GasLimits`, `Urgency`), the event vocabulary and the feed that
+//! streams it (`MarketEvent`, `decode_log`, `MarketFeed`, ...), the
+//! client-facing params/result types
 //! (`OpenTakerParams`, `OpenResult`, ...), the maker-equity types
 //! (`MakerEquityBreakdown`, `MakerState`, ...), the market's margin-ratio
 //! thresholds (`MarginRatios`, `MarginRatioTriple`), liquidity sizing

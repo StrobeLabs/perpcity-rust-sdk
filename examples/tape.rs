@@ -16,7 +16,7 @@ use std::env;
 
 use alloy::primitives::Address;
 use alloy::providers::ProviderBuilder;
-use perpcity_sdk::feeds::events::MarketEvent;
+use perpcity_sdk::events::MarketEvent;
 use perpcity_sdk::history::History;
 
 #[tokio::main]

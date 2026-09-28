@@ -15,6 +15,16 @@ The changes below break the public API, so the next release is 0.5.0 (a minor bu
 - **A failed broadcast returns `TransactionError::BroadcastFailed { tx_hash, source }` instead of `PerpCityError::Rpc`.** The node can accept a transaction and still fail the request, so the outcome is unknown; the hash of the signed transaction lets the caller look it up. `source` is the same `TransportError` that `Rpc` carried. `is_transient()` is true for both, so retry loops are unchanged; code that matched `PerpCityError::Rpc` to detect a failed broadcast must match the new variant.
 - **`TransactionError::Reverted` carries `tx_hash: FixedBytes<32>`**, which was only in `reason`. Patterns that use `..` are unaffected; exhaustive patterns and constructions must name the new field. With `OutOfGas`, `ReceiptTimeout` and `BroadcastFailed`, every `TxBuilder::send` error that follows the broadcast now carries a typed hash.
 
+### Changed
+
+- **The event vocabulary moved to `events`, out from under `feeds`.**
+  `MarketEvent`, `SwapInfo`, `MakerSettle`, `CumulativesInfo`,
+  `decode_log` and `decode_raw` now live at `perpcity_sdk::events`:
+  `feeds` streams the present tense and `history` replays the past, and
+  both speak this one vocabulary, so it belongs under neither. The old
+  path `feeds::events` still re-exports everything and `prelude` is
+  unchanged, so no import breaks; new code should prefer the new path.
+
 ### Added
 
 - **The market-event tape.** `history::market_events(provider, perp,

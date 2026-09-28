@@ -20,7 +20,7 @@ use alloy::rpc::types::{Filter, Log};
 use serde::{Deserialize, Serialize};
 
 use crate::errors::{Result, ValidationError};
-use crate::feeds::events::{MarketEvent, decode_log};
+use crate::events::{MarketEvent, decode_log};
 
 use futures_util::TryStreamExt;
 
