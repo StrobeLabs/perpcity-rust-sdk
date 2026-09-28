@@ -5,15 +5,24 @@
 //! | [`MarketFeed`] | Contract event logs | Trading events (positions, index updates) |
 //! | [`BlockHeaderFeed`] | `newHeads` subscription | Block headers (base fee for gas pricing) |
 //!
-//! The [`events`] submodule provides the [`MarketEvent`] type and
-//! [`decode_log`] function used by [`MarketFeed`] to decode raw logs.
+//! [`MarketFeed`] streams the present tense of the market's event
+//! vocabulary, which lives in [`crate::events`] — the same
+//! [`MarketEvent`] values [`crate::history`] replays from the past.
 
 pub mod block;
-pub mod events;
 pub mod market;
 pub mod taker;
 
+/// The event vocabulary, at its former path.
+///
+/// It moved to [`crate::events`] when history began replaying the same
+/// events feeds stream: the vocabulary belongs to neither tense. This
+/// re-export keeps existing imports working.
+pub mod events {
+    pub use crate::events::*;
+}
+
+pub use crate::events::{MarketEvent, decode_log};
 pub use block::BlockHeaderFeed;
-pub use events::{MarketEvent, decode_log};
 pub use market::MarketFeed;
 pub use taker::{LiveTakerMarket, LiveTakerMarketPublisher};

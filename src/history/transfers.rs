@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use crate::constants::LOG_FILTER_MAX_TOPIC_VALUES;
 use crate::contracts::IERC20;
 use crate::errors::{Result, ValidationError};
-use crate::feeds::events::decode_raw;
+use crate::events::decode_raw;
 
 use super::scan::{SharedWidths, check_block_range, scan_all};
 

@@ -34,7 +34,7 @@ use alloy::primitives::Address;
 use alloy::rpc::types::{Filter, Log};
 use tokio::sync::mpsc;
 
-use super::events::{MarketEvent, decode_log};
+use crate::events::{MarketEvent, decode_log};
 use crate::transport::ws::WsManager;
 
 /// A filtered stream of decoded [`MarketEvent`]s for a single perp.

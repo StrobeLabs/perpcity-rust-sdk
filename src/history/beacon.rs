@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use crate::contracts::IBeacon;
 use crate::convert::price_x96_to_f64;
 use crate::errors::{Result, ValidationError};
-use crate::feeds::events::decode_raw;
+use crate::events::decode_raw;
 
 use futures_util::TryStreamExt;
 

@@ -16,7 +16,7 @@ use super::*;
 use crate::constants::Q96;
 use crate::contracts::{IBeacon, IERC20, Perp, SwapResult};
 use crate::errors::{ContractError, PerpCityError, ValidationError};
-use crate::feeds::events::MarketEvent;
+use crate::events::MarketEvent;
 
 const EMITTER: Address = Address::repeat_byte(0xAA);
 const TOPIC: B256 = B256::repeat_byte(0x11);

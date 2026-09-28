@@ -6,7 +6,7 @@
 //! beacon's index series, `(block, timestamp, index)`;
 //! [`market_events`] and [`latest_market_events`] replay a perp's whole
 //! event history — the tape — through the same decoder the live feed
-//! uses ([`crate::feeds::events::decode_log`]), position-NFT transfers
+//! uses ([`crate::events::decode_log`]), position-NFT transfers
 //! included; and [`token_transfers`] reads an ERC-20's `Transfer` events
 //! between address sets (for example, every USDC transfer between a
 //! treasury and its wallets). [`History`] wraps them all with a uniform
