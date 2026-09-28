@@ -659,9 +659,13 @@ impl Router {
 
         // Standard path: select endpoint from appropriate pool, try with retry
         let mut last_err = None;
-        let now_ms = now_ms();
 
         for attempt in 0..max_attempts {
+            // Per attempt, not per call: a retry sequence spans its
+            // backoffs, and a circuit opened on the last attempt would
+            // otherwise be stamped with the time of the first — starting
+            // its recovery window early.
+            let now_ms = now_ms();
             let Some((pool, idx, permit)) = self.select_for(is_write, now_ms) else {
                 tracing::error!("all RPC endpoints unavailable (circuits open)");
                 return Err(TransportError::local_usage_str(
