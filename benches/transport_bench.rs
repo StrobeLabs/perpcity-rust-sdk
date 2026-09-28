@@ -309,10 +309,11 @@ fn bench_request_cycle(c: &mut Criterion) {
     group.bench_function("select_and_record/3ep", |b| {
         let pool = make_warm_pool(3);
         b.iter(|| {
-            let idx = pool
+            let (idx, permit) = pool
                 .select(Strategy::LatencyBased, black_box(1000))
                 .unwrap();
             pool.record_success(black_box(idx), black_box(5_000_000));
+            permit.resolved();
         })
     });
 
@@ -320,10 +321,13 @@ fn bench_request_cycle(c: &mut Criterion) {
     group.bench_function("hedged_select_and_record/fan3_from5", |b| {
         let pool = make_warm_pool(5);
         b.iter(|| {
-            let indices = pool.select_n(black_box(3), black_box(1000));
-            // Simulate: first endpoint (best latency) wins
-            if let Some(&idx) = indices.first() {
+            let mut selected = pool.select_n(black_box(3), black_box(1000));
+            // Simulate: first endpoint (best latency) wins; the losers'
+            // permits drop with `selected`, as they do after a real hedge.
+            if !selected.is_empty() {
+                let (idx, permit) = selected.swap_remove(0);
                 pool.record_success(black_box(idx), black_box(2_000_000));
+                permit.resolved();
             }
         })
     });
