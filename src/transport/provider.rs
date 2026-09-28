@@ -687,6 +687,11 @@ impl Router {
                         // Stale-replica rejections are not evidence of an
                         // unhealthy endpoint — don't touch the circuit breaker.
                         if attempt + 1 < max_attempts {
+                            // This attempt is over and the next one selects
+                            // again, so give any probe slot back now rather
+                            // than hold it through the backoff, where it
+                            // would keep the endpoint from another caller.
+                            drop(permit);
                             tracing::warn!(
                                 attempt = attempt + 1,
                                 max_attempts,
