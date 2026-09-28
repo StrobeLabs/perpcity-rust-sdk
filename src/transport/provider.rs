@@ -11,8 +11,13 @@
 //! - **Per-endpoint circuit breaker**: automatically routes around dead endpoints
 //! - **Strategy-based selection**: round-robin, latency-based, or hedged reads
 //! - **Read/write classification**: a read is retried when the endpoint
-//!   failed to answer, never when it declined the request; a write is
-//!   retried only when it provably never reached the mempool
+//!   failed to answer, never when it declined the request. A write is
+//!   retried on a pre-mempool rejection (safe: the transaction never
+//!   landed) and also when the endpoint did not answer — where the same
+//!   signed bytes are idempotent at the node, but the outcome of the
+//!   earlier attempt is unknown, so a caller reconciling a send should
+//!   trust the receipt rather than the error
+//!   ([`TransactionError::tx_hash`](crate::errors::TransactionError::tx_hash))
 //! - **Hedged requests**: fan out reads to N endpoints, take the fastest response;
 //!   losing requests are **cancelled** via `JoinSet::abort_all` to save RPC rate limits
 //! - **Lock-free endpoint selection**: read path uses atomic mirrors, zero mutex
