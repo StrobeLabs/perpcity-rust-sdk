@@ -1,8 +1,9 @@
-//! Liquidity estimation for PerpCity maker positions.
+//! Liquidity sizing and band amounts for PerpCity maker positions.
 //!
 //! These functions help determine how much liquidity to provide across a
 //! tick range, either from a flat USD amount or targeting a specific margin
-//! ratio.
+//! ratio, and what token amounts a band's liquidity holds at a price
+//! ([`amounts_for_liquidity`]).
 
 use alloy::primitives::U256;
 
@@ -158,19 +159,58 @@ pub fn liquidity_for_target_ratio(
     Ok(liquidity_f as u128)
 }
 
-/// Uniswap `getAmountsForLiquidity` with the price clamped into the range.
-pub(crate) fn amounts_for_liquidity(
-    sqrt_p: U256,
-    sqrt_a: U256,
-    sqrt_b: U256,
+/// Uniswap `LiquidityAmounts.getAmountsForLiquidity`: the amounts
+/// `liquidity` holds across the band `[sqrt_price_a_x96, sqrt_price_b_x96]`
+/// at `sqrt_price_x96`, both rounded down.
+///
+/// Returns `(amount0, amount1)`. In a PerpCity pool currency0 is the perp
+/// token and currency1 is USDC, so this is `(perp atoms, USDC atoms)`. The
+/// bounds may come in either order. The price is clamped into the band: at
+/// or below it the band holds only perps, at or above it only USDC.
+///
+/// # Examples
+///
+/// The perps a band holds at a float price. It equals the band's long
+/// capacity at that price:
+///
+/// ```
+/// use alloy::primitives::U256;
+/// use perpcity_sdk::convert::price_to_sqrt_price_x96;
+/// use perpcity_sdk::{amounts_for_liquidity, band_capacity, get_sqrt_ratio_at_tick};
+///
+/// let sqrt_price = price_to_sqrt_price_x96(35.0)?;
+/// let (perp_atoms, _usdc_atoms) = amounts_for_liquidity(
+///     sqrt_price,
+///     get_sqrt_ratio_at_tick(27_090)?,
+///     get_sqrt_ratio_at_tick(38_100)?,
+///     1_757_959,
+/// )?;
+/// let capacity = band_capacity(sqrt_price, 27_090, 38_100, 1_757_959)?;
+/// assert_eq!(perp_atoms, U256::from(capacity.long_atoms));
+/// # Ok::<(), perpcity_sdk::ValidationError>(())
+/// ```
+///
+/// # Errors
+///
+/// - [`ValidationError::InvalidPrice`] if any sqrt price is zero
+/// - [`ValidationError::Overflow`] if an amount exceeds `U256`
+pub fn amounts_for_liquidity(
+    sqrt_price_x96: U256,
+    sqrt_price_a_x96: U256,
+    sqrt_price_b_x96: U256,
     liquidity: u128,
 ) -> Result<(U256, U256), ValidationError> {
-    let (sa, sb) = if sqrt_a <= sqrt_b {
-        (sqrt_a, sqrt_b)
+    if sqrt_price_x96.is_zero() || sqrt_price_a_x96.is_zero() || sqrt_price_b_x96.is_zero() {
+        return Err(ValidationError::InvalidPrice {
+            reason: "zero sqrt price".into(),
+        });
+    }
+    let (sa, sb) = if sqrt_price_a_x96 <= sqrt_price_b_x96 {
+        (sqrt_price_a_x96, sqrt_price_b_x96)
     } else {
-        (sqrt_b, sqrt_a)
+        (sqrt_price_b_x96, sqrt_price_a_x96)
     };
-    let sp = sqrt_p.clamp(sa, sb);
+    let sp = sqrt_price_x96.clamp(sa, sb);
     let amount0 = amount0_delta(sp, sb, liquidity, Rounding::TowardZero)?;
     let amount1 = amount1_delta(sa, sp, liquidity, Rounding::TowardZero)?;
     Ok((amount0, amount1))
@@ -300,6 +340,65 @@ mod tests {
     #[test]
     fn target_ratio_rejects_zero_margin() {
         assert!(liquidity_for_target_ratio(0, -100, 100, Q96, 0.1).is_err());
+    }
+
+    // ── amounts_for_liquidity ────────────────────────────────────
+
+    /// Uniswap's three branches, with the price at each band edge landing
+    /// on the one-sided result.
+    #[test]
+    fn amounts_follow_price_position() {
+        let sa = get_sqrt_ratio_at_tick(-600).unwrap();
+        let sb = get_sqrt_ratio_at_tick(600).unwrap();
+        let liquidity = 1_000_000_000u128;
+        let full0 = amount0_delta(sa, sb, liquidity, Rounding::TowardZero).unwrap();
+        let full1 = amount1_delta(sa, sb, liquidity, Rounding::TowardZero).unwrap();
+
+        let below = get_sqrt_ratio_at_tick(-1200).unwrap();
+        let above = get_sqrt_ratio_at_tick(1200).unwrap();
+        assert_eq!(
+            amounts_for_liquidity(below, sa, sb, liquidity).unwrap(),
+            (full0, U256::ZERO)
+        );
+        assert_eq!(
+            amounts_for_liquidity(sa, sa, sb, liquidity).unwrap(),
+            (full0, U256::ZERO)
+        );
+        assert_eq!(
+            amounts_for_liquidity(above, sa, sb, liquidity).unwrap(),
+            (U256::ZERO, full1)
+        );
+        assert_eq!(
+            amounts_for_liquidity(sb, sa, sb, liquidity).unwrap(),
+            (U256::ZERO, full1)
+        );
+
+        let (in0, in1) = amounts_for_liquidity(Q96, sa, sb, liquidity).unwrap();
+        assert!(!in0.is_zero() && in0 < full0);
+        assert!(!in1.is_zero() && in1 < full1);
+    }
+
+    #[test]
+    fn amounts_accept_bounds_in_either_order() {
+        let sa = get_sqrt_ratio_at_tick(-600).unwrap();
+        let sb = get_sqrt_ratio_at_tick(600).unwrap();
+        assert_eq!(
+            amounts_for_liquidity(Q96, sa, sb, 1_000_000).unwrap(),
+            amounts_for_liquidity(Q96, sb, sa, 1_000_000).unwrap()
+        );
+    }
+
+    #[test]
+    fn amounts_reject_zero_prices() {
+        let sb = get_sqrt_ratio_at_tick(600).unwrap();
+        assert!(matches!(
+            amounts_for_liquidity(U256::ZERO, Q96, sb, 1),
+            Err(ValidationError::InvalidPrice { .. })
+        ));
+        assert!(matches!(
+            amounts_for_liquidity(Q96, U256::ZERO, sb, 1),
+            Err(ValidationError::InvalidPrice { .. })
+        ));
     }
 
     #[test]

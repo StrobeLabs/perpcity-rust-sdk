@@ -65,15 +65,15 @@ fn parse_taker_swap(receipt: &alloy::rpc::types::TransactionReceipt) -> Option<(
     None
 }
 
-/// Which side of the book a liquidation targets. The two contract entry
-/// points are twins; only the encoded call differs.
+/// Which book, maker or taker, a liquidation targets. The two contract
+/// entry points are twins; only the encoded call differs.
 #[derive(Debug, Clone, Copy)]
-enum Side {
+enum Book {
     Maker,
     Taker,
 }
 
-impl Side {
+impl Book {
     fn liquidation_calldata(self, pos_id: U256, fee_recipient: Address) -> Bytes {
         match self {
             Self::Maker => Perp::liquidateMakerCall {
@@ -481,7 +481,7 @@ impl PerpClient {
         pos_id: U256,
         fee_recipient: Address,
     ) -> Result<()> {
-        self.simulate_liquidation(Side::Maker, pos_id, fee_recipient)
+        self.simulate_liquidation(Book::Maker, pos_id, fee_recipient)
             .await
     }
 
@@ -505,7 +505,7 @@ impl PerpClient {
         fee_recipient: Address,
         urgency: Urgency,
     ) -> Result<alloy::rpc::types::TransactionReceipt> {
-        self.send_liquidation(Side::Maker, pos_id, fee_recipient, urgency)
+        self.send_liquidation(Book::Maker, pos_id, fee_recipient, urgency)
             .await
     }
 
@@ -525,7 +525,7 @@ impl PerpClient {
         pos_id: U256,
         fee_recipient: Address,
     ) -> Result<()> {
-        self.simulate_liquidation(Side::Taker, pos_id, fee_recipient)
+        self.simulate_liquidation(Book::Taker, pos_id, fee_recipient)
             .await
     }
 
@@ -543,21 +543,21 @@ impl PerpClient {
         fee_recipient: Address,
         urgency: Urgency,
     ) -> Result<alloy::rpc::types::TransactionReceipt> {
-        self.send_liquidation(Side::Taker, pos_id, fee_recipient, urgency)
+        self.send_liquidation(Book::Taker, pos_id, fee_recipient, urgency)
             .await
     }
 
     /// Shared `eth_call` health probe behind the four public liquidation
-    /// methods: validates the fee recipient, encodes the side's call, and
+    /// methods: validates the fee recipient, encodes the book's call, and
     /// preflights at the pinned [`GasLimits::LIQUIDATE`] cap.
     async fn simulate_liquidation(
         &self,
-        side: Side,
+        book: Book,
         pos_id: U256,
         fee_recipient: Address,
     ) -> Result<()> {
         validate_fee_recipient(fee_recipient)?;
-        let calldata = side.liquidation_calldata(pos_id, fee_recipient);
+        let calldata = book.liquidation_calldata(pos_id, fee_recipient);
         self.preflight_call(
             self.deployments.perp,
             &calldata,
@@ -573,18 +573,18 @@ impl PerpClient {
     /// broadcast.
     async fn send_liquidation(
         &self,
-        side: Side,
+        book: Book,
         pos_id: U256,
         fee_recipient: Address,
         urgency: Urgency,
     ) -> Result<alloy::rpc::types::TransactionReceipt> {
         validate_fee_recipient(fee_recipient)?;
-        let calldata = side.liquidation_calldata(pos_id, fee_recipient);
+        let calldata = book.liquidation_calldata(pos_id, fee_recipient);
 
         tracing::debug!(
             pos_id = %pos_id,
             %fee_recipient,
-            side = side.label(),
+            book = book.label(),
             ?urgency,
             "liquidating position"
         );
@@ -598,7 +598,7 @@ impl PerpClient {
         tracing::debug!(
             pos_id = %pos_id,
             tx_hash = %receipt.transaction_hash,
-            side = side.label(),
+            book = book.label(),
             "position liquidated"
         );
         Ok(receipt)
