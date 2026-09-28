@@ -12,6 +12,7 @@
 //! the scan's ordinary signal and no reason to take an endpoint out of
 //! service.
 
+use alloy::rpc::json_rpc::ErrorPayload;
 use alloy::transports::{RpcError, TransportError, TransportErrorKind};
 
 /// What a failed request is evidence about.
@@ -41,27 +42,53 @@ pub(crate) fn fault(error: &TransportError) -> Fault {
         // An error *response* means the endpoint answered. Only a rate
         // limit says anything about the endpoint itself.
         RpcError::ErrorResp(payload) => {
-            if payload.is_retry_err() {
+            if is_rate_limit(payload) {
                 Fault::Endpoint
             } else {
                 Fault::Request
             }
         }
         RpcError::Transport(TransportErrorKind::HttpError(http)) => match http.status {
-            429 | 503 => Fault::Endpoint,
+            // Overloaded, or timed out before it could answer.
+            408 | 429 | 503 => Fault::Endpoint,
+            // Credentials belong to the endpoint, not to the request.
             401 | 403 => Fault::Endpoint,
             500..=599 => Fault::Endpoint,
             _ => Fault::Request,
         },
-        // A request this transport cannot serialize, or a response it
-        // cannot parse into the caller's type, is about the request.
-        RpcError::SerError(_) | RpcError::DeserError { .. } => Fault::Request,
+        // A request this transport could not serialize never reached the
+        // endpoint, and serializing it again will fail the same way.
+        RpcError::SerError(_) => Fault::Request,
+        // A response that will not parse is a malformed answer — a proxy's
+        // error page, a truncated body — which another endpoint may not
+        // give. A caller asking for a type the node words differently
+        // lands here too, and pays one retry for the ambiguity.
+        RpcError::DeserError { .. } => Fault::Endpoint,
         RpcError::UnsupportedFeature(_) => Fault::Request,
         // Missing batch responses, a gone backend, an unavailable
         // subscription, a local usage error, a null where a value was
         // required: the endpoint did not deliver.
         _ => Fault::Endpoint,
     }
+}
+
+/// Whether a JSON-RPC error is a rate limit, per alloy's retry rules.
+///
+/// Alloy calls every `-32005` retryable, since Infura returns it for
+/// `exceeded project rate limit` — but Infura also returns it for
+/// `query returned more than 10000 results`, a range rejection that the
+/// log scan narrows and that no endpoint would answer differently. So for
+/// that code the message decides.
+pub(crate) fn is_rate_limit(payload: &ErrorPayload) -> bool {
+    if payload.code != -32_005 {
+        return payload.is_retry_err();
+    }
+    ErrorPayload::<()> {
+        code: 0,
+        message: payload.message.clone(),
+        data: None,
+    }
+    .is_retry_err()
 }
 
 #[cfg(test)]
@@ -96,7 +123,9 @@ mod tests {
 
     #[test]
     fn overload_auth_and_server_errors_are_the_endpoints() {
-        for status in [429, 503, 500, 502, 504] {
+        // 408 is the one client error that is about the endpoint: it did
+        // not get the request in time, and asking again can work.
+        for status in [408, 429, 503, 500, 502, 504] {
             assert_eq!(fault(&http(status)), Fault::Endpoint, "status {status}");
         }
         // Credentials are a property of the endpoint, not the request.
@@ -114,6 +143,37 @@ mod tests {
             )),
             Fault::Endpoint
         );
+    }
+
+    /// Infura answers both a rate limit and a range rejection with
+    /// `-32005`, and alloy calls the code retryable either way, so only
+    /// the message separates them. Getting this wrong would count a
+    /// narrowing rejection against the endpoint — the whole point of this
+    /// taxonomy — for every Infura-shaped provider.
+    #[test]
+    fn the_message_decides_what_minus_32005_means() {
+        assert_eq!(
+            fault(&rpc_error(-32_005, "exceeded project rate limit")),
+            Fault::Endpoint
+        );
+        assert_eq!(
+            fault(&rpc_error(
+                -32_005,
+                "query returned more than 10000 results"
+            )),
+            Fault::Request
+        );
+    }
+
+    /// A request that never serialized cannot be the endpoint's fault; a
+    /// response that will not parse probably is.
+    #[test]
+    fn serialization_is_the_requests_fault_and_deserialization_the_endpoints() {
+        let ser = RpcError::SerError(serde_json::from_str::<u8>("x").unwrap_err());
+        assert_eq!(fault(&ser), Fault::Request);
+
+        let deser = RpcError::deser_err(serde_json::from_str::<u8>("x").unwrap_err(), "<html>");
+        assert_eq!(fault(&deser), Fault::Endpoint);
     }
 
     #[test]

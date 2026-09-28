@@ -22,13 +22,13 @@ use std::time::Duration;
 use tokio::time::Instant;
 
 use alloy::providers::Provider;
-use alloy::rpc::json_rpc::ErrorPayload;
 use alloy::rpc::types::{Filter, Log};
 use alloy::transports::{RpcError, TransportError, TransportErrorKind};
 use futures_util::stream::{self, Stream, StreamExt, TryStreamExt};
 
 use crate::constants::{LOG_SCAN_INITIAL_SPAN, LOG_SCAN_MAX_SPAN};
 use crate::errors::{ContractError, PerpCityError, Result, ValidationError};
+use crate::transport::fault::is_rate_limit;
 
 /// Concurrent header reads when a provider omits log timestamps.
 const HEADER_READ_CONCURRENCY: usize = 4;
@@ -433,18 +433,4 @@ fn classify(error: &TransportError) -> Failure {
         },
         _ => Failure::Unanswered,
     }
-}
-
-/// Whether a JSON-RPC error is a rate limit, per alloy's retry rules, with
-/// `-32005` a rate limit only when its message says so.
-fn is_rate_limit(payload: &ErrorPayload) -> bool {
-    if payload.code != -32_005 {
-        return payload.is_retry_err();
-    }
-    ErrorPayload::<()> {
-        code: 0,
-        message: payload.message.clone(),
-        data: None,
-    }
-    .is_retry_err()
 }

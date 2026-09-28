@@ -36,7 +36,7 @@
 //! ```
 
 pub mod config;
-mod fault;
+pub(crate) mod fault;
 pub mod health;
 pub mod provider;
 mod redact;
