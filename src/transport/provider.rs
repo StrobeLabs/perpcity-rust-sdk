@@ -57,7 +57,7 @@ use tower::Service;
 
 use super::config::{Strategy, TransportConfig};
 use super::fault::{Fault, fault};
-use super::health::{CircuitState, EndpointHealth, EndpointStatus};
+use super::health::{CircuitState, EndpointHealth, EndpointStatus, Reserved};
 
 // ── Packed atomic state constants ────────────────────────────────────
 //
@@ -126,6 +126,16 @@ impl ManagedEndpoint {
         }
     }
 
+    /// Give back a half-open probe slot whose request was never sent.
+    /// Updates Mutex state + atomic mirrors.
+    #[inline]
+    fn release_probe(&self) {
+        let mut h = self.health.lock().unwrap();
+        h.release_probe();
+        self.atomic_state
+            .store(pack_state(h.state()), Ordering::Relaxed);
+    }
+
     /// Record an answer that declined the request. Updates Mutex state +
     /// atomic mirrors.
     #[inline]
@@ -163,6 +173,45 @@ impl std::fmt::Debug for ManagedEndpoint {
         f.debug_struct("ManagedEndpoint")
             .field("endpoint", &self.label)
             .finish_non_exhaustive()
+    }
+}
+
+/// The right to send one request to an endpoint, holding a half-open
+/// probe slot until the request's outcome is recorded.
+///
+/// Selecting an endpoint can reserve a probe slot, and a slot that is
+/// never given back stops the endpoint being probed again — with the
+/// default budget of one, forever. So the reservation is a value: drop it
+/// without sending, or drop it because the request was cancelled, and the
+/// slot comes back. [`Self::resolved`] says an outcome was recorded, and
+/// the outcome already settled the slot.
+#[must_use = "dropping the permit releases the endpoint's probe slot; that is usually what you want, but say so"]
+#[derive(Debug)]
+pub struct ProbePermit<'a> {
+    /// `None` once resolved, or when the circuit was closed and no slot
+    /// was taken.
+    held: Option<&'a ManagedEndpoint>,
+}
+
+impl ProbePermit<'_> {
+    /// A permit over a closed circuit: nothing was reserved, so nothing
+    /// has to be given back. Cheap enough for the lock-free path.
+    fn free() -> Self {
+        Self { held: None }
+    }
+
+    /// The request was sent and its outcome recorded, which resolved the
+    /// slot; the permit has nothing left to give back.
+    pub fn resolved(mut self) {
+        self.held = None;
+    }
+}
+
+impl Drop for ProbePermit<'_> {
+    fn drop(&mut self) {
+        if let Some(endpoint) = self.held.take() {
+            endpoint.release_probe();
+        }
     }
 }
 
@@ -220,13 +269,36 @@ impl EndpointPool {
         self.endpoints.is_empty()
     }
 
-    /// Select the best endpoint index based on strategy.
+    /// Select the best endpoint based on strategy, with the right to send
+    /// it one request.
     ///
-    /// Returns `None` if all endpoints are unavailable.
-    pub fn select(&self, strategy: Strategy, now_ms: u64) -> Option<usize> {
+    /// Returns `None` if all endpoints are unavailable. The permit must
+    /// outlive the request: dropping it gives back any probe slot the
+    /// selection reserved.
+    pub fn select(&self, strategy: Strategy, now_ms: u64) -> Option<(usize, ProbePermit<'_>)> {
         match strategy {
             Strategy::RoundRobin => self.select_round_robin(now_ms),
             Strategy::LatencyBased | Strategy::Hedged { .. } => self.select_latency_based(now_ms),
+        }
+    }
+
+    /// Take the right to send one request to endpoint `idx`, or `None` if
+    /// its circuit will not allow one.
+    fn reserve(&self, idx: usize, now_ms: u64) -> Option<ProbePermit<'_>> {
+        let endpoint = &self.endpoints[idx];
+        let mut health = endpoint.health.lock().unwrap();
+        let reserved = health.reserve(now_ms);
+        endpoint
+            .atomic_state
+            .store(pack_state(health.state()), Ordering::Relaxed);
+        endpoint
+            .atomic_latency_ns
+            .store(health.avg_latency_ns(), Ordering::Relaxed);
+        match reserved? {
+            Reserved::Probe => Some(ProbePermit {
+                held: Some(endpoint),
+            }),
+            Reserved::Freely => Some(ProbePermit::free()),
         }
     }
 
@@ -235,33 +307,26 @@ impl EndpointPool {
     /// Fast path: scan atomic state tags — if a Closed endpoint is found,
     /// return it immediately without locking. Only falls back to Mutex
     /// when all endpoints are non-Closed (rare: circuit breaker tripped).
-    fn select_round_robin(&self, now_ms: u64) -> Option<usize> {
+    fn select_round_robin(&self, now_ms: u64) -> Option<(usize, ProbePermit<'_>)> {
         let n = self.endpoints.len();
         let start = self.round_robin.fetch_add(1, Ordering::Relaxed);
 
-        // Lock-free fast path: find first Closed endpoint in round-robin order
+        // Lock-free fast path: first Closed endpoint in round-robin order.
+        // A closed circuit reserves nothing, so no lock is needed.
         for i in 0..n {
             let idx = (start + i) % n;
             if self.endpoints[idx].atomic_state.load(Ordering::Relaxed) & TAG_MASK == TAG_CLOSED {
-                return Some(idx);
+                return Some((idx, ProbePermit::free()));
             }
         }
 
-        // Slow path: all non-Closed, try is_callable (may transition Open→HalfOpen)
-        for i in 0..n {
+        // Slow path: all non-Closed, so a reservation may transition
+        // Open→HalfOpen and take a probe slot. The first that allows one
+        // wins, and nothing else was reserved.
+        (0..n).find_map(|i| {
             let idx = (start + i) % n;
-            let ep = &self.endpoints[idx];
-            let mut h = ep.health.lock().unwrap();
-            if h.is_callable(now_ms) {
-                ep.atomic_state
-                    .store(pack_state(h.state()), Ordering::Relaxed);
-                return Some(idx);
-            }
-            ep.atomic_state
-                .store(pack_state(h.state()), Ordering::Relaxed);
-        }
-
-        None
+            Some((idx, self.reserve(idx, now_ms)?))
+        })
     }
 
     /// Latency-based selection with lock-free fast path.
@@ -273,112 +338,97 @@ impl EndpointPool {
     /// Slow path: no Closed endpoints available. Lock each non-Closed endpoint
     /// and call `is_callable()` which may transition Open→HalfOpen. Only entered
     /// when circuit breakers have tripped (error condition, rare).
-    fn select_latency_based(&self, now_ms: u64) -> Option<usize> {
-        // Lock-free fast path: find best Closed endpoint by latency
-        let mut best_idx = None;
-        let mut best_latency = u64::MAX;
+    fn select_latency_based(&self, now_ms: u64) -> Option<(usize, ProbePermit<'_>)> {
+        // Lock-free fast path: best Closed endpoint by latency. A closed
+        // circuit reserves nothing, so no lock is needed.
+        let mut best: Option<(usize, u64)> = None;
         let mut any_non_closed = false;
-
-        for (i, ep) in self.endpoints.iter().enumerate() {
-            let state = ep.atomic_state.load(Ordering::Relaxed);
-            if state & TAG_MASK == TAG_CLOSED {
-                let lat = ep.atomic_latency_ns.load(Ordering::Relaxed);
-                if lat < best_latency {
-                    best_latency = lat;
-                    best_idx = Some(i);
+        for (i, endpoint) in self.endpoints.iter().enumerate() {
+            if endpoint.atomic_state.load(Ordering::Relaxed) & TAG_MASK == TAG_CLOSED {
+                let latency = endpoint.atomic_latency_ns.load(Ordering::Relaxed);
+                if best.is_none_or(|(_, best_latency)| latency < best_latency) {
+                    best = Some((i, latency));
                 }
             } else {
                 any_non_closed = true;
             }
         }
-
-        if best_idx.is_some() {
-            return best_idx;
+        if let Some((idx, _)) = best {
+            return Some((idx, ProbePermit::free()));
+        }
+        if !any_non_closed {
+            return None;
         }
 
-        // Slow path: no Closed endpoints, try Open/HalfOpen with locks
-        if any_non_closed {
-            for (i, ep) in self.endpoints.iter().enumerate() {
-                let mut h = ep.health.lock().unwrap();
-                if h.is_callable(now_ms) {
-                    let lat = h.avg_latency_ns();
-                    // Sync atomics after potential state transition
-                    ep.atomic_latency_ns
-                        .store(h.avg_latency_ns(), Ordering::Relaxed);
-                    ep.atomic_state
-                        .store(pack_state(h.state()), Ordering::Relaxed);
-                    if lat < best_latency {
-                        best_latency = lat;
-                        best_idx = Some(i);
-                    }
-                } else {
-                    ep.atomic_state
-                        .store(pack_state(h.state()), Ordering::Relaxed);
-                }
+        // Slow path: nothing is closed, so each candidate must be reserved
+        // to be considered — and every candidate this loop passes over
+        // gives its slot back when its permit drops. Without that, one
+        // selection would strand a probe slot on every endpoint it did not
+        // choose, and with the default budget of one slot those endpoints
+        // would never be probed again.
+        let mut best: Option<(usize, u64, ProbePermit<'_>)> = None;
+        for idx in 0..self.endpoints.len() {
+            let Some(permit) = self.reserve(idx, now_ms) else {
+                continue;
+            };
+            let latency = self.endpoints[idx]
+                .atomic_latency_ns
+                .load(Ordering::Relaxed);
+            match &best {
+                // Keeping the incumbent drops this candidate's permit.
+                Some((_, best_latency, _)) if *best_latency <= latency => {}
+                // Replacing it drops the incumbent's permit.
+                _ => best = Some((idx, latency, permit)),
             }
         }
-
-        best_idx
+        best.map(|(idx, _, permit)| (idx, permit))
     }
 
     /// Select up to `n` callable endpoints for hedged requests, ordered by latency.
     ///
     /// Uses a fixed-size stack buffer (max 16 endpoints) to avoid heap allocation
     /// in the common case.
-    pub fn select_n(&self, n: usize, now_ms: u64) -> Vec<usize> {
-        // Stack buffer avoids Vec allocation for up to 16 endpoints
-        let mut candidates: [(usize, u64); 16] = [(0, u64::MAX); 16];
-        let mut count = 0;
+    pub fn select_n(&self, n: usize, now_ms: u64) -> Vec<(usize, ProbePermit<'_>)> {
+        let mut candidates: Vec<(usize, u64, ProbePermit<'_>)> = Vec::with_capacity(n);
         let mut any_non_closed = false;
 
-        // Lock-free fast path: collect Closed endpoints
-        for (i, ep) in self.endpoints.iter().enumerate() {
-            if count >= 16 {
-                break;
-            }
-            let state = ep.atomic_state.load(Ordering::Relaxed);
-            if state & TAG_MASK == TAG_CLOSED {
-                let lat = ep.atomic_latency_ns.load(Ordering::Relaxed);
-                candidates[count] = (i, lat);
-                count += 1;
+        // Lock-free fast path: collect Closed endpoints, which reserve
+        // nothing.
+        for (idx, endpoint) in self.endpoints.iter().enumerate() {
+            if endpoint.atomic_state.load(Ordering::Relaxed) & TAG_MASK == TAG_CLOSED {
+                let latency = endpoint.atomic_latency_ns.load(Ordering::Relaxed);
+                candidates.push((idx, latency, ProbePermit::free()));
             } else {
                 any_non_closed = true;
             }
         }
 
-        // If we have enough Closed endpoints, sort and return top-n
-        if count >= n {
-            candidates[..count].sort_unstable_by_key(|&(_, lat)| lat);
-            return candidates[..n].iter().map(|&(i, _)| i).collect();
-        }
-
-        // Slow path: not enough Closed, add recoverable Open/HalfOpen
-        if any_non_closed {
-            for (i, ep) in self.endpoints.iter().enumerate() {
-                if count >= 16 {
-                    break;
-                }
-                // Skip already-collected Closed endpoints
-                let state = ep.atomic_state.load(Ordering::Relaxed);
-                if state & TAG_MASK == TAG_CLOSED {
+        // Only reserve elsewhere if the closed endpoints cannot fill the
+        // fan-out: a reservation this function hands back is a probe slot
+        // spent on a request that never happens.
+        if candidates.len() < n && any_non_closed {
+            for idx in 0..self.endpoints.len() {
+                if self.endpoints[idx].atomic_state.load(Ordering::Relaxed) & TAG_MASK == TAG_CLOSED
+                {
                     continue;
                 }
-                let mut h = ep.health.lock().unwrap();
-                if h.is_callable(now_ms) {
-                    let lat = h.avg_latency_ns();
-                    ep.atomic_state
-                        .store(pack_state(h.state()), Ordering::Relaxed);
-                    candidates[count] = (i, lat);
-                    count += 1;
-                } else {
-                    ep.atomic_state
-                        .store(pack_state(h.state()), Ordering::Relaxed);
+                if let Some(permit) = self.reserve(idx, now_ms) {
+                    let latency = self.endpoints[idx]
+                        .atomic_latency_ns
+                        .load(Ordering::Relaxed);
+                    candidates.push((idx, latency, permit));
                 }
             }
         }
 
-        candidates[..count].sort_unstable_by_key(|&(_, lat)| lat);
-        candidates[..count.min(n)].iter().map(|&(i, _)| i).collect()
+        // Fastest first; the permits of the candidates that do not make the
+        // cut drop with the truncation, giving their slots back.
+        candidates.sort_unstable_by_key(|&(_, latency, _)| latency);
+        candidates.truncate(n);
+        candidates
+            .into_iter()
+            .map(|(idx, _, permit)| (idx, permit))
+            .collect()
     }
 
     /// Number of endpoints in this pool.
@@ -547,20 +597,24 @@ impl Router {
     /// the shared pool. Returns a reference to the chosen pool and the
     /// endpoint index within that pool, or `None` if all endpoints across
     /// both pools are unavailable.
-    fn select_for(&self, is_write: bool, now_ms: u64) -> Option<(&EndpointPool, usize)> {
+    fn select_for(
+        &self,
+        is_write: bool,
+        now_ms: u64,
+    ) -> Option<(&EndpointPool, usize, ProbePermit<'_>)> {
         let dedicated = if is_write { &self.write } else { &self.read };
 
         // Try dedicated pool first
         if !dedicated.is_empty()
-            && let Some(idx) = dedicated.select(self.strategy, now_ms)
+            && let Some((idx, permit)) = dedicated.select(self.strategy, now_ms)
         {
-            return Some((dedicated, idx));
+            return Some((dedicated, idx, permit));
         }
 
         // Fall back to shared pool
         self.shared
             .select(self.strategy, now_ms)
-            .map(|idx| (&self.shared, idx))
+            .map(|(idx, permit)| (&self.shared, idx, permit))
     }
 
     /// Select the pool for hedged reads. Prefers the read pool if it has
@@ -608,7 +662,7 @@ impl Router {
         let now_ms = now_ms();
 
         for attempt in 0..max_attempts {
-            let Some((pool, idx)) = self.select_for(is_write, now_ms) else {
+            let Some((pool, idx, permit)) = self.select_for(is_write, now_ms) else {
                 tracing::error!("all RPC endpoints unavailable (circuits open)");
                 return Err(TransportError::local_usage_str(
                     "all RPC endpoints unavailable (circuits open)",
@@ -647,11 +701,13 @@ impl Router {
                     } else {
                         let latency_ns = start.elapsed().as_nanos() as u64;
                         pool.record_success(idx, latency_ns);
+                        permit.resolved();
                         return Ok(response);
                     }
                 }
                 Ok(Err(e)) => {
                     pool.record_error(idx, now_ms, &e);
+                    permit.resolved();
                     tracing::warn!(
                         attempt = attempt + 1,
                         max_attempts,
@@ -673,6 +729,7 @@ impl Router {
                 }
                 Err(_timeout) => {
                     pool.record_failure(idx, now_ms);
+                    permit.resolved();
                     tracing::warn!(
                         attempt = attempt + 1,
                         max_attempts,
@@ -708,17 +765,23 @@ impl Router {
         timeout: std::time::Duration,
     ) -> Result<ResponsePacket, TransportError> {
         let now_ms = now_ms();
-        let indices = pool.select_n(fan_out, now_ms);
+        let selected = pool.select_n(fan_out, now_ms);
 
-        if indices.is_empty() {
+        if selected.is_empty() {
             return Err(TransportError::local_usage_str(
                 "all RPC endpoints unavailable (circuits open)",
             ));
         }
 
+        // Permits stay here, in the parent: a losing request is cancelled
+        // and never reports an outcome, so only dropping its permit gives
+        // the probe slot back. Keyed by endpoint so an outcome can resolve
+        // the right one.
+        let mut permits: Vec<(usize, ProbePermit<'_>)> = selected;
+
         // If only one endpoint is available, fall back to single request
-        if indices.len() == 1 {
-            let idx = indices[0];
+        if permits.len() == 1 {
+            let (idx, permit) = permits.pop().expect("one endpoint");
             let start = Instant::now();
             let mut transport = pool.transport(idx);
             let result = tokio::time::timeout(timeout, transport.call(req)).await;
@@ -726,14 +789,17 @@ impl Router {
             return match result {
                 Ok(Ok(resp)) => {
                     pool.record_success(idx, start.elapsed().as_nanos() as u64);
+                    permit.resolved();
                     Ok(resp)
                 }
                 Ok(Err(e)) => {
                     pool.record_error(idx, now_ms, &e);
+                    permit.resolved();
                     Err(e)
                 }
                 Err(_) => {
                     pool.record_failure(idx, now_ms);
+                    permit.resolved();
                     Err(TransportError::local_usage_str("request timed out"))
                 }
             };
@@ -742,7 +808,7 @@ impl Router {
         // Fan out to multiple endpoints using JoinSet for proper cancellation
         let mut join_set = tokio::task::JoinSet::new();
 
-        for &idx in &indices {
+        for &(idx, _) in &permits {
             let mut transport = pool.transport(idx);
             let req_clone = req.clone();
 
@@ -757,6 +823,14 @@ impl Router {
             });
         }
 
+        /// Hand back the permit of the endpoint that just reported, so its
+        /// outcome — not its drop — settles the probe slot.
+        fn resolve(permits: &mut Vec<(usize, ProbePermit<'_>)>, idx: usize) {
+            if let Some(at) = permits.iter().position(|&(held, _)| held == idx) {
+                permits.swap_remove(at).1.resolved();
+            }
+        }
+
         let mut last_err = None;
 
         while let Some(join_result) = join_set.join_next().await {
@@ -764,13 +838,16 @@ impl Router {
                 Ok((idx, Ok(response), start)) => {
                     let latency_ns = start.elapsed().as_nanos() as u64;
                     pool.record_success(idx, latency_ns);
+                    resolve(&mut permits, idx);
                     // Cancel remaining in-flight requests — saves RPC rate limits.
                     // JoinSet::drop also aborts, but explicit abort_all is clearer.
+                    // The cancelled requests' permits drop with `permits`.
                     join_set.abort_all();
                     return Ok(response);
                 }
                 Ok((idx, Err(e), _start)) => {
                     pool.record_error(idx, now_ms, &e);
+                    resolve(&mut permits, idx);
                     last_err = Some(e);
                 }
                 // Task was aborted (by our abort_all or JoinSet::drop) — expected
@@ -916,16 +993,64 @@ mod tests {
         .unwrap();
 
         let now = now_ms();
-        let a = pool.select(Strategy::RoundRobin, now).unwrap();
-        let b = pool.select(Strategy::RoundRobin, now).unwrap();
-        let c = pool.select(Strategy::RoundRobin, now).unwrap();
-        let d = pool.select(Strategy::RoundRobin, now).unwrap();
+        let a = pool.select(Strategy::RoundRobin, now).unwrap().0;
+        let b = pool.select(Strategy::RoundRobin, now).unwrap().0;
+        let c = pool.select(Strategy::RoundRobin, now).unwrap().0;
+        let d = pool.select(Strategy::RoundRobin, now).unwrap().0;
 
         // Should cycle through 0, 1, 2, 0
         assert_eq!(a, 0);
         assert_eq!(b, 1);
         assert_eq!(c, 2);
         assert_eq!(d, 0);
+    }
+
+    /// Selecting among several recovering endpoints reserves a probe slot
+    /// on each one it considers, and with the default budget of one slot a
+    /// reservation never given back would remove that endpoint from the
+    /// pool for good. The permits the selection passes over release theirs,
+    /// so every endpoint stays reachable.
+    #[test]
+    fn selection_does_not_strand_probe_slots_on_endpoints_it_passes_over() {
+        let pool = EndpointPool::from_urls(
+            &[
+                "https://rpc1.example.com".into(),
+                "https://rpc2.example.com".into(),
+                "https://rpc3.example.com".into(),
+            ],
+            Default::default(),
+        )
+        .unwrap();
+
+        // Trip every circuit, then let the recovery window elapse.
+        for idx in 0..3 {
+            for t in 1..=3 {
+                pool.record_failure(idx, t * 1_000);
+            }
+        }
+        let recovered = 40_000;
+        assert!(pool.select(Strategy::LatencyBased, recovered).is_some());
+
+        // Whichever endpoint was chosen, the other two were reserved while
+        // being considered. If their slots were stranded, every later
+        // selection would find nothing callable.
+        for round in 0..5 {
+            assert!(
+                pool.select(Strategy::LatencyBased, recovered).is_some(),
+                "no endpoint callable on round {round}: probe slots were stranded"
+            );
+        }
+
+        // Same for the hedged selection, which considers every endpoint and
+        // keeps only the fastest `n`.
+        assert_eq!(pool.select_n(1, recovered).len(), 1);
+        for round in 0..5 {
+            assert_eq!(
+                pool.select_n(1, recovered).len(),
+                1,
+                "hedged selection stranded a slot on round {round}"
+            );
+        }
     }
 
     #[test]
@@ -942,7 +1067,7 @@ mod tests {
         pool.record_success(0, 10_000_000); // 10ms
         pool.record_success(1, 1_000_000); // 1ms
 
-        let selected = pool.select(Strategy::LatencyBased, now_ms()).unwrap();
+        let (selected, _permit) = pool.select(Strategy::LatencyBased, now_ms()).unwrap();
         assert_eq!(selected, 1); // lower latency
     }
 
@@ -963,7 +1088,7 @@ mod tests {
         pool.record_failure(0, now);
         pool.record_failure(0, now);
 
-        let selected = pool.select(Strategy::LatencyBased, now).unwrap();
+        let (selected, _permit) = pool.select(Strategy::LatencyBased, now).unwrap();
         assert_eq!(selected, 1); // only healthy endpoint
     }
 
@@ -987,7 +1112,7 @@ mod tests {
             pool.record_error(0, now, &declined);
         }
         assert_eq!(
-            pool.select(Strategy::LatencyBased, now),
+            pool.select(Strategy::LatencyBased, now).map(|(idx, _)| idx),
             Some(0),
             "an endpoint that declines requests is still working"
         );
@@ -997,7 +1122,7 @@ mod tests {
         for _ in 0..3 {
             pool.record_error(0, now, &overloaded);
         }
-        assert_eq!(pool.select(Strategy::LatencyBased, now), None);
+        assert!(pool.select(Strategy::LatencyBased, now).is_none());
     }
 
     /// Alchemy's reply to an `eth_getLogs` range it considers too wide: a
@@ -1101,6 +1226,7 @@ mod tests {
         pool.record_success(2, 3_000_000);
 
         let selected = pool.select_n(2, now_ms());
+        let selected: Vec<usize> = selected.into_iter().map(|(idx, _)| idx).collect();
         assert_eq!(selected, vec![1, 2]); // ordered by latency, take 2
     }
 
@@ -1136,7 +1262,7 @@ mod tests {
         let transport = HftTransport::new(config).unwrap();
         let router = &transport.router;
 
-        let (pool, _idx) = router.select_for(false, now_ms()).unwrap();
+        let (pool, _idx, _permit) = router.select_for(false, now_ms()).unwrap();
         // Should select from the read pool (1 endpoint), not shared
         assert_eq!(pool.len(), 1);
         assert_eq!(pool.endpoint_urls()[0], "https://read.example.com");
@@ -1152,7 +1278,7 @@ mod tests {
         let transport = HftTransport::new(config).unwrap();
         let router = &transport.router;
 
-        let (pool, _idx) = router.select_for(true, now_ms()).unwrap();
+        let (pool, _idx, _permit) = router.select_for(true, now_ms()).unwrap();
         // No write pool → falls back to shared
         assert_eq!(pool.endpoint_urls()[0], "https://shared.example.com");
     }
@@ -1174,7 +1300,7 @@ mod tests {
         router.read.record_failure(0, now);
 
         // Read should fall back to shared
-        let (pool, _idx) = router.select_for(false, now).unwrap();
+        let (pool, _idx, _permit) = router.select_for(false, now).unwrap();
         assert_eq!(pool.endpoint_urls()[0], "https://shared.example.com");
     }
 
@@ -1270,7 +1396,7 @@ mod tests {
 
         // Multiple selections should consistently pick endpoint 1 (lower latency)
         for _ in 0..100 {
-            assert_eq!(pool.select(Strategy::LatencyBased, 1000).unwrap(), 1);
+            assert_eq!(pool.select(Strategy::LatencyBased, 1000).unwrap().0, 1);
         }
     }
 
@@ -1291,6 +1417,7 @@ mod tests {
         pool.record_success(2, 5_000_000);
 
         let selected = pool.select_n(2, 1000);
+        let selected: Vec<usize> = selected.into_iter().map(|(idx, _)| idx).collect();
         assert_eq!(selected, vec![1, 2]); // ordered by latency
     }
 }

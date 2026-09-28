@@ -22,6 +22,16 @@
 
 use super::config::CircuitBreakerConfig;
 
+/// What sending one request to an endpoint cost.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Reserved {
+    /// The circuit is closed: nothing was taken, nothing to give back.
+    Freely,
+    /// A half-open probe slot was taken, and has to be resolved — by the
+    /// request's outcome, or by giving it back.
+    Probe,
+}
+
 /// Circuit breaker state for an endpoint.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CircuitState {
@@ -99,18 +109,32 @@ impl EndpointHealth {
     /// - **Open**: callable only if the recovery timeout has elapsed (transitions to HalfOpen).
     /// - **HalfOpen**: callable if probe slots are available.
     pub fn is_callable(&mut self, now_ms: u64) -> bool {
+        self.reserve(now_ms).is_some()
+    }
+
+    /// Take the right to send one request, and say whether that took a
+    /// half-open probe slot.
+    ///
+    /// `None` when the endpoint is not callable. `Some(Reserved::Probe)`
+    /// means a slot was taken and **must** be resolved — by recording the
+    /// request's outcome, or by [`Self::release_probe`] if it is never
+    /// sent. `Some(Reserved::Freely)` took nothing.
+    ///
+    /// Callers do not track this themselves: `EndpointPool` hands out a
+    /// permit whose `Drop` releases an unresolved slot.
+    pub fn reserve(&mut self, now_ms: u64) -> Option<Reserved> {
         match self.state {
-            CircuitState::Closed => true,
+            CircuitState::Closed => Some(Reserved::Freely),
             CircuitState::Open { since_ms } => {
                 let elapsed = now_ms.saturating_sub(since_ms);
                 if elapsed >= self.config.recovery_timeout.as_millis() as u64 {
-                    // Transition to HalfOpen
+                    // Recovery elapsed: the first probe may go.
                     self.state = CircuitState::HalfOpen {
                         probes_in_flight: 1,
                     };
-                    true
+                    Some(Reserved::Probe)
                 } else {
-                    false
+                    None
                 }
             }
             CircuitState::HalfOpen { probes_in_flight } => {
@@ -118,11 +142,24 @@ impl EndpointHealth {
                     self.state = CircuitState::HalfOpen {
                         probes_in_flight: probes_in_flight + 1,
                     };
-                    true
+                    Some(Reserved::Probe)
                 } else {
-                    false
+                    None
                 }
             }
+        }
+    }
+
+    /// Give back a half-open probe slot taken by [`Self::reserve`] for a
+    /// request that was never sent, or whose outcome never arrived.
+    ///
+    /// Leaves the circuit half-open: the endpoint has still not shown
+    /// whether it recovered.
+    pub fn release_probe(&mut self) {
+        if let CircuitState::HalfOpen { probes_in_flight } = self.state {
+            self.state = CircuitState::HalfOpen {
+                probes_in_flight: probes_in_flight.saturating_sub(1),
+            };
         }
     }
 
@@ -136,11 +173,7 @@ impl EndpointHealth {
     /// endpoint would never be probed again.
     pub fn record_answered(&mut self) {
         self.consecutive_failures = 0;
-        if let CircuitState::HalfOpen { probes_in_flight } = self.state {
-            self.state = CircuitState::HalfOpen {
-                probes_in_flight: probes_in_flight.saturating_sub(1),
-            };
-        }
+        self.release_probe();
     }
 
     /// Record a successful request with its latency.
