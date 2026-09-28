@@ -15,6 +15,26 @@ The changes below break the public API, so the next release is 0.5.0 (a minor bu
 - **A failed broadcast returns `TransactionError::BroadcastFailed { tx_hash, source }` instead of `PerpCityError::Rpc`.** The node can accept a transaction and still fail the request, so the outcome is unknown; the hash of the signed transaction lets the caller look it up. `source` is the same `TransportError` that `Rpc` carried. `is_transient()` is true for both, so retry loops are unchanged; code that matched `PerpCityError::Rpc` to detect a failed broadcast must match the new variant.
 - **`TransactionError::Reverted` carries `tx_hash: FixedBytes<32>`**, which was only in `reason`. Patterns that use `..` are unaffected; exhaustive patterns and constructions must name the new field. With `OutOfGas`, `ReceiptTimeout` and `BroadcastFailed`, every `TxBuilder::send` error that follows the broadcast now carries a typed hash.
 
+### Fixed
+
+- **A request an endpoint declines no longer counts against its health,
+  and a declined read is no longer retried.** `HftTransport` treated every
+  non-200 as evidence the endpoint was failing, so a provider that answers
+  a too-wide `eth_getLogs` with an HTTP client error — Alchemy returns
+  `400` carrying `-32602 Log response size exceeded` — looked like an
+  endpoint dying. Two consequences, both fixed: the read-retry loop resent
+  the request twice for an answer that could not change, which tripled the
+  cost of every rejected probe in the adaptive log scan; and three such
+  answers opened the circuit, taking a healthy endpoint out of service for
+  the recovery window. Since the retries counted separately, a single
+  oversized request could open the circuit on its own, which meant a cold
+  scan of a dense log range could not converge at all. The transport now
+  distinguishes a request the endpoint declined (any client error but
+  `401`, `403`, `429`) from a failure of the endpoint itself (no answer,
+  timeout, rate limit, server error, auth refusal) and records only the
+  latter. A narrowing rejection is the log scan's ordinary signal, so
+  `history`'s width search can now narrow as often as it needs to.
+
 ### Changed
 
 - **The event vocabulary moved to `events`, out from under `feeds`.**
