@@ -49,6 +49,7 @@ use alloy::transports::{TransportError, TransportFut};
 use tower::Service;
 
 use super::config::{Strategy, TransportConfig};
+use super::fault::{Fault, fault};
 use super::health::{CircuitState, EndpointHealth, EndpointStatus};
 
 // ── Packed atomic state constants ────────────────────────────────────
@@ -378,6 +379,18 @@ impl EndpointPool {
         self.endpoints[idx].record_failure(now_ms);
     }
 
+    /// Record what a failed request says about endpoint `idx`.
+    ///
+    /// A request the endpoint declined says nothing about its health — it
+    /// answered, and every endpoint would decline the same request — so
+    /// only an endpoint's own failure counts against it. See
+    /// [`Fault`](super::fault::Fault).
+    pub fn record_error(&self, idx: usize, now_ms: u64, error: &TransportError) {
+        if fault(error) == Fault::Endpoint {
+            self.record_failure(idx, now_ms);
+        }
+    }
+
     /// Clone the transport for endpoint `idx` (cheap, clones the inner Arc).
     fn transport(&self, idx: usize) -> alloy::transports::BoxTransport {
         self.endpoints[idx].transport.clone()
@@ -619,7 +632,7 @@ impl Router {
                     }
                 }
                 Ok(Err(e)) => {
-                    pool.record_failure(idx, now_ms);
+                    pool.record_error(idx, now_ms, &e);
                     tracing::warn!(
                         attempt = attempt + 1,
                         max_attempts,
@@ -688,7 +701,7 @@ impl Router {
                     Ok(resp)
                 }
                 Ok(Err(e)) => {
-                    pool.record_failure(idx, now_ms);
+                    pool.record_error(idx, now_ms, &e);
                     Err(e)
                 }
                 Err(_) => {
@@ -729,7 +742,7 @@ impl Router {
                     return Ok(response);
                 }
                 Ok((idx, Err(e), _start)) => {
-                    pool.record_failure(idx, now_ms);
+                    pool.record_error(idx, now_ms, &e);
                     last_err = Some(e);
                 }
                 // Task was aborted (by our abort_all or JoinSet::drop) — expected
@@ -924,6 +937,39 @@ mod tests {
 
         let selected = pool.select(Strategy::LatencyBased, now).unwrap();
         assert_eq!(selected, 1); // only healthy endpoint
+    }
+
+    /// A provider that declines a request — a block range it considers
+    /// too wide, say — is working, so it stays in service however many
+    /// times it declines. The log scan's width search depends on this:
+    /// narrowing from its initial span takes several rejections in a row,
+    /// and a breaker that counted them would take the endpoint out before
+    /// the search converged.
+    #[test]
+    fn declined_requests_leave_an_endpoint_in_service() {
+        use alloy::transports::TransportErrorKind;
+
+        let pool =
+            EndpointPool::from_urls(&["https://rpc1.example.com".into()], Default::default())
+                .unwrap();
+        let now = now_ms();
+
+        let declined = TransportErrorKind::http_error(400, String::new());
+        for _ in 0..10 {
+            pool.record_error(0, now, &declined);
+        }
+        assert_eq!(
+            pool.select(Strategy::LatencyBased, now),
+            Some(0),
+            "an endpoint that declines requests is still working"
+        );
+
+        // An endpoint that cannot answer still loses its circuit.
+        let overloaded = TransportErrorKind::http_error(503, String::new());
+        for _ in 0..3 {
+            pool.record_error(0, now, &overloaded);
+        }
+        assert_eq!(pool.select(Strategy::LatencyBased, now), None);
     }
 
     #[test]
