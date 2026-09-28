@@ -121,6 +121,16 @@ impl ManagedEndpoint {
         }
     }
 
+    /// Record an answer that declined the request. Updates Mutex state +
+    /// atomic mirrors.
+    #[inline]
+    fn record_answered(&self) {
+        let mut h = self.health.lock().unwrap();
+        h.record_answered();
+        self.atomic_state
+            .store(pack_state(h.state()), Ordering::Relaxed);
+    }
+
     /// Record a failed request. Updates Mutex state + atomic mirrors.
     #[inline]
     fn record_failure(&self, now_ms: u64) {
@@ -383,13 +393,15 @@ impl EndpointPool {
 
     /// Record what a failed request says about endpoint `idx`.
     ///
-    /// A request the endpoint declined says nothing about its health — it
-    /// answered, and every endpoint would decline the same request — so
-    /// only an endpoint's own failure counts against it. See
+    /// A request the endpoint declined is not held against it — it
+    /// answered, and every endpoint would decline the same request — but
+    /// the answer is still evidence it is alive, which ends its failure
+    /// streak and releases the probe slot a half-open request took. See
     /// [`Fault`](super::fault::Fault).
     pub fn record_error(&self, idx: usize, now_ms: u64, error: &TransportError) {
-        if fault(error) == Fault::Endpoint {
-            self.record_failure(idx, now_ms);
+        match fault(error) {
+            Fault::Endpoint => self.record_failure(idx, now_ms),
+            Fault::Request => self.endpoints[idx].record_answered(),
         }
     }
 
