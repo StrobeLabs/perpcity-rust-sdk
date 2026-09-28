@@ -12,10 +12,16 @@ concurrency:
 
 name: CI
 
+# Every cargo invocation passes `--locked` (the lockfile is committed, so a
+# green run proves it resolves) and `--all-features`. The features are the
+# reason for the latter: `test-utils` exposes `history::test_support` to
+# downstream test suites and `aws` the KMS signer, so a broken feature gate
+# would otherwise ship green.
 jobs:
   fmt:
     runs-on: ubuntu-latest
     name: fmt
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -26,31 +32,34 @@ jobs:
   clippy:
     runs-on: ubuntu-latest
     name: clippy
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
-      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo clippy --locked --all-features --all-targets -- -D warnings
 
   test:
     runs-on: ubuntu-latest
     name: test
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test --all-targets
-      - run: cargo test --doc
+      - run: cargo test --locked --all-features --all-targets
+      - run: cargo test --locked --all-features --doc
 
   doc:
     runs-on: ubuntu-latest
     name: doc
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@nightly
+      - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo doc --no-deps
+      - run: cargo doc --locked --all-features --no-deps
         env:
           RUSTDOCFLAGS: -Dwarnings
