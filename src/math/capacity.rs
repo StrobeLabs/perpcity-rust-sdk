@@ -115,20 +115,20 @@ impl MarketCapacity {
     /// interest equal to it. A hand-built value above `u32::MAX`
     /// saturates.
     pub fn utilization_e6(&self, side: Side) -> Option<u32> {
-        let capacity = self.capacity.atoms(side);
-        if capacity == 0 {
-            return None;
-        }
-        // Cannot fail: the divisor is non-zero and the quotient stays below
-        // 2^148.
-        let utilization = mul_div(
+        // `mul_div` fails only on a zero divisor, which is the same
+        // condition the contract answers with `type(uint24).max` instead of
+        // a ratio — so the guard and the error are one thing, and `ok()`
+        // is the whole of it. Inventing a value for an unreachable branch
+        // would put a number here that reads as 4294% utilization, which is
+        // the sentinel this signature exists to avoid.
+        mul_div(
             U256::from(self.open_interest_atoms(side)),
             U256::from(SCALE_1E6),
-            U256::from(capacity),
+            U256::from(self.capacity.atoms(side)),
             Rounding::TowardZero,
         )
-        .map_or(u32::MAX, |utilization| utilization.saturating_to());
-        Some(utilization)
+        .ok()
+        .map(|utilization| utilization.saturating_to())
     }
 }
 
