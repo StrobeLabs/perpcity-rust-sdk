@@ -4,7 +4,11 @@ permissions:
 on:
   push:
     branches: [main]
+  # `ready_for_review` is not one of the default activity types, and the
+  # jobs below skip drafts — so without it, a draft marked ready with no
+  # further commits would never trigger a run to un-skip them.
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
