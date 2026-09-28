@@ -630,11 +630,69 @@ fn taker_opened(pos_id: u64) -> Perp::TakerOpened {
 }
 
 fn position_mint(owner: Address, pos_id: u64) -> Perp::Transfer {
+    position_transfer(Address::ZERO, owner, pos_id)
+}
+
+fn position_transfer(from: Address, to: Address, pos_id: u64) -> Perp::Transfer {
     Perp::Transfer {
-        from: Address::ZERO,
-        to: owner,
+        from,
+        to,
         tokenId: U256::from(pos_id),
     }
+}
+
+#[tokio::test]
+async fn custody_folds_out_of_the_tape_and_answers_at_a_point() {
+    let alice = Address::repeat_byte(0x0A);
+    let bob = Address::repeat_byte(0x0B);
+    let logs = vec![
+        mined_event_log(&position_mint(alice, 7), PERP, 10, 0, Some(10)),
+        // A trade between the mint and the handoff: the fold ignores it,
+        // but it shares a block with the handoff to pin the order key.
+        mined_event_log(&taker_opened(7), PERP, 20, 1, Some(20)),
+        mined_event_log(&position_transfer(alice, bob, 7), PERP, 20, 2, Some(20)),
+        mined_event_log(
+            &position_transfer(bob, Address::ZERO, 7),
+            PERP,
+            30,
+            0,
+            Some(30),
+        ),
+        mined_event_log(&position_mint(bob, 9), PERP, 40, 0, Some(40)),
+    ];
+    let node = FakeNode::new(logs, u64::MAX);
+    let tape = market_events(&node.provider(), PERP, 0, 100).await.unwrap();
+    let custody = OwnershipLog::fold(&tape);
+
+    let pos = U256::from(7);
+    let at = |block, log_index| ChainPoint { block, log_index };
+    assert_eq!(custody.owner_at(pos, at(9, 0)), None, "before the mint");
+    assert_eq!(custody.owner_at(pos, at(10, 0)), Some(alice));
+    assert_eq!(
+        custody.owner_at(pos, at(20, 1)),
+        Some(alice),
+        "the trade in the handoff's block, before it"
+    );
+    assert_eq!(custody.owner_at(pos, at(20, 2)), Some(bob));
+    assert_eq!(custody.owner_at(pos, at(31, 0)), None, "after the burn");
+    assert_eq!(custody.latest_owner(pos), Some(bob), "the final holder");
+
+    assert_eq!(custody.len(), 2);
+    assert_eq!(
+        custody.positions().collect::<Vec<_>>(),
+        vec![pos, U256::from(9)]
+    );
+    assert_eq!(
+        custody.transfers(pos).collect::<Vec<_>>(),
+        vec![
+            (at(10, 0), alice),
+            (at(20, 2), bob),
+            (at(30, 0), Address::ZERO),
+        ]
+    );
+    // A position the tape never saw, and an empty fold.
+    assert_eq!(custody.owner_at(U256::from(11), at(10, 0)), None);
+    assert!(OwnershipLog::fold(&[]).is_empty());
 }
 
 #[tokio::test]

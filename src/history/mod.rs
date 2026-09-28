@@ -7,7 +7,8 @@
 //! [`market_events`] and [`latest_market_events`] replay a perp's whole
 //! event history — the tape — through the same decoder the live feed
 //! uses ([`crate::events::decode_log`]), position-NFT transfers
-//! included; and [`token_transfers`] reads an ERC-20's `Transfer` events
+//! included — so [`OwnershipLog`] folds a tape into who held which
+//! position when; and [`token_transfers`] reads an ERC-20's `Transfer` events
 //! between address sets (for example, every USDC transfer between a
 //! treasury and its wallets). [`History`] wraps them all with a uniform
 //! block-lag policy and a request width learned once across scans.
@@ -57,7 +58,7 @@ mod tests;
 
 pub use beacon::{IndexPrint, beacon_prints, latest_beacon_prints};
 pub use scan::{ScanStats, get_logs_chunked};
-pub use tape::{TapeEvent, latest_market_events, market_events};
+pub use tape::{ChainPoint, OwnershipLog, TapeEvent, latest_market_events, market_events};
 pub use transfers::{TokenTransfer, token_transfers};
 
 use alloy::primitives::Address;

@@ -27,6 +27,21 @@ The changes below break the public API, so the next release is 0.5.0 (a minor bu
 
 ### Added
 
+- **`history::OwnershipLog` and `history::ChainPoint`** — who held each
+  of a market's positions, over time, folded from a tape:
+  `OwnershipLog::fold(&tape)` walks the
+  `MarketEvent::PositionTransferred` events and answers
+  `owner_at(pos_id, ChainPoint)` (custody when an event happened — the
+  attribution a measurement over past events wants, since a position
+  handed between wallets mid-life has more than one owner),
+  `latest_owner(pos_id)` (its final holder, for a caller that wants one
+  address per position), plus `transfers`, `positions` and `len`. A mint
+  is a transfer from the zero address and a burn is a transfer to it, so
+  custody is `None` before the mint and after the burn. `ChainPoint
+  { block, log_index }` is the chain's total order — two logs in one
+  block still compare — and `TapeEvent::point()` returns an event's.
+  Trade events carry a position id and never a wallet, so this fold is
+  how a market's activity is attributed to the addresses behind it.
 - **The market-event tape.** `history::market_events(provider, perp,
   from_block, to_block)` replays every event a perp emitted, in chain
   order, and `history::latest_market_events(.., limit)` the newest
