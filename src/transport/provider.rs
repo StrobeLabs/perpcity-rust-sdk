@@ -10,7 +10,9 @@
 //!
 //! - **Per-endpoint circuit breaker**: automatically routes around dead endpoints
 //! - **Strategy-based selection**: round-robin, latency-based, or hedged reads
-//! - **Read/write classification**: reads are retried on failure; writes never are
+//! - **Read/write classification**: a read is retried when the endpoint
+//!   failed to answer, never when it declined the request; a write is
+//!   retried only when it provably never reached the mempool
 //! - **Hedged requests**: fan out reads to N endpoints, take the fastest response;
 //!   losing requests are **cancelled** via `JoinSet::abort_all` to save RPC rate limits
 //! - **Lock-free endpoint selection**: read path uses atomic mirrors, zero mutex
@@ -641,6 +643,15 @@ impl Router {
                         is_write,
                         "transport error"
                     );
+                    // A declined read earns the same answer however often
+                    // it is asked, so it goes back to the caller now:
+                    // retrying costs round trips and delays the reply it
+                    // is going to get anyway. Writes keep their own retry
+                    // policy, which turns on whether the transaction
+                    // could have landed.
+                    if !is_write && fault(&e) == Fault::Request {
+                        return Err(e);
+                    }
                     last_err = Some(e);
                 }
                 Err(_timeout) => {
@@ -970,6 +981,90 @@ mod tests {
             pool.record_error(0, now, &overloaded);
         }
         assert_eq!(pool.select(Strategy::LatencyBased, now), None);
+    }
+
+    /// Alchemy's reply to an `eth_getLogs` range it considers too wide: a
+    /// JSON-RPC error delivered with an HTTP client-error status.
+    fn declined_response() -> String {
+        const BODY: &str = r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32602,"message":"Log response size exceeded. Retry a smaller range."}}"#;
+        format!(
+            "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{BODY}",
+            BODY.len(),
+        )
+    }
+
+    /// A local endpoint that declines everything, counting what it was
+    /// asked. Answers on the same connection as often as it is asked, so
+    /// the count is requests, not connections.
+    async fn declining_endpoint() -> (String, Arc<AtomicUsize>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let served = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&served);
+        tokio::spawn(async move {
+            let response = declined_response();
+            while let Ok((mut socket, _)) = listener.accept().await {
+                let counter = Arc::clone(&counter);
+                let response = response.clone();
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 4096];
+                    while let Ok(read) = socket.read(&mut buf).await {
+                        if read == 0 || socket.write_all(response.as_bytes()).await.is_err() {
+                            return;
+                        }
+                        counter.fetch_add(1, Ordering::SeqCst);
+                    }
+                });
+            }
+        });
+        (url, served)
+    }
+
+    #[allow(unused_imports)]
+    use alloy::providers::Provider as _;
+
+    fn provider_over(url: &str) -> alloy::providers::RootProvider<alloy::network::Ethereum> {
+        let transport = HftTransport::new(
+            TransportConfig::builder()
+                .shared_endpoint(url)
+                .build()
+                .unwrap(),
+        )
+        .unwrap();
+        alloy::providers::RootProvider::new(alloy::rpc::client::RpcClient::new(
+            alloy::transports::BoxTransport::new(transport),
+            false,
+        ))
+    }
+
+    /// The width search narrows by being told no, so a declined request
+    /// must cost one round trip, not one plus the read retries.
+    #[tokio::test]
+    async fn a_declined_request_is_sent_once() {
+        let (url, served) = declining_endpoint().await;
+        let error = provider_over(&url)
+            .get_block_number()
+            .await
+            .expect_err("the endpoint declines everything");
+        assert_eq!(
+            served.load(Ordering::SeqCst),
+            1,
+            "a declined request earns the same answer every time: {error}"
+        );
+    }
+
+    /// And however often it declines, it keeps serving: nothing is
+    /// refused locally by an open circuit.
+    #[tokio::test]
+    async fn declining_every_request_keeps_the_endpoint_in_service() {
+        let (url, served) = declining_endpoint().await;
+        let provider = provider_over(&url);
+        for _ in 0..10 {
+            let _ = provider.get_block_number().await;
+        }
+        assert_eq!(served.load(Ordering::SeqCst), 10);
     }
 
     #[test]
