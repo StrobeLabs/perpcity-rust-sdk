@@ -9,12 +9,23 @@
 //!
 //! The tape covers what the perp itself emits. That includes
 //! [`MarketEvent::PositionTransferred`] — the position NFT's mint, burn
-//! and mid-life transfers, which is how a position id maps to its owner
-//! over time. It does not include [`MarketEvent::IndexUpdated`] (the
-//! beacon's address — see [`beacon_prints`](super::beacon_prints)) or
+//! and mid-life transfers — so who held a position at a given block is a
+//! fold of the tape: [`OwnershipLog`]. Trade events name a position id
+//! and never a wallet, so that fold is how a market's activity is
+//! attributed to the addresses behind it. The tape does not include
+//! [`MarketEvent::IndexUpdated`] (the beacon's address — see
+//! [`beacon_prints`](super::beacon_prints)) or
 //! [`MarketEvent::ModifyLiquidity`] (the PoolManager's address).
+//!
+//! Chain order has two sources: within one response, every production
+//! client returns `eth_getLogs` results by block then log index; across
+//! responses, the scan reads its windows in range order. Folds that
+//! depend on it say so — [`OwnershipLog::fold`] debug-asserts each
+//! position's transfers arrive strictly increasing.
 
-use alloy::primitives::{Address, B256};
+use std::collections::BTreeMap;
+
+use alloy::primitives::{Address, B256, U256};
 use alloy::providers::Provider;
 use alloy::rpc::types::{Filter, Log};
 use serde::{Deserialize, Serialize};
@@ -25,6 +36,20 @@ use crate::events::{MarketEvent, decode_log};
 use futures_util::TryStreamExt;
 
 use super::scan::{SharedWidths, block_timestamps, check_block_range, scan_all, scan_newest};
+
+/// A position in the chain's total order: a block, then a log's index
+/// within it.
+///
+/// Two events in the same block still compare, which is what a join
+/// across series (a fill against the index print before it, a trade
+/// against the transfer that handed the position over) needs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct ChainPoint {
+    /// Block the log landed in.
+    pub block: u64,
+    /// Position of the log within its block.
+    pub log_index: u64,
+}
 
 /// One market event with its chain position.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -39,6 +64,115 @@ pub struct TapeEvent {
     pub tx_hash: B256,
     /// The decoded event, as the live feed would have streamed it.
     pub event: MarketEvent,
+}
+
+impl TapeEvent {
+    /// Where this event sits in the chain's total order.
+    pub fn point(&self) -> ChainPoint {
+        ChainPoint {
+            block: self.block_number,
+            log_index: self.log_index,
+        }
+    }
+}
+
+/// Who held each of a market's positions, over time: the custody
+/// timeline folded from a tape's [`MarketEvent::PositionTransferred`]
+/// events.
+///
+/// A mint is a transfer from the zero address and a burn (a full close,
+/// or a liquidation) is a transfer to it, so custody is `None` before a
+/// position's mint and after its burn.
+///
+/// ```
+/// use perpcity_sdk::history::OwnershipLog;
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// # let tape: Vec<perpcity_sdk::history::TapeEvent> = Vec::new();
+/// let custody = OwnershipLog::fold(&tape);
+/// for pos_id in custody.positions() {
+///     let _owner = custody.latest_owner(pos_id);
+/// }
+/// # Ok(())
+/// # }
+/// ```
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct OwnershipLog {
+    /// Position id → `(from this point on, this address holds it)`, in
+    /// chain order. The zero address marks a burn.
+    spans: BTreeMap<U256, Vec<(ChainPoint, Address)>>,
+}
+
+impl OwnershipLog {
+    /// Fold the custody timeline out of a tape's transfer events; other
+    /// events are skipped.
+    ///
+    /// `events` must be in chain order, as every reader in this module
+    /// returns them.
+    pub fn fold<'a>(events: impl IntoIterator<Item = &'a TapeEvent>) -> Self {
+        let mut spans: BTreeMap<U256, Vec<(ChainPoint, Address)>> = BTreeMap::new();
+        for event in events {
+            if let MarketEvent::PositionTransferred { to, pos_id, .. } = event.event {
+                let timeline = spans.entry(pos_id).or_default();
+                let point = event.point();
+                debug_assert!(
+                    timeline.last().is_none_or(|&(last, _)| last < point),
+                    "tape out of chain order at {point:?}"
+                );
+                timeline.push((point, to));
+            }
+        }
+        Self { spans }
+    }
+
+    /// Who held `pos_id` at `at`: the recipient of its latest transfer at
+    /// or before that point. `None` before the mint, after the burn, or
+    /// for a position this tape never saw minted.
+    ///
+    /// This is the attribution a measurement over past events wants: a
+    /// position handed between wallets mid-life has more than one owner,
+    /// and only a point-in-time read credits each event to the wallet
+    /// that held it then.
+    pub fn owner_at(&self, pos_id: U256, at: ChainPoint) -> Option<Address> {
+        let timeline = self.spans.get(&pos_id)?;
+        let held = timeline.partition_point(|&(point, _)| point <= at);
+        let (_, owner) = timeline[..held].last()?;
+        (!owner.is_zero()).then_some(*owner)
+    }
+
+    /// The last wallet that held `pos_id`, ignoring its burn — the
+    /// position's final owner, for a caller that wants one address per
+    /// position rather than a timeline. `None` for a position this tape
+    /// never saw minted.
+    pub fn latest_owner(&self, pos_id: U256) -> Option<Address> {
+        self.spans
+            .get(&pos_id)?
+            .iter()
+            .rev()
+            .map(|&(_, owner)| owner)
+            .find(|owner| !owner.is_zero())
+    }
+
+    /// Every transfer of `pos_id`, oldest first, as
+    /// `(point, new owner)`; the zero address ends the position.
+    pub fn transfers(&self, pos_id: U256) -> impl Iterator<Item = (ChainPoint, Address)> + '_ {
+        self.spans.get(&pos_id).into_iter().flatten().copied()
+    }
+
+    /// Every position id with custody history, ascending.
+    pub fn positions(&self) -> impl Iterator<Item = U256> + '_ {
+        self.spans.keys().copied()
+    }
+
+    /// Positions with custody history.
+    pub fn len(&self) -> usize {
+        self.spans.len()
+    }
+
+    /// Whether the tape held no position transfers at all.
+    pub fn is_empty(&self) -> bool {
+        self.spans.is_empty()
+    }
 }
 
 /// Every market event `perp` emitted in blocks `from_block..=to_block`,
