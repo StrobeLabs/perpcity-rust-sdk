@@ -86,6 +86,28 @@ pub enum MakerEquityKind {
     Failed(PerpCityError),
 }
 
+/// How many of a batch's ids resolved to each [`MakerEquityKind`].
+#[derive(Debug, Default, PartialEq, Eq)]
+struct Tally {
+    computed: usize,
+    not_a_maker: usize,
+    failed: usize,
+}
+
+impl Tally {
+    fn of(kinds: &[MakerEquityKind]) -> Self {
+        let mut tally = Self::default();
+        for kind in kinds {
+            match kind {
+                MakerEquityKind::Computed(_) => tally.computed += 1,
+                MakerEquityKind::NotAMaker => tally.not_a_maker += 1,
+                MakerEquityKind::Failed(_) => tally.failed += 1,
+            }
+        }
+        tally
+    }
+}
+
 /// A maker position that survived the row-read phase and awaits slot reads.
 struct PendingMaker {
     /// Index into the caller's `pos_ids`, so per-position results can be
@@ -417,11 +439,36 @@ impl PerpClient {
             .concat()
             .await;
 
-        tracing::debug!(
-            count = pos_ids.len(),
-            block = market.snapshot().block.number,
-            "maker equities read"
-        );
+        // The batch degrades per position instead of failing, so this line is
+        // the only place the shape of what came back is visible: a sweep that
+        // is 40% `Failed` otherwise reads exactly like a clean one. A failure
+        // is worth seeing without turning debug on, so the outcome picks the
+        // level; the per-position causes are already logged above.
+        let Tally {
+            computed,
+            not_a_maker,
+            failed,
+        } = Tally::of(&kinds);
+        let block = market.snapshot().block.number;
+        if failed > 0 {
+            tracing::warn!(
+                count = pos_ids.len(),
+                computed,
+                not_a_maker,
+                failed,
+                block,
+                "maker equities read, some positions failed"
+            );
+        } else {
+            tracing::debug!(
+                count = pos_ids.len(),
+                computed,
+                not_a_maker,
+                failed,
+                block,
+                "maker equities read"
+            );
+        }
         Ok(pos_ids
             .iter()
             .zip(kinds)
@@ -1076,6 +1123,43 @@ mod tests {
             ),
             "{err}"
         );
+    }
+
+    /// The aggregate log line is the only caller-visible summary of a batch
+    /// that degrades per position, so the tally must attribute every id —
+    /// a miscount is a sweep reported cleaner than it was.
+    #[test]
+    fn tally_counts_every_outcome_kind() {
+        let failed = || {
+            MakerEquityKind::Failed(PerpCityError::Contract(ContractError::MulticallFailed {
+                reason: "row reverted".into(),
+            }))
+        };
+        let kinds = vec![
+            MakerEquityKind::Computed(MakerEquityBreakdown::default()),
+            MakerEquityKind::NotAMaker,
+            failed(),
+            MakerEquityKind::Computed(MakerEquityBreakdown::default()),
+            failed(),
+            failed(),
+        ];
+
+        let tally = Tally::of(&kinds);
+        assert_eq!(
+            tally,
+            Tally {
+                computed: 2,
+                not_a_maker: 1,
+                failed: 3,
+            }
+        );
+        assert_eq!(
+            tally.computed + tally.not_a_maker + tally.failed,
+            kinds.len(),
+            "every id must be counted exactly once"
+        );
+
+        assert_eq!(Tally::of(&[]), Tally::default());
     }
 
     /// A chunk-wide read failure fans out to every id of the chunk as a
