@@ -16,6 +16,12 @@
 //! [`MarketEvent::IndexUpdated`] (the beacon's address — see
 //! [`beacon_prints`](super::beacon_prints)) or
 //! [`MarketEvent::ModifyLiquidity`] (the PoolManager's address).
+//!
+//! Chain order has two sources: within one response, every production
+//! client returns `eth_getLogs` results by block then log index; across
+//! responses, the scan reads its windows in range order. Folds that
+//! depend on it say so — [`OwnershipLog::fold`] debug-asserts each
+//! position's transfers arrive strictly increasing.
 
 use std::collections::BTreeMap;
 
