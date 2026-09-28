@@ -39,6 +39,12 @@
 //! endpoint put the backoff in the transport (alloy's `RetryBackoffLayer`,
 //! or [`HftTransport`](crate::HftTransport)'s read retries).
 //!
+//! A narrowing rejection is the scan working, not the endpoint failing —
+//! providers deliver it either as a JSON-RPC error or with a client-error
+//! status, and [`HftTransport`](crate::HftTransport) keeps such an answer
+//! off the endpoint's health record and does not retry it, so a search
+//! can narrow as many times as it needs to.
+//!
 //! The deployed beacons expose no last-update getter (`index()` returns
 //! the value alone), so a beacon's newest `IndexUpdated` log is the only
 //! record of when it last printed: `latest_beacon_prints(.., 1)` reads it.

@@ -126,6 +126,23 @@ impl EndpointHealth {
         }
     }
 
+    /// Record that the endpoint answered by declining the request.
+    ///
+    /// Evidence that it is reachable and responsive, so the failure streak
+    /// ends and a half-open probe gives its slot back — but not evidence
+    /// that it can serve a request, so a half-open circuit stays half-open
+    /// and the latency average is left alone. Without the slot release, a
+    /// probe answered this way would hold its slot forever and the
+    /// endpoint would never be probed again.
+    pub fn record_answered(&mut self) {
+        self.consecutive_failures = 0;
+        if let CircuitState::HalfOpen { probes_in_flight } = self.state {
+            self.state = CircuitState::HalfOpen {
+                probes_in_flight: probes_in_flight.saturating_sub(1),
+            };
+        }
+    }
+
     /// Record a successful request with its latency.
     ///
     /// Resets consecutive failure count and transitions HalfOpen → Closed.
@@ -263,6 +280,46 @@ mod tests {
                 probes_in_flight: 1
             }
         ));
+    }
+
+    /// A probe the endpoint answers by declining has still been answered:
+    /// its slot comes back, so the endpoint keeps being probed instead of
+    /// sitting half-open with a slot it will never get back.
+    #[test]
+    fn a_declined_probe_returns_its_slot() {
+        let config = CircuitBreakerConfig {
+            half_open_max_requests: 1,
+            ..default_config()
+        };
+        let mut h = EndpointHealth::new(config);
+        for t in 1..=3 {
+            h.record_failure(t * 1000);
+        }
+        assert!(h.is_callable(33_000), "recovery elapsed: one probe allowed");
+        assert!(!h.is_callable(33_001), "the probe is in flight");
+
+        h.record_answered();
+        assert!(
+            h.is_callable(33_002),
+            "the answered probe released its slot"
+        );
+        assert!(
+            matches!(h.state(), CircuitState::HalfOpen { .. }),
+            "declining is not proof the endpoint can serve the request"
+        );
+    }
+
+    /// An answer breaks a failure streak, so unrelated failures either
+    /// side of it do not add up toward the threshold.
+    #[test]
+    fn an_answer_ends_the_failure_streak() {
+        let mut h = EndpointHealth::new(default_config());
+        h.record_failure(1_000);
+        h.record_failure(2_000);
+        h.record_answered();
+        assert_eq!(h.status().consecutive_failures, 0);
+        h.record_failure(3_000);
+        assert_eq!(h.state(), CircuitState::Closed, "one failure, not three");
     }
 
     #[test]
