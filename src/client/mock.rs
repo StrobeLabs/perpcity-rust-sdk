@@ -49,8 +49,15 @@ pub(super) const CHAIN_ID: u64 = 42_161;
 pub(super) fn client() -> (PerpClient, Rpc) {
     let asserter = Asserter::new();
     let provider = RootProvider::<Ethereum>::new(RpcClient::mocked(asserter.clone()));
-    // Health diagnostics only: the provider above is not wired to it, and
-    // the transport connects lazily, so nothing ever reaches this address.
+    (client_over(provider), Rpc(asserter))
+}
+
+/// A client over any provider — a mocked one, or a
+/// [`FakeNode`](crate::history::test_support::FakeNode)'s — with a fixed
+/// signer and deployments.
+pub(super) fn client_over(provider: RootProvider<Ethereum>) -> PerpClient {
+    // Health diagnostics only: the provider is not wired to it, and the
+    // transport connects lazily, so nothing ever reaches this address.
     let transport = HftTransport::new(
         TransportConfig::builder()
             .shared_endpoint("http://127.0.0.1:1")
@@ -65,8 +72,7 @@ pub(super) fn client() -> (PerpClient, Rpc) {
         usdc: USDC,
         pool_manager: POOL_MANAGER,
     };
-    let client = PerpClient::from_parts(provider, transport, signer, deployments, CHAIN_ID);
-    (client, Rpc(asserter))
+    PerpClient::from_parts(provider, transport, signer, deployments, CHAIN_ID)
 }
 
 /// The mock's answer queue, in the vocabulary of the reads.

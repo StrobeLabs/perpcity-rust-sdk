@@ -107,7 +107,7 @@ pub const DEFAULT_IN_FLIGHT: usize = 4;
 /// nothing.
 ///
 /// Constructed from any [`Provider`] — reading history needs no signer.
-/// A [`PerpClient`](crate::PerpClient) exposes its provider through
+/// A [`PerpClient`](crate::PerpClient) keeps one handle over its provider,
 /// [`history()`](crate::PerpClient::history).
 #[derive(Debug)]
 pub struct History<P> {

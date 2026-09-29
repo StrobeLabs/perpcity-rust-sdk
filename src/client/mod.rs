@@ -65,6 +65,7 @@ use crate::errors::{Result, TransactionError};
 use crate::hft::gas::{FeeCache, GasLimitCache};
 use crate::hft::pipeline::{PipelineConfig, TxPipeline};
 use crate::hft::state_cache::{CachedBounds, CachedFees, StateCache, StateCacheConfig};
+use crate::history::History;
 use crate::transport::provider::HftTransport;
 use crate::types::{Bounds, Deployments, Fees};
 
@@ -180,6 +181,10 @@ impl From<Bounds> for CachedBounds {
 pub struct PerpClient {
     /// Alloy provider wired to HftTransport (multi-endpoint, health-aware).
     provider: RootProvider<Ethereum>,
+    /// One history handle over the provider for the client's lifetime, so
+    /// the learned `eth_getLogs` width and the scan counters carry across
+    /// calls.
+    history: History<RootProvider<Ethereum>>,
     /// The underlying transport (kept for health diagnostics).
     transport: HftTransport,
     /// Wallet for signing transactions.
@@ -271,8 +276,10 @@ impl PerpClient {
         S: TxSigner<Signature> + Send + Sync + 'static,
     {
         let address = TxSigner::address(&signer);
+        let history = History::new(provider.clone());
         Self {
             provider,
+            history,
             transport,
             wallet: EthereumWallet::from(signer),
             address,
@@ -400,10 +407,13 @@ impl PerpClient {
         &self.provider
     }
 
-    /// A [`History`](crate::history::History) handle over this client's
-    /// provider, for historical reads with the default lag policy.
-    pub fn history(&self) -> crate::history::History<&RootProvider<Ethereum>> {
-        crate::history::History::new(&self.provider)
+    /// The client's [`History`] handle, with the default lag policy. It is
+    /// one handle for the client's lifetime, so a process that scans
+    /// repeatedly pays the width search once and [`History::stats`] meters
+    /// every scan. For another lag or concurrency budget, build a handle
+    /// with [`History::new`] over [`Self::provider`].
+    pub fn history(&self) -> &History<RootProvider<Ethereum>> {
+        &self.history
     }
 
     /// The signing wallet (for building signed transactions outside the SDK).
@@ -495,7 +505,60 @@ fn now_secs() -> u64 {
 
 #[cfg(test)]
 mod tests {
+    use alloy::primitives::{B256, Bytes};
+    use alloy::rpc::types::{Filter, Log};
+
     use super::*;
+    use crate::client::mock;
+    use crate::history::test_support::{FakeNode, mined_log};
+
+    // ── The history handle ───────────────────────────────────────────
+
+    const EMITTER: Address = Address::repeat_byte(0xe1);
+    const TOPIC: B256 = B256::repeat_byte(0x70);
+
+    fn logs_every(step: u64, last: u64) -> Vec<Log> {
+        (0..=last)
+            .step_by(step as usize)
+            .map(|block| mined_log(EMITTER, TOPIC, Bytes::new(), block, 0))
+            .collect()
+    }
+
+    /// The client keeps one handle: what one scan learns about the
+    /// provider's `eth_getLogs` width, the next scan through the accessor
+    /// starts from, and the counters run across both.
+    #[tokio::test]
+    async fn history_is_one_handle_for_the_clients_lifetime() {
+        let cap = 10_000;
+        let node = FakeNode::new(logs_every(777, 120_000), cap);
+        let client = mock::client_over(node.provider());
+        let filter = Filter::new().address(EMITTER).event_signature(TOPIC);
+
+        client
+            .history()
+            .logs(&filter, 0, Some(120_000))
+            .await
+            .unwrap();
+        let first = client.history().stats();
+        let after_first = node.requests().len();
+        assert!(first.requests > 0);
+
+        client
+            .history()
+            .logs(&filter, 120_001, Some(240_000))
+            .await
+            .unwrap();
+        let second = client.history().stats();
+        assert!(
+            second.requests > first.requests,
+            "counters accumulate across calls to the accessor"
+        );
+        let (from, to) = node.requests()[after_first];
+        assert!(
+            to - from < cap,
+            "the second scan started at the learned width, not the full span"
+        );
+    }
 
     // ── Type conversion helpers ──────────────────────────────────────
 
