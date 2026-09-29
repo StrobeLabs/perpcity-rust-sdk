@@ -985,8 +985,57 @@ impl PerpClient {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::client::mock::{self, BEACON, x96};
+    use crate::client::mock::{self, BEACON, Rpc, e6, x96};
+    use crate::contracts::Modules;
     use crate::errors::PerpCityError;
+
+    /// The market's tick spacing in these tests.
+    const SPACING: i32 = 30;
+
+    /// The three `Perp` reads that open `get_perp_config` and
+    /// `get_perp_data`: modules, pool key, pool state.
+    fn perp_answers(rpc: &Rpc) {
+        rpc.call::<Perp::modulesCall>(&mock::modules());
+        rpc.call::<Perp::poolKeyCall>(&mock::pool_key(SPACING));
+        rpc.call::<Perp::poolStateCall>(&mock::pool_state(x96(3, 1)));
+    }
+
+    /// The `IFees` module's two reads, and what they decode to.
+    fn fees_answers(rpc: &Rpc) {
+        rpc.call::<IFees::feesCall>(&IFees::feesReturn {
+            cFee: e6(1_000),
+            insFee: e6(2_000),
+            lpFee: e6(3_000),
+        });
+        rpc.call::<IFees::liqFeeCall>(&e6(50_000));
+    }
+
+    fn expected_fees() -> Fees {
+        Fees {
+            creator_fee: 0.001,
+            insurance_fee: 0.002,
+            lp_fee: 0.003,
+            liquidation_fee: 0.05,
+        }
+    }
+
+    /// The `IMarginRatios` module's taker read, and what it decodes to.
+    fn bounds_answers(rpc: &Rpc) {
+        rpc.call::<IMarginRatios::takerMarginRatiosCall>(&IMarginRatios::takerMarginRatiosReturn {
+            init: e6(100_000),
+            liq: e6(50_000),
+            backstop: e6(20_000),
+        });
+    }
+
+    fn expected_bounds() -> Bounds {
+        Bounds {
+            min_margin: 5.0,
+            min_taker_leverage: 1.0,
+            max_taker_leverage: 10.0,
+            liquidation_taker_ratio: 0.05,
+        }
+    }
 
     // ── Fast layer: mark, funding, balance ────────────────────────────
 
@@ -1242,5 +1291,195 @@ mod tests {
             ),
             "{err}"
         );
+    }
+
+    // ── Slow layer: fees and bounds, keyed by module address ──────────
+
+    /// The config read asks the `Perp` for its modules, then asks the
+    /// modules it named: six RPCs, decoded into fractions.
+    #[tokio::test]
+    async fn perp_config_reads_the_perp_then_the_modules_it_names() {
+        let (client, rpc) = mock::client();
+        perp_answers(&rpc);
+        fees_answers(&rpc);
+        bounds_answers(&rpc);
+
+        let config = client.get_perp_config().await.unwrap();
+        assert_eq!(
+            config,
+            PerpData {
+                perp: mock::PERP,
+                tick_spacing: SPACING,
+                mark: 1.5,
+                beacon: BEACON,
+                bounds: expected_bounds(),
+                fees: expected_fees(),
+            }
+        );
+        assert!(
+            rpc.is_drained(),
+            "modules, poolKey, poolState, fees, liqFee, takerMarginRatios"
+        );
+    }
+
+    /// Fees and bounds live in the slow layer: a second config read asks
+    /// only the `Perp`, `invalidate_fast_cache` leaves them in place, and
+    /// `invalidate_all_cache` is what evicts them.
+    #[tokio::test]
+    async fn fees_and_bounds_survive_a_fast_invalidation_but_not_a_full_one() {
+        let (client, rpc) = mock::client();
+        perp_answers(&rpc);
+        fees_answers(&rpc);
+        bounds_answers(&rpc);
+        let first = client.get_perp_config().await.unwrap();
+
+        perp_answers(&rpc);
+        assert_eq!(client.get_perp_config().await.unwrap(), first);
+        assert!(rpc.is_drained(), "the modules were not asked again");
+
+        client.invalidate_fast_cache();
+        perp_answers(&rpc);
+        assert_eq!(client.get_perp_config().await.unwrap(), first);
+        assert!(rpc.is_drained(), "the slow layer is untouched");
+
+        client.invalidate_all_cache();
+        perp_answers(&rpc);
+        fees_answers(&rpc);
+        bounds_answers(&rpc);
+        assert_eq!(client.get_perp_config().await.unwrap(), first);
+        assert!(rpc.is_drained(), "evicted: the modules are asked again");
+    }
+
+    /// A zero module address is rejected by name before it is called, so
+    /// no RPC goes to the zero address.
+    #[tokio::test]
+    async fn an_unregistered_module_is_named_before_it_is_asked() {
+        let (client, rpc) = mock::client();
+        rpc.call::<Perp::modulesCall>(&Modules {
+            fees: Address::ZERO,
+            ..mock::modules()
+        });
+        rpc.call::<Perp::poolKeyCall>(&mock::pool_key(SPACING));
+        rpc.call::<Perp::poolStateCall>(&mock::pool_state(x96(3, 1)));
+
+        let err = client.get_perp_config().await.unwrap_err();
+        assert!(
+            matches!(
+                err,
+                PerpCityError::Contract(ContractError::ModuleNotRegistered { ref module })
+                    if module == "IFees"
+            ),
+            "{err}"
+        );
+        assert!(
+            rpc.is_drained(),
+            "the perp was read; the fees module was not"
+        );
+    }
+
+    /// The lighter read stops at the `Perp`: beacon, spacing, mark.
+    #[tokio::test]
+    async fn perp_data_stops_at_the_perp() {
+        let (client, rpc) = mock::client();
+        perp_answers(&rpc);
+
+        assert_eq!(
+            client.get_perp_data().await.unwrap(),
+            (BEACON, SPACING, 1.5)
+        );
+        assert!(rpc.is_drained());
+    }
+
+    // ── Pinned reads: head minus the lag ──────────────────────────────
+
+    /// Both triples come back as fractions. The two reads share one ABI
+    /// shape, so distinct values are what pin their order.
+    #[tokio::test]
+    async fn margin_ratios_decode_both_triples_as_fractions() {
+        let (client, rpc) = mock::client();
+        rpc.quantity(100);
+        rpc.block(100 - SNAPSHOT_BLOCK_LAG, 1_700_000_000);
+        rpc.call::<Perp::modulesCall>(&mock::modules());
+        rpc.call::<IMarginRatios::makerMarginRatiosCall>(&IMarginRatios::makerMarginRatiosReturn {
+            init: e6(1_000_000),
+            liq: e6(900_000),
+            backstop: e6(800_000),
+        });
+        rpc.call::<IMarginRatios::takerMarginRatiosCall>(&IMarginRatios::takerMarginRatiosReturn {
+            init: e6(100_000),
+            liq: e6(50_000),
+            backstop: e6(20_000),
+        });
+
+        let ratios = client.get_margin_ratios().await.unwrap();
+        assert_eq!(
+            (
+                ratios.maker.init,
+                ratios.maker.liquidation,
+                ratios.maker.backstop
+            ),
+            (1.0, 0.9, 0.8)
+        );
+        assert_eq!(
+            (
+                ratios.taker.init,
+                ratios.taker.liquidation,
+                ratios.taker.backstop
+            ),
+            (0.1, 0.05, 0.02)
+        );
+        assert!(
+            rpc.is_drained(),
+            "blockNumber, block, modules, maker, taker"
+        );
+    }
+
+    /// The pinned block is the head less the lag, and a replica that has
+    /// no header for it is a failed read that names the block — and is
+    /// transient, since the replica will catch up.
+    #[tokio::test]
+    async fn a_missing_lagged_header_is_block_unavailable_at_head_minus_lag() {
+        let (client, rpc) = mock::client();
+        rpc.quantity(100);
+        rpc.no_block();
+
+        let err = client.get_margin_ratios().await.unwrap_err();
+        assert!(
+            matches!(
+                err,
+                PerpCityError::Contract(ContractError::BlockUnavailable { number })
+                    if number == 100 - SNAPSHOT_BLOCK_LAG
+            ),
+            "{err}"
+        );
+        assert!(err.is_transient());
+        assert!(
+            rpc.is_drained(),
+            "nothing is read at a block that is missing"
+        );
+    }
+
+    /// A market with no ratios module fails after the modules read, not
+    /// with an opaque decode error from the zero address.
+    #[tokio::test]
+    async fn margin_ratios_without_a_module_fail_after_the_modules_read() {
+        let (client, rpc) = mock::client();
+        rpc.quantity(100);
+        rpc.block(100 - SNAPSHOT_BLOCK_LAG, 1_700_000_000);
+        rpc.call::<Perp::modulesCall>(&Modules {
+            marginRatios: Address::ZERO,
+            ..mock::modules()
+        });
+
+        let err = client.get_margin_ratios().await.unwrap_err();
+        assert!(
+            matches!(
+                err,
+                PerpCityError::Contract(ContractError::ModuleNotRegistered { ref module })
+                    if module == "IMarginRatios"
+            ),
+            "{err}"
+        );
+        assert!(rpc.is_drained());
     }
 }

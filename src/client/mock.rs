@@ -7,17 +7,19 @@
 //! fails, and [`Rpc::is_drained`] proves none was left over), what it
 //! makes of the bytes it gets back, and what it remembers between calls.
 
+use alloy::consensus::Header as ConsensusHeader;
 use alloy::network::Ethereum;
-use alloy::primitives::{Address, B256, Bytes, I256, Signed, U256, Uint};
+use alloy::primitives::{Address, B256, Bytes, I256, Signed, U64, U256, Uint};
 use alloy::providers::RootProvider;
 use alloy::rpc::client::RpcClient;
 use alloy::rpc::json_rpc::ErrorPayload;
+use alloy::rpc::types::{Block, BlockTransactions, Header};
 use alloy::signers::local::PrivateKeySigner;
 use alloy::sol_types::SolCall;
 use alloy::transports::mock::Asserter;
 use serde_json::value::RawValue;
 
-use crate::contracts::{OpenInterest, Perp, Position, Rates};
+use crate::contracts::{Modules, OpenInterest, Perp, PoolKey, Position, Rates};
 use crate::types::Deployments;
 use crate::{HftTransport, TransportConfig};
 
@@ -29,8 +31,14 @@ pub(super) const PERP: Address = Address::repeat_byte(0x11);
 pub(super) const USDC: Address = Address::repeat_byte(0x22);
 /// The V4 `PoolManager` its pool lives in.
 pub(super) const POOL_MANAGER: Address = Address::repeat_byte(0x33);
-/// The market's beacon.
+/// The modules `modules()` names, each distinct so a read that asks the
+/// wrong one is asking a different address.
 pub(super) const BEACON: Address = Address::repeat_byte(0xb1);
+pub(super) const FEES: Address = Address::repeat_byte(0xf1);
+pub(super) const FUNDING: Address = Address::repeat_byte(0xf2);
+pub(super) const MARGIN_RATIOS: Address = Address::repeat_byte(0xa1);
+pub(super) const PRICE_IMPACT: Address = Address::repeat_byte(0xd1);
+pub(super) const PRICING: Address = Address::repeat_byte(0xd2);
 /// Arbitrum One, so chain-bound paths take the mainnet branch.
 pub(super) const CHAIN_ID: u64 = 42_161;
 
@@ -66,6 +74,30 @@ impl Rpc {
     pub(super) fn call<C: SolCall>(&self, ret: &C::Return) {
         self.0
             .push_success(&Bytes::from(C::abi_encode_returns(ret)));
+    }
+
+    /// The next request returns a hex quantity (`eth_blockNumber`).
+    pub(super) fn quantity(&self, n: u64) {
+        self.0.push_success(&U64::from(n));
+    }
+
+    /// The next `eth_getBlockByNumber` finds a header with this number
+    /// and timestamp; returns its hash, which pinned reads carry.
+    pub(super) fn block(&self, number: u64, timestamp: u64) -> B256 {
+        let header = Header::new(ConsensusHeader {
+            number,
+            timestamp,
+            ..ConsensusHeader::default()
+        });
+        let hash = header.hash;
+        let block: Block = Block::new(header, BlockTransactions::Hashes(Vec::new()));
+        self.0.push_success(&block);
+        hash
+    }
+
+    /// The next `eth_getBlockByNumber` finds nothing.
+    pub(super) fn no_block(&self) {
+        self.0.push_success(&Option::<Block>::None);
     }
 
     /// The next request fails as the node's own error, with no revert
@@ -111,6 +143,34 @@ pub(super) fn rates(funding_per_day_wad: i128) -> Rates {
         shortUtilFeePerDay: 0,
         lastTouch: Uint::ZERO,
     }
+}
+
+/// `modules()` naming the addresses above.
+pub(super) fn modules() -> Modules {
+    Modules {
+        beacon: BEACON,
+        fees: FEES,
+        funding: FUNDING,
+        marginRatios: MARGIN_RATIOS,
+        priceImpact: PRICE_IMPACT,
+        pricing: PRICING,
+    }
+}
+
+/// `poolKey()` with this tick spacing.
+pub(super) fn pool_key(tick_spacing: i32) -> PoolKey {
+    PoolKey {
+        currency0: Address::ZERO,
+        currency1: Address::ZERO,
+        fee: Uint::ZERO,
+        tickSpacing: Signed::try_from(tick_spacing).expect("fits int24"),
+        hooks: Address::ZERO,
+    }
+}
+
+/// A `uint24` ratio or fee as the modules store it, in millionths.
+pub(super) fn e6(value: u32) -> Uint<24, 1> {
+    Uint::from(value)
 }
 
 /// `openInterest()` in perp atoms.
