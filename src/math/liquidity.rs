@@ -176,7 +176,7 @@ pub fn liquidity_for_target_ratio(
 /// ```
 /// use alloy::primitives::U256;
 /// use perpcity_sdk::convert::price_to_sqrt_price_x96;
-/// use perpcity_sdk::{amounts_for_liquidity, band_capacity, get_sqrt_ratio_at_tick};
+/// use perpcity_sdk::{MakerRange, amounts_for_liquidity, band_capacity, get_sqrt_ratio_at_tick};
 ///
 /// let sqrt_price = price_to_sqrt_price_x96(35.0)?;
 /// let (perp_atoms, _usdc_atoms) = amounts_for_liquidity(
@@ -185,7 +185,7 @@ pub fn liquidity_for_target_ratio(
 ///     get_sqrt_ratio_at_tick(38_100)?,
 ///     1_757_959,
 /// )?;
-/// let capacity = band_capacity(sqrt_price, 27_090, 38_100, 1_757_959)?;
+/// let capacity = band_capacity(sqrt_price, &MakerRange::new(27_090, 38_100, 1_757_959))?;
 /// assert_eq!(perp_atoms, U256::from(capacity.long_atoms));
 /// # Ok::<(), perpcity_sdk::ValidationError>(())
 /// ```

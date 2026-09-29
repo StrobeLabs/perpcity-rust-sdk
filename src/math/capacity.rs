@@ -39,6 +39,7 @@ use crate::contracts;
 use crate::errors::ValidationError;
 use crate::math::BlockContext;
 use crate::math::fixed_point::{Rounding, mul_div};
+use crate::math::range::MakerRange;
 use crate::math::swap::amount0_delta;
 use crate::math::tick::get_sqrt_ratio_at_tick;
 use crate::types::Side;
@@ -132,11 +133,12 @@ impl MarketCapacity {
     }
 }
 
-/// The capacity a maker band of `liquidity` over `[tick_lower, tick_upper]`
-/// adds at `sqrt_price_x96`, exact to the contract (see the module docs).
+/// The capacity a maker `range` adds at `sqrt_price_x96`, exact to the
+/// contract (see the module docs).
 ///
 /// To size a band from margin, derive its liquidity first (for example
-/// with [`crate::math::liquidity::estimate_liquidity`]) and pass that here.
+/// with [`crate::math::liquidity::estimate_liquidity`]) and pass the range
+/// holding it here.
 ///
 /// # Errors
 ///
@@ -147,11 +149,9 @@ impl MarketCapacity {
 ///   contract's `toUint128` reverts
 pub fn band_capacity(
     sqrt_price_x96: U256,
-    tick_lower: i32,
-    tick_upper: i32,
-    liquidity: u128,
+    range: &MakerRange,
 ) -> Result<Capacity, ValidationError> {
-    Band::new(sqrt_price_x96, tick_lower, tick_upper)?.capacity(liquidity)
+    Band::new(sqrt_price_x96, range.tick_lower, range.tick_upper)?.capacity(range.liquidity)
 }
 
 /// The least liquidity over `[tick_lower, tick_upper]` whose capacity on
@@ -332,8 +332,9 @@ mod tests {
     #[test]
     fn band_capacity_matches_mainnet_opens() {
         for g in &GOLDEN {
+            let range = MakerRange::new(g.tick_lower, g.tick_upper, g.liquidity);
             assert_eq!(
-                band_capacity(g.sqrt_price_x96, g.tick_lower, g.tick_upper, g.liquidity).unwrap(),
+                band_capacity(g.sqrt_price_x96, &range).unwrap(),
                 g.capacity,
                 "band [{}, {}]",
                 g.tick_lower,
@@ -353,7 +354,8 @@ mod tests {
             .unwrap()
             .to::<u128>();
 
-        let at_lower = band_capacity(sqrt_lower, -600, 600, liquidity).unwrap();
+        let range = MakerRange::new(-600, 600, liquidity);
+        let at_lower = band_capacity(sqrt_lower, &range).unwrap();
         assert_eq!(
             at_lower,
             Capacity {
@@ -361,7 +363,7 @@ mod tests {
                 short_atoms: 0
             }
         );
-        let at_upper = band_capacity(sqrt_upper, -600, 600, liquidity).unwrap();
+        let at_upper = band_capacity(sqrt_upper, &range).unwrap();
         assert_eq!(
             at_upper,
             Capacity {
@@ -370,7 +372,7 @@ mod tests {
             }
         );
         assert_eq!(
-            band_capacity(Q96, -600, 600, 0).unwrap(),
+            band_capacity(Q96, &MakerRange::new(-600, 600, 0)).unwrap(),
             Capacity::default()
         );
     }
@@ -424,24 +426,22 @@ mod tests {
 
     #[test]
     fn band_capacity_validates_inputs() {
+        for (lower, upper) in [
+            (600, 600),
+            (600, -600),
+            (MIN_TICK - 1, 0),
+            (0, MAX_TICK + 1),
+        ] {
+            assert!(
+                matches!(
+                    band_capacity(Q96, &MakerRange::new(lower, upper, 1)),
+                    Err(ValidationError::InvalidTickRange { .. })
+                ),
+                "[{lower}, {upper}]"
+            );
+        }
         assert!(matches!(
-            band_capacity(Q96, 600, 600, 1),
-            Err(ValidationError::InvalidTickRange { .. })
-        ));
-        assert!(matches!(
-            band_capacity(Q96, 600, -600, 1),
-            Err(ValidationError::InvalidTickRange { .. })
-        ));
-        assert!(matches!(
-            band_capacity(Q96, MIN_TICK - 1, 0, 1),
-            Err(ValidationError::InvalidTickRange { .. })
-        ));
-        assert!(matches!(
-            band_capacity(Q96, 0, MAX_TICK + 1, 1),
-            Err(ValidationError::InvalidTickRange { .. })
-        ));
-        assert!(matches!(
-            band_capacity(U256::ZERO, -600, 600, 1),
+            band_capacity(U256::ZERO, &MakerRange::new(-600, 600, 1)),
             Err(ValidationError::InvalidPrice { .. })
         ));
     }
@@ -450,13 +450,18 @@ mod tests {
     /// less falls short.
     fn assert_least(sqrt_price_x96: U256, lower: i32, upper: i32, side: Side, target: u128) {
         let liquidity = liquidity_for_capacity(sqrt_price_x96, lower, upper, side, target).unwrap();
-        let reached = band_capacity(sqrt_price_x96, lower, upper, liquidity).unwrap();
+        let reached =
+            band_capacity(sqrt_price_x96, &MakerRange::new(lower, upper, liquidity)).unwrap();
         assert!(
             reached.atoms(side) >= target,
             "{side} target {target}: liquidity {liquidity} gives {}",
             reached.atoms(side)
         );
-        let below = band_capacity(sqrt_price_x96, lower, upper, liquidity - 1).unwrap();
+        let below = band_capacity(
+            sqrt_price_x96,
+            &MakerRange::new(lower, upper, liquidity - 1),
+        )
+        .unwrap();
         assert!(
             below.atoms(side) < target,
             "{side} target {target}: liquidity {} already gives {}",
@@ -567,7 +572,7 @@ mod tests {
     #[test]
     fn liquidity_for_capacity_at_the_largest_target() {
         let sqrt_price = get_sqrt_ratio_at_tick(MAX_TICK).unwrap();
-        let full = band_capacity(sqrt_price, 0, MAX_TICK, u128::MAX)
+        let full = band_capacity(sqrt_price, &MakerRange::new(0, MAX_TICK, u128::MAX))
             .unwrap()
             .short_atoms;
         assert_least(sqrt_price, 0, MAX_TICK, Side::Short, full);

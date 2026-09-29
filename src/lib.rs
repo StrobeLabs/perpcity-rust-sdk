@@ -116,4 +116,7 @@ pub use math::swap::{
 pub use math::capacity::{Capacity, MarketCapacity, band_capacity, liquidity_for_capacity};
 
 #[doc(inline)]
+pub use math::range::MakerRange;
+
+#[doc(inline)]
 pub use math::liquidity::{amounts_for_liquidity, estimate_liquidity, liquidity_for_target_ratio};

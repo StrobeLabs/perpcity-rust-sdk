@@ -7,6 +7,7 @@
 //! |---|---|
 //! | [`tick`] | Tick ↔ price conversions, tick alignment, `getSqrtRatioAtTick` |
 //! | [`capacity`] | Taker capacity a maker band adds, and the liquidity for a target capacity |
+//! | [`range`] | A maker's range as the contract stores it: bounds, liquidity, and the questions asked of them |
 //! | [`liquidity`] | Liquidity sizing and band token amounts for maker positions |
 //! | [`position`] | Entry price, size, value, leverage, liquidation price |
 //! | [`ema`] | Contract-exact EMA advancement (Solady `expWad` port) |
@@ -27,6 +28,7 @@ pub mod liquidity;
 pub mod maker_equity;
 pub mod position;
 pub mod pricing;
+pub mod range;
 pub mod swap;
 pub mod tick;
 

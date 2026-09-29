@@ -241,8 +241,8 @@ let price = tick_to_price(tick)?;
 let liq = estimate_liquidity(tick_lower, tick_upper, margin_scaled)?;
 
 // Taker capacity a maker band adds at the pool price, and its inverse
-use perpcity_sdk::{Side, band_capacity, liquidity_for_capacity};
-let cap = band_capacity(sqrt_price_x96, tick_lower, tick_upper, liquidity)?;
+use perpcity_sdk::{MakerRange, Side, band_capacity, liquidity_for_capacity};
+let cap = band_capacity(sqrt_price_x96, &MakerRange::new(tick_lower, tick_upper, liquidity))?;
 let liq = liquidity_for_capacity(sqrt_price_x96, tick_lower, tick_upper, Side::Short, 1_000_000)?;
 ```
 
