@@ -11,6 +11,8 @@ The changes below break the public API, so the next release is 0.5.0 (a minor bu
 
 ### Breaking
 
+- **A maker's geometry is two types, and the maker math takes them.** `TickRange::new(lower, upper)?` is a tick interval valid by construction (`lower < upper`, both in the V4 domain; private fields, checked on deserialise), and `MakerBand { range, liquidity }` is a range holding liquidity — the shape `makerDetails` stores. `estimate_liquidity(&range, usd)`, `liquidity_for_target_ratio(margin, &range, sqrt_price, ratio)` and `liquidity_for_capacity(sqrt_price, &range, side, target)` take a `TickRange` instead of two loose ticks and no longer return `InvalidTickRange` — it can only come from `TickRange::new`; `band_capacity(sqrt_price, &band)` takes a `MakerBand`. `band_amounts(sqrt_price, &band)` is the typed form of `amounts_for_liquidity`. Callers build the range once at the boundary the ticks entered and pass it down.
+- **`PriceImpactPoint` is removed.** Nothing in the SDK produced or consumed it; the local swap simulation (`TakerMarketSnapshot::quote_to_price`) is the price-impact query.
 - **`TransactionError::ReceiptTimeout` carries `tx_hash: FixedBytes<32>`.** The hash was only in `reason`, and a timeout whose last poll hit an RPC error left it out of the string too, so a caller could not look up the receipt. `reason` stays and now says only why polling stopped; `Display` reads `receipt timeout for 0x…: <reason>`. Patterns that use `..` are unaffected; exhaustive patterns and constructions must name the new field. `is_transient()` is unchanged (true), and the send path still never reuses the timed-out transaction's nonce.
 - **A failed broadcast returns `TransactionError::BroadcastFailed { tx_hash, source }` instead of `PerpCityError::Rpc`.** The node can accept a transaction and still fail the request, so the outcome is unknown; the hash of the signed transaction lets the caller look it up. `source` is the same `TransportError` that `Rpc` carried. `is_transient()` is true for both, so retry loops are unchanged; code that matched `PerpCityError::Rpc` to detect a failed broadcast must match the new variant.
 - **`TransactionError::Reverted` carries `tx_hash: FixedBytes<32>`**, which was only in `reason`. Patterns that use `..` are unaffected; exhaustive patterns and constructions must name the new field. With `OutOfGas`, `ReceiptTimeout` and `BroadcastFailed`, every `TxBuilder::send` error that follows the broadcast now carries a typed hash.
@@ -47,6 +49,23 @@ The changes below break the public API, so the next release is 0.5.0 (a minor bu
 
 ### Added
 
+- **`StateAt`: a market's storage, every read pinned to one block.**
+  `MarketReader::state()` pins the lagged snapshot block and
+  `state_at(number)` a block the caller names; both resolve the header
+  first, so an absent block is `ContractError::BlockUnavailable` and never
+  a fall-back to the head. Every read on the handle — `solvency()`,
+  `next_pos_id()`, `position(id)` (`None` for a closed or never-minted id,
+  where `get_position` errs), `maker_band(id)`, `pool_tick()`,
+  `collateral()` — is by that block's hash, and `block()` says which. It
+  is the state half of what `History` is for logs, and the first public
+  block-pinned read. A full (non-archive) endpoint keeps the header and
+  prunes the state, so it hands out the handle and each read then fails
+  with the new `ContractError::StateUnavailable`, which `is_transient()`
+  refuses: an archive endpoint is the fix, not a retry.
+- **`SolvencyState { bad_debt, total_margin }`**, the contract's own
+  struct in USDC, and **`convert::usdc_from_atoms`**, the one checked
+  widening from a `uint128` or `uint256` into the `i128` that
+  `scale_from_6dec` takes.
 - **`history::OwnershipLog` and `history::ChainPoint`** — who held each
   of a market's positions, over time, folded from a tape:
   `OwnershipLog::fold(&tape)` walks the

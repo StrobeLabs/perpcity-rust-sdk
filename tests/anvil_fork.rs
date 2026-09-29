@@ -748,9 +748,12 @@ async fn state_reads_pin_the_block_they_were_asked_for() {
         if lagged.position(pos_id).await.unwrap().is_some() {
             open += 1;
         }
-        if let Some(range) = lagged.maker_range(pos_id).await.unwrap() {
+        if let Some(band) = lagged.maker_band(pos_id).await.unwrap() {
             makers += 1;
-            assert!(range.tick_lower < range.tick_upper, "{pos_id}: {range:?}");
+            assert!(
+                band.liquidity > 0 && band.range.width() > 0,
+                "{pos_id}: {band:?}"
+            );
         }
     }
     println!("{open} open positions, {makers} with liquidity");

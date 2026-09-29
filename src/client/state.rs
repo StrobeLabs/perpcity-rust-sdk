@@ -8,8 +8,7 @@ use crate::contracts::{IERC20, Perp, Position};
 use crate::convert::usdc_from_atoms;
 use crate::errors::{ContractError, PerpCityError, Result, ValidationError};
 use crate::math::BlockContext;
-use crate::math::range::MakerRange;
-use crate::math::tick::get_sqrt_ratio_at_tick;
+use crate::math::range::{MakerBand, TickRange};
 use crate::types::SolvencyState;
 
 use super::i24_to_i32;
@@ -163,12 +162,12 @@ impl StateAt {
         Ok((position.margin != 0 || !position.delta.is_zero()).then_some(position))
     }
 
-    /// One position's liquidity range, or `None` if it holds none there:
-    /// a taker, or a maker whose liquidity is gone.
+    /// One position's band, or `None` if it holds no liquidity there: a
+    /// taker, or a maker whose liquidity is gone.
     ///
-    /// The ticks are validated against the V4 domain so tick math on the
-    /// result cannot fail on chain-supplied values.
-    pub async fn maker_range(&self, pos_id: U256) -> Result<Option<MakerRange>> {
+    /// The chain's ticks pass through [`TickRange::new`], so this is where
+    /// a malformed range would fail — never the math downstream.
+    pub async fn maker_band(&self, pos_id: U256) -> Result<Option<MakerBand>> {
         let perp = Perp::new(self.market.perp, self.market.chain.provider());
         let maker = perp
             .makerDetails(pos_id)
@@ -179,14 +178,8 @@ impl StateAt {
         if maker.liquidity == 0 {
             return Ok(None);
         }
-        let range = MakerRange::new(
-            i24_to_i32(maker.tickLower),
-            i24_to_i32(maker.tickUpper),
-            maker.liquidity,
-        );
-        get_sqrt_ratio_at_tick(range.tick_lower)?;
-        get_sqrt_ratio_at_tick(range.tick_upper)?;
-        Ok(Some(range))
+        let range = TickRange::new(i24_to_i32(maker.tickLower), i24_to_i32(maker.tickUpper))?;
+        Ok(Some(MakerBand::new(range, maker.liquidity)))
     }
 
     /// The pool's current tick.
@@ -378,16 +371,33 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn maker_range_is_none_without_liquidity() {
+    async fn maker_band_is_none_without_liquidity() {
         let (state, rpc) = state().await;
         rpc.call::<Perp::makerDetailsCall>(&mock::maker(-60, 60, 0));
-        assert_eq!(state.maker_range(U256::from(1)).await.unwrap(), None);
+        assert_eq!(state.maker_band(U256::from(1)).await.unwrap(), None);
 
         rpc.call::<Perp::makerDetailsCall>(&mock::maker(38_340, 38_430, 97_506_535));
         assert_eq!(
-            state.maker_range(U256::from(1_691)).await.unwrap(),
-            Some(MakerRange::new(38_340, 38_430, 97_506_535))
+            state.maker_band(U256::from(1_691)).await.unwrap(),
+            Some(MakerBand::new(
+                TickRange::new(38_340, 38_430).unwrap(),
+                97_506_535
+            ))
         );
+    }
+
+    /// A range the contract could never store still cannot reach the
+    /// math: it fails here, as the chain boundary.
+    #[tokio::test]
+    async fn a_malformed_range_fails_at_the_read() {
+        let (state, rpc) = state().await;
+        rpc.call::<Perp::makerDetailsCall>(&mock::maker(60, -60, 5));
+        assert!(matches!(
+            state.maker_band(U256::from(2)).await,
+            Err(PerpCityError::Validation(
+                ValidationError::InvalidTickRange { .. }
+            ))
+        ));
     }
 
     #[tokio::test]

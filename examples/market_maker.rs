@@ -36,8 +36,8 @@ use perpcity_sdk::math::liquidity::estimate_liquidity;
 use perpcity_sdk::math::tick::{align_tick_down, align_tick_up, price_to_tick};
 use perpcity_sdk::{
     ARBITRUM_SEPOLIA_CHAIN_ID, ARBITRUM_SEPOLIA_POOL_MANAGER, ARBITRUM_SEPOLIA_USDC,
-    ChainDeployments, ChainReader, HftTransport, OpenMakerParams, PerpClient, TransportConfig,
-    Urgency,
+    ChainDeployments, ChainReader, HftTransport, OpenMakerParams, PerpClient, TickRange,
+    TransportConfig, Urgency,
 };
 
 /// How far above/below the current price to set the range, as a fraction.
@@ -142,7 +142,8 @@ async fn main() -> perpcity_sdk::Result<()> {
     //
     // Convert margin to 6-decimal scaled value for the liquidity formula.
     let margin_scaled = (MARGIN_USDC * 1_000_000.0) as u128;
-    let liquidity_u256 = estimate_liquidity(tick_lower, tick_upper, margin_scaled)?;
+    let liquidity_u256 =
+        estimate_liquidity(&TickRange::new(tick_lower, tick_upper)?, margin_scaled)?;
 
     // The on-chain liquidity field is uint120, so cap at max u120.
     let max_u120: u128 = (1u128 << 120) - 1;

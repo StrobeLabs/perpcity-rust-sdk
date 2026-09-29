@@ -91,7 +91,8 @@ async fn main() -> Result<()> {
     // -- Estimate liquidity for 100 USDC margin --
     let margin = 100.0;
     let margin_scaled = (margin * 1_000_000.0) as u128;
-    let liquidity_u256 = estimate_liquidity(tick_lower, tick_upper, margin_scaled)?;
+    let liquidity_u256 =
+        estimate_liquidity(&TickRange::new(tick_lower, tick_upper)?, margin_scaled)?;
     let max_u120: u128 = (1u128 << 120) - 1;
     let liquidity: u128 = u128::try_from(liquidity_u256)
         .unwrap_or(max_u120)
