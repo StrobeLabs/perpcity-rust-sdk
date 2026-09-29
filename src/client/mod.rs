@@ -205,6 +205,23 @@ impl std::fmt::Debug for PerpClient {
     }
 }
 
+/// A read helper bounded on `impl AsRef<MarketReader>` or
+/// `impl AsRef<ChainReader>` takes a client where it takes a reader, so a
+/// `&PerpClient` argument keeps compiling when the helper narrows to the
+/// reads it makes. Use the bound, not `as_ref()` bare: with two targets,
+/// the bare call is ambiguous.
+impl AsRef<MarketReader> for PerpClient {
+    fn as_ref(&self) -> &MarketReader {
+        &self.market
+    }
+}
+
+impl AsRef<ChainReader> for PerpClient {
+    fn as_ref(&self) -> &ChainReader {
+        &self.chain
+    }
+}
+
 impl PerpClient {
     /// Create a new PerpClient.
     ///

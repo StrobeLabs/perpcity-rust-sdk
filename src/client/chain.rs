@@ -25,7 +25,11 @@ use crate::types::ChainDeployments;
 
 use super::queries::BookImmutables;
 use super::transactions::{classify_simulation_failure, preflight_request};
-use super::{DEFAULT_GAS_TTL_MS, DEFAULT_PRIORITY_FEE, now_ms, now_secs};
+use super::{
+    ARBITRUM_CHAIN_ID, ARBITRUM_POOL_MANAGER, ARBITRUM_SEPOLIA_CHAIN_ID,
+    ARBITRUM_SEPOLIA_POOL_MANAGER, ARBITRUM_SEPOLIA_USDC, ARBITRUM_USDC, DEFAULT_GAS_TTL_MS,
+    DEFAULT_PRIORITY_FEE, now_ms, now_secs,
+};
 
 /// What every market on a chain shares, and the reads addressed by
 /// something other than a market.
@@ -73,6 +77,14 @@ impl fmt::Debug for ChainReader {
     }
 }
 
+/// So a helper bounded on `impl AsRef<ChainReader>` takes a reader, a
+/// market reader or a client alike.
+impl AsRef<ChainReader> for ChainReader {
+    fn as_ref(&self) -> &ChainReader {
+        self
+    }
+}
+
 impl ChainReader {
     /// A reader over `transport` for the chain `deployments` describe.
     /// Makes no network calls.
@@ -80,6 +92,32 @@ impl ChainReader {
         let rpc_client = RpcClient::new(BoxTransport::new(transport.clone()), false);
         let provider = RootProvider::<Ethereum>::new(rpc_client);
         Self::from_parts(provider, transport, deployments, chain_id)
+    }
+
+    /// A reader for Arbitrum One: canonical Circle USDC and the mainnet
+    /// `PoolManager`.
+    pub fn arbitrum(transport: HftTransport) -> Self {
+        Self::new(
+            transport,
+            ChainDeployments {
+                usdc: ARBITRUM_USDC,
+                pool_manager: ARBITRUM_POOL_MANAGER,
+            },
+            ARBITRUM_CHAIN_ID,
+        )
+    }
+
+    /// A reader for Arbitrum Sepolia: the deployment's test USDC and the
+    /// testnet `PoolManager`.
+    pub fn arbitrum_sepolia(transport: HftTransport) -> Self {
+        Self::new(
+            transport,
+            ChainDeployments {
+                usdc: ARBITRUM_SEPOLIA_USDC,
+                pool_manager: ARBITRUM_SEPOLIA_POOL_MANAGER,
+            },
+            ARBITRUM_SEPOLIA_CHAIN_ID,
+        )
     }
 
     /// Assemble a reader around an already-built provider. [`Self::new`]

@@ -34,6 +34,21 @@ impl ChainReader {
     }
 }
 
+/// So a helper bounded on `impl AsRef<MarketReader>` takes a market reader
+/// or a client alike, and one bounded on `impl AsRef<ChainReader>` takes a
+/// market reader too.
+impl AsRef<MarketReader> for MarketReader {
+    fn as_ref(&self) -> &MarketReader {
+        self
+    }
+}
+
+impl AsRef<ChainReader> for MarketReader {
+    fn as_ref(&self) -> &ChainReader {
+        &self.chain
+    }
+}
+
 impl MarketReader {
     /// The chain reader this market is read through.
     pub fn chain(&self) -> &ChainReader {

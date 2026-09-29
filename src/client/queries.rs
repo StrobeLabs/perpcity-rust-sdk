@@ -944,6 +944,27 @@ mod tests {
         }
     }
 
+    // ── Narrowing a helper to the reads it makes ──────────────────────
+
+    /// What a downstream read helper looks like once it says it only
+    /// reads: bounded on the market reader, not the client.
+    async fn mark_of(market: impl AsRef<MarketReader>) -> Result<f64> {
+        market.as_ref().get_mark_price().await
+    }
+
+    /// A helper narrowed to `impl AsRef<MarketReader>` still takes the
+    /// client a caller already holds, and takes the bare reader too — so
+    /// narrowing costs the caller nothing.
+    #[tokio::test]
+    async fn a_helper_narrowed_to_the_market_reader_accepts_the_client() {
+        let (client, rpc) = mock::client();
+        rpc.call::<Perp::poolStateCall>(&mock::pool_state(x96(3, 1)));
+
+        assert_eq!(mark_of(&client).await.unwrap(), 1.5);
+        assert_eq!(mark_of(client.market()).await.unwrap(), 1.5, "cache hit");
+        assert!(rpc.is_drained());
+    }
+
     // ── Fast layer: mark, funding, balance ────────────────────────────
 
     /// `poolState().ammPrice` is Q96; the read hands back the plain price.
