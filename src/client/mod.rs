@@ -41,6 +41,8 @@
 //! ```
 
 mod maker_equity;
+#[cfg(test)]
+mod mock;
 mod queries;
 mod trades;
 mod transactions;
@@ -243,17 +245,36 @@ impl PerpClient {
     where
         S: TxSigner<Signature> + Send + Sync + 'static,
     {
-        let address = TxSigner::address(&signer);
-        let wallet = EthereumWallet::from(signer);
-
         let boxed = BoxTransport::new(transport.clone());
         let rpc_client = RpcClient::new(boxed, false);
         let provider = RootProvider::<Ethereum>::new(rpc_client);
-
-        Ok(Self {
+        Ok(Self::from_parts(
             provider,
             transport,
-            wallet,
+            signer,
+            deployments,
+            chain_id,
+        ))
+    }
+
+    /// Assemble a client around an already-built provider. [`Self::new`]
+    /// wires the provider to `transport`; the mocked client in tests does
+    /// not, which is the only reason the two are separate.
+    fn from_parts<S>(
+        provider: RootProvider<Ethereum>,
+        transport: HftTransport,
+        signer: S,
+        deployments: Deployments,
+        chain_id: u64,
+    ) -> Self
+    where
+        S: TxSigner<Signature> + Send + Sync + 'static,
+    {
+        let address = TxSigner::address(&signer);
+        Self {
+            provider,
+            transport,
+            wallet: EthereumWallet::from(signer),
             address,
             deployments,
             chain_id,
@@ -264,7 +285,7 @@ impl PerpClient {
             state_cache: Mutex::new(StateCache::new(StateCacheConfig::default())),
             book_immutables: tokio::sync::OnceCell::new(),
             get_proof_unsupported: AtomicBool::new(false),
-        })
+        }
     }
 
     /// Create a client pre-configured for Arbitrum One (mainnet).

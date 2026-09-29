@@ -979,3 +979,117 @@ impl PerpClient {
         })
     }
 }
+
+/// Characterisation of the reads as deployed: each test pins what a read
+/// asks the chain, what it makes of the answer, and what it keeps.
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::client::mock::{self, x96};
+    use crate::errors::PerpCityError;
+
+    // ── Fast layer: mark, funding, balance ────────────────────────────
+
+    /// `poolState().ammPrice` is Q96; the read hands back the plain price.
+    #[tokio::test]
+    async fn mark_price_is_the_pool_price_scaled_from_x96() {
+        let (client, rpc) = mock::client();
+        rpc.call::<Perp::poolStateCall>(&mock::pool_state(x96(3, 1)));
+
+        assert_eq!(client.get_mark_price().await.unwrap(), 1.5);
+        assert!(rpc.is_drained(), "one eth_call");
+    }
+
+    /// The fast layer answers a second read without an RPC — the queue is
+    /// empty, so an RPC would fail — until the caller invalidates it.
+    #[tokio::test]
+    async fn mark_price_is_served_from_the_fast_layer_until_invalidated() {
+        let (client, rpc) = mock::client();
+        rpc.call::<Perp::poolStateCall>(&mock::pool_state(x96(3, 1)));
+        assert_eq!(client.get_mark_price().await.unwrap(), 1.5);
+
+        assert_eq!(client.get_mark_price().await.unwrap(), 1.5, "cache hit");
+
+        client.invalidate_fast_cache();
+        rpc.call::<Perp::poolStateCall>(&mock::pool_state(x96(1, 0)));
+        assert_eq!(client.get_mark_price().await.unwrap(), 1.0);
+        assert!(rpc.is_drained());
+    }
+
+    /// `rates().fundingPerDay` is an `int88` scaled by 1e18; the sign is
+    /// the contract's (positive: longs pay shorts).
+    #[tokio::test]
+    async fn funding_rate_scales_the_per_day_rate_from_wad() {
+        let (client, rpc) = mock::client();
+        rpc.call::<Perp::ratesCall>(&mock::rates(-5_000_000_000_000_000));
+
+        assert_eq!(client.get_funding_rate().await.unwrap(), -0.005);
+        assert_eq!(
+            client.get_funding_rate().await.unwrap(),
+            -0.005,
+            "cache hit"
+        );
+
+        client.invalidate_fast_cache();
+        rpc.call::<Perp::ratesCall>(&mock::rates(2_000_000_000_000_000));
+        assert_eq!(client.get_funding_rate().await.unwrap(), 0.002);
+        assert!(rpc.is_drained());
+    }
+
+    /// The signer's USDC balance, scaled from six decimals, and cached in
+    /// the fast layer alongside the prices.
+    #[tokio::test]
+    async fn usdc_balance_is_scaled_from_6dec_and_cached() {
+        let (client, rpc) = mock::client();
+        rpc.call::<IERC20::balanceOfCall>(&U256::from(1_234_567u32));
+
+        assert_eq!(client.get_usdc_balance().await.unwrap(), 1.234_567);
+        assert_eq!(
+            client.get_usdc_balance().await.unwrap(),
+            1.234_567,
+            "cache hit"
+        );
+
+        client.invalidate_fast_cache();
+        rpc.call::<IERC20::balanceOfCall>(&U256::ZERO);
+        assert_eq!(client.get_usdc_balance().await.unwrap(), 0.0);
+        assert!(rpc.is_drained());
+    }
+
+    /// A balance beyond `i128` is an overflow, not a saturated number.
+    #[tokio::test]
+    async fn usdc_balance_beyond_i128_is_an_overflow() {
+        let (client, rpc) = mock::client();
+        rpc.call::<IERC20::balanceOfCall>(&(U256::from(i128::MAX) + U256::from(1u8)));
+
+        let err = client.get_usdc_balance().await.unwrap_err();
+        assert!(
+            matches!(
+                err,
+                PerpCityError::Validation(ValidationError::Overflow { .. })
+            ),
+            "{err}"
+        );
+    }
+
+    // ── Failure surface ───────────────────────────────────────────────
+
+    /// A transport failure inside a contract call surfaces as an ABI
+    /// error wrapping the transport error — which [`PerpCityError::
+    /// is_transient`] does not classify as transient. Recorded as is.
+    #[tokio::test]
+    async fn a_transport_failure_in_a_contract_call_is_an_abi_error() {
+        let (client, rpc) = mock::client();
+        rpc.fails("connection reset");
+
+        let err = client.get_mark_price().await.unwrap_err();
+        assert!(
+            matches!(
+                err,
+                PerpCityError::Abi(alloy::contract::Error::TransportError(_))
+            ),
+            "{err}"
+        );
+        assert!(!err.is_transient(), "not classified transient today");
+    }
+}
