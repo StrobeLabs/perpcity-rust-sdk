@@ -54,14 +54,14 @@ type TickFundingRead = std::result::Result<TickFunding, Arc<TransportError>>;
 
 /// Maximum position ids per RPC batch inside a maker-equity read.
 ///
-/// [`PerpClient::get_maker_equities`] chunks larger inputs internally at
+/// [`MarketReader::get_maker_equities`] chunks larger inputs internally at
 /// this size (every chunk still pins to the one shared block), keeping
 /// each row multicall and slot read inside RPC response-size and calldata
 /// limits. Exposed so callers sizing their own sweeps can align with it.
 pub const MAX_MAKER_EQUITY_BATCH: usize = 500;
 
 /// The batch outcome for one requested position id: every id passed to
-/// [`PerpClient::get_maker_equities`] comes back as exactly one of these,
+/// [`MarketReader::get_maker_equities`] comes back as exactly one of these,
 /// in input order.
 #[derive(Debug)]
 pub struct MakerEquityOutcome {

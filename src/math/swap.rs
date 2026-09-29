@@ -89,7 +89,7 @@ pub struct TakerMarketSnapshot {
 impl Default for TakerMarketSnapshot {
     /// Test and scaffolding convenience: the block fields and price are
     /// placeholders, not a valid market. Real snapshots come from
-    /// `PerpClient::load_taker_market_snapshot`.
+    /// `MarketReader::load_taker_market_snapshot`.
     fn default() -> Self {
         Self {
             block: BlockContext::default(),

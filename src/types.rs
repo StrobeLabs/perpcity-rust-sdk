@@ -146,7 +146,7 @@ fn to_e6(ratio: f64) -> u32 {
 /// now on; an open position keeps the liquidation ratio stored on it at
 /// open (`positions(id).liqMarginRatio`, surfaced by
 /// [`MakerEquityBreakdown::liq_margin_ratio_e6`](crate::MakerEquityBreakdown::liq_margin_ratio_e6)).
-/// Read with [`PerpClient::get_margin_ratios`](crate::PerpClient::get_margin_ratios).
+/// Read with [`MarketReader::get_margin_ratios`](crate::MarketReader::get_margin_ratios).
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct MarginRatios {
     /// Maker (LP) thresholds.
@@ -202,7 +202,7 @@ pub struct OpenInterest {
 /// Live market data from a multicall snapshot.
 ///
 /// Pure market state — no static config. Returned alongside [`PerpData`]
-/// from [`PerpClient::get_perp_snapshot`](crate::PerpClient::get_perp_snapshot).
+/// from [`MarketReader::get_perp_snapshot`](crate::MarketReader::get_perp_snapshot).
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct PerpSnapshot {
     /// Pool (AMM spot) price in human-readable units — not a TWAP, and not

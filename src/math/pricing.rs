@@ -27,7 +27,7 @@ use serde::{Deserialize, Serialize};
 use crate::math::BlockContext;
 
 /// The contract's mark at one block, read by
-/// [`PerpClient::get_fair_price`](crate::PerpClient::get_fair_price).
+/// [`MarketReader::get_fair_price`](crate::MarketReader::get_fair_price).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FairPrice {
     /// The block the price inputs were read at.

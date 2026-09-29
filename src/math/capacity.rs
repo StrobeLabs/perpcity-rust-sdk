@@ -73,7 +73,7 @@ impl From<contracts::Capacity> for Capacity {
 }
 
 /// A market's taker capacity and the open interest drawing on it, read at
-/// one block by [`PerpClient::get_capacity`](crate::PerpClient::get_capacity).
+/// one block by [`MarketReader::get_capacity`](crate::MarketReader::get_capacity).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MarketCapacity {
     /// The block both totals were read at.
