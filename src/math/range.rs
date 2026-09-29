@@ -6,7 +6,8 @@ use serde::{Deserialize, Serialize};
 /// bounds and the liquidity standing between them.
 ///
 /// The one type for a band's geometry wherever it appears — read back
-/// from chain, sized before it opens, or tracked after it did — so
+/// from chain ([`StateAt::maker_range`](crate::StateAt::maker_range)),
+/// sized before it opens, or tracked after it did — so
 /// [`band_capacity`](crate::band_capacity) takes it whole.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct MakerRange {

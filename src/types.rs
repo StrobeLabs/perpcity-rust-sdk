@@ -175,6 +175,18 @@ pub struct OpenInterest {
     pub short_oi: f64,
 }
 
+/// The market's own solvency books, in USDC: the contract's `SolvencyState`.
+///
+/// `total_margin` moves only when real USDC enters or leaves, so it is
+/// the honest upper bound on what positions may collectively claim.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+pub struct SolvencyState {
+    /// Insolvency the contract has recognised and booked.
+    pub bad_debt: f64,
+    /// Margin the contract believes it holds.
+    pub total_margin: f64,
+}
+
 /// Live market data from a multicall snapshot.
 ///
 /// Pure market state — no static config. Returned alongside [`PerpData`]

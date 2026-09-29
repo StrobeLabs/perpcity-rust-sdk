@@ -459,6 +459,13 @@ impl ChainReader {
             .get_block_number()
             .await?
             .saturating_sub(SNAPSHOT_BLOCK_LAG);
+        self.block_at(number).await
+    }
+
+    /// Resolve block `number` to the context and hash-pinned id reads use.
+    /// A header the endpoint cannot serve is a failed read
+    /// ([`ContractError::BlockUnavailable`]), never a fall-back to the head.
+    pub(super) async fn block_at(&self, number: u64) -> Result<(BlockContext, BlockId)> {
         let block = self
             .inner
             .provider
