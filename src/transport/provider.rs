@@ -46,7 +46,7 @@
 //! # }
 //! ```
 
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::Instant;
@@ -508,6 +508,9 @@ struct Router {
     write: EndpointPool,
     strategy: Strategy,
     config: TransportConfig,
+    /// Set once any endpoint has answered `eth_getProof` with "method not
+    /// found"; see [`HftTransport::supports_get_proof`].
+    get_proof_unsupported: AtomicBool,
 }
 
 /// Multi-endpoint RPC transport with health-aware routing.
@@ -540,6 +543,7 @@ impl HftTransport {
                 write,
                 strategy: config.strategy,
                 config,
+                get_proof_unsupported: AtomicBool::new(false),
             }),
         })
     }
@@ -568,6 +572,27 @@ impl HftTransport {
         out.extend(r.read.endpoint_urls());
         out.extend(r.write.endpoint_urls());
         out
+    }
+
+    /// Whether `eth_getProof` is still worth asking for over this
+    /// transport: false once any endpoint has answered it with "method not
+    /// found" (JSON-RPC `-32601`), after which proof-backed reads go
+    /// straight to their `eth_getStorageAt` fallback, which every endpoint
+    /// serves.
+    ///
+    /// One latch for the whole endpoint set, shared by every client over
+    /// this transport; a per-endpoint record is #116.
+    pub(crate) fn supports_get_proof(&self) -> bool {
+        !self.router.get_proof_unsupported.load(Ordering::Relaxed)
+    }
+
+    /// Remember that an endpoint answered `eth_getProof` with "method not
+    /// found". Relaxed ordering: the latch is a hint, and a lost race costs
+    /// one more probe.
+    pub(crate) fn note_get_proof_unsupported(&self) {
+        self.router
+            .get_proof_unsupported
+            .store(true, Ordering::Relaxed);
     }
 }
 

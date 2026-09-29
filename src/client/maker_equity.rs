@@ -11,7 +11,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::future::IntoFuture;
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
 
 use alloy::eips::BlockId;
 use alloy::primitives::{Address, B256, I256, U256};
@@ -752,7 +751,7 @@ impl PerpClient {
         ticks: &BTreeSet<i32>,
     ) -> Result<BTreeMap<i32, TickFundingRead>> {
         let perp_addr = self.perp;
-        if !self.get_proof_unsupported.load(Ordering::Relaxed) {
+        if self.transport.supports_get_proof() {
             let keys: Vec<B256> = ticks
                 .iter()
                 .flat_map(|&tick| perp_tick_funding_slots(tick).map(B256::from))
@@ -807,7 +806,7 @@ impl PerpClient {
                         "eth_getProof unsupported by endpoint; \
                          falling back to eth_getStorageAt"
                     );
-                    self.get_proof_unsupported.store(true, Ordering::Relaxed);
+                    self.transport.note_get_proof_unsupported();
                 }
                 // Any other failure (rate limit, timeout, a replica hiccup)
                 // falls back for this read only — the per-tick reads give
@@ -1256,5 +1255,31 @@ mod tests {
         assert!(funding[&-60].is_ok());
         assert!(funding[&60].is_err());
         assert!(rpc.is_drained());
+    }
+
+    /// The latch belongs to the transport, not the client: a second client
+    /// over the same transport inherits what the first learned and goes
+    /// straight to storage, with no probe of its own.
+    #[tokio::test]
+    async fn the_latch_is_shared_by_every_client_over_one_transport() {
+        let ticks = BTreeSet::from([60]);
+        let transport = mock::transport();
+        let (first, first_rpc) = mock::client_sharing(transport.clone());
+        let (second, second_rpc) = mock::client_sharing(transport);
+
+        first_rpc.method_not_found();
+        funding_words(&first_rpc, 7, 9);
+        first
+            .get_tick_funding(BlockId::latest(), &ticks)
+            .await
+            .unwrap();
+
+        funding_words(&second_rpc, 7, 9);
+        let funding = second
+            .get_tick_funding(BlockId::latest(), &ticks)
+            .await
+            .unwrap();
+        assert!(funding[&60].is_ok());
+        assert!(second_rpc.is_drained(), "two storage reads and no probe");
     }
 }

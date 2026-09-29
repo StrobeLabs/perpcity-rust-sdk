@@ -47,24 +47,39 @@ pub(super) const CHAIN_ID: u64 = 42_161;
 
 /// A client whose every RPC is answered by the returned [`Rpc`].
 pub(super) fn client() -> (PerpClient, Rpc) {
+    client_sharing(transport())
+}
+
+/// A client whose every RPC is answered by the returned [`Rpc`], over a
+/// transport the test hands in — the same one to several clients, to
+/// test what the transport remembers on their behalf.
+pub(super) fn client_sharing(transport: HftTransport) -> (PerpClient, Rpc) {
     let asserter = Asserter::new();
     let provider = RootProvider::<Ethereum>::new(RpcClient::mocked(asserter.clone()));
-    (client_over(provider), Rpc(asserter))
+    (client_with(provider, transport), Rpc(asserter))
 }
 
 /// A client over any provider — a mocked one, or a
 /// [`FakeNode`](crate::history::test_support::FakeNode)'s — with a fixed
 /// signer and deployments.
 pub(super) fn client_over(provider: RootProvider<Ethereum>) -> PerpClient {
-    // Health diagnostics only: the provider is not wired to it, and the
-    // transport connects lazily, so nothing ever reaches this address.
-    let transport = HftTransport::new(
+    client_with(provider, transport())
+}
+
+/// A transport no request ever reaches: the mocked provider is not wired
+/// to it, and it connects lazily. It carries the endpoint capabilities the
+/// reads consult, so a test can share one between clients.
+pub(super) fn transport() -> HftTransport {
+    HftTransport::new(
         TransportConfig::builder()
             .shared_endpoint("http://127.0.0.1:1")
             .build()
             .expect("one endpoint is a valid config"),
     )
-    .expect("a parseable URL builds a transport");
+    .expect("a parseable URL builds a transport")
+}
+
+fn client_with(provider: RootProvider<Ethereum>, transport: HftTransport) -> PerpClient {
     let signer = PrivateKeySigner::from_bytes(&B256::repeat_byte(0x01))
         .expect("a non-zero scalar is a valid key");
     let deployments = Deployments {
