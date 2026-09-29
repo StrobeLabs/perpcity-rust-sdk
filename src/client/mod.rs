@@ -173,10 +173,9 @@ impl From<Bounds> for CachedBounds {
 /// operations go through the [`TxPipeline`] for zero-RPC-on-hot-path
 /// nonce/gas resolution; reads go through the reader's caches.
 pub struct PerpClient {
-    /// Everything the chain's readers share: provider, transport, history,
-    /// the base-fee and state caches.
-    chain: ChainReader,
-    /// The market this client trades, read through `chain`.
+    /// The market this client trades. The chain — provider, transport,
+    /// history, the base-fee and state caches, shared by every reader and
+    /// client over it — is reached through it.
     market: MarketReader,
     /// Wallet for signing transactions.
     wallet: EthereumWallet,
@@ -210,7 +209,7 @@ impl AsRef<MarketReader> for PerpClient {
 
 impl AsRef<ChainReader> for PerpClient {
     fn as_ref(&self) -> &ChainReader {
-        &self.chain
+        self.market.chain()
     }
 }
 
@@ -232,7 +231,6 @@ impl PerpClient {
     {
         let address = TxSigner::address(&signer);
         Self {
-            chain: market.chain().clone(),
             market,
             wallet: EthereumWallet::from(signer),
             address,
@@ -250,7 +248,7 @@ impl PerpClient {
     /// pipeline manages nonces locally (zero RPC per transaction).
     pub async fn sync_nonce(&self) -> Result<()> {
         let count = self
-            .chain
+            .chain()
             .provider()
             .get_transaction_count(self.address)
             .await?;
@@ -267,9 +265,9 @@ impl PerpClient {
         self.address
     }
 
-    /// The chain reader this client is built over.
+    /// The chain reader this client's market is on.
     pub fn chain(&self) -> &ChainReader {
-        &self.chain
+        self.market.chain()
     }
 
     /// The reader for the market this client trades.

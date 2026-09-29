@@ -801,7 +801,7 @@ impl PerpClient {
     /// [`Self::chain`]; this one stays here because only the client knows
     /// whose balance "mine" is.
     pub async fn get_usdc_balance(&self) -> Result<f64> {
-        self.chain.balance_of(self.address).await
+        self.chain().balance_of(self.address).await
     }
 }
 

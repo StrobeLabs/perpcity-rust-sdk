@@ -108,7 +108,7 @@ impl<'a> TxBuilder<'a> {
             // resync steps past it instead of colliding with it.
             let count = self
                 .client
-                .chain
+                .chain()
                 .provider()
                 .get_transaction_count(self.client.address)
                 .pending()
@@ -135,7 +135,7 @@ impl<'a> TxBuilder<'a> {
                 // Preflight at the pinned limit itself: a call that runs out
                 // of gas at this limit must fail here, not on-chain.
                 self.client
-                    .chain
+                    .chain()
                     .preflight_call(
                         self.client.address,
                         self.to,
@@ -160,7 +160,7 @@ impl<'a> TxBuilder<'a> {
         // Prepare via pipeline (zero RPC)
         let prepared = {
             let pipeline = self.client.pipeline.lock().unwrap();
-            let fee_cache = self.client.chain.fee_cache().lock().unwrap();
+            let fee_cache = self.client.chain().fee_cache().lock().unwrap();
             pipeline.prepare(
                 TxRequest {
                     to: self.to.into_array(),
@@ -193,7 +193,7 @@ impl<'a> TxBuilder<'a> {
             .with_gas_limit(prepared.gas_limit)
             .with_max_fee_per_gas(prepared.gas_fees.max_fee_per_gas as u128)
             .with_max_priority_fee_per_gas(prepared.gas_fees.max_priority_fee_per_gas as u128)
-            .with_chain_id(self.client.chain.chain_id());
+            .with_chain_id(self.client.chain().chain_id());
 
         // Sign. A failure here is provably local — nothing was broadcast —
         // so the nonce can be handed straight back (a bare `?` would strand
@@ -220,7 +220,7 @@ impl<'a> TxBuilder<'a> {
         let tx_hash_b256 = *tx_envelope.tx_hash();
         if let Err(source) = self
             .client
-            .chain
+            .chain()
             .provider()
             .send_tx_envelope(tx_envelope)
             .await
@@ -404,7 +404,7 @@ impl PerpClient {
     /// resyncs from chain before the next send whether or not this is
     /// called.
     pub async fn poll_receipt(&self, tx_hash: B256) -> Result<TransactionReceipt> {
-        wait_for_receipt(self.chain.provider(), tx_hash).await
+        wait_for_receipt(self.chain().provider(), tx_hash).await
     }
 
     /// Simulate a transaction and return a gas limit.
@@ -441,7 +441,7 @@ impl PerpClient {
             // sent with, so a stale (too-small) cached estimate surfaces as
             // a failed preflight rather than an on-chain out-of-gas.
             match self
-                .chain
+                .chain()
                 .preflight_call(self.address, to, calldata, value, Some(limit))
                 .await
             {
@@ -503,7 +503,7 @@ impl PerpClient {
             .with_input(calldata.clone())
             .with_value(U256::from(value));
 
-        self.chain
+        self.chain()
             .provider()
             .estimate_gas(tx)
             .await
