@@ -122,6 +122,15 @@ let headroom = cap.headroom_atoms(Side::Short);        // short OI still openabl
 let fair     = client.market().get_fair_price().await?;         // the contract's mark (X96)
 let position = client.market().get_position(open.pos_id).await?; // raw on-chain Position
 
+// Storage at one block: the handle is the block, so nothing read through
+// it can come from another. `state()` pins the lagged snapshot block;
+// `state_at(n)` a block you name (archive endpoint for old ones).
+let state    = client.market().state().await?;
+let books    = state.solvency().await?;                        // badDebt, totalMargin (USDC)
+let held     = state.collateral().await?;                      // the perp's USDC
+let range    = state.maker_range(open.pos_id).await?;          // Some(MakerRange) for a live maker
+let at_block = state.block();                                  // number, hash, timestamp
+
 // Batch balances — N addresses in 1 multicall (1 CU instead of 2N)
 let (usdc, eth) = client.chain().get_balances(address).await?;
 let all = client.chain().get_balances_batch(&addresses).await?;

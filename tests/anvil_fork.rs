@@ -12,10 +12,12 @@ use std::process::{Child, Command};
 use std::time::Duration;
 
 use alloy::primitives::{Address, U256, address};
+use alloy::providers::Provider;
 use alloy::signers::local::PrivateKeySigner;
 use alloy::sol;
 use alloy::sol_types::SolCall;
 
+use perpcity_sdk::constants::SNAPSHOT_BLOCK_LAG;
 use perpcity_sdk::{
     AdjustTakerParams, ChainDeployments, ChainReader, HftTransport, MakerEquityKind,
     OpenTakerParams, PerpCityError, PerpClient, TransactionError, TransportConfig, Urgency,
@@ -698,4 +700,61 @@ async fn liquidation_simulation_returns_typed_reverts() {
     }
 
     println!("\n=== Liquidation simulation test passed! ===");
+}
+
+#[tokio::test]
+#[ignore] // Requires `anvil` — run with: cargo test --test anvil_fork -- --ignored --nocapture
+async fn state_reads_pin_the_block_they_were_asked_for() {
+    let anvil = AnvilInstance::fork().await;
+    let transport = HftTransport::new(
+        TransportConfig::builder()
+            .shared_endpoint(&anvil.url)
+            .build()
+            .unwrap(),
+    )
+    .unwrap();
+    let market = chain(transport).market(PERP);
+
+    // The lagged handle sits SNAPSHOT_BLOCK_LAG behind the head the fork
+    // reports (anvil mines nothing here, so the head does not move).
+    let head = market.chain().provider().get_block_number().await.unwrap();
+    let lagged = market.state().await.unwrap();
+    assert_eq!(lagged.block().number, head - SNAPSHOT_BLOCK_LAG);
+
+    // A named block is that block, and its hash is what the reads pin to.
+    let named = market.state_at(head - 20).await.unwrap();
+    assert_eq!(named.block().number, head - 20);
+    assert_ne!(named.block().hash, lagged.block().hash);
+
+    let solvency = lagged.solvency().await.unwrap();
+    let minted = lagged.next_pos_id().await.unwrap();
+    let collateral = lagged.collateral().await.unwrap();
+    let tick = lagged.pool_tick().await.unwrap();
+    println!(
+        "block {}: {minted} minted, totalMargin {:.2}, badDebt {:.2}, collateral {:.2}, tick {tick}",
+        lagged.block().number,
+        solvency.total_margin,
+        solvency.bad_debt,
+        collateral
+    );
+    assert!(minted >= 1, "nextPosId starts at 1");
+    assert!(solvency.total_margin >= 0.0 && collateral >= 0.0);
+
+    // Every minted id is either a position or an empty struct, and only a
+    // maker with liquidity has a range; the tick math accepts every range.
+    let mut open = 0;
+    let mut makers = 0;
+    for pos_id in (1..minted).map(U256::from) {
+        if lagged.position(pos_id).await.unwrap().is_some() {
+            open += 1;
+        }
+        if let Some(range) = lagged.maker_range(pos_id).await.unwrap() {
+            makers += 1;
+            assert!(range.tick_lower < range.tick_upper, "{pos_id}: {range:?}");
+        }
+    }
+    println!("{open} open positions, {makers} with liquidity");
+    assert!(makers <= open, "a range belongs to an open position");
+
+    println!("\n=== State handle test passed! ===");
 }
