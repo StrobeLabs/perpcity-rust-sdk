@@ -2,10 +2,11 @@
 
 use alloy::eips::BlockId;
 use alloy::primitives::U256;
+use alloy::transports::RpcError;
 
 use crate::contracts::{IERC20, Perp, Position};
 use crate::convert::usdc_from_atoms;
-use crate::errors::{Result, ValidationError};
+use crate::errors::{ContractError, PerpCityError, Result, ValidationError};
 use crate::math::BlockContext;
 use crate::math::range::MakerRange;
 use crate::math::tick::get_sqrt_ratio_at_tick;
@@ -38,8 +39,8 @@ impl MarketReader {
     ///
     /// # Errors
     ///
-    /// [`ContractError::BlockUnavailable`](crate::ContractError::BlockUnavailable)
-    /// when the serving replica is missing the pinned header.
+    /// [`ContractError::BlockUnavailable`] when the serving replica is
+    /// missing the pinned header.
     pub async fn state(&self) -> Result<StateAt> {
         let (block, _) = self.chain.lagged_snapshot_block().await?;
         Ok(StateAt {
@@ -51,14 +52,15 @@ impl MarketReader {
     /// State reads pinned to block `number`.
     ///
     /// The header is resolved here; the state behind it is only checked
-    /// by the reads, so a full (non-archive) endpoint hands out the handle
-    /// for an old block and then fails each read with the node's
-    /// "historical state is not available" transport error.
+    /// by the reads. A full (non-archive) endpoint keeps every header but
+    /// prunes old state, so it hands out the handle and then fails each
+    /// read with [`ContractError::StateUnavailable`], which is not
+    /// transient: the fix is an archive endpoint, not a retry.
     ///
     /// # Errors
     ///
-    /// [`ContractError::BlockUnavailable`](crate::ContractError::BlockUnavailable)
-    /// when the endpoint does not serve that header.
+    /// [`ContractError::BlockUnavailable`] when the endpoint does not
+    /// serve that header.
     pub async fn state_at(&self, number: u64) -> Result<StateAt> {
         let (block, _) = self.chain.block_at(number).await?;
         Ok(StateAt {
@@ -83,6 +85,22 @@ impl StateAt {
         BlockId::hash(self.block.hash)
     }
 
+    /// A read's failure, with the node's "state pruned" answer typed as
+    /// [`ContractError::StateUnavailable`] for this handle's block.
+    fn read_error(&self, error: alloy::contract::Error) -> PerpCityError {
+        match &error {
+            alloy::contract::Error::TransportError(RpcError::ErrorResp(payload))
+                if state_pruned(&payload.message) =>
+            {
+                ContractError::StateUnavailable {
+                    number: self.block.number,
+                }
+                .into()
+            }
+            _ => error.into(),
+        }
+    }
+
     /// The market's solvency books.
     ///
     /// # Errors
@@ -91,7 +109,12 @@ impl StateAt {
     /// broken read, not a balance.
     pub async fn solvency(&self) -> Result<SolvencyState> {
         let perp = Perp::new(self.market.perp, self.market.chain.provider());
-        let state = perp.solvencyState().block(self.id()).call().await?;
+        let state = perp
+            .solvencyState()
+            .block(self.id())
+            .call()
+            .await
+            .map_err(|e| self.read_error(e))?;
         Ok(SolvencyState {
             bad_debt: usdc_from_atoms(state.badDebt, "badDebt")?,
             total_margin: usdc_from_atoms(state.totalMargin, "totalMargin")?,
@@ -107,7 +130,12 @@ impl StateAt {
     /// broken read, since no market has minted that many.
     pub async fn next_pos_id(&self) -> Result<u64> {
         let perp = Perp::new(self.market.perp, self.market.chain.provider());
-        let next = perp.nextPosId().block(self.id()).call().await?;
+        let next = perp
+            .nextPosId()
+            .block(self.id())
+            .call()
+            .await
+            .map_err(|e| self.read_error(e))?;
         u64::try_from(next).map_err(|_| {
             ValidationError::Overflow {
                 context: format!("nextPosId {next} exceeds u64"),
@@ -126,7 +154,12 @@ impl StateAt {
     /// exist and fails with `PositionNotFound` instead.
     pub async fn position(&self, pos_id: U256) -> Result<Option<Position>> {
         let perp = Perp::new(self.market.perp, self.market.chain.provider());
-        let position = perp.positions(pos_id).block(self.id()).call().await?;
+        let position = perp
+            .positions(pos_id)
+            .block(self.id())
+            .call()
+            .await
+            .map_err(|e| self.read_error(e))?;
         Ok((position.margin != 0 || !position.delta.is_zero()).then_some(position))
     }
 
@@ -137,7 +170,12 @@ impl StateAt {
     /// result cannot fail on chain-supplied values.
     pub async fn maker_range(&self, pos_id: U256) -> Result<Option<MakerRange>> {
         let perp = Perp::new(self.market.perp, self.market.chain.provider());
-        let maker = perp.makerDetails(pos_id).block(self.id()).call().await?;
+        let maker = perp
+            .makerDetails(pos_id)
+            .block(self.id())
+            .call()
+            .await
+            .map_err(|e| self.read_error(e))?;
         if maker.liquidity == 0 {
             return Ok(None);
         }
@@ -154,7 +192,12 @@ impl StateAt {
     /// The pool's current tick.
     pub async fn pool_tick(&self) -> Result<i32> {
         let perp = Perp::new(self.market.perp, self.market.chain.provider());
-        let state = perp.poolState().block(self.id()).call().await?;
+        let state = perp
+            .poolState()
+            .block(self.id())
+            .call()
+            .await
+            .map_err(|e| self.read_error(e))?;
         Ok(i24_to_i32(state.tick))
     }
 
@@ -170,9 +213,18 @@ impl StateAt {
             .balanceOf(self.market.perp)
             .block(self.id())
             .call()
-            .await?;
+            .await
+            .map_err(|e| self.read_error(e))?;
         Ok(usdc_from_atoms(raw, "collateral")?)
     }
+}
+
+/// Whether a node's error message is its refusal to serve pruned state:
+/// Nitro's "historical state … is not available", geth's "missing trie
+/// node". The message is the only place a node says so.
+fn state_pruned(message: &str) -> bool {
+    let message = message.to_ascii_lowercase();
+    message.contains("historical state") || message.contains("missing trie node")
 }
 
 #[cfg(test)]
@@ -230,6 +282,39 @@ mod tests {
             panic!("an absent header must fail the handle");
         };
         assert_eq!(number, 7);
+    }
+
+    /// A full node keeps the header and prunes the state: the handle is
+    /// handed out and the read names the condition, which no retry fixes.
+    #[tokio::test]
+    async fn pruned_state_is_a_typed_permanent_failure() {
+        for message in [
+            "historical state 1682db2b34068813264a4d89e2d8d02b0703b6f0e6acd8437d8080d98a5db56b is not available",
+            "missing trie node 0x1682db2b (path ) state 0x1682db2b is not available",
+        ] {
+            let (state, rpc) = state().await;
+            rpc.fails(message);
+            let error = state.solvency().await.unwrap_err();
+            let PerpCityError::Contract(ContractError::StateUnavailable { number }) = error else {
+                panic!("{message:?} must type as StateUnavailable, got {error}");
+            };
+            assert_eq!(number, 92);
+            assert!(
+                !error.is_transient(),
+                "an archive endpoint is the fix, not a retry"
+            );
+        }
+    }
+
+    /// Any other node failure keeps its own shape.
+    #[tokio::test]
+    async fn other_read_failures_pass_through() {
+        let (state, rpc) = state().await;
+        rpc.fails("execution aborted (timeout = 5s)");
+        assert!(matches!(
+            state.pool_tick().await.unwrap_err(),
+            PerpCityError::Abi(_)
+        ));
     }
 
     #[tokio::test]
