@@ -33,6 +33,7 @@ use crate::types::{
     Bounds, Fees, MarginRatioTriple, MarginRatios, OpenInterest, PerpData, PerpSnapshot,
 };
 
+use super::market::MarketReader;
 use super::{PerpClient, SCALE_F64, i24_to_i32, now_secs, u24_to_u32};
 
 /// Funding/utilization rates are scaled by 1e18 per day on-chain.
@@ -113,42 +114,53 @@ fn funding_per_day_to_f64(rate: alloy::primitives::Signed<88, 2>) -> f64 {
     i128::try_from(rate).unwrap_or(0) as f64 / WAD_F64
 }
 
-impl PerpClient {
+impl MarketReader {
     // ── Read operations ──────────────────────────────────────────────
 
-    /// Cache key for this client's market: the `Perp` address left-padded to 32 bytes.
+    /// Cache key for this market: the `Perp` address left-padded to 32 bytes.
     fn market_key(&self) -> [u8; 32] {
         self.perp.into_word().0
     }
 
-    /// Fetch and cache the deployment-fixed values the taker book loader
-    /// needs. The first call costs three RPC reads; every later call is free.
-    async fn book_immutables(&self) -> Result<&BookImmutables> {
-        self.book_immutables
-            .get_or_try_init(|| async {
-                let perp = Perp::new(self.perp, self.chain.provider());
-                let pool_id_call = perp.POOL_ID();
-                let pool_key_call = perp.poolKey();
-                let ema_window_call = perp.EMA_WINDOW();
-                let (pool_id, pool_key, ema_window) = tokio::try_join!(
-                    pool_id_call.call(),
-                    pool_key_call.call(),
-                    ema_window_call.call(),
-                )?;
-                let tick_spacing = i24_to_i32(pool_key.tickSpacing);
-                if tick_spacing <= 0 {
-                    return Err(ValidationError::InvalidConfig {
-                        reason: format!("invalid tick spacing {tick_spacing}"),
-                    }
-                    .into());
-                }
-                Ok(BookImmutables {
-                    pool_id,
-                    tick_spacing,
-                    ema_window: ema_window_secs(ema_window)?,
-                })
-            })
-            .await
+    /// The deployment-fixed values the taker book loader needs, from the
+    /// chain reader's per-market cache, or three RPC reads the first time
+    /// any reader of this market asks.
+    async fn book_immutables(&self) -> Result<BookImmutables> {
+        {
+            let cached = self.chain.immutables().lock().unwrap();
+            if let Some(immutables) = cached.get(&self.perp) {
+                return Ok(*immutables);
+            }
+        }
+
+        let perp = Perp::new(self.perp, self.chain.provider());
+        let pool_id_call = perp.POOL_ID();
+        let pool_key_call = perp.poolKey();
+        let ema_window_call = perp.EMA_WINDOW();
+        let (pool_id, pool_key, ema_window) = tokio::try_join!(
+            pool_id_call.call(),
+            pool_key_call.call(),
+            ema_window_call.call(),
+        )?;
+        let tick_spacing = i24_to_i32(pool_key.tickSpacing);
+        if tick_spacing <= 0 {
+            return Err(ValidationError::InvalidConfig {
+                reason: format!("invalid tick spacing {tick_spacing}"),
+            }
+            .into());
+        }
+        let immutables = BookImmutables {
+            pool_id,
+            tick_spacing,
+            ema_window: ema_window_secs(ema_window)?,
+        };
+
+        self.chain
+            .immutables()
+            .lock()
+            .unwrap()
+            .insert(self.perp, immutables);
+        Ok(immutables)
     }
 
     /// The contract's mark at `block`, as `PerpLogic.accrue` sets it: the
@@ -236,7 +248,7 @@ impl PerpClient {
     /// pinned to the returned block hash, resolved via the same
     /// [`SNAPSHOT_BLOCK_LAG`](crate::constants::SNAPSHOT_BLOCK_LAG) policy as the maker-equity reads.
     pub async fn load_taker_market_snapshot(&self) -> Result<TakerMarketSnapshot> {
-        let immutables = *self.book_immutables().await?;
+        let immutables = self.book_immutables().await?;
         let (block, block_id) = self.chain.lagged_snapshot_block().await?;
         let perp = Perp::new(self.perp, self.chain.provider());
         let stored_emas = self
@@ -303,7 +315,7 @@ impl PerpClient {
             pool_id,
             tick_spacing: spacing,
             ..
-        } = *self.book_immutables().await?;
+        } = self.book_immutables().await?;
 
         let min_word = MIN_TICK.div_euclid(spacing).div_euclid(256);
         let max_word = MAX_TICK.div_euclid(spacing).div_euclid(256);
@@ -516,17 +528,6 @@ impl PerpClient {
         Ok(price)
     }
 
-    /// Get the oracle index price from a beacon contract.
-    ///
-    /// The beacon address is available from `PerpData.beacon` (returned by
-    /// [`get_perp_config`](Self::get_perp_config)).
-    ///
-    /// Note: `index()` is a state-mutating function on-chain; this performs an
-    /// `eth_call` (simulation) and does not send a transaction.
-    pub async fn get_index_price(&self, beacon: Address) -> Result<f64> {
-        self.chain.get_index_price(beacon).await
-    }
-
     /// Read the market's `IMarginRatios` module: the maker and taker
     /// init / liquidation / backstop thresholds, as fractions.
     ///
@@ -645,38 +646,6 @@ impl PerpClient {
         Ok(daily_rate)
     }
 
-    /// Get the USDC balance of the signer's address.
-    ///
-    /// Uses the fast cache layer (2s TTL).
-    pub async fn get_usdc_balance(&self) -> Result<f64> {
-        self.chain.balance_of(self.address).await
-    }
-
-    // ── Batch reads (via Multicall3) ──────────────────────────────────
-
-    /// Get the USDC and ETH balances of an address in a single RPC call.
-    ///
-    /// Uses Multicall3 to bundle a `balanceOf` (USDC) and `getEthBalance`
-    /// (native ETH) into one `eth_call`. The RPC provider charges 1 CU
-    /// regardless of how many sub-calls the multicall executes.
-    ///
-    /// Returns `(usdc_balance, eth_balance)` where USDC is in human units
-    /// (e.g. `100.0` = 100 USDC) and ETH is in wei.
-    pub async fn get_balances(&self, address: Address) -> Result<(f64, U256)> {
-        self.chain.get_balances(address).await
-    }
-
-    /// Get the USDC and ETH balances for multiple addresses in a single RPC call.
-    ///
-    /// Uses Multicall3 to bundle N × `balanceOf` + N × `getEthBalance` into
-    /// one `eth_call`. For 10 addresses, this is 1 CU instead of 20.
-    ///
-    /// Returns a `Vec<(usdc_balance, eth_balance)>` in the same order as
-    /// the input addresses.
-    pub async fn get_balances_batch(&self, addresses: &[Address]) -> Result<Vec<(f64, U256)>> {
-        self.chain.get_balances_batch(addresses).await
-    }
-
     /// Get perp config and live market data in a single multicall (plus the
     /// beacon index read).
     ///
@@ -713,7 +682,7 @@ impl PerpClient {
         };
 
         // Index price from the beacon (1 CU).
-        let index_price = self.get_index_price(modules.beacon).await?;
+        let index_price = self.chain.get_index_price(modules.beacon).await?;
 
         // Fees/bounds (from cache or chain).
         let fees = self.get_or_fetch_fees(modules.fees).await?;
@@ -822,6 +791,95 @@ impl PerpClient {
             max_taker_leverage: margin_ratio_to_leverage(u24_to_u32(taker.init))?,
             liquidation_taker_ratio: u24_to_u32(taker.liq) as f64 / scale,
         })
+    }
+}
+
+impl PerpClient {
+    // ── Reads, on this client's market and chain readers ─────────────
+
+    /// [`MarketReader::get_fair_price`] on this client's market.
+    pub async fn get_fair_price(&self) -> Result<FairPrice> {
+        self.market.get_fair_price().await
+    }
+
+    /// [`MarketReader::load_taker_market_snapshot`] on this client's market.
+    pub async fn load_taker_market_snapshot(&self) -> Result<TakerMarketSnapshot> {
+        self.market.load_taker_market_snapshot().await
+    }
+
+    /// [`MarketReader::get_perp_config`] on this client's market.
+    pub async fn get_perp_config(&self) -> Result<PerpData> {
+        self.market.get_perp_config().await
+    }
+
+    /// [`MarketReader::get_perp_data`] on this client's market.
+    pub async fn get_perp_data(&self) -> Result<(Address, i32, f64)> {
+        self.market.get_perp_data().await
+    }
+
+    /// [`MarketReader::get_position`] on this client's market.
+    pub async fn get_position(&self, pos_id: U256) -> Result<Position> {
+        self.market.get_position(pos_id).await
+    }
+
+    /// [`MarketReader::get_positions_by_owner`] on this client's market.
+    pub async fn get_positions_by_owner(&self, owner: Address) -> Result<Vec<U256>> {
+        self.market.get_positions_by_owner(owner).await
+    }
+
+    /// [`MarketReader::get_mark_price`] on this client's market.
+    pub async fn get_mark_price(&self) -> Result<f64> {
+        self.market.get_mark_price().await
+    }
+
+    /// [`MarketReader::get_margin_ratios`] on this client's market.
+    pub async fn get_margin_ratios(&self) -> Result<MarginRatios> {
+        self.market.get_margin_ratios().await
+    }
+
+    /// [`MarketReader::get_open_interest`] on this client's market.
+    pub async fn get_open_interest(&self) -> Result<OpenInterest> {
+        self.market.get_open_interest().await
+    }
+
+    /// [`MarketReader::get_capacity`] on this client's market.
+    pub async fn get_capacity(&self) -> Result<MarketCapacity> {
+        self.market.get_capacity().await
+    }
+
+    /// [`MarketReader::get_funding_rate`] on this client's market.
+    pub async fn get_funding_rate(&self) -> Result<f64> {
+        self.market.get_funding_rate().await
+    }
+
+    /// [`MarketReader::get_perp_snapshot`] on this client's market.
+    pub async fn get_perp_snapshot(&self) -> Result<(PerpData, PerpSnapshot)> {
+        self.market.get_perp_snapshot().await
+    }
+
+    /// [`ChainReader::get_index_price`](super::ChainReader::get_index_price)
+    /// on this client's chain reader.
+    pub async fn get_index_price(&self, beacon: Address) -> Result<f64> {
+        self.chain.get_index_price(beacon).await
+    }
+
+    /// The signer's USDC balance:
+    /// [`ChainReader::balance_of`](super::ChainReader::balance_of) at this
+    /// client's address.
+    pub async fn get_usdc_balance(&self) -> Result<f64> {
+        self.chain.balance_of(self.address).await
+    }
+
+    /// [`ChainReader::get_balances`](super::ChainReader::get_balances) on
+    /// this client's chain reader.
+    pub async fn get_balances(&self, address: Address) -> Result<(f64, U256)> {
+        self.chain.get_balances(address).await
+    }
+
+    /// [`ChainReader::get_balances_batch`](super::ChainReader::get_balances_batch)
+    /// on this client's chain reader.
+    pub async fn get_balances_batch(&self, addresses: &[Address]) -> Result<Vec<(f64, U256)>> {
+        self.chain.get_balances_batch(addresses).await
     }
 }
 
@@ -1723,10 +1781,10 @@ mod tests {
         );
     }
 
-    /// The immutables are read once per client: a second snapshot starts
+    /// The immutables are read once per market: a second snapshot starts
     /// at the lagged block.
     #[tokio::test]
-    async fn book_immutables_are_read_once_per_client() {
+    async fn book_immutables_are_read_once_per_market() {
         let (client, rpc) = mock::client();
         immutables_answers(&rpc);
         snapshot_answers(&rpc, 0, bitmap(&[]), None);
@@ -1738,6 +1796,28 @@ mod tests {
             expected_snapshot(hash, 0)
         );
         assert!(rpc.is_drained(), "nine answers: no immutables");
+    }
+
+    /// The immutables belong to the market, not the reader: a second
+    /// reader of the same market over one chain reader inherits them, and
+    /// a reader of another market reads its own.
+    #[tokio::test]
+    async fn book_immutables_are_shared_per_market_across_readers() {
+        let (chain, rpc) = mock::chain();
+        let (first, second) = (chain.market(mock::PERP), chain.market(mock::PERP));
+        immutables_answers(&rpc);
+        snapshot_answers(&rpc, 0, bitmap(&[]), None);
+        first.load_taker_market_snapshot().await.unwrap();
+
+        snapshot_answers(&rpc, 0, bitmap(&[]), None);
+        second.load_taker_market_snapshot().await.unwrap();
+        assert!(rpc.is_drained(), "the second reader skipped the immutables");
+
+        let other = chain.market(Address::repeat_byte(0x12));
+        immutables_answers(&rpc);
+        snapshot_answers(&rpc, 0, bitmap(&[]), None);
+        other.load_taker_market_snapshot().await.unwrap();
+        assert!(rpc.is_drained(), "another market reads its own");
     }
 
     /// A non-positive spacing is rejected when the immutables are first

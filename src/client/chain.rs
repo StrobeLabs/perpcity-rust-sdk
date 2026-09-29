@@ -1,5 +1,6 @@
 //! The chain-scoped read handle, [`ChainReader`].
 
+use std::collections::HashMap;
 use std::fmt;
 use std::sync::{Arc, Mutex};
 
@@ -22,6 +23,7 @@ use crate::math::BlockContext;
 use crate::transport::provider::HftTransport;
 use crate::types::ChainDeployments;
 
+use super::queries::BookImmutables;
 use super::transactions::{classify_simulation_failure, preflight_request};
 use super::{DEFAULT_GAS_TTL_MS, DEFAULT_PRIORITY_FEE, now_ms, now_secs};
 
@@ -56,6 +58,10 @@ struct Inner {
     fees: Mutex<FeeCache>,
     /// TTL cache over on-chain reads, keyed per market and per holder.
     state: Mutex<StateCache>,
+    /// Each market's deployment-fixed pool values, read once per market
+    /// by whichever reader asks first. Immutables never go stale, so
+    /// there is no TTL.
+    immutables: Mutex<HashMap<Address, BookImmutables>>,
 }
 
 impl fmt::Debug for ChainReader {
@@ -95,6 +101,7 @@ impl ChainReader {
                 history,
                 fees: Mutex::new(FeeCache::new(DEFAULT_GAS_TTL_MS, DEFAULT_PRIORITY_FEE)),
                 state: Mutex::new(StateCache::new(StateCacheConfig::default())),
+                immutables: Mutex::new(HashMap::new()),
             }),
         }
     }
@@ -135,9 +142,14 @@ impl ChainReader {
         &self.inner.fees
     }
 
-    /// The state cache, for the market reads that still live on the client.
+    /// The state cache, for the market reads.
     pub(super) fn state_cache(&self) -> &Mutex<StateCache> {
         &self.inner.state
+    }
+
+    /// The per-market immutables, for the market reads.
+    pub(super) fn immutables(&self) -> &Mutex<HashMap<Address, BookImmutables>> {
+        &self.inner.immutables
     }
 
     // ── Gas ──────────────────────────────────────────────────────────

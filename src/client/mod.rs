@@ -42,6 +42,7 @@
 
 mod chain;
 mod maker_equity;
+mod market;
 #[cfg(test)]
 mod mock;
 mod queries;
@@ -50,6 +51,7 @@ mod transactions;
 
 pub use chain::ChainReader;
 pub use maker_equity::{MAX_MAKER_EQUITY_BATCH, MakerEquityKind, MakerEquityOutcome};
+pub use market::MarketReader;
 pub use transactions::TxBuilder;
 
 use std::sync::Mutex;
@@ -182,8 +184,8 @@ pub struct PerpClient {
     /// Everything the chain's readers share: provider, transport, history,
     /// the base-fee and state caches.
     chain: ChainReader,
-    /// The market this client is bound to.
-    perp: Address,
+    /// The market this client trades, read through `chain`.
+    market: MarketReader,
     /// Wallet for signing transactions.
     wallet: EthereumWallet,
     /// The signer's address.
@@ -192,17 +194,13 @@ pub struct PerpClient {
     pipeline: Mutex<TxPipeline>,
     /// Cached gas estimates from `eth_estimateGas`, keyed by function selector.
     gas_limit_cache: Mutex<GasLimitCache>,
-    /// Deployment-fixed Perp/pool values (pool id, tick spacing, EMA window),
-    /// fetched once on first taker book load.
-    book_immutables: tokio::sync::OnceCell<queries::BookImmutables>,
 }
 
 impl std::fmt::Debug for PerpClient {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PerpClient")
             .field("address", &self.address)
-            .field("perp", &self.perp)
-            .field("chain", &self.chain)
+            .field("market", &self.market)
             .finish_non_exhaustive()
     }
 }
@@ -240,14 +238,13 @@ impl PerpClient {
     {
         let address = TxSigner::address(&signer);
         Self {
+            market: chain.market(perp),
             chain,
-            perp,
             wallet: EthereumWallet::from(signer),
             address,
             // Pipeline starts at nonce 0; call sync_nonce() before first tx
             pipeline: Mutex::new(TxPipeline::new(0, PipelineConfig::default())),
             gas_limit_cache: Mutex::new(GasLimitCache::new()),
-            book_immutables: tokio::sync::OnceCell::new(),
         }
     }
 
@@ -337,12 +334,17 @@ impl PerpClient {
         &self.chain
     }
 
+    /// The reader for the market this client trades.
+    pub fn market(&self) -> &MarketReader {
+        &self.market
+    }
+
     /// The market and chain addresses as one bundle, the shape the
     /// constructors take.
     pub fn deployments(&self) -> Deployments {
         let chain = self.chain.deployments();
         Deployments {
-            perp: self.perp,
+            perp: self.market.perp(),
             usdc: chain.usdc,
             pool_manager: chain.pool_manager,
         }

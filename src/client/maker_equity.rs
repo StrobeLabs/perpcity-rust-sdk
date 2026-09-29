@@ -34,6 +34,7 @@ use crate::storage::{
     v4_tick_fee_growth_outside1_slot,
 };
 
+use super::market::MarketReader;
 use super::queries::{MarkViews, multicall_error};
 use super::{PerpClient, i24_to_i32, u24_to_u32};
 
@@ -331,6 +332,24 @@ fn split_maker_rows(
 }
 
 impl PerpClient {
+    /// [`MarketReader::get_maker_equities`] on this client's market.
+    pub async fn get_maker_equities(&self, pos_ids: &[U256]) -> Result<Vec<MakerEquityOutcome>> {
+        self.market.get_maker_equities(pos_ids).await
+    }
+
+    /// [`MarketReader::get_maker_equities_at_mark`] on this client's market.
+    pub async fn get_maker_equities_at_mark(
+        &self,
+        pos_ids: &[U256],
+        mark_price_x96: U256,
+    ) -> Result<Vec<MakerEquityOutcome>> {
+        self.market
+            .get_maker_equities_at_mark(pos_ids, mark_price_x96)
+            .await
+    }
+}
+
+impl MarketReader {
     /// Read chain state and compute the settle-preview equity for each maker
     /// position in `pos_ids`, all pinned to one block.
     ///
@@ -1202,6 +1221,7 @@ mod tests {
         funding_words(&rpc, 7, 9);
 
         let funding = client
+            .market()
             .get_tick_funding(BlockId::latest(), &ticks)
             .await
             .unwrap();
@@ -1215,6 +1235,7 @@ mod tests {
 
         funding_words(&rpc, 7, 9);
         let funding = client
+            .market()
             .get_tick_funding(BlockId::latest(), &ticks)
             .await
             .unwrap();
@@ -1233,6 +1254,7 @@ mod tests {
             funding_words(&rpc, 7, 9);
 
             let funding = client
+                .market()
                 .get_tick_funding(BlockId::latest(), &ticks)
                 .await
                 .unwrap();
@@ -1253,6 +1275,7 @@ mod tests {
         rpc.fails("replica dropped the read");
 
         let funding = client
+            .market()
             .get_tick_funding(BlockId::latest(), &ticks)
             .await
             .unwrap();
@@ -1274,12 +1297,14 @@ mod tests {
         first_rpc.method_not_found();
         funding_words(&first_rpc, 7, 9);
         first
+            .market()
             .get_tick_funding(BlockId::latest(), &ticks)
             .await
             .unwrap();
 
         funding_words(&second_rpc, 7, 9);
         let funding = second
+            .market()
             .get_tick_funding(BlockId::latest(), &ticks)
             .await
             .unwrap();
