@@ -486,7 +486,7 @@ impl PerpClient {
         block_id: BlockId,
         pos_ids: &[U256],
     ) -> Result<Vec<MakerEquityKind>> {
-        let perp_addr = self.deployments.perp;
+        let perp_addr = self.perp;
 
         // ── Position rows: one multicall, degrading per position ────
         let row_call = |calldata: Vec<u8>| IMulticall3::Call3 {
@@ -563,7 +563,7 @@ impl PerpClient {
         // ── Market-wide state: one multicall, all-or-nothing ────────
         // (without a consistent market snapshot no position's equity can
         // be computed.)
-        let perp = Perp::new(self.deployments.perp, &self.provider);
+        let perp = Perp::new(self.perp, &self.provider);
         let (cumls, rates, pool_state, capacity, oi, pool_id, modules, stored_emas, ema_window) =
             self.multicall_at(block_id)
                 .add(perp.cumulatives())
@@ -643,7 +643,7 @@ impl PerpClient {
             return Ok(Vec::new());
         }
 
-        let (layout, slots) = FeeGrowthLayout::new(pool_id, self.deployments.perp, pending);
+        let (layout, slots) = FeeGrowthLayout::new(pool_id, self.perp, pending);
         // Positions share band boundaries (a maker ladder reuses each inner
         // tick twice), so read each distinct tick's two funding words once.
         let ticks: BTreeSet<i32> = pending
@@ -652,7 +652,7 @@ impl PerpClient {
             .collect();
         // The tick set comes from the rows, not from the fee-growth words,
         // and both reads pin to the same block: run them concurrently.
-        let manager = IPoolManagerState::new(self.deployments.pool_manager, &self.provider);
+        let manager = IPoolManagerState::new(self.chain.pool_manager, &self.provider);
         let fee_growth = async {
             manager
                 .extsload_1(slots)
@@ -751,7 +751,7 @@ impl PerpClient {
         block_id: BlockId,
         ticks: &BTreeSet<i32>,
     ) -> Result<BTreeMap<i32, TickFundingRead>> {
-        let perp_addr = self.deployments.perp;
+        let perp_addr = self.perp;
         if !self.get_proof_unsupported.load(Ordering::Relaxed) {
             let keys: Vec<B256> = ticks
                 .iter()

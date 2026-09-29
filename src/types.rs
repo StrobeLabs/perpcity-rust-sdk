@@ -19,7 +19,18 @@ use std::fmt;
 use alloy::primitives::{Address, B256, U256};
 use serde::{Deserialize, Serialize};
 
-/// Deployed contract addresses for a PerpCity instance.
+/// The addresses every market on a chain shares.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChainDeployments {
+    /// The collateral token.
+    pub usdc: Address,
+    /// The Uniswap V4 `PoolManager` every market's pool lives in (see
+    /// `ARBITRUM_POOL_MANAGER` / `ARBITRUM_SEPOLIA_POOL_MANAGER`).
+    pub pool_manager: Address,
+}
+
+/// One market's `Perp` contract and the chain-wide addresses it settles
+/// against — the bundle the client constructors take.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Deployments {
     /// Perp contract address (one per market).
@@ -30,6 +41,16 @@ pub struct Deployments {
     /// address per chain (see `ARBITRUM_POOL_MANAGER` /
     /// `ARBITRUM_SEPOLIA_POOL_MANAGER`).
     pub pool_manager: Address,
+}
+
+impl Deployments {
+    /// The chain-scoped half: everything but the market.
+    pub fn chain(&self) -> ChainDeployments {
+        ChainDeployments {
+            usdc: self.usdc,
+            pool_manager: self.pool_manager,
+        }
+    }
 }
 
 /// Metadata about a perpetual market.

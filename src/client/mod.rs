@@ -67,7 +67,7 @@ use crate::hft::pipeline::{PipelineConfig, TxPipeline};
 use crate::hft::state_cache::{CachedBounds, CachedFees, StateCache, StateCacheConfig};
 use crate::history::History;
 use crate::transport::provider::HftTransport;
-use crate::types::{Bounds, Deployments, Fees};
+use crate::types::{Bounds, ChainDeployments, Deployments, Fees};
 
 // ── Network constants ──────────────────────────────────────────────────
 
@@ -191,8 +191,10 @@ pub struct PerpClient {
     wallet: EthereumWallet,
     /// The signer's address.
     address: Address,
-    /// Deployed contract addresses.
-    deployments: Deployments,
+    /// The market this client is bound to.
+    perp: Address,
+    /// The addresses every market on the chain shares.
+    chain: ChainDeployments,
     /// Chain ID for transaction building.
     chain_id: u64,
     /// Transaction pipeline (nonce + gas). Mutex for interior mutability.
@@ -223,7 +225,8 @@ impl std::fmt::Debug for PerpClient {
         f.debug_struct("PerpClient")
             .field("address", &self.address)
             .field("chain_id", &self.chain_id)
-            .field("deployments", &self.deployments)
+            .field("perp", &self.perp)
+            .field("chain", &self.chain)
             .finish_non_exhaustive()
     }
 }
@@ -283,7 +286,8 @@ impl PerpClient {
             transport,
             wallet: EthereumWallet::from(signer),
             address,
-            deployments,
+            perp: deployments.perp,
+            chain: deployments.chain(),
             chain_id,
             // Pipeline starts at nonce 0; call sync_nonce() before first tx
             pipeline: Mutex::new(TxPipeline::new(0, PipelineConfig::default())),
@@ -397,9 +401,14 @@ impl PerpClient {
         self.address
     }
 
-    /// The deployed contract addresses.
-    pub fn deployments(&self) -> &Deployments {
-        &self.deployments
+    /// The market and chain addresses as one bundle, the shape the
+    /// constructors take.
+    pub fn deployments(&self) -> Deployments {
+        Deployments {
+            perp: self.perp,
+            usdc: self.chain.usdc,
+            pool_manager: self.chain.pool_manager,
+        }
     }
 
     /// The underlying Alloy provider (for advanced queries).

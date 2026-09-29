@@ -1,6 +1,6 @@
 //! Read operations: market data, positions, balances, and multicall batches.
 //!
-//! The client is bound to a single `Perp` market (`deployments.perp`). There is
+//! The client is bound to a single `Perp` market, the one it was built with. There is
 //! no `PerpManager` and no `perp_id` — the market is identified by which `Perp`
 //! contract the client points at. Positions are keyed by `posId` (ERC721 token
 //! id) within that `Perp`.
@@ -124,7 +124,7 @@ impl PerpClient {
 
     /// Cache key for this client's market: the `Perp` address left-padded to 32 bytes.
     fn market_key(&self) -> [u8; 32] {
-        self.deployments.perp.into_word().0
+        self.perp.into_word().0
     }
 
     /// A typed Multicall3 batch pinned to `block`. Add calls with `add`
@@ -142,7 +142,7 @@ impl PerpClient {
     async fn book_immutables(&self) -> Result<&BookImmutables> {
         self.book_immutables
             .get_or_try_init(|| async {
-                let perp = Perp::new(self.deployments.perp, &self.provider);
+                let perp = Perp::new(self.perp, &self.provider);
                 let pool_id_call = perp.POOL_ID();
                 let pool_key_call = perp.poolKey();
                 let ema_window_call = perp.EMA_WINDOW();
@@ -217,7 +217,7 @@ impl PerpClient {
     /// from the serving replica.
     pub async fn get_fair_price(&self) -> Result<FairPrice> {
         let (block, block_id) = self.lagged_snapshot_block().await?;
-        let perp = Perp::new(self.deployments.perp, &self.provider);
+        let perp = Perp::new(self.perp, &self.provider);
         let (modules, pool_state, stored_emas, rates, ema_window) = self
             .multicall_at(block_id)
             .add(perp.modules())
@@ -280,10 +280,10 @@ impl PerpClient {
     pub async fn load_taker_market_snapshot(&self) -> Result<TakerMarketSnapshot> {
         let immutables = *self.book_immutables().await?;
         let (block, block_id) = self.lagged_snapshot_block().await?;
-        let perp = Perp::new(self.deployments.perp, &self.provider);
+        let perp = Perp::new(self.perp, &self.provider);
         let stored_emas = self
             .provider
-            .get_storage_at(self.deployments.perp, perp_emas_slot())
+            .get_storage_at(self.perp, perp_emas_slot())
             .block_id(block_id)
             .await?;
         let pool_state_call = perp.poolState().block(block_id);
@@ -351,7 +351,7 @@ impl PerpClient {
         let bitmap_slots: Vec<B256> = (min_word..=max_word)
             .map(|word| B256::from(v4_tick_bitmap_slot(pool_id, word)))
             .collect();
-        let manager = IPoolManagerState::new(self.deployments.pool_manager, &self.provider);
+        let manager = IPoolManagerState::new(self.chain.pool_manager, &self.provider);
         let bitmaps = manager
             .extsload_1(bitmap_slots)
             .block(block_id)
@@ -425,7 +425,7 @@ impl PerpClient {
     ///
     /// Uses the [`crate::hft::state_cache::StateCache`] for fees and bounds (60s TTL).
     pub async fn get_perp_config(&self) -> Result<PerpData> {
-        let perp = Perp::new(self.deployments.perp, &self.provider);
+        let perp = Perp::new(self.perp, &self.provider);
 
         let modules = perp.modules().call().await?;
         let pool_key = perp.poolKey().call().await?;
@@ -436,7 +436,7 @@ impl PerpClient {
         let bounds = self.get_or_fetch_bounds(modules.marginRatios).await?;
 
         Ok(PerpData {
-            perp: self.deployments.perp,
+            perp: self.perp,
             tick_spacing: i24_to_i32(pool_key.tickSpacing),
             mark,
             beacon: modules.beacon,
@@ -449,7 +449,7 @@ impl PerpClient {
     ///
     /// Lighter-weight than [`Self::get_perp_config`] — skips fees/bounds lookups.
     pub async fn get_perp_data(&self) -> Result<(Address, i32, f64)> {
-        let perp = Perp::new(self.deployments.perp, &self.provider);
+        let perp = Perp::new(self.perp, &self.provider);
         let modules = perp.modules().call().await?;
         let pool_key = perp.poolKey().call().await?;
         let pool_state = perp.poolState().call().await?;
@@ -463,7 +463,7 @@ impl PerpClient {
     /// Returns the raw contract position struct. Use [`crate::math::position`]
     /// functions to compute derived values (entry price, PnL, etc.).
     pub async fn get_position(&self, pos_id: U256) -> Result<Position> {
-        let perp = Perp::new(self.deployments.perp, &self.provider);
+        let perp = Perp::new(self.perp, &self.provider);
         let pos = perp.positions(pos_id).call().await?;
 
         // A non-existent or burned position decodes to an all-zero struct.
@@ -482,7 +482,7 @@ impl PerpClient {
     /// **Note:** This is O(n) in total positions ever minted. For high-throughput
     /// use cases, prefer the bot API's position endpoints instead.
     pub async fn get_positions_by_owner(&self, owner: Address) -> Result<Vec<U256>> {
-        let perp = Perp::new(self.deployments.perp, &self.provider);
+        let perp = Perp::new(self.perp, &self.provider);
         let next_pos_id: U256 = perp.nextPosId().call().await?;
 
         let total: u64 = next_pos_id
@@ -541,7 +541,7 @@ impl PerpClient {
         }
 
         // Fetch from chain
-        let perp = Perp::new(self.deployments.perp, &self.provider);
+        let perp = Perp::new(self.perp, &self.provider);
         let pool_state = perp.poolState().call().await?;
         let price = price_x96_to_f64(pool_state.ammPrice)?;
 
@@ -596,7 +596,7 @@ impl PerpClient {
     /// pinned header is missing from the serving replica.
     pub async fn get_margin_ratios(&self) -> Result<MarginRatios> {
         let (_, block_id) = self.lagged_snapshot_block().await?;
-        let perp = Perp::new(self.deployments.perp, &self.provider);
+        let perp = Perp::new(self.perp, &self.provider);
         let modules = perp.modules().block(block_id).call().await?;
         let ratios = IMarginRatios::new(
             registered_module(modules.marginRatios, "IMarginRatios")?,
@@ -625,7 +625,7 @@ impl PerpClient {
     /// interest in atoms at a known block, next to the capacity it draws
     /// on, use [`Self::get_capacity`].
     pub async fn get_open_interest(&self) -> Result<OpenInterest> {
-        let perp = Perp::new(self.deployments.perp, &self.provider);
+        let perp = Perp::new(self.perp, &self.provider);
         let oi = perp.openInterest().call().await?;
 
         Ok(OpenInterest {
@@ -646,7 +646,7 @@ impl PerpClient {
     /// from the serving replica.
     pub async fn get_capacity(&self) -> Result<MarketCapacity> {
         let (block, block_id) = self.lagged_snapshot_block().await?;
-        let perp = Perp::new(self.deployments.perp, &self.provider);
+        let perp = Perp::new(self.perp, &self.provider);
         let (capacity, oi) = self
             .multicall_at(block_id)
             .add(perp.capacity())
@@ -680,7 +680,7 @@ impl PerpClient {
             }
         }
 
-        let perp = Perp::new(self.deployments.perp, &self.provider);
+        let perp = Perp::new(self.perp, &self.provider);
         let rates = perp.rates().call().await?;
         let daily_rate = funding_per_day_to_f64(rates.fundingPerDay);
 
@@ -710,7 +710,7 @@ impl PerpClient {
             }
         }
 
-        let usdc = IERC20::new(self.deployments.usdc, &self.provider);
+        let usdc = IERC20::new(self.chain.usdc, &self.provider);
         let raw: U256 = usdc.balanceOf(self.address).call().await?;
         let raw_i128 = i128::try_from(raw).map_err(|_| ValidationError::Overflow {
             context: format!("USDC balance {} exceeds i128::MAX", raw),
@@ -755,7 +755,7 @@ impl PerpClient {
             return Ok(Vec::new());
         }
 
-        let usdc_addr = self.deployments.usdc;
+        let usdc_addr = self.chain.usdc;
         let n = addresses.len();
 
         // Build sub-calls: N × USDC balanceOf + N × ETH getEthBalance
@@ -851,7 +851,7 @@ impl PerpClient {
     /// multicall and the beacon read are separate calls, so a trade between
     /// them can put the index one block after the pool state.
     pub async fn get_perp_snapshot(&self) -> Result<(PerpData, PerpSnapshot)> {
-        let perp = Perp::new(self.deployments.perp, &self.provider);
+        let perp = Perp::new(self.perp, &self.provider);
         let (modules, pool_key, pool_state, rates, oi) = self
             .multicall_at(BlockId::latest())
             .add(perp.modules())
@@ -878,7 +878,7 @@ impl PerpClient {
         let bounds = self.get_or_fetch_bounds(modules.marginRatios).await?;
 
         let perp_data = PerpData {
-            perp: self.deployments.perp,
+            perp: self.perp,
             tick_spacing: i24_to_i32(pool_key.tickSpacing),
             mark,
             beacon: modules.beacon,
