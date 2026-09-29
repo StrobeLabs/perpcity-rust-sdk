@@ -116,6 +116,11 @@ impl Rpc {
         self.0.push_success(&Option::<Block>::None);
     }
 
+    /// The next `eth_getStorageAt` returns `word`.
+    pub(super) fn storage(&self, word: U256) {
+        self.0.push_success(&word);
+    }
+
     /// The next request fails as the node's own error, with no revert
     /// data: a transport-level failure.
     pub(super) fn fails(&self, message: &'static str) {

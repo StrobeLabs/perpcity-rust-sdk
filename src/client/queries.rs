@@ -1704,4 +1704,215 @@ mod tests {
         );
         assert!(rpc.is_drained());
     }
+
+    // ── The taker snapshot: immutables, pinned views, and the book ────
+
+    /// The pool's id, as `POOL_ID()` reports it.
+    const POOL_ID: B256 = B256::repeat_byte(0x99);
+    /// When the market was last touched, and the block time in these
+    /// tests, so the stored EMAs need no advancing.
+    const TOUCHED_AT: u64 = 1_700_000_000;
+    /// Bitmap words the book walk covers at this spacing:
+    /// `MIN_TICK.div_euclid(30) = -4606`, `.div_euclid(256) = -18`, up to
+    /// `4606.div_euclid(256) = 17` — 36 words, word `w` at offset `w + 18`.
+    const BITMAP_WORDS: usize = 36;
+
+    /// The three immutables the first snapshot reads, in `try_join!` order.
+    fn immutables_answers(rpc: &Rpc) {
+        rpc.call::<Perp::POOL_IDCall>(&POOL_ID);
+        rpc.call::<Perp::poolKeyCall>(&mock::pool_key(SPACING));
+        rpc.call::<Perp::EMA_WINDOWCall>(&U256::from(3_600u32));
+    }
+
+    /// Everything after the immutables: the lagged block, the stored
+    /// EMAs, the three pinned `Perp` views, the beacon, the impact bounds,
+    /// then the bitmap and — if any tick is set — the tick words. Pool,
+    /// index and EMAs are all 1.0; returns the pinned block's hash.
+    fn snapshot_answers(
+        rpc: &Rpc,
+        liquidity: u128,
+        bitmap: Vec<B256>,
+        tick_words: Option<Vec<B256>>,
+    ) -> B256 {
+        let one = x96(1, 0);
+        rpc.quantity(100);
+        let hash = rpc.block(100 - SNAPSHOT_BLOCK_LAG, TOUCHED_AT);
+        rpc.storage((one << 128) | one);
+        rpc.call::<Perp::poolStateCall>(&Perp::poolStateReturn {
+            sqrtPrice: Uint::from(1u8) << 96,
+            liquidity,
+            ..mock::pool_state(one)
+        });
+        rpc.call::<Perp::modulesCall>(&mock::modules());
+        rpc.call::<Perp::ratesCall>(&Rates {
+            lastTouch: Uint::from(TOUCHED_AT),
+            ..mock::rates(0)
+        });
+        rpc.call::<IBeacon::indexCall>(&one);
+        rpc.call::<IPriceImpact::sqrtPriceBoundsCall>(&IPriceImpact::sqrtPriceBoundsReturn {
+            sqrtMin: one >> 1,
+            sqrtMax: one << 1,
+        });
+        rpc.call::<IPoolManagerState::extsload_1Call>(&bitmap);
+        if let Some(words) = tick_words {
+            rpc.call::<IPoolManagerState::extsload_1Call>(&words);
+        }
+        hash
+    }
+
+    /// A bitmap with these `(offset, bit)`s set.
+    fn bitmap(set: &[(usize, usize)]) -> Vec<B256> {
+        let mut words = vec![U256::ZERO; BITMAP_WORDS];
+        for &(offset, bit) in set {
+            words[offset] |= U256::from(1u8) << bit;
+        }
+        words.into_iter().map(B256::from).collect()
+    }
+
+    /// A tick's storage word: `liquidityNet` in the high half,
+    /// `liquidityGross` in the low.
+    fn tick_word(gross: u128, net: i128) -> B256 {
+        B256::from((U256::from(net as u128) << 128) | U256::from(gross))
+    }
+
+    fn expected_snapshot(hash: B256, liquidity: u128) -> TakerMarketSnapshot {
+        let one = x96(1, 0);
+        TakerMarketSnapshot {
+            block: BlockContext {
+                number: 100 - SNAPSHOT_BLOCK_LAG,
+                hash,
+                timestamp: TOUCHED_AT,
+            },
+            sqrt_price_x96: one,
+            tick: 0,
+            liquidity,
+            ticks: BTreeMap::new(),
+            protocol_sqrt_min_x96: MIN_SWAP_SQRT_PRICE_X96,
+            protocol_sqrt_max_x96: MAX_SWAP_SQRT_PRICE_X96,
+            impact_sqrt_min_x96: one >> 1,
+            impact_sqrt_max_x96: one << 1,
+        }
+    }
+
+    /// An empty bitmap means no tick words are asked for, and the empty
+    /// book reconciles with a pool holding no liquidity.
+    #[tokio::test]
+    async fn taker_snapshot_of_an_empty_book_skips_the_tick_words() {
+        let (client, rpc) = mock::client();
+        immutables_answers(&rpc);
+        let hash = snapshot_answers(&rpc, 0, bitmap(&[]), None);
+
+        assert_eq!(
+            client.load_taker_market_snapshot().await.unwrap(),
+            expected_snapshot(hash, 0)
+        );
+        assert!(rpc.is_drained(), "twelve answers, none left over");
+    }
+
+    /// Set bits become ticks at `compressed * spacing`, their words are
+    /// read in bitmap order, and the net liquidity of every tick at or
+    /// below the pool's must add up to what the pool reports.
+    #[tokio::test]
+    async fn taker_snapshot_rebuilds_the_book_from_the_bitmap() {
+        const L: u128 = 1_000;
+        let (client, rpc) = mock::client();
+        immutables_answers(&rpc);
+        // Tick -60 is compressed -2: word -1 (offset 17), bit 254.
+        // Tick 60 is compressed 2: word 0 (offset 18), bit 2.
+        let hash = snapshot_answers(
+            &rpc,
+            L,
+            bitmap(&[(17, 254), (18, 2)]),
+            Some(vec![tick_word(L, L as i128), tick_word(L, -(L as i128))]),
+        );
+
+        let snapshot = client.load_taker_market_snapshot().await.unwrap();
+        assert_eq!(
+            snapshot,
+            TakerMarketSnapshot {
+                ticks: BTreeMap::from([
+                    (
+                        -60,
+                        TickLiquidity {
+                            gross: L,
+                            net: L as i128
+                        }
+                    ),
+                    (
+                        60,
+                        TickLiquidity {
+                            gross: L,
+                            net: -(L as i128)
+                        }
+                    ),
+                ]),
+                ..expected_snapshot(hash, L)
+            }
+        );
+        assert!(rpc.is_drained(), "thirteen answers");
+    }
+
+    /// A book whose ticks do not add up to the pool's active liquidity is
+    /// a wrong read, not a snapshot.
+    #[tokio::test]
+    async fn a_book_that_does_not_reconcile_with_the_pool_is_rejected() {
+        const L: u128 = 1_000;
+        let (client, rpc) = mock::client();
+        immutables_answers(&rpc);
+        snapshot_answers(
+            &rpc,
+            L + 1,
+            bitmap(&[(17, 254), (18, 2)]),
+            Some(vec![tick_word(L, L as i128), tick_word(L, -(L as i128))]),
+        );
+
+        let err = client.load_taker_market_snapshot().await.unwrap_err();
+        assert!(
+            matches!(
+                err,
+                PerpCityError::Contract(ContractError::MulticallFailed { ref reason })
+                    if reason.contains("liquidity mismatch")
+            ),
+            "{err}"
+        );
+    }
+
+    /// The immutables are read once per client: a second snapshot starts
+    /// at the lagged block.
+    #[tokio::test]
+    async fn book_immutables_are_read_once_per_client() {
+        let (client, rpc) = mock::client();
+        immutables_answers(&rpc);
+        snapshot_answers(&rpc, 0, bitmap(&[]), None);
+        client.load_taker_market_snapshot().await.unwrap();
+
+        let hash = snapshot_answers(&rpc, 0, bitmap(&[]), None);
+        assert_eq!(
+            client.load_taker_market_snapshot().await.unwrap(),
+            expected_snapshot(hash, 0)
+        );
+        assert!(rpc.is_drained(), "nine answers: no immutables");
+    }
+
+    /// A non-positive spacing is rejected when the immutables are first
+    /// read, and the rejection is not cached: the next snapshot asks again.
+    #[tokio::test]
+    async fn a_non_positive_tick_spacing_is_rejected_and_asked_again() {
+        let (client, rpc) = mock::client();
+        for spacing in [0, -30] {
+            rpc.call::<Perp::POOL_IDCall>(&POOL_ID);
+            rpc.call::<Perp::poolKeyCall>(&mock::pool_key(spacing));
+            rpc.call::<Perp::EMA_WINDOWCall>(&U256::from(3_600u32));
+
+            let err = client.load_taker_market_snapshot().await.unwrap_err();
+            assert!(
+                matches!(
+                    err,
+                    PerpCityError::Validation(ValidationError::InvalidConfig { .. })
+                ),
+                "{err}"
+            );
+            assert!(rpc.is_drained(), "three answers each time");
+        }
+    }
 }
