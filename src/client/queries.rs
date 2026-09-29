@@ -984,10 +984,13 @@ impl PerpClient {
 /// asks the chain, what it makes of the answer, and what it keeps.
 #[cfg(test)]
 mod tests {
+    use alloy::primitives::Uint;
+
     use super::*;
-    use crate::client::mock::{self, BEACON, Rpc, e6, x96};
-    use crate::contracts::Modules;
+    use crate::client::mock::{self, BEACON, Rpc, e6, failed_row, ok_row, returns, x96};
+    use crate::contracts::{Modules, Rates};
     use crate::errors::PerpCityError;
+    use crate::math::capacity::Capacity;
 
     /// The market's tick spacing in these tests.
     const SPACING: i32 = 30;
@@ -1477,6 +1480,225 @@ mod tests {
                 err,
                 PerpCityError::Contract(ContractError::ModuleNotRegistered { ref module })
                     if module == "IMarginRatios"
+            ),
+            "{err}"
+        );
+        assert!(rpc.is_drained());
+    }
+
+    // ── Multicall reads ───────────────────────────────────────────────
+
+    /// N addresses cost one RPC: N `balanceOf` rows then N `getEthBalance`
+    /// rows, paired back up in input order.
+    #[tokio::test]
+    async fn balances_batch_bundles_usdc_then_eth_into_one_multicall() {
+        let holders = [Address::repeat_byte(0xa1), Address::repeat_byte(0xa2)];
+        let (client, rpc) = mock::client();
+        rpc.aggregate3(vec![
+            ok_row(returns::<IERC20::balanceOfCall>(&U256::from(1_000_000u32))),
+            ok_row(returns::<IERC20::balanceOfCall>(&U256::from(2_500_000u32))),
+            ok_row(returns::<IMulticall3::getEthBalanceCall>(&U256::from(5u8))),
+            ok_row(returns::<IMulticall3::getEthBalanceCall>(&U256::ZERO)),
+        ]);
+
+        let balances = client.get_balances_batch(&holders).await.unwrap();
+        assert_eq!(balances, vec![(1.0, U256::from(5u8)), (2.5, U256::ZERO)]);
+        assert!(rpc.is_drained(), "one eth_call for four sub-calls");
+    }
+
+    /// No addresses, no RPC.
+    #[tokio::test]
+    async fn balances_batch_of_nobody_makes_no_rpc() {
+        let (client, rpc) = mock::client();
+
+        assert!(client.get_balances_batch(&[]).await.unwrap().is_empty());
+        assert!(rpc.is_drained());
+    }
+
+    /// A multicall that answers with the wrong number of rows, or a row
+    /// that reverted, is a multicall failure rather than a partial answer.
+    #[tokio::test]
+    async fn a_short_or_reverted_balance_row_is_a_multicall_failure() {
+        let holders = [Address::repeat_byte(0xa1), Address::repeat_byte(0xa2)];
+        let usdc = || ok_row(returns::<IERC20::balanceOfCall>(&U256::ZERO));
+        let eth = || ok_row(returns::<IMulticall3::getEthBalanceCall>(&U256::ZERO));
+
+        let (client, rpc) = mock::client();
+        rpc.aggregate3(vec![usdc(), usdc(), eth()]);
+        let err = client.get_balances_batch(&holders).await.unwrap_err();
+        assert!(
+            matches!(
+                err,
+                PerpCityError::Contract(ContractError::MulticallFailed { .. })
+            ),
+            "short: {err}"
+        );
+
+        rpc.aggregate3(vec![usdc(), failed_row(), eth(), eth()]);
+        let err = client.get_balances_batch(&holders).await.unwrap_err();
+        assert!(
+            matches!(
+                err,
+                PerpCityError::Contract(ContractError::MulticallFailed { .. })
+            ),
+            "reverted row: {err}"
+        );
+        assert!(rpc.is_drained());
+    }
+
+    /// Capacity and open interest are read in one batch at the lagged
+    /// block, and the result carries that block.
+    #[tokio::test]
+    async fn capacity_carries_the_lagged_block_it_was_read_at() {
+        let (client, rpc) = mock::client();
+        rpc.quantity(100);
+        let hash = rpc.block(100 - SNAPSHOT_BLOCK_LAG, 1_700_000_000);
+        rpc.aggregate(
+            100 - SNAPSHOT_BLOCK_LAG,
+            [
+                returns::<Perp::capacityCall>(&mock::capacity(10, 20)),
+                returns::<Perp::openInterestCall>(&mock::open_interest(3, 4)),
+            ],
+        );
+
+        assert_eq!(
+            client.get_capacity().await.unwrap(),
+            MarketCapacity {
+                block: BlockContext {
+                    number: 100 - SNAPSHOT_BLOCK_LAG,
+                    hash,
+                    timestamp: 1_700_000_000,
+                },
+                capacity: Capacity {
+                    long_atoms: 10,
+                    short_atoms: 20,
+                },
+                long_open_interest_atoms: 3,
+                short_open_interest_atoms: 4,
+            }
+        );
+        assert!(rpc.is_drained(), "blockNumber, block, one multicall");
+    }
+
+    /// The snapshot is one multicall for the `Perp`'s five views, one
+    /// beacon read, and the slow layer — which a second snapshot skips.
+    #[tokio::test]
+    async fn perp_snapshot_is_one_multicall_plus_the_beacon_and_the_slow_layer() {
+        let perp_views = || {
+            [
+                returns::<Perp::modulesCall>(&mock::modules()),
+                returns::<Perp::poolKeyCall>(&mock::pool_key(SPACING)),
+                returns::<Perp::poolStateCall>(&mock::pool_state(x96(3, 1))),
+                returns::<Perp::ratesCall>(&mock::rates(-5_000_000_000_000_000)),
+                returns::<Perp::openInterestCall>(&mock::open_interest(1_500_000, 250_000)),
+            ]
+        };
+        let (client, rpc) = mock::client();
+        rpc.aggregate(100, perp_views());
+        rpc.call::<IBeacon::indexCall>(&x96(5, 2));
+        fees_answers(&rpc);
+        bounds_answers(&rpc);
+
+        let (data, snapshot) = client.get_perp_snapshot().await.unwrap();
+        assert_eq!(
+            data,
+            PerpData {
+                perp: mock::PERP,
+                tick_spacing: SPACING,
+                mark: 1.5,
+                beacon: BEACON,
+                bounds: expected_bounds(),
+                fees: expected_fees(),
+            }
+        );
+        assert_eq!(
+            snapshot,
+            PerpSnapshot {
+                mark_price: 1.5,
+                index_price: 1.25,
+                funding_rate_daily: -0.005,
+                open_interest: OpenInterest {
+                    long_oi: 1.5,
+                    short_oi: 0.25,
+                },
+            }
+        );
+        assert!(rpc.is_drained(), "multicall, index, fees, liqFee, ratios");
+
+        rpc.aggregate(101, perp_views());
+        rpc.call::<IBeacon::indexCall>(&x96(5, 2));
+        assert_eq!(client.get_perp_snapshot().await.unwrap(), (data, snapshot));
+        assert!(rpc.is_drained(), "fees and bounds came from the slow layer");
+    }
+
+    /// With pool, index and EMAs all equal and no time since the last
+    /// touch, the fair price is that price: the plumbing is pinned without
+    /// re-deriving the EMA math, which has its own tests.
+    #[tokio::test]
+    async fn fair_price_reads_the_mark_inputs_at_the_lagged_block() {
+        const TOUCHED_AT: u64 = 1_700_000_000;
+        let one = x96(1, 0);
+        let (client, rpc) = mock::client();
+        rpc.quantity(100);
+        let hash = rpc.block(100 - SNAPSHOT_BLOCK_LAG, TOUCHED_AT);
+        rpc.aggregate(
+            100 - SNAPSHOT_BLOCK_LAG,
+            [
+                returns::<Perp::modulesCall>(&mock::modules()),
+                returns::<Perp::poolStateCall>(&mock::pool_state(one)),
+                returns::<Perp::emasCall>(&mock::emas(one.to::<u128>(), one.to::<u128>())),
+                returns::<Perp::ratesCall>(&Rates {
+                    lastTouch: Uint::from(TOUCHED_AT),
+                    ..mock::rates(0)
+                }),
+                returns::<Perp::EMA_WINDOWCall>(&U256::from(3_600u32)),
+            ],
+        );
+        rpc.call::<IBeacon::indexCall>(&one);
+
+        assert_eq!(
+            client.get_fair_price().await.unwrap(),
+            FairPrice {
+                block: BlockContext {
+                    number: 100 - SNAPSHOT_BLOCK_LAG,
+                    hash,
+                    timestamp: TOUCHED_AT,
+                },
+                price_x96: one,
+            }
+        );
+        assert!(rpc.is_drained(), "blockNumber, block, multicall, index");
+    }
+
+    /// A perp with no beacon fails by name after the batch, before the
+    /// index read that would otherwise decode nothing from the zero
+    /// address.
+    #[tokio::test]
+    async fn fair_price_without_a_beacon_names_the_missing_interface() {
+        let one = x96(1, 0);
+        let (client, rpc) = mock::client();
+        rpc.quantity(100);
+        rpc.block(100 - SNAPSHOT_BLOCK_LAG, 1_700_000_000);
+        rpc.aggregate(
+            100 - SNAPSHOT_BLOCK_LAG,
+            [
+                returns::<Perp::modulesCall>(&Modules {
+                    beacon: Address::ZERO,
+                    ..mock::modules()
+                }),
+                returns::<Perp::poolStateCall>(&mock::pool_state(one)),
+                returns::<Perp::emasCall>(&mock::emas(0, 0)),
+                returns::<Perp::ratesCall>(&mock::rates(0)),
+                returns::<Perp::EMA_WINDOWCall>(&U256::from(3_600u32)),
+            ],
+        );
+
+        let err = client.get_fair_price().await.unwrap_err();
+        assert!(
+            matches!(
+                err,
+                PerpCityError::Contract(ContractError::ModuleNotRegistered { ref module })
+                    if module == "IBeacon"
             ),
             "{err}"
         );

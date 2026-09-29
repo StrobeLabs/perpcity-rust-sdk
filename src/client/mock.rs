@@ -11,6 +11,7 @@ use alloy::consensus::Header as ConsensusHeader;
 use alloy::network::Ethereum;
 use alloy::primitives::{Address, B256, Bytes, I256, Signed, U64, U256, Uint};
 use alloy::providers::RootProvider;
+use alloy::providers::bindings::IMulticall3 as Multicall;
 use alloy::rpc::client::RpcClient;
 use alloy::rpc::json_rpc::ErrorPayload;
 use alloy::rpc::types::{Block, BlockTransactions, Header};
@@ -19,7 +20,9 @@ use alloy::sol_types::SolCall;
 use alloy::transports::mock::Asserter;
 use serde_json::value::RawValue;
 
-use crate::contracts::{Modules, OpenInterest, Perp, PoolKey, Position, Rates};
+use crate::contracts::{
+    Capacity, IMulticall3, Modules, OpenInterest, Perp, PoolKey, Position, PricePair, Rates,
+};
 use crate::types::Deployments;
 use crate::{HftTransport, TransportConfig};
 
@@ -72,8 +75,21 @@ pub(super) struct Rpc(Asserter);
 impl Rpc {
     /// The next `eth_call` returns `ret`, encoded as `C`'s return.
     pub(super) fn call<C: SolCall>(&self, ret: &C::Return) {
-        self.0
-            .push_success(&Bytes::from(C::abi_encode_returns(ret)));
+        self.0.push_success(&Bytes::from(returns::<C>(ret)));
+    }
+
+    /// The next Multicall3 `aggregate` returns these encoded results, in
+    /// call order, stamped with `block`.
+    pub(super) fn aggregate(&self, block: u64, results: impl IntoIterator<Item = Vec<u8>>) {
+        self.call::<Multicall::aggregateCall>(&Multicall::aggregateReturn {
+            blockNumber: U256::from(block),
+            returnData: results.into_iter().map(Bytes::from).collect(),
+        });
+    }
+
+    /// The next Multicall3 `aggregate3` returns these rows.
+    pub(super) fn aggregate3(&self, rows: Vec<IMulticall3::Result>) {
+        self.call::<IMulticall3::aggregate3Call>(&rows);
     }
 
     /// The next request returns a hex quantity (`eth_blockNumber`).
@@ -142,6 +158,40 @@ pub(super) fn rates(funding_per_day_wad: i128) -> Rates {
         longUtilFeePerDay: 0,
         shortUtilFeePerDay: 0,
         lastTouch: Uint::ZERO,
+    }
+}
+
+/// `ret`, ABI-encoded as `C`'s return: one entry of a multicall answer.
+pub(super) fn returns<C: SolCall>(ret: &C::Return) -> Vec<u8> {
+    C::abi_encode_returns(ret)
+}
+
+/// A successful `aggregate3` row.
+pub(super) fn ok_row(return_data: Vec<u8>) -> IMulticall3::Result {
+    IMulticall3::Result {
+        success: true,
+        returnData: return_data.into(),
+    }
+}
+
+/// A reverted `aggregate3` row.
+pub(super) fn failed_row() -> IMulticall3::Result {
+    IMulticall3::Result {
+        success: false,
+        returnData: Bytes::new(),
+    }
+}
+
+/// `capacity()` in perp atoms.
+pub(super) fn capacity(long: u128, short: u128) -> Capacity {
+    Capacity { long, short }
+}
+
+/// `emas()`: the stored pair, both Q96 narrowed to `uint128`.
+pub(super) fn emas(amm_x96: u128, index_x96: u128) -> PricePair {
+    PricePair {
+        ammPrice: amm_x96,
+        index: index_x96,
     }
 }
 
