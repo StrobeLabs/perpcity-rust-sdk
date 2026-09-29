@@ -40,6 +40,7 @@
 //! # }
 //! ```
 
+mod chain;
 mod maker_equity;
 #[cfg(test)]
 mod mock;
@@ -47,6 +48,7 @@ mod queries;
 mod trades;
 mod transactions;
 
+pub use chain::ChainReader;
 pub use maker_equity::{MAX_MAKER_EQUITY_BATCH, MakerEquityKind, MakerEquityOutcome};
 pub use transactions::TxBuilder;
 
@@ -56,17 +58,15 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use alloy::network::{Ethereum, EthereumWallet, TxSigner};
 use alloy::primitives::{Address, Signature, U256, address};
 use alloy::providers::{Provider, RootProvider};
-use alloy::rpc::client::RpcClient;
-use alloy::transports::BoxTransport;
 
 use crate::constants::SCALE_1E6;
-use crate::errors::{Result, TransactionError};
-use crate::hft::gas::{FeeCache, GasLimitCache};
+use crate::errors::Result;
+use crate::hft::gas::GasLimitCache;
 use crate::hft::pipeline::{PipelineConfig, TxPipeline};
-use crate::hft::state_cache::{CachedBounds, CachedFees, StateCache, StateCacheConfig};
+use crate::hft::state_cache::{CachedBounds, CachedFees};
 use crate::history::History;
 use crate::transport::provider::HftTransport;
-use crate::types::{Bounds, ChainDeployments, Deployments, Fees};
+use crate::types::{Bounds, Deployments, Fees};
 
 // ── Network constants ──────────────────────────────────────────────────
 
@@ -171,40 +171,27 @@ impl From<Bounds> for CachedBounds {
 
 // ── PerpClient ───────────────────────────────────────────────────────
 
-/// High-level client for the PerpCity protocol.
+/// High-level client for the PerpCity protocol: one signer on one market.
 ///
-/// Combines transport, signing, transaction pipeline, state caching, and
-/// contract bindings into one ergonomic API. All write operations go
-/// through the [`TxPipeline`] for zero-RPC-on-hot-path nonce/gas resolution.
-/// Read operations use the [`StateCache`] to avoid redundant RPC calls.
+/// A client is a [`ChainReader`] — provider, transport, history, the
+/// base-fee and state caches, shared by every client over it — plus a
+/// signer, the market it trades, and the transaction pipeline. All write
+/// operations go through the [`TxPipeline`] for zero-RPC-on-hot-path
+/// nonce/gas resolution; reads go through the reader's caches.
 pub struct PerpClient {
-    /// Alloy provider wired to HftTransport (multi-endpoint, health-aware).
-    provider: RootProvider<Ethereum>,
-    /// One history handle over the provider for the client's lifetime, so
-    /// the learned `eth_getLogs` width and the scan counters carry across
-    /// calls.
-    history: History<RootProvider<Ethereum>>,
-    /// The underlying transport: health diagnostics, and the endpoint
-    /// capabilities the reads consult.
-    transport: HftTransport,
+    /// Everything the chain's readers share: provider, transport, history,
+    /// the base-fee and state caches.
+    chain: ChainReader,
+    /// The market this client is bound to.
+    perp: Address,
     /// Wallet for signing transactions.
     wallet: EthereumWallet,
     /// The signer's address.
     address: Address,
-    /// The market this client is bound to.
-    perp: Address,
-    /// The addresses every market on the chain shares.
-    chain: ChainDeployments,
-    /// Chain ID for transaction building.
-    chain_id: u64,
     /// Transaction pipeline (nonce + gas). Mutex for interior mutability.
     pipeline: Mutex<TxPipeline>,
-    /// Gas fee cache, updated from block headers.
-    fee_cache: Mutex<FeeCache>,
     /// Cached gas estimates from `eth_estimateGas`, keyed by function selector.
     gas_limit_cache: Mutex<GasLimitCache>,
-    /// Multi-layer state cache for on-chain reads.
-    state_cache: Mutex<StateCache>,
     /// Deployment-fixed Perp/pool values (pool id, tick spacing, EMA window),
     /// fetched once on first taker book load.
     book_immutables: tokio::sync::OnceCell<queries::BookImmutables>,
@@ -214,7 +201,6 @@ impl std::fmt::Debug for PerpClient {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PerpClient")
             .field("address", &self.address)
-            .field("chain_id", &self.chain_id)
             .field("perp", &self.perp)
             .field("chain", &self.chain)
             .finish_non_exhaustive()
@@ -243,47 +229,24 @@ impl PerpClient {
     where
         S: TxSigner<Signature> + Send + Sync + 'static,
     {
-        let boxed = BoxTransport::new(transport.clone());
-        let rpc_client = RpcClient::new(boxed, false);
-        let provider = RootProvider::<Ethereum>::new(rpc_client);
-        Ok(Self::from_parts(
-            provider,
-            transport,
-            signer,
-            deployments,
-            chain_id,
-        ))
+        let chain = ChainReader::new(transport, deployments.chain(), chain_id);
+        Ok(Self::from_parts(chain, signer, deployments.perp))
     }
 
-    /// Assemble a client around an already-built provider. [`Self::new`]
-    /// wires the provider to `transport`; the mocked client in tests does
-    /// not, which is the only reason the two are separate.
-    fn from_parts<S>(
-        provider: RootProvider<Ethereum>,
-        transport: HftTransport,
-        signer: S,
-        deployments: Deployments,
-        chain_id: u64,
-    ) -> Self
+    /// A signing client for `perp` over an existing chain reader.
+    fn from_parts<S>(chain: ChainReader, signer: S, perp: Address) -> Self
     where
         S: TxSigner<Signature> + Send + Sync + 'static,
     {
         let address = TxSigner::address(&signer);
-        let history = History::new(provider.clone());
         Self {
-            provider,
-            history,
-            transport,
+            chain,
+            perp,
             wallet: EthereumWallet::from(signer),
             address,
-            perp: deployments.perp,
-            chain: deployments.chain(),
-            chain_id,
             // Pipeline starts at nonce 0; call sync_nonce() before first tx
             pipeline: Mutex::new(TxPipeline::new(0, PipelineConfig::default())),
-            fee_cache: Mutex::new(FeeCache::new(DEFAULT_GAS_TTL_MS, DEFAULT_PRIORITY_FEE)),
             gas_limit_cache: Mutex::new(GasLimitCache::new()),
-            state_cache: Mutex::new(StateCache::new(StateCacheConfig::default())),
             book_immutables: tokio::sync::OnceCell::new(),
         }
     }
@@ -319,68 +282,47 @@ impl PerpClient {
     /// Must be called before the first transaction. After this, the
     /// pipeline manages nonces locally (zero RPC per transaction).
     pub async fn sync_nonce(&self) -> Result<()> {
-        let count = self.provider.get_transaction_count(self.address).await?;
+        let count = self
+            .chain
+            .provider()
+            .get_transaction_count(self.address)
+            .await?;
         let mut pipeline = self.pipeline.lock().unwrap();
         *pipeline = TxPipeline::new(count, PipelineConfig::default());
         tracing::debug!(nonce = count, address = %self.address, "nonce synced");
         Ok(())
     }
 
-    /// Refresh the gas cache from the latest block header.
-    ///
-    /// Fetches the latest block directly in a single RPC call and extracts
-    /// the base fee for EIP-1559 fee computation. Should be called
-    /// periodically (every 1-2 seconds) or from a `newHeads`
-    /// subscription callback.
+    // ── Chain-scoped gas and caches, on the chain reader ─────────────
+
+    /// [`ChainReader::refresh_gas`] on this client's chain reader.
     pub async fn refresh_gas(&self) -> Result<()> {
-        let header = self
-            .provider
-            .get_block_by_number(alloy::eips::BlockNumberOrTag::Latest)
-            .await?
-            .ok_or_else(|| TransactionError::GasUnavailable {
-                reason: "latest block not found".into(),
-            })?;
-
-        let base_fee =
-            header
-                .header
-                .base_fee_per_gas
-                .ok_or_else(|| TransactionError::GasUnavailable {
-                    reason: "block has no base fee (pre-EIP-1559?)".into(),
-                })?;
-
-        let now = now_ms();
-        self.fee_cache.lock().unwrap().update(base_fee, now);
-        tracing::debug!(base_fee, "gas cache refreshed");
-        Ok(())
+        self.chain.refresh_gas().await
     }
 
-    /// Inject a base fee from an external source (e.g. a shared poller).
-    ///
-    /// Updates the gas cache as if `refresh_gas` had been called, but without
-    /// any RPC calls. The cache TTL is reset to now.
+    /// [`ChainReader::set_base_fee`] on this client's chain reader.
     pub fn set_base_fee(&self, base_fee: u64) {
-        let now = now_ms();
-        self.fee_cache.lock().unwrap().update(base_fee, now);
-        tracing::debug!(base_fee, "base fee injected");
+        self.chain.set_base_fee(base_fee);
     }
 
-    /// Return the current cached base fee, if any (ignores TTL).
-    ///
-    /// Intended for reading the base fee after `refresh_gas` in order to
-    /// distribute it to other clients via [`set_base_fee`](Self::set_base_fee).
+    /// [`ChainReader::base_fee`] on this client's chain reader.
     pub fn base_fee(&self) -> Option<u64> {
-        self.fee_cache.lock().unwrap().base_fee()
+        self.chain.base_fee()
     }
 
-    /// Override the gas cache TTL (milliseconds).
-    ///
-    /// When gas is managed externally via [`set_base_fee`](Self::set_base_fee),
-    /// the default 2s TTL may be too tight. Set this to match the poller's
-    /// cadence with headroom (e.g. `tick_secs * 2 * 1000`).
+    /// [`ChainReader::set_gas_ttl`] on this client's chain reader.
     pub fn set_gas_ttl(&self, ttl_ms: u64) {
-        self.fee_cache.lock().unwrap().set_ttl(ttl_ms);
-        tracing::debug!(ttl_ms, "gas cache TTL updated");
+        self.chain.set_gas_ttl(ttl_ms);
+    }
+
+    /// [`ChainReader::invalidate_fast_cache`] on this client's chain reader.
+    pub fn invalidate_fast_cache(&self) {
+        self.chain.invalidate_fast_cache();
+    }
+
+    /// [`ChainReader::invalidate_all_cache`] on this client's chain reader.
+    pub fn invalidate_all_cache(&self) {
+        self.chain.invalidate_all_cache();
     }
 
     // ── Accessors ────────────────────────────────────────────────────
@@ -390,28 +332,30 @@ impl PerpClient {
         self.address
     }
 
+    /// The chain reader this client is built over.
+    pub fn chain(&self) -> &ChainReader {
+        &self.chain
+    }
+
     /// The market and chain addresses as one bundle, the shape the
     /// constructors take.
     pub fn deployments(&self) -> Deployments {
+        let chain = self.chain.deployments();
         Deployments {
             perp: self.perp,
-            usdc: self.chain.usdc,
-            pool_manager: self.chain.pool_manager,
+            usdc: chain.usdc,
+            pool_manager: chain.pool_manager,
         }
     }
 
-    /// The underlying Alloy provider (for advanced queries).
+    /// [`ChainReader::provider`] on this client's chain reader.
     pub fn provider(&self) -> &RootProvider<Ethereum> {
-        &self.provider
+        self.chain.provider()
     }
 
-    /// The client's [`History`] handle, with the default lag policy. It is
-    /// one handle for the client's lifetime, so a process that scans
-    /// repeatedly pays the width search once and [`History::stats`] meters
-    /// every scan. For another lag or concurrency budget, build a handle
-    /// with [`History::new`] over [`Self::provider`].
+    /// [`ChainReader::history`] on this client's chain reader.
     pub fn history(&self) -> &History<RootProvider<Ethereum>> {
-        &self.history
+        self.chain.history()
     }
 
     /// The signing wallet (for building signed transactions outside the SDK).
@@ -419,23 +363,9 @@ impl PerpClient {
         &self.wallet
     }
 
-    /// The underlying HFT transport (for health diagnostics).
+    /// [`ChainReader::transport`] on this client's chain reader.
     pub fn transport(&self) -> &HftTransport {
-        &self.transport
-    }
-
-    /// Invalidate the fast cache layer (prices, funding, balance).
-    ///
-    /// Call on new-block events to ensure fresh data.
-    pub fn invalidate_fast_cache(&self) {
-        let mut cache = self.state_cache.lock().unwrap();
-        cache.invalidate_fast_layer();
-    }
-
-    /// Invalidate all cached state.
-    pub fn invalidate_all_cache(&self) {
-        let mut cache = self.state_cache.lock().unwrap();
-        cache.invalidate_all();
+        self.chain.transport()
     }
 
     /// Resolve a transaction (mined, reverted, or timed out).

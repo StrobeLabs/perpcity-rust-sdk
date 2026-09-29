@@ -108,7 +108,8 @@ impl<'a> TxBuilder<'a> {
             // resync steps past it instead of colliding with it.
             let count = self
                 .client
-                .provider
+                .chain
+                .provider()
                 .get_transaction_count(self.client.address)
                 .pending()
                 .await?;
@@ -134,7 +135,14 @@ impl<'a> TxBuilder<'a> {
                 // Preflight at the pinned limit itself: a call that runs out
                 // of gas at this limit must fail here, not on-chain.
                 self.client
-                    .preflight_call(self.to, &self.calldata, self.value, Some(limit))
+                    .chain
+                    .preflight_call(
+                        self.client.address,
+                        self.to,
+                        &self.calldata,
+                        self.value,
+                        Some(limit),
+                    )
                     .await?;
                 limit
             }
@@ -152,7 +160,7 @@ impl<'a> TxBuilder<'a> {
         // Prepare via pipeline (zero RPC)
         let prepared = {
             let pipeline = self.client.pipeline.lock().unwrap();
-            let fee_cache = self.client.fee_cache.lock().unwrap();
+            let fee_cache = self.client.chain.fee_cache().lock().unwrap();
             pipeline.prepare(
                 TxRequest {
                     to: self.to.into_array(),
@@ -185,7 +193,7 @@ impl<'a> TxBuilder<'a> {
             .with_gas_limit(prepared.gas_limit)
             .with_max_fee_per_gas(prepared.gas_fees.max_fee_per_gas as u128)
             .with_max_priority_fee_per_gas(prepared.gas_fees.max_priority_fee_per_gas as u128)
-            .with_chain_id(self.client.chain_id);
+            .with_chain_id(self.client.chain.chain_id());
 
         // Sign. A failure here is provably local — nothing was broadcast —
         // so the nonce can be handed straight back (a bare `?` would strand
@@ -210,7 +218,13 @@ impl<'a> TxBuilder<'a> {
         // chain once nothing is in flight. The hash is known before the
         // request, so the caller can still look the transaction up.
         let tx_hash_b256 = *tx_envelope.tx_hash();
-        if let Err(source) = self.client.provider.send_tx_envelope(tx_envelope).await {
+        if let Err(source) = self
+            .client
+            .chain
+            .provider()
+            .send_tx_envelope(tx_envelope)
+            .await
+        {
             let pipeline = self.client.pipeline.lock().unwrap();
             pipeline.mark_desynced_prepared();
             return Err(TransactionError::BroadcastFailed {
@@ -306,7 +320,7 @@ impl<'a> TxBuilder<'a> {
 /// Build the preflight `eth_call` request. Kept as a pure function so the
 /// request shape — in particular that a pinned gas limit is carried onto
 /// the simulation — is unit-testable without a provider.
-fn preflight_request(
+pub(super) fn preflight_request(
     from: Address,
     to: Address,
     calldata: &Bytes,
@@ -390,32 +404,7 @@ impl PerpClient {
     /// resyncs from chain before the next send whether or not this is
     /// called.
     pub async fn poll_receipt(&self, tx_hash: B256) -> Result<TransactionReceipt> {
-        wait_for_receipt(&self.provider, tx_hash).await
-    }
-
-    /// Run an `eth_call` simulation to verify a transaction won't revert.
-    ///
-    /// When `gas_limit` is set, the simulation is capped at exactly the
-    /// limit the transaction will broadcast with, so an execution that
-    /// cannot finish inside a pinned limit fails preflight instead of
-    /// burning the gas on-chain — the one failure a fixed limit like
-    /// [`GasLimits::LIQUIDATE`](crate::hft::gas::GasLimits::LIQUIDATE)
-    /// exists to prevent. Without a limit the node simulates with its
-    /// default gas cap.
-    pub(super) async fn preflight_call(
-        &self,
-        to: Address,
-        calldata: &Bytes,
-        value: u128,
-        gas_limit: Option<u64>,
-    ) -> std::result::Result<(), TransactionError> {
-        let tx = preflight_request(self.address, to, calldata, value, gas_limit);
-
-        self.provider
-            .call(tx)
-            .await
-            .map_err(|e| classify_simulation_failure(&e, "eth_call"))?;
-        Ok(())
+        wait_for_receipt(self.chain.provider(), tx_hash).await
     }
 
     /// Simulate a transaction and return a gas limit.
@@ -451,7 +440,11 @@ impl PerpClient {
             // Cap the preflight at the cached limit the transaction will be
             // sent with, so a stale (too-small) cached estimate surfaces as
             // a failed preflight rather than an on-chain out-of-gas.
-            match self.preflight_call(to, calldata, value, Some(limit)).await {
+            match self
+                .chain
+                .preflight_call(self.address, to, calldata, value, Some(limit))
+                .await
+            {
                 Ok(()) => return Ok(limit),
                 Err(revert @ TransactionError::SimulationReverted { .. }) => {
                     return Err(revert.into());
@@ -510,7 +503,8 @@ impl PerpClient {
             .with_input(calldata.clone())
             .with_value(U256::from(value));
 
-        self.provider
+        self.chain
+            .provider()
             .estimate_gas(tx)
             .await
             .map_err(|e| classify_simulation_failure(&e, "eth_estimateGas").into())
@@ -533,7 +527,7 @@ fn is_execution_outcome(resp: &alloy::rpc::json_rpc::ErrorPayload) -> bool {
 /// execution failure without revert data
 /// ([`TransactionError::SimulationFailed`], not transient), or a failure to
 /// get an answer at all ([`TransactionError::GasUnavailable`], transient).
-fn classify_simulation_failure(
+pub(super) fn classify_simulation_failure(
     e: &alloy::transports::TransportError,
     what: &str,
 ) -> TransactionError {

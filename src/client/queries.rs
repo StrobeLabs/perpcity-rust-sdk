@@ -13,18 +13,12 @@
 use std::collections::BTreeMap;
 
 use alloy::eips::BlockId;
-use alloy::network::Ethereum;
 use alloy::primitives::{Address, B256, U256};
-use alloy::providers::{Empty, MulticallBuilder, MulticallError, Provider, RootProvider};
-use alloy::sol_types::{SolCall, SolValue};
+use alloy::providers::{MulticallError, Provider};
 
-use crate::constants::{
-    MAX_SWAP_SQRT_PRICE_X96, MAX_TICK, MIN_SWAP_SQRT_PRICE_X96, MIN_TICK, MULTICALL3,
-    SNAPSHOT_BLOCK_LAG,
-};
+use crate::constants::{MAX_SWAP_SQRT_PRICE_X96, MAX_TICK, MIN_SWAP_SQRT_PRICE_X96, MIN_TICK};
 use crate::contracts::{
-    IBeacon, IERC20, IFees, IMarginRatios, IMulticall3, IPoolManagerState, IPriceImpact, Perp,
-    Position,
+    IBeacon, IFees, IMarginRatios, IPoolManagerState, IPriceImpact, Perp, Position,
 };
 use crate::convert::{margin_ratio_to_leverage, price_x96_to_f64, scale_from_6dec};
 use crate::errors::{ContractError, PerpCityError, Result, ValidationError};
@@ -127,22 +121,12 @@ impl PerpClient {
         self.perp.into_word().0
     }
 
-    /// A typed Multicall3 batch pinned to `block`. Add calls with `add`
-    /// and read them with `aggregate`, which fails as a whole if any call
-    /// reverts (map its error with [`multicall_error`]).
-    pub(super) fn multicall_at(
-        &self,
-        block: BlockId,
-    ) -> MulticallBuilder<Empty, &RootProvider<Ethereum>, Ethereum> {
-        self.provider.multicall().address(MULTICALL3).block(block)
-    }
-
     /// Fetch and cache the deployment-fixed values the taker book loader
     /// needs. The first call costs three RPC reads; every later call is free.
     async fn book_immutables(&self) -> Result<&BookImmutables> {
         self.book_immutables
             .get_or_try_init(|| async {
-                let perp = Perp::new(self.perp, &self.provider);
+                let perp = Perp::new(self.perp, self.chain.provider());
                 let pool_id_call = perp.POOL_ID();
                 let pool_key_call = perp.poolKey();
                 let ema_window_call = perp.EMA_WINDOW();
@@ -181,7 +165,7 @@ impl PerpClient {
         views: MarkViews,
     ) -> Result<U256> {
         let beacon = registered_module(views.beacon, "IBeacon")?;
-        let index = IBeacon::new(beacon, &self.provider)
+        let index = IBeacon::new(beacon, self.chain.provider())
             .index()
             .block(BlockId::hash(block.hash))
             .call()
@@ -204,7 +188,7 @@ impl PerpClient {
     /// Read the contract's mark: the deployed fair price
     /// ([`fair_price_x96`]) of the pool price, the beacon index and the
     /// EMAs advanced to the block, pinned to one lagged block (see
-    /// [`SNAPSHOT_BLOCK_LAG`]).
+    /// [`SNAPSHOT_BLOCK_LAG`](crate::constants::SNAPSHOT_BLOCK_LAG)).
     ///
     /// This is the price every health check, `valPnl` and utilization
     /// accrual uses, and the mark [`Self::get_maker_equities`] prices at.
@@ -216,9 +200,10 @@ impl PerpClient {
     /// [`ContractError::BlockUnavailable`] when the pinned header is missing
     /// from the serving replica.
     pub async fn get_fair_price(&self) -> Result<FairPrice> {
-        let (block, block_id) = self.lagged_snapshot_block().await?;
-        let perp = Perp::new(self.perp, &self.provider);
+        let (block, block_id) = self.chain.lagged_snapshot_block().await?;
+        let perp = Perp::new(self.perp, self.chain.provider());
         let (modules, pool_state, stored_emas, rates, ema_window) = self
+            .chain
             .multicall_at(block_id)
             .add(perp.modules())
             .add(perp.poolState())
@@ -242,33 +227,6 @@ impl PerpClient {
         Ok(FairPrice { block, price_x96 })
     }
 
-    /// Resolve the lagged, reorg-safe block that snapshot reads pin to.
-    ///
-    /// Lagging [`SNAPSHOT_BLOCK_LAG`] blocks behind the head keeps every
-    /// replica of a load-balanced endpoint able to serve the pinned state;
-    /// a replica that still misses the header is a failed read
-    /// ([`ContractError::BlockUnavailable`]), never a silent degrade.
-    pub(super) async fn lagged_snapshot_block(&self) -> Result<(BlockContext, BlockId)> {
-        let number = self
-            .provider
-            .get_block_number()
-            .await?
-            .saturating_sub(SNAPSHOT_BLOCK_LAG);
-        let block = self
-            .provider
-            .get_block_by_number(number.into())
-            .await?
-            .ok_or(ContractError::BlockUnavailable { number })?;
-        Ok((
-            BlockContext {
-                number: block.header.number,
-                hash: block.header.hash,
-                timestamp: block.header.timestamp,
-            },
-            BlockId::hash(block.header.hash),
-        ))
-    }
-
     /// Load an exact concentrated-liquidity snapshot at a lagged canonical
     /// block for the deployed Perp contract (`perpcity-contracts@4bbe554f`).
     ///
@@ -276,13 +234,14 @@ impl PerpClient {
     /// advances it with the contract's exact arithmetic, and evaluates the
     /// configured price-impact module. Every contract and PoolManager read is
     /// pinned to the returned block hash, resolved via the same
-    /// [`SNAPSHOT_BLOCK_LAG`] policy as the maker-equity reads.
+    /// [`SNAPSHOT_BLOCK_LAG`](crate::constants::SNAPSHOT_BLOCK_LAG) policy as the maker-equity reads.
     pub async fn load_taker_market_snapshot(&self) -> Result<TakerMarketSnapshot> {
         let immutables = *self.book_immutables().await?;
-        let (block, block_id) = self.lagged_snapshot_block().await?;
-        let perp = Perp::new(self.perp, &self.provider);
+        let (block, block_id) = self.chain.lagged_snapshot_block().await?;
+        let perp = Perp::new(self.perp, self.chain.provider());
         let stored_emas = self
-            .provider
+            .chain
+            .provider()
             .get_storage_at(self.perp, perp_emas_slot())
             .block_id(block_id)
             .await?;
@@ -294,7 +253,7 @@ impl PerpClient {
             modules_call.call(),
             rates_call.call(),
         )?;
-        let index = IBeacon::new(modules.beacon, &self.provider)
+        let index = IBeacon::new(modules.beacon, self.chain.provider())
             .index()
             .block(block_id)
             .call()
@@ -311,7 +270,7 @@ impl PerpClient {
             block.timestamp,
             immutables.ema_window,
         )?;
-        let bounds = IPriceImpact::new(modules.priceImpact, &self.provider)
+        let bounds = IPriceImpact::new(modules.priceImpact, self.chain.provider())
             .sqrtPriceBounds(
                 state.ammPrice,
                 index,
@@ -351,7 +310,8 @@ impl PerpClient {
         let bitmap_slots: Vec<B256> = (min_word..=max_word)
             .map(|word| B256::from(v4_tick_bitmap_slot(pool_id, word)))
             .collect();
-        let manager = IPoolManagerState::new(self.chain.pool_manager, &self.provider);
+        let manager =
+            IPoolManagerState::new(self.chain.deployments().pool_manager, self.chain.provider());
         let bitmaps = manager
             .extsload_1(bitmap_slots)
             .block(block_id)
@@ -425,7 +385,7 @@ impl PerpClient {
     ///
     /// Uses the [`crate::hft::state_cache::StateCache`] for fees and bounds (60s TTL).
     pub async fn get_perp_config(&self) -> Result<PerpData> {
-        let perp = Perp::new(self.perp, &self.provider);
+        let perp = Perp::new(self.perp, self.chain.provider());
 
         let modules = perp.modules().call().await?;
         let pool_key = perp.poolKey().call().await?;
@@ -449,7 +409,7 @@ impl PerpClient {
     ///
     /// Lighter-weight than [`Self::get_perp_config`] — skips fees/bounds lookups.
     pub async fn get_perp_data(&self) -> Result<(Address, i32, f64)> {
-        let perp = Perp::new(self.perp, &self.provider);
+        let perp = Perp::new(self.perp, self.chain.provider());
         let modules = perp.modules().call().await?;
         let pool_key = perp.poolKey().call().await?;
         let pool_state = perp.poolState().call().await?;
@@ -463,7 +423,7 @@ impl PerpClient {
     /// Returns the raw contract position struct. Use [`crate::math::position`]
     /// functions to compute derived values (entry price, PnL, etc.).
     pub async fn get_position(&self, pos_id: U256) -> Result<Position> {
-        let perp = Perp::new(self.perp, &self.provider);
+        let perp = Perp::new(self.perp, self.chain.provider());
         let pos = perp.positions(pos_id).call().await?;
 
         // A non-existent or burned position decodes to an all-zero struct.
@@ -482,7 +442,7 @@ impl PerpClient {
     /// **Note:** This is O(n) in total positions ever minted. For high-throughput
     /// use cases, prefer the bot API's position endpoints instead.
     pub async fn get_positions_by_owner(&self, owner: Address) -> Result<Vec<U256>> {
-        let perp = Perp::new(self.perp, &self.provider);
+        let perp = Perp::new(self.perp, self.chain.provider());
         let next_pos_id: U256 = perp.nextPosId().call().await?;
 
         let total: u64 = next_pos_id
@@ -533,7 +493,7 @@ impl PerpClient {
 
         // Check cache
         {
-            let cache = self.state_cache.lock().unwrap();
+            let cache = self.chain.state_cache().lock().unwrap();
             if let Some(price) = cache.get_mark_price(&key, now_ts) {
                 tracing::trace!(price, "mark price cache hit");
                 return Ok(price);
@@ -541,7 +501,7 @@ impl PerpClient {
         }
 
         // Fetch from chain
-        let perp = Perp::new(self.perp, &self.provider);
+        let perp = Perp::new(self.perp, self.chain.provider());
         let pool_state = perp.poolState().call().await?;
         let price = price_x96_to_f64(pool_state.ammPrice)?;
 
@@ -549,7 +509,7 @@ impl PerpClient {
 
         // Update cache
         {
-            let mut cache = self.state_cache.lock().unwrap();
+            let mut cache = self.chain.state_cache().lock().unwrap();
             cache.put_mark_price(key, price, now_ts);
         }
 
@@ -564,18 +524,7 @@ impl PerpClient {
     /// Note: `index()` is a state-mutating function on-chain; this performs an
     /// `eth_call` (simulation) and does not send a transaction.
     pub async fn get_index_price(&self, beacon: Address) -> Result<f64> {
-        let contract = IBeacon::new(beacon, &self.provider);
-        let index_x96: U256 = contract.index().call().await?;
-
-        if index_x96.is_zero() {
-            return Err(ValidationError::InvalidPrice {
-                reason: "beacon returned zero index".into(),
-            }
-            .into());
-        }
-
-        let index = price_x96_to_f64(index_x96)?;
-        Ok(index)
+        self.chain.get_index_price(beacon).await
     }
 
     /// Read the market's `IMarginRatios` module: the maker and taker
@@ -595,12 +544,12 @@ impl PerpClient {
     /// is the zero address; [`ContractError::BlockUnavailable`] when the
     /// pinned header is missing from the serving replica.
     pub async fn get_margin_ratios(&self) -> Result<MarginRatios> {
-        let (_, block_id) = self.lagged_snapshot_block().await?;
-        let perp = Perp::new(self.perp, &self.provider);
+        let (_, block_id) = self.chain.lagged_snapshot_block().await?;
+        let perp = Perp::new(self.perp, self.chain.provider());
         let modules = perp.modules().block(block_id).call().await?;
         let ratios = IMarginRatios::new(
             registered_module(modules.marginRatios, "IMarginRatios")?,
-            &self.provider,
+            self.chain.provider(),
         );
         let maker_call = ratios.makerMarginRatios().block(block_id);
         let taker_call = ratios.takerMarginRatios().block(block_id);
@@ -625,7 +574,7 @@ impl PerpClient {
     /// interest in atoms at a known block, next to the capacity it draws
     /// on, use [`Self::get_capacity`].
     pub async fn get_open_interest(&self) -> Result<OpenInterest> {
-        let perp = Perp::new(self.perp, &self.provider);
+        let perp = Perp::new(self.perp, self.chain.provider());
         let oi = perp.openInterest().call().await?;
 
         Ok(OpenInterest {
@@ -635,7 +584,7 @@ impl PerpClient {
     }
 
     /// Read the market's taker capacity and open interest, pinned to one
-    /// lagged block (see [`SNAPSHOT_BLOCK_LAG`]).
+    /// lagged block (see [`SNAPSHOT_BLOCK_LAG`](crate::constants::SNAPSHOT_BLOCK_LAG)).
     ///
     /// [`MarketCapacity`] derives each side's headroom (open interest a
     /// taker can still add) and utilization as the contract computes it.
@@ -645,9 +594,10 @@ impl PerpClient {
     /// [`ContractError::BlockUnavailable`] when the pinned header is missing
     /// from the serving replica.
     pub async fn get_capacity(&self) -> Result<MarketCapacity> {
-        let (block, block_id) = self.lagged_snapshot_block().await?;
-        let perp = Perp::new(self.perp, &self.provider);
+        let (block, block_id) = self.chain.lagged_snapshot_block().await?;
+        let perp = Perp::new(self.perp, self.chain.provider());
         let (capacity, oi) = self
+            .chain
             .multicall_at(block_id)
             .add(perp.capacity())
             .add(perp.openInterest())
@@ -673,14 +623,14 @@ impl PerpClient {
 
         // Check cache
         {
-            let cache = self.state_cache.lock().unwrap();
+            let cache = self.chain.state_cache().lock().unwrap();
             if let Some(rate) = cache.get_funding_rate(&key, now_ts) {
                 tracing::trace!(rate, "funding rate cache hit");
                 return Ok(rate);
             }
         }
 
-        let perp = Perp::new(self.perp, &self.provider);
+        let perp = Perp::new(self.perp, self.chain.provider());
         let rates = perp.rates().call().await?;
         let daily_rate = funding_per_day_to_f64(rates.fundingPerDay);
 
@@ -688,7 +638,7 @@ impl PerpClient {
 
         // Update cache
         {
-            let mut cache = self.state_cache.lock().unwrap();
+            let mut cache = self.chain.state_cache().lock().unwrap();
             cache.put_funding_rate(key, daily_rate, now_ts);
         }
 
@@ -699,33 +649,7 @@ impl PerpClient {
     ///
     /// Uses the fast cache layer (2s TTL).
     pub async fn get_usdc_balance(&self) -> Result<f64> {
-        let now_ts = now_secs();
-
-        // Check cache
-        {
-            let cache = self.state_cache.lock().unwrap();
-            if let Some(bal) = cache.get_usdc_balance(now_ts) {
-                tracing::trace!(balance = bal, "USDC balance cache hit");
-                return Ok(bal);
-            }
-        }
-
-        let usdc = IERC20::new(self.chain.usdc, &self.provider);
-        let raw: U256 = usdc.balanceOf(self.address).call().await?;
-        let raw_i128 = i128::try_from(raw).map_err(|_| ValidationError::Overflow {
-            context: format!("USDC balance {} exceeds i128::MAX", raw),
-        })?;
-        let balance = scale_from_6dec(raw_i128);
-
-        tracing::debug!(balance, "USDC balance fetched");
-
-        // Update cache
-        {
-            let mut cache = self.state_cache.lock().unwrap();
-            cache.put_usdc_balance(balance, now_ts);
-        }
-
-        Ok(balance)
+        self.chain.balance_of(self.address).await
     }
 
     // ── Batch reads (via Multicall3) ──────────────────────────────────
@@ -739,8 +663,7 @@ impl PerpClient {
     /// Returns `(usdc_balance, eth_balance)` where USDC is in human units
     /// (e.g. `100.0` = 100 USDC) and ETH is in wei.
     pub async fn get_balances(&self, address: Address) -> Result<(f64, U256)> {
-        let results = self.get_balances_batch(&[address]).await?;
-        Ok(results.into_iter().next().unwrap())
+        self.chain.get_balances(address).await
     }
 
     /// Get the USDC and ETH balances for multiple addresses in a single RPC call.
@@ -751,89 +674,7 @@ impl PerpClient {
     /// Returns a `Vec<(usdc_balance, eth_balance)>` in the same order as
     /// the input addresses.
     pub async fn get_balances_batch(&self, addresses: &[Address]) -> Result<Vec<(f64, U256)>> {
-        if addresses.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        let usdc_addr = self.chain.usdc;
-        let n = addresses.len();
-
-        // Build sub-calls: N × USDC balanceOf + N × ETH getEthBalance
-        let mut calls = Vec::with_capacity(2 * n);
-
-        for &addr in addresses {
-            // USDC balanceOf(addr)
-            let calldata = IERC20::balanceOfCall { account: addr }.abi_encode();
-            calls.push(IMulticall3::Call3 {
-                target: usdc_addr,
-                allowFailure: false,
-                callData: calldata.into(),
-            });
-        }
-
-        for &addr in addresses {
-            // getEthBalance(addr) — Multicall3 built-in
-            let calldata = IMulticall3::getEthBalanceCall { addr }.abi_encode();
-            calls.push(IMulticall3::Call3 {
-                target: MULTICALL3,
-                allowFailure: false,
-                callData: calldata.into(),
-            });
-        }
-
-        let multicall = IMulticall3::new(MULTICALL3, &self.provider);
-        let results = multicall.aggregate3(calls).call().await?;
-
-        if results.len() != 2 * n {
-            return Err(ContractError::MulticallFailed {
-                reason: format!(
-                    "multicall returned {} results, expected {}",
-                    results.len(),
-                    2 * n
-                ),
-            }
-            .into());
-        }
-
-        let mut out = Vec::with_capacity(n);
-        for i in 0..n {
-            // Decode USDC balance (first N results)
-            let usdc_result = &results[i];
-            if !usdc_result.success {
-                return Err(ContractError::MulticallFailed {
-                    reason: format!("USDC balanceOf failed for address {}", addresses[i]),
-                }
-                .into());
-            }
-            let usdc_raw = U256::abi_decode(&usdc_result.returnData).map_err(|e| {
-                ValidationError::DecodeFailed {
-                    context: format!("failed to decode USDC balance: {e}"),
-                }
-            })?;
-            let usdc_i128 = i128::try_from(usdc_raw).map_err(|_| ValidationError::Overflow {
-                context: format!("USDC balance {} exceeds i128::MAX", usdc_raw),
-            })?;
-            let usdc = scale_from_6dec(usdc_i128);
-
-            // Decode ETH balance (last N results)
-            let eth_result = &results[n + i];
-            if !eth_result.success {
-                return Err(ContractError::MulticallFailed {
-                    reason: format!("getEthBalance failed for address {}", addresses[i]),
-                }
-                .into());
-            }
-            let eth = U256::abi_decode(&eth_result.returnData).map_err(|e| {
-                ValidationError::DecodeFailed {
-                    context: format!("failed to decode ETH balance: {e}"),
-                }
-            })?;
-
-            out.push((usdc, eth));
-        }
-
-        tracing::debug!(count = n, "batch balances fetched via multicall");
-        Ok(out)
+        self.chain.get_balances_batch(addresses).await
     }
 
     /// Get perp config and live market data in a single multicall (plus the
@@ -851,8 +692,9 @@ impl PerpClient {
     /// multicall and the beacon read are separate calls, so a trade between
     /// them can put the index one block after the pool state.
     pub async fn get_perp_snapshot(&self) -> Result<(PerpData, PerpSnapshot)> {
-        let perp = Perp::new(self.perp, &self.provider);
+        let perp = Perp::new(self.perp, self.chain.provider());
         let (modules, pool_key, pool_state, rates, oi) = self
+            .chain
             .multicall_at(BlockId::latest())
             .add(perp.modules())
             .add(perp.poolKey())
@@ -905,7 +747,7 @@ impl PerpClient {
         let key: [u8; 20] = fees_addr.into();
 
         let cached = {
-            let cache = self.state_cache.lock().unwrap();
+            let cache = self.chain.state_cache().lock().unwrap();
             cache.get_fees(&key, now_ts).cloned()
         };
 
@@ -913,7 +755,7 @@ impl PerpClient {
             Some(cached) => Ok(Fees::from(cached)),
             None => {
                 let fees = self.fetch_fees(fees_addr).await?;
-                let mut cache = self.state_cache.lock().unwrap();
+                let mut cache = self.chain.state_cache().lock().unwrap();
                 cache.put_fees(key, CachedFees::from(fees), now_ts);
                 Ok(fees)
             }
@@ -926,7 +768,7 @@ impl PerpClient {
         let key: [u8; 20] = ratios_addr.into();
 
         let cached = {
-            let cache = self.state_cache.lock().unwrap();
+            let cache = self.chain.state_cache().lock().unwrap();
             cache.get_bounds(&key, now_ts).cloned()
         };
 
@@ -934,7 +776,7 @@ impl PerpClient {
             Some(cached) => Ok(Bounds::from(cached)),
             None => {
                 let bounds = self.fetch_bounds(ratios_addr).await?;
-                let mut cache = self.state_cache.lock().unwrap();
+                let mut cache = self.chain.state_cache().lock().unwrap();
                 cache.put_bounds(key, CachedBounds::from(bounds), now_ts);
                 Ok(bounds)
             }
@@ -943,7 +785,10 @@ impl PerpClient {
 
     /// Fetch fees from the `IFees` module contract.
     async fn fetch_fees(&self, fees_addr: Address) -> Result<Fees> {
-        let fees_contract = IFees::new(registered_module(fees_addr, "IFees")?, &self.provider);
+        let fees_contract = IFees::new(
+            registered_module(fees_addr, "IFees")?,
+            self.chain.provider(),
+        );
 
         let fee_result = fees_contract.fees().call().await?;
         let c_fee = u24_to_u32(fee_result.cFee);
@@ -965,7 +810,7 @@ impl PerpClient {
     async fn fetch_bounds(&self, ratios_addr: Address) -> Result<Bounds> {
         let ratios_contract = IMarginRatios::new(
             registered_module(ratios_addr, "IMarginRatios")?,
-            &self.provider,
+            self.chain.provider(),
         );
         let taker = ratios_contract.takerMarginRatios().call().await?;
 
@@ -988,7 +833,8 @@ mod tests {
 
     use super::*;
     use crate::client::mock::{self, BEACON, Rpc, e6, failed_row, ok_row, returns, x96};
-    use crate::contracts::{Modules, Rates};
+    use crate::constants::SNAPSHOT_BLOCK_LAG;
+    use crate::contracts::{IERC20, IMulticall3, Modules, Rates};
     use crate::errors::PerpCityError;
     use crate::math::capacity::Capacity;
 

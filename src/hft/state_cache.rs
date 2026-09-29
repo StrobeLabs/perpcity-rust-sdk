@@ -5,7 +5,7 @@
 //! | Layer | TTL | Data | Why |
 //! |---|---|---|---|
 //! | **Slow** | 60 s | Fees, bounds | Change only via governance |
-//! | **Fast** | 2 s (1 block) | Mark prices, funding rates, USDC balance | Change every block |
+//! | **Fast** | 2 s (1 block) | Mark prices, funding rates, USDC balances | Change every block |
 //!
 //! All methods take an explicit `now_ts` (Unix seconds) for deterministic
 //! testing — no hidden clock dependencies.
@@ -91,10 +91,21 @@ impl Default for StateCacheConfig {
     }
 }
 
+/// What a cached token balance is a balance of: one holder's balance of
+/// one token, so a cache shared across holders or collateral tokens keeps
+/// every entry apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct BalanceKey {
+    /// The token contract.
+    pub token: [u8; 20],
+    /// The account whose balance it is.
+    pub holder: [u8; 20],
+}
+
 /// Multi-layer TTL cache for on-chain state.
 ///
-/// Keyed by address (`[u8; 20]`) for per-market data, or by perp ID
-/// (`[u8; 32]`) for per-perp data. The USDC balance is a singleton.
+/// Keyed by address (`[u8; 20]`) for per-market data, by perp ID
+/// (`[u8; 32]`) for per-perp data, and by [`BalanceKey`] for balances.
 #[derive(Debug)]
 pub struct StateCache {
     // Slow layer (60s TTL): governance-controlled
@@ -104,7 +115,7 @@ pub struct StateCache {
     // Fast layer (2s TTL): changes every block
     mark_prices: HashMap<[u8; 32], CachedValue<f64>>,
     funding_rates: HashMap<[u8; 32], CachedValue<f64>>,
-    usdc_balance: Option<CachedValue<f64>>,
+    balances: HashMap<BalanceKey, CachedValue<f64>>,
 
     slow_ttl: u64,
     fast_ttl: u64,
@@ -118,7 +129,7 @@ impl StateCache {
             bounds: HashMap::new(),
             mark_prices: HashMap::new(),
             funding_rates: HashMap::new(),
-            usdc_balance: None,
+            balances: HashMap::new(),
             slow_ttl: config.slow_ttl,
             fast_ttl: config.fast_ttl,
         }
@@ -212,33 +223,37 @@ impl StateCache {
         );
     }
 
-    // ── Fast layer: USDC balance ───────────────────────────────────
+    // ── Fast layer: balances ───────────────────────────────────────
 
-    /// Get cached USDC balance, or `None` if stale/absent.
+    /// Get a cached token balance, or `None` if stale/absent.
     #[inline]
-    pub fn get_usdc_balance(&self, now_ts: u64) -> Option<f64> {
-        self.usdc_balance
+    pub fn get_balance(&self, key: &BalanceKey, now_ts: u64) -> Option<f64> {
+        self.balances
+            .get(key)
             .filter(|cv| cv.is_valid(now_ts))
             .map(|cv| cv.value)
     }
 
-    /// Cache the USDC balance.
-    pub fn put_usdc_balance(&mut self, balance: f64, now_ts: u64) {
-        self.usdc_balance = Some(CachedValue {
-            value: balance,
-            expires_at: now_ts.saturating_add(self.fast_ttl),
-        });
+    /// Cache a token balance.
+    pub fn put_balance(&mut self, key: BalanceKey, balance: f64, now_ts: u64) {
+        self.balances.insert(
+            key,
+            CachedValue {
+                value: balance,
+                expires_at: now_ts.saturating_add(self.fast_ttl),
+            },
+        );
     }
 
     // ── Invalidation ───────────────────────────────────────────────
 
-    /// Invalidate all fast-layer data (prices, funding, balance).
+    /// Invalidate all fast-layer data (prices, funding, balances).
     ///
     /// Call on new-block events. The slow layer (fees, bounds) is preserved.
     pub fn invalidate_fast_layer(&mut self) {
         self.mark_prices.clear();
         self.funding_rates.clear();
-        self.usdc_balance = None;
+        self.balances.clear();
     }
 
     /// Invalidate everything (both layers).
@@ -271,6 +286,13 @@ mod tests {
         }
     }
 
+    fn sample_balance_key() -> BalanceKey {
+        BalanceKey {
+            token: [0xEE; 20],
+            holder: [0x01; 20],
+        }
+    }
+
     #[test]
     fn empty_cache_returns_none() {
         let c = StateCache::new(StateCacheConfig::default());
@@ -278,7 +300,7 @@ mod tests {
         assert!(c.get_bounds(&[0; 20], 0).is_none());
         assert!(c.get_mark_price(&[0; 32], 0).is_none());
         assert!(c.get_funding_rate(&[0; 32], 0).is_none());
-        assert!(c.get_usdc_balance(0).is_none());
+        assert!(c.get_balance(&sample_balance_key(), 0).is_none());
     }
 
     #[test]
@@ -314,12 +336,34 @@ mod tests {
     }
 
     #[test]
-    fn usdc_balance_ttl() {
+    fn balance_ttl() {
         let mut c = StateCache::new(StateCacheConfig::default());
+        let key = sample_balance_key();
 
-        c.put_usdc_balance(10_000.0, 100);
-        assert_eq!(c.get_usdc_balance(101), Some(10_000.0));
-        assert!(c.get_usdc_balance(102).is_none());
+        c.put_balance(key, 10_000.0, 100);
+        assert_eq!(c.get_balance(&key, 101), Some(10_000.0));
+        assert!(c.get_balance(&key, 102).is_none());
+    }
+
+    /// The same token for another holder, or another token for the same
+    /// holder, is another entry.
+    #[test]
+    fn balances_are_keyed_by_token_and_holder() {
+        let mut c = StateCache::new(StateCacheConfig::default());
+        let key = sample_balance_key();
+        let other_holder = BalanceKey {
+            holder: [0x02; 20],
+            ..key
+        };
+        let other_token = BalanceKey {
+            token: [0xEF; 20],
+            ..key
+        };
+
+        c.put_balance(key, 1.0, 0);
+        assert_eq!(c.get_balance(&key, 0), Some(1.0));
+        assert!(c.get_balance(&other_holder, 0).is_none());
+        assert!(c.get_balance(&other_token, 0).is_none());
     }
 
     #[test]
@@ -343,7 +387,7 @@ mod tests {
         c.put_bounds(addr, sample_bounds(), 0);
         c.put_mark_price(perp, 42000.0, 0);
         c.put_funding_rate(perp, 0.0001, 0);
-        c.put_usdc_balance(1000.0, 0);
+        c.put_balance(sample_balance_key(), 1000.0, 0);
 
         c.invalidate_fast_layer();
 
@@ -354,7 +398,7 @@ mod tests {
         // Fast layer cleared
         assert!(c.get_mark_price(&perp, 0).is_none());
         assert!(c.get_funding_rate(&perp, 0).is_none());
-        assert!(c.get_usdc_balance(0).is_none());
+        assert!(c.get_balance(&sample_balance_key(), 0).is_none());
     }
 
     #[test]

@@ -502,7 +502,7 @@ impl PerpClient {
                 ]
             })
             .collect();
-        let multicall = IMulticall3::new(MULTICALL3, &self.provider);
+        let multicall = IMulticall3::new(MULTICALL3, self.chain.provider());
         let rows = multicall.aggregate3(calls).block(block_id).call().await?;
         if rows.len() != 2 * pos_ids.len() {
             return Err(ContractError::MulticallFailed {
@@ -557,14 +557,15 @@ impl PerpClient {
         // the block timestamp would silently skew the accrual replay (a
         // slow clock reads as zero accrual). A settlement preview must not
         // quietly degrade — fail and let the caller retry.
-        let (block, block_id) = self.lagged_snapshot_block().await?;
+        let (block, block_id) = self.chain.lagged_snapshot_block().await?;
 
         // ── Market-wide state: one multicall, all-or-nothing ────────
         // (without a consistent market snapshot no position's equity can
         // be computed.)
-        let perp = Perp::new(self.perp, &self.provider);
+        let perp = Perp::new(self.perp, self.chain.provider());
         let (cumls, rates, pool_state, capacity, oi, pool_id, modules, stored_emas, ema_window) =
-            self.multicall_at(block_id)
+            self.chain
+                .multicall_at(block_id)
                 .add(perp.cumulatives())
                 .add(perp.rates())
                 .add(perp.poolState())
@@ -651,7 +652,8 @@ impl PerpClient {
             .collect();
         // The tick set comes from the rows, not from the fee-growth words,
         // and both reads pin to the same block: run them concurrently.
-        let manager = IPoolManagerState::new(self.chain.pool_manager, &self.provider);
+        let manager =
+            IPoolManagerState::new(self.chain.deployments().pool_manager, self.chain.provider());
         let fee_growth = async {
             manager
                 .extsload_1(slots)
@@ -751,13 +753,14 @@ impl PerpClient {
         ticks: &BTreeSet<i32>,
     ) -> Result<BTreeMap<i32, TickFundingRead>> {
         let perp_addr = self.perp;
-        if self.transport.supports_get_proof() {
+        if self.chain.transport().supports_get_proof() {
             let keys: Vec<B256> = ticks
                 .iter()
                 .flat_map(|&tick| perp_tick_funding_slots(tick).map(B256::from))
                 .collect();
             match self
-                .provider
+                .chain
+                .provider()
                 .get_proof(perp_addr, keys)
                 .block_id(block_id)
                 .await
@@ -806,7 +809,7 @@ impl PerpClient {
                         "eth_getProof unsupported by endpoint; \
                          falling back to eth_getStorageAt"
                     );
-                    self.transport.note_get_proof_unsupported();
+                    self.chain.transport().note_get_proof_unsupported();
                 }
                 // Any other failure (rate limit, timeout, a replica hiccup)
                 // falls back for this read only — the per-tick reads give
@@ -832,7 +835,8 @@ impl PerpClient {
             .map(|&tick| {
                 let [slot_opp, slot_div] = perp_tick_funding_slots(tick);
                 let read = |slot: U256| {
-                    self.provider
+                    self.chain
+                        .provider()
                         .get_storage_at(perp_addr, slot)
                         .block_id(block_id)
                         .into_future()

@@ -23,10 +23,11 @@ use serde_json::value::RawValue;
 use crate::contracts::{
     Capacity, IMulticall3, Modules, OpenInterest, Perp, PoolKey, Position, PricePair, Rates,
 };
-use crate::types::Deployments;
+use crate::types::ChainDeployments;
 use crate::{HftTransport, TransportConfig};
 
 use super::PerpClient;
+use super::chain::ChainReader;
 
 /// The market the mocked client points at.
 pub(super) const PERP: Address = Address::repeat_byte(0x11);
@@ -66,6 +67,13 @@ pub(super) fn client_over(provider: RootProvider<Ethereum>) -> PerpClient {
     client_with(provider, transport())
 }
 
+/// A chain reader on its own, every RPC answered by the returned [`Rpc`].
+pub(super) fn chain() -> (ChainReader, Rpc) {
+    let asserter = Asserter::new();
+    let provider = RootProvider::<Ethereum>::new(RpcClient::mocked(asserter.clone()));
+    (chain_with(provider, transport()), Rpc(asserter))
+}
+
 /// A transport no request ever reaches: the mocked provider is not wired
 /// to it, and it connects lazily. It carries the endpoint capabilities the
 /// reads consult, so a test can share one between clients.
@@ -79,15 +87,18 @@ pub(super) fn transport() -> HftTransport {
     .expect("a parseable URL builds a transport")
 }
 
-fn client_with(provider: RootProvider<Ethereum>, transport: HftTransport) -> PerpClient {
-    let signer = PrivateKeySigner::from_bytes(&B256::repeat_byte(0x01))
-        .expect("a non-zero scalar is a valid key");
-    let deployments = Deployments {
-        perp: PERP,
+fn chain_with(provider: RootProvider<Ethereum>, transport: HftTransport) -> ChainReader {
+    let deployments = ChainDeployments {
         usdc: USDC,
         pool_manager: POOL_MANAGER,
     };
-    PerpClient::from_parts(provider, transport, signer, deployments, CHAIN_ID)
+    ChainReader::from_parts(provider, transport, deployments, CHAIN_ID)
+}
+
+fn client_with(provider: RootProvider<Ethereum>, transport: HftTransport) -> PerpClient {
+    let signer = PrivateKeySigner::from_bytes(&B256::repeat_byte(0x01))
+        .expect("a non-zero scalar is a valid key");
+    PerpClient::from_parts(chain_with(provider, transport), signer, PERP)
 }
 
 /// The mock's answer queue, in the vocabulary of the reads.
