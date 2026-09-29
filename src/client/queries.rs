@@ -985,7 +985,7 @@ impl PerpClient {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::client::mock::{self, x96};
+    use crate::client::mock::{self, BEACON, x96};
     use crate::errors::PerpCityError;
 
     // ── Fast layer: mark, funding, balance ────────────────────────────
@@ -1076,7 +1076,8 @@ mod tests {
 
     /// A transport failure inside a contract call surfaces as an ABI
     /// error wrapping the transport error — which [`PerpCityError::
-    /// is_transient`] does not classify as transient. Recorded as is.
+    /// is_transient`] does not classify as transient. Recorded as is;
+    /// the classification is #115.
     #[tokio::test]
     async fn a_transport_failure_in_a_contract_call_is_an_abi_error() {
         let (client, rpc) = mock::client();
@@ -1091,5 +1092,155 @@ mod tests {
             "{err}"
         );
         assert!(!err.is_transient(), "not classified transient today");
+    }
+
+    // ── Uncached single reads ─────────────────────────────────────────
+
+    /// The beacon's `index()` is Q96, read by `eth_call` without sending.
+    #[tokio::test]
+    async fn index_price_is_the_beacon_index_scaled_from_x96() {
+        let (client, rpc) = mock::client();
+        rpc.call::<IBeacon::indexCall>(&x96(5, 2));
+
+        assert_eq!(client.get_index_price(BEACON).await.unwrap(), 1.25);
+        assert!(rpc.is_drained(), "one eth_call, nothing cached");
+    }
+
+    /// A zero index is a beacon with nothing to say, not a price of zero.
+    #[tokio::test]
+    async fn a_zero_index_is_an_invalid_price() {
+        let (client, rpc) = mock::client();
+        rpc.call::<IBeacon::indexCall>(&U256::ZERO);
+
+        let err = client.get_index_price(BEACON).await.unwrap_err();
+        assert!(
+            matches!(
+                err,
+                PerpCityError::Validation(ValidationError::InvalidPrice { .. })
+            ),
+            "{err}"
+        );
+    }
+
+    /// `positions(id)` comes back as the raw contract struct, untouched.
+    #[tokio::test]
+    async fn a_position_is_the_raw_contract_struct() {
+        let (client, rpc) = mock::client();
+        rpc.call::<Perp::positionsCall>(&mock::position(1_000_000));
+
+        let position = client.get_position(U256::from(7u8)).await.unwrap();
+        assert_eq!(position.margin, 1_000_000);
+        assert!(position.delta.is_zero());
+        assert!(rpc.is_drained());
+    }
+
+    /// The contract answers a burned or never-minted id with an all-zero
+    /// struct rather than a revert; the read names it.
+    #[tokio::test]
+    async fn an_all_zero_position_is_not_found() {
+        let (client, rpc) = mock::client();
+        rpc.call::<Perp::positionsCall>(&mock::position(0));
+
+        let Err(err) = client.get_position(U256::from(7u8)).await else {
+            panic!("an all-zero struct must not decode as a position");
+        };
+        assert!(
+            matches!(
+                err,
+                PerpCityError::Contract(ContractError::PositionNotFound { pos_id })
+                    if pos_id == U256::from(7u8)
+            ),
+            "{err}"
+        );
+    }
+
+    /// Open interest is stored in perp atoms (six decimals).
+    #[tokio::test]
+    async fn open_interest_scales_atoms_to_perp_tokens() {
+        let (client, rpc) = mock::client();
+        rpc.call::<Perp::openInterestCall>(&mock::open_interest(1_500_000, 250_000));
+
+        let oi = client.get_open_interest().await.unwrap();
+        assert_eq!((oi.long_oi, oi.short_oi), (1.5, 0.25));
+        assert!(rpc.is_drained());
+    }
+
+    // ── Positions by owner: an `ownerOf` walk ─────────────────────────
+
+    /// Every id below `nextPosId` is asked; a revert means a burned token
+    /// and is skipped, another owner's token is skipped, and the walk
+    /// costs one RPC per id plus the counter.
+    #[tokio::test]
+    async fn positions_by_owner_walks_every_minted_id_and_skips_burned_ones() {
+        let owner = Address::repeat_byte(0xaa);
+        let (client, rpc) = mock::client();
+        rpc.call::<Perp::nextPosIdCall>(&U256::from(4u8));
+        rpc.call::<Perp::ownerOfCall>(&owner);
+        rpc.call::<Perp::ownerOfCall>(&Address::repeat_byte(0xbb));
+        rpc.reverts(&[0xde, 0xad, 0xbe, 0xef]);
+
+        let owned = client.get_positions_by_owner(owner).await.unwrap();
+        assert_eq!(owned, vec![U256::from(1u8)]);
+        assert!(rpc.is_drained(), "nextPosId plus one ownerOf per id");
+    }
+
+    /// A node error with no revert data is a network condition, not a
+    /// burned token: the walk stops and says so instead of dropping ids.
+    #[tokio::test]
+    async fn positions_by_owner_propagates_a_transport_failure() {
+        let owner = Address::repeat_byte(0xaa);
+        let (client, rpc) = mock::client();
+        rpc.call::<Perp::nextPosIdCall>(&U256::from(3u8));
+        rpc.call::<Perp::ownerOfCall>(&owner);
+        rpc.fails("connection reset");
+
+        let err = client.get_positions_by_owner(owner).await.unwrap_err();
+        assert!(
+            matches!(
+                err,
+                PerpCityError::Abi(alloy::contract::Error::TransportError(_))
+            ),
+            "{err}"
+        );
+    }
+
+    /// Ids start at 1, so a `nextPosId` of 0 or 1 means nothing was ever
+    /// minted, and the counter is the only RPC.
+    #[tokio::test]
+    async fn positions_by_owner_of_an_empty_market_is_one_rpc() {
+        let owner = Address::repeat_byte(0xaa);
+        for next in [0u8, 1] {
+            let (client, rpc) = mock::client();
+            rpc.call::<Perp::nextPosIdCall>(&U256::from(next));
+
+            assert!(
+                client
+                    .get_positions_by_owner(owner)
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+            assert!(rpc.is_drained());
+        }
+    }
+
+    /// The walk is bounded by `u64`; a counter beyond it is an overflow,
+    /// not a walk that never ends.
+    #[tokio::test]
+    async fn positions_by_owner_rejects_a_counter_beyond_u64() {
+        let (client, rpc) = mock::client();
+        rpc.call::<Perp::nextPosIdCall>(&(U256::from(u64::MAX) + U256::from(1u8)));
+
+        let err = client
+            .get_positions_by_owner(Address::repeat_byte(0xaa))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                PerpCityError::Validation(ValidationError::Overflow { .. })
+            ),
+            "{err}"
+        );
     }
 }

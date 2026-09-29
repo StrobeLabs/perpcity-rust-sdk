@@ -8,14 +8,16 @@
 //! makes of the bytes it gets back, and what it remembers between calls.
 
 use alloy::network::Ethereum;
-use alloy::primitives::{Address, B256, Bytes, Signed, U256, Uint};
+use alloy::primitives::{Address, B256, Bytes, I256, Signed, U256, Uint};
 use alloy::providers::RootProvider;
 use alloy::rpc::client::RpcClient;
+use alloy::rpc::json_rpc::ErrorPayload;
 use alloy::signers::local::PrivateKeySigner;
 use alloy::sol_types::SolCall;
 use alloy::transports::mock::Asserter;
+use serde_json::value::RawValue;
 
-use crate::contracts::{Perp, Rates};
+use crate::contracts::{OpenInterest, Perp, Position, Rates};
 use crate::types::Deployments;
 use crate::{HftTransport, TransportConfig};
 
@@ -27,6 +29,8 @@ pub(super) const PERP: Address = Address::repeat_byte(0x11);
 pub(super) const USDC: Address = Address::repeat_byte(0x22);
 /// The V4 `PoolManager` its pool lives in.
 pub(super) const POOL_MANAGER: Address = Address::repeat_byte(0x33);
+/// The market's beacon.
+pub(super) const BEACON: Address = Address::repeat_byte(0xb1);
 /// Arbitrum One, so chain-bound paths take the mainnet branch.
 pub(super) const CHAIN_ID: u64 = 42_161;
 
@@ -70,6 +74,18 @@ impl Rpc {
         self.0.push_failure_msg(message);
     }
 
+    /// The next `eth_call` reverts, carrying `data` the way a node reports
+    /// `execution reverted` (JSON-RPC code 3).
+    pub(super) fn reverts(&self, data: &[u8]) {
+        let data = RawValue::from_string(format!("\"0x{}\"", alloy::hex::encode(data)))
+            .expect("a quoted hex string is valid JSON");
+        self.0.push_failure(ErrorPayload {
+            code: 3,
+            message: "execution reverted".into(),
+            data: Some(data),
+        });
+    }
+
     /// Whether every queued answer was consumed: the reads made exactly
     /// the RPCs the test expected.
     pub(super) fn is_drained(&self) -> bool {
@@ -94,6 +110,24 @@ pub(super) fn rates(funding_per_day_wad: i128) -> Rates {
         longUtilFeePerDay: 0,
         shortUtilFeePerDay: 0,
         lastTouch: Uint::ZERO,
+    }
+}
+
+/// `openInterest()` in perp atoms.
+pub(super) fn open_interest(long: u128, short: u128) -> OpenInterest {
+    OpenInterest { long, short }
+}
+
+/// `positions(id)` for a position holding this margin and no exposure.
+/// Zero margin and zero delta together are how the contract reports a
+/// position that never existed or was burned.
+pub(super) fn position(margin: u128) -> Position {
+    Position {
+        delta: I256::ZERO,
+        margin,
+        liqMarginRatio: Uint::ZERO,
+        backstopMarginRatio: Uint::ZERO,
+        lastCumlFundingX96: I256::ZERO,
     }
 }
 
