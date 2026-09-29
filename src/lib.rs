@@ -56,7 +56,7 @@ pub use client::{
     ARBITRUM_CHAIN_ID, ARBITRUM_POOL_MANAGER, ARBITRUM_SEPOLIA_CHAIN_ID,
     ARBITRUM_SEPOLIA_PERP_FACTORY, ARBITRUM_SEPOLIA_POOL_MANAGER, ARBITRUM_SEPOLIA_USDC,
     ARBITRUM_USDC, ChainReader, MAX_MAKER_EQUITY_BATCH, MakerEquityKind, MakerEquityOutcome,
-    MarketReader, PerpClient, TxBuilder,
+    MarketReader, PerpClient, StateAt, TxBuilder,
 };
 
 #[doc(inline)]
@@ -86,7 +86,7 @@ pub use types::{
     AdjustMakerParams, AdjustMakerResult, AdjustTakerParams, AdjustTakerResult, Bounds,
     ChainDeployments, ExactAdjustTakerParams, ExactOpenTakerParams, Fees, MarginRatioTriple,
     MarginRatios, OpenInterest, OpenMakerParams, OpenResult, OpenTakerParams, PerpData,
-    PerpSnapshot, PriceImpactPoint, Side,
+    PerpSnapshot, Side, SolvencyState,
 };
 
 #[doc(inline)]
@@ -114,6 +114,9 @@ pub use math::swap::{
 
 #[doc(inline)]
 pub use math::capacity::{Capacity, MarketCapacity, band_capacity, liquidity_for_capacity};
+
+#[doc(inline)]
+pub use math::range::{MakerBand, TickRange};
 
 #[doc(inline)]
 pub use math::liquidity::{amounts_for_liquidity, estimate_liquidity, liquidity_for_target_ratio};

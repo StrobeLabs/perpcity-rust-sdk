@@ -14,6 +14,8 @@
 //! The [`price_to_sqrt_price_x96`] / [`sqrt_price_x96_to_price`] pair
 //! handles this encoding, using a 6-decimal intermediate for precision.
 
+use std::fmt;
+
 use alloy::primitives::{I256, U256};
 
 use crate::constants::Q96;
@@ -80,6 +82,34 @@ pub fn scale_to_6dec(amount: f64) -> Result<i128, ValidationError> {
 /// ```
 pub fn scale_from_6dec(value: i128) -> f64 {
     value as f64 / F64_1E6
+}
+
+/// A 6-decimal on-chain amount as human-readable f64, for the unsigned
+/// widths the contracts return (`uint128`, `uint256`).
+///
+/// No balance or margin comes near `i128`, so a value past it is a broken
+/// read rather than a quantity; `what` names the figure in the error.
+///
+/// # Errors
+///
+/// [`ValidationError::Overflow`] if `atoms` does not fit `i128`.
+///
+/// # Examples
+///
+/// ```
+/// # use perpcity_sdk::convert::usdc_from_atoms;
+/// assert_eq!(usdc_from_atoms(1_500_000u128, "margin")?, 1.5);
+/// assert!(usdc_from_atoms(u128::MAX, "margin").is_err());
+/// # Ok::<(), perpcity_sdk::ValidationError>(())
+/// ```
+pub fn usdc_from_atoms<A>(atoms: A, what: &str) -> Result<f64, ValidationError>
+where
+    A: TryInto<i128> + fmt::Display + Copy,
+{
+    let atoms = atoms.try_into().map_err(|_| ValidationError::Overflow {
+        context: format!("{what} {atoms} exceeds i128"),
+    })?;
+    Ok(scale_from_6dec(atoms))
 }
 
 // ── Leverage ↔ margin ratio ────────────────────────────────────────────

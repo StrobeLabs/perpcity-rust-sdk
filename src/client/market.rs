@@ -14,7 +14,8 @@ use super::chain::ChainReader;
 ///
 /// Every read addressed to a market — its pool state, positions, capacity,
 /// the contract's mark, the taker book, maker equities, the liquidation
-/// probes — is here. Owned and cheap to clone (the chain reader is an
+/// probes, and its storage at one block ([`Self::state`]) — is here.
+/// Owned and cheap to clone (the chain reader is an
 /// Arc), so it can be stored in a struct or moved into a task, and every
 /// reader of one market over one chain reader shares that reader's caches.
 /// It needs no signer.

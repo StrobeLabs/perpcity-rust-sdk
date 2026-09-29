@@ -58,6 +58,15 @@ pub enum ContractError {
         number: u64,
     },
 
+    /// The endpoint serves block `number`'s header but has pruned the
+    /// state behind it: a full node asked for a block outside its window.
+    /// Retrying gets the same answer; an archive endpoint is the fix.
+    #[error("block {number} state unavailable from RPC (pruned; needs an archive endpoint)")]
+    StateUnavailable {
+        /// The pinned block whose state the endpoint no longer holds.
+        number: u64,
+    },
+
     /// The RPC endpoint refused an `eth_getLogs` request that no narrower
     /// range fixes: a single block it still rejects, or a method, parse or
     /// auth error. Retrying the same request gets the same answer.

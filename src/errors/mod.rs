@@ -98,7 +98,8 @@ impl PerpCityError {
     /// unexpected shape, which retrying will not fix.
     ///
     /// `LogsRejected` is a server's refusal of an `eth_getLogs` request at
-    /// its narrowest, so it is not transient.
+    /// its narrowest, and `StateUnavailable` a full node's refusal of
+    /// pruned state, so neither is transient.
     pub fn is_transient(&self) -> bool {
         matches!(
             self,

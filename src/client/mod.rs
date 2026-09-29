@@ -40,12 +40,14 @@ mod market;
 #[cfg(test)]
 mod mock;
 mod queries;
+mod state;
 mod trades;
 mod transactions;
 
 pub use chain::ChainReader;
 pub use maker_equity::{MAX_MAKER_EQUITY_BATCH, MakerEquityKind, MakerEquityOutcome};
 pub use market::MarketReader;
+pub use state::StateAt;
 pub use transactions::TxBuilder;
 
 use std::sync::Mutex;

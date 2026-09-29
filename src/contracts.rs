@@ -733,6 +733,9 @@ mod abi_lock {
             "safeTransferFrom(address,address,uint256)"
         );
         assert_eq!(Perp::positionsCall::SIGNATURE, "positions(uint256)");
+        assert_eq!(Perp::makerDetailsCall::SIGNATURE, "makerDetails(uint256)");
+        assert_eq!(Perp::nextPosIdCall::SIGNATURE, "nextPosId()");
+        assert_eq!(Perp::solvencyStateCall::SIGNATURE, "solvencyState()");
         assert_eq!(Perp::poolStateCall::SIGNATURE, "poolState()");
         assert_eq!(Perp::modulesCall::SIGNATURE, "modules()");
         assert_eq!(Perp::ratesCall::SIGNATURE, "rates()");

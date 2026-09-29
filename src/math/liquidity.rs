@@ -10,12 +10,11 @@ use alloy::primitives::U256;
 use crate::constants::Q96;
 use crate::errors::ValidationError;
 use crate::math::fixed_point::Rounding;
+use crate::math::range::{MakerBand, TickRange};
 use crate::math::swap::{amount0_delta, amount1_delta};
 
-use super::tick::get_sqrt_ratio_at_tick;
-
-/// Estimate the liquidity needed to deploy `usd_amount` of value across a
-/// tick range `[tick_lower, tick_upper]`.
+/// Estimate the liquidity needed to deploy `usd_amount` of value across
+/// `range`.
 ///
 /// Uses the Uniswap V3/V4 formula for concentrated liquidity:
 ///
@@ -27,28 +26,19 @@ use super::tick::get_sqrt_ratio_at_tick;
 ///
 /// # Errors
 ///
-/// - [`ValidationError::InvalidTickRange`] if `tick_lower >= tick_upper`
 /// - [`ValidationError::InvalidMargin`] if `usd_amount_scaled` is 0
 /// - [`ValidationError::Overflow`] if the sqrt price delta is zero
 pub fn estimate_liquidity(
-    tick_lower: i32,
-    tick_upper: i32,
+    range: &TickRange,
     usd_amount_scaled: u128,
 ) -> Result<U256, ValidationError> {
-    if tick_lower >= tick_upper {
-        return Err(ValidationError::InvalidTickRange {
-            lower: tick_lower,
-            upper: tick_upper,
-        });
-    }
     if usd_amount_scaled == 0 {
         return Err(ValidationError::InvalidMargin {
             reason: "USD amount must be non-zero".into(),
         });
     }
 
-    let sqrt_lower = get_sqrt_ratio_at_tick(tick_lower)?;
-    let sqrt_upper = get_sqrt_ratio_at_tick(tick_upper)?;
+    let (sqrt_lower, sqrt_upper) = range.sqrt_bounds();
 
     let delta = sqrt_upper - sqrt_lower;
     if delta.is_zero() {
@@ -73,29 +63,21 @@ pub fn estimate_liquidity(
 /// # Arguments
 ///
 /// - `margin_scaled`: Margin in 6-decimal units (e.g. `1_000_000` = 1 USDC)
-/// - `tick_lower`, `tick_upper`: Tick range for the position
+/// - `range`: Tick range for the position
 /// - `current_sqrt_price_x96`: Current pool sqrtPriceX96
 /// - `target_margin_ratio`: Target ratio as a fraction (e.g. `0.1` for 10%)
 ///
 /// # Errors
 ///
-/// - [`ValidationError::InvalidTickRange`] if `tick_lower >= tick_upper`
 /// - [`ValidationError::InvalidMargin`] if `margin_scaled` is 0
 /// - [`ValidationError::InvalidLeverage`] if `target_margin_ratio` is not in `(0, 1)`
 /// - [`ValidationError::Overflow`] if the result would be non-finite
 pub fn liquidity_for_target_ratio(
     margin_scaled: u128,
-    tick_lower: i32,
-    tick_upper: i32,
+    range: &TickRange,
     current_sqrt_price_x96: U256,
     target_margin_ratio: f64,
 ) -> Result<u128, ValidationError> {
-    if tick_lower >= tick_upper {
-        return Err(ValidationError::InvalidTickRange {
-            lower: tick_lower,
-            upper: tick_upper,
-        });
-    }
     if target_margin_ratio <= 0.0 || target_margin_ratio >= 1.0 {
         return Err(ValidationError::InvalidLeverage {
             reason: format!("target_margin_ratio must be in (0, 1), got {target_margin_ratio}"),
@@ -108,8 +90,7 @@ pub fn liquidity_for_target_ratio(
     }
 
     // Convert sqrtPriceX96 values to f64 for the ratio calculation.
-    let sqrt_lower_x96 = get_sqrt_ratio_at_tick(tick_lower)?;
-    let sqrt_upper_x96 = get_sqrt_ratio_at_tick(tick_upper)?;
+    let (sqrt_lower_x96, sqrt_upper_x96) = range.sqrt_bounds();
 
     let q96_f = crate::constants::Q96_U128 as f64;
 
@@ -176,16 +157,13 @@ pub fn liquidity_for_target_ratio(
 /// ```
 /// use alloy::primitives::U256;
 /// use perpcity_sdk::convert::price_to_sqrt_price_x96;
-/// use perpcity_sdk::{amounts_for_liquidity, band_capacity, get_sqrt_ratio_at_tick};
+/// use perpcity_sdk::math::liquidity::band_amounts;
+/// use perpcity_sdk::{MakerBand, TickRange, band_capacity};
 ///
 /// let sqrt_price = price_to_sqrt_price_x96(35.0)?;
-/// let (perp_atoms, _usdc_atoms) = amounts_for_liquidity(
-///     sqrt_price,
-///     get_sqrt_ratio_at_tick(27_090)?,
-///     get_sqrt_ratio_at_tick(38_100)?,
-///     1_757_959,
-/// )?;
-/// let capacity = band_capacity(sqrt_price, 27_090, 38_100, 1_757_959)?;
+/// let band = MakerBand::new(TickRange::new(27_090, 38_100)?, 1_757_959);
+/// let (perp_atoms, _usdc_atoms) = band_amounts(sqrt_price, &band)?;
+/// let capacity = band_capacity(sqrt_price, &band)?;
 /// assert_eq!(perp_atoms, U256::from(capacity.long_atoms));
 /// # Ok::<(), perpcity_sdk::ValidationError>(())
 /// ```
@@ -216,18 +194,37 @@ pub fn amounts_for_liquidity(
     Ok((amount0, amount1))
 }
 
+/// The amounts `band` holds at `sqrt_price_x96`, `(perp atoms, USDC
+/// atoms)`: [`amounts_for_liquidity`] over the band's own bounds.
+///
+/// # Errors
+///
+/// As [`amounts_for_liquidity`].
+pub fn band_amounts(
+    sqrt_price_x96: U256,
+    band: &MakerBand,
+) -> Result<(U256, U256), ValidationError> {
+    let (sqrt_lower, sqrt_upper) = band.range.sqrt_bounds();
+    amounts_for_liquidity(sqrt_price_x96, sqrt_lower, sqrt_upper, band.liquidity)
+}
+
 // ── Tests ──────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::math::tick::get_sqrt_ratio_at_tick;
+
+    fn range(lower: i32, upper: i32) -> TickRange {
+        TickRange::new(lower, upper).unwrap()
+    }
 
     // ── estimate_liquidity ───────────────────────────────────────
 
     #[test]
     fn estimate_liquidity_basic() {
         // Small range, 1 USDC → should get a positive liquidity value.
-        let liq = estimate_liquidity(-100, 100, 1_000_000).unwrap();
+        let liq = estimate_liquidity(&range(-100, 100), 1_000_000).unwrap();
         assert!(!liq.is_zero(), "liquidity should be positive");
     }
 
@@ -236,8 +233,8 @@ mod tests {
         // For the same USD amount, a wider range requires less liquidity per unit
         // of price range, but the formula L = usd * Q96 / delta means wider delta
         // → lower L. Verify this inverse relationship.
-        let narrow = estimate_liquidity(-100, 100, 1_000_000).unwrap();
-        let wide = estimate_liquidity(-1000, 1000, 1_000_000).unwrap();
+        let narrow = estimate_liquidity(&range(-100, 100), 1_000_000).unwrap();
+        let wide = estimate_liquidity(&range(-1000, 1000), 1_000_000).unwrap();
         assert!(
             narrow > wide,
             "narrower range should concentrate more liquidity: narrow={narrow}, wide={wide}"
@@ -246,8 +243,8 @@ mod tests {
 
     #[test]
     fn estimate_liquidity_more_usd_gives_more_liquidity() {
-        let small = estimate_liquidity(-100, 100, 1_000_000).unwrap();
-        let large = estimate_liquidity(-100, 100, 10_000_000).unwrap();
+        let small = estimate_liquidity(&range(-100, 100), 1_000_000).unwrap();
+        let large = estimate_liquidity(&range(-100, 100), 10_000_000).unwrap();
         assert!(
             large > small,
             "more USD should give more liquidity: large={large}, small={small}"
@@ -259,8 +256,8 @@ mod tests {
         // Doubling USD should approximately double liquidity (linear relationship).
         // Not exactly 2× due to integer division truncation: 2*(x/d) can differ
         // from (2*x)/d by at most 1.
-        let base = estimate_liquidity(-1000, 1000, 1_000_000).unwrap();
-        let doubled = estimate_liquidity(-1000, 1000, 2_000_000).unwrap();
+        let base = estimate_liquidity(&range(-1000, 1000), 1_000_000).unwrap();
+        let doubled = estimate_liquidity(&range(-1000, 1000), 2_000_000).unwrap();
         let diff = doubled.abs_diff(base * U256::from(2u64));
         assert!(
             diff <= U256::from(1u64),
@@ -269,18 +266,8 @@ mod tests {
     }
 
     #[test]
-    fn estimate_liquidity_rejects_equal_ticks() {
-        assert!(estimate_liquidity(100, 100, 1_000_000).is_err());
-    }
-
-    #[test]
-    fn estimate_liquidity_rejects_inverted_ticks() {
-        assert!(estimate_liquidity(200, 100, 1_000_000).is_err());
-    }
-
-    #[test]
     fn estimate_liquidity_rejects_zero_amount() {
-        assert!(estimate_liquidity(-100, 100, 0).is_err());
+        assert!(estimate_liquidity(&range(-100, 100), 0).is_err());
     }
 
     // ── liquidity_for_target_ratio ──────────────────────────────
@@ -289,7 +276,8 @@ mod tests {
     fn target_ratio_basic() {
         let liq = liquidity_for_target_ratio(
             1_000_000, // 1 USDC
-            -1000, 1000, Q96, // current price = 1.0 (at tick 0)
+            &range(-1000, 1000),
+            Q96, // current price = 1.0 (at tick 0)
             0.1, // 10% margin ratio
         )
         .unwrap();
@@ -299,8 +287,10 @@ mod tests {
     #[test]
     fn target_ratio_higher_ratio_gives_less_liquidity() {
         // Higher margin ratio → less leveraged → less liquidity needed for same margin.
-        let low_ratio = liquidity_for_target_ratio(1_000_000, -1000, 1000, Q96, 0.05).unwrap();
-        let high_ratio = liquidity_for_target_ratio(1_000_000, -1000, 1000, Q96, 0.2).unwrap();
+        let low_ratio =
+            liquidity_for_target_ratio(1_000_000, &range(-1000, 1000), Q96, 0.05).unwrap();
+        let high_ratio =
+            liquidity_for_target_ratio(1_000_000, &range(-1000, 1000), Q96, 0.2).unwrap();
         assert!(
             low_ratio > high_ratio,
             "lower ratio needs more liquidity: low={low_ratio}, high={high_ratio}"
@@ -309,8 +299,8 @@ mod tests {
 
     #[test]
     fn target_ratio_more_margin_gives_more_liquidity() {
-        let small = liquidity_for_target_ratio(1_000_000, -1000, 1000, Q96, 0.1).unwrap();
-        let large = liquidity_for_target_ratio(10_000_000, -1000, 1000, Q96, 0.1).unwrap();
+        let small = liquidity_for_target_ratio(1_000_000, &range(-1000, 1000), Q96, 0.1).unwrap();
+        let large = liquidity_for_target_ratio(10_000_000, &range(-1000, 1000), Q96, 0.1).unwrap();
         assert!(
             large > small,
             "more margin should give more liquidity: large={large}, small={small}"
@@ -318,28 +308,18 @@ mod tests {
     }
 
     #[test]
-    fn target_ratio_rejects_invalid_tick_range() {
-        assert!(liquidity_for_target_ratio(1_000_000, 100, 100, Q96, 0.1).is_err());
-    }
-
-    #[test]
-    fn target_ratio_rejects_zero_ratio() {
-        assert!(liquidity_for_target_ratio(1_000_000, -100, 100, Q96, 0.0).is_err());
-    }
-
-    #[test]
-    fn target_ratio_rejects_ratio_at_one() {
-        assert!(liquidity_for_target_ratio(1_000_000, -100, 100, Q96, 1.0).is_err());
-    }
-
-    #[test]
-    fn target_ratio_rejects_negative_ratio() {
-        assert!(liquidity_for_target_ratio(1_000_000, -100, 100, Q96, -0.1).is_err());
+    fn target_ratio_rejects_a_ratio_outside_the_open_unit_interval() {
+        for ratio in [0.0, 1.0, -0.1] {
+            assert!(
+                liquidity_for_target_ratio(1_000_000, &range(-100, 100), Q96, ratio).is_err(),
+                "ratio {ratio}"
+            );
+        }
     }
 
     #[test]
     fn target_ratio_rejects_zero_margin() {
-        assert!(liquidity_for_target_ratio(0, -100, 100, Q96, 0.1).is_err());
+        assert!(liquidity_for_target_ratio(0, &range(-100, 100), Q96, 0.1).is_err());
     }
 
     // ── amounts_for_liquidity ────────────────────────────────────
@@ -405,7 +385,9 @@ mod tests {
     fn target_ratio_price_above_range() {
         // If current price is above the entire range, quote_per_liq = 0 → error.
         // Tick 2000 is well above the range [-1000, -500].
-        let sqrt_above = super::super::tick::get_sqrt_ratio_at_tick(2000).unwrap();
-        assert!(liquidity_for_target_ratio(1_000_000, -1000, -500, sqrt_above, 0.1).is_err());
+        let sqrt_above = get_sqrt_ratio_at_tick(2000).unwrap();
+        assert!(
+            liquidity_for_target_ratio(1_000_000, &range(-1000, -500), sqrt_above, 0.1).is_err()
+        );
     }
 }

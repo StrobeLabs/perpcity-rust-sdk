@@ -21,7 +21,8 @@ use alloy::transports::mock::Asserter;
 use serde_json::value::RawValue;
 
 use crate::contracts::{
-    Capacity, IMulticall3, Modules, OpenInterest, Perp, PoolKey, Position, PricePair, Rates,
+    Capacity, IMulticall3, Maker, MakerFunding, Modules, OpenInterest, Perp, PoolKey, Position,
+    PricePair, Rates, SolvencyState,
 };
 use crate::types::ChainDeployments;
 use crate::{HftTransport, TransportConfig};
@@ -195,6 +196,42 @@ pub(super) fn pool_state(amm_price_x96: U256) -> Perp::poolStateReturn {
         sqrtPrice: Uint::ZERO,
         ammPrice: amm_price_x96,
         liquidity: 0,
+    }
+}
+
+/// `poolState()` sitting at this tick; the rest of the slot is zero.
+pub(super) fn pool_state_at_tick(tick: i32) -> Perp::poolStateReturn {
+    Perp::poolStateReturn {
+        tick: Signed::try_from(tick).expect("a test tick fits int24"),
+        sqrtPrice: Uint::ZERO,
+        ammPrice: U256::ZERO,
+        liquidity: 0,
+    }
+}
+
+/// `solvencyState()` in 6-decimal atoms.
+pub(super) fn solvency(bad_debt: u128, total_margin: u128) -> SolvencyState {
+    SolvencyState {
+        badDebt: bad_debt,
+        totalMargin: total_margin,
+    }
+}
+
+/// `makerDetails(id)` for a range over `[lower, upper]` holding
+/// `liquidity`; the accumulators are zero.
+pub(super) fn maker(lower: i32, upper: i32, liquidity: u128) -> Maker {
+    Maker {
+        tickLower: Signed::try_from(lower).expect("a test tick fits int24"),
+        tickUpper: Signed::try_from(upper).expect("a test tick fits int24"),
+        liquidity,
+        lastLongUtilEarningsX96: U256::ZERO,
+        lastShortUtilEarningsX96: U256::ZERO,
+        capacity: Capacity { long: 0, short: 0 },
+        lastCumlFunding: MakerFunding {
+            belowX96: I256::ZERO,
+            withinX96: I256::ZERO,
+            divSqrtPriceWithinX96: I256::ZERO,
+        },
     }
 }
 

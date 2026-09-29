@@ -122,6 +122,15 @@ let headroom = cap.headroom_atoms(Side::Short);        // short OI still openabl
 let fair     = client.market().get_fair_price().await?;         // the contract's mark (X96)
 let position = client.market().get_position(open.pos_id).await?; // raw on-chain Position
 
+// Storage at one block: the handle is the block, so nothing read through
+// it can come from another. `state()` pins the lagged snapshot block;
+// `state_at(n)` a block you name (archive endpoint for old ones).
+let state    = client.market().state().await?;
+let books    = state.solvency().await?;                        // badDebt, totalMargin (USDC)
+let held     = state.collateral().await?;                      // the perp's USDC
+let band     = state.maker_band(open.pos_id).await?;           // Some(MakerBand) for a live maker
+let at_block = state.block();                                  // number, hash, timestamp
+
 // Batch balances — N addresses in 1 multicall (1 CU instead of 2N)
 let (usdc, eth) = client.chain().get_balances(address).await?;
 let all = client.chain().get_balances_batch(&addresses).await?;
@@ -238,12 +247,16 @@ use perpcity_sdk::math::liquidity::estimate_liquidity;
 
 let tick = price_to_tick(50.0)?;
 let price = tick_to_price(tick)?;
-let liq = estimate_liquidity(tick_lower, tick_upper, margin_scaled)?;
 
-// Taker capacity a maker band adds at the pool price, and its inverse
-use perpcity_sdk::{Side, band_capacity, liquidity_for_capacity};
-let cap = band_capacity(sqrt_price_x96, tick_lower, tick_upper, liquidity)?;
-let liq = liquidity_for_capacity(sqrt_price_x96, tick_lower, tick_upper, Side::Short, 1_000_000)?;
+// A maker's geometry: a range is valid by construction, a band is a range
+// holding liquidity — every function below takes them and trusts them
+use perpcity_sdk::{MakerBand, Side, TickRange, band_capacity, liquidity_for_capacity};
+let range = TickRange::new(tick_lower, tick_upper)?;
+let liq = estimate_liquidity(&range, margin_scaled)?;
+
+// Taker capacity a band adds at the pool price, and its inverse
+let cap = band_capacity(sqrt_price_x96, &MakerBand::new(range, liquidity))?;
+let liq = liquidity_for_capacity(sqrt_price_x96, &range, Side::Short, 1_000_000)?;
 ```
 
 All math functions are pure, `O(1)`, and ported faithfully from PerpCity's Solidity contracts and Uniswap V4's `TickMath`.

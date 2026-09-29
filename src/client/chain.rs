@@ -14,7 +14,7 @@ use alloy::transports::BoxTransport;
 
 use crate::constants::{MULTICALL3, SNAPSHOT_BLOCK_LAG};
 use crate::contracts::{IBeacon, IERC20, IMulticall3};
-use crate::convert::{price_x96_to_f64, scale_from_6dec};
+use crate::convert::{price_x96_to_f64, usdc_from_atoms};
 use crate::errors::{ContractError, Result, TransactionError, ValidationError};
 use crate::hft::gas::FeeCache;
 use crate::hft::state_cache::{BalanceKey, StateCache, StateCacheConfig};
@@ -287,10 +287,7 @@ impl ChainReader {
             .balanceOf(holder)
             .call()
             .await?;
-        let raw_i128 = i128::try_from(raw).map_err(|_| ValidationError::Overflow {
-            context: format!("USDC balance {raw} exceeds i128::MAX"),
-        })?;
-        let balance = scale_from_6dec(raw_i128);
+        let balance = usdc_from_atoms(raw, "USDC balance")?;
         tracing::debug!(%holder, balance, "USDC balance fetched");
 
         self.inner
@@ -381,10 +378,7 @@ impl ChainReader {
                     context: format!("failed to decode USDC balance: {e}"),
                 }
             })?;
-            let usdc_i128 = i128::try_from(usdc_raw).map_err(|_| ValidationError::Overflow {
-                context: format!("USDC balance {} exceeds i128::MAX", usdc_raw),
-            })?;
-            let usdc = scale_from_6dec(usdc_i128);
+            let usdc = usdc_from_atoms(usdc_raw, "USDC balance")?;
 
             // Decode ETH balance (last N results)
             let eth_result = &results[n + i];
@@ -459,6 +453,13 @@ impl ChainReader {
             .get_block_number()
             .await?
             .saturating_sub(SNAPSHOT_BLOCK_LAG);
+        self.block_at(number).await
+    }
+
+    /// Resolve block `number` to the context and hash-pinned id reads use.
+    /// A header the endpoint cannot serve is a failed read
+    /// ([`ContractError::BlockUnavailable`]), never a fall-back to the head.
+    pub(super) async fn block_at(&self, number: u64) -> Result<(BlockContext, BlockId)> {
         let block = self
             .inner
             .provider
