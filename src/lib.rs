@@ -55,8 +55,8 @@ pub mod types;
 pub use client::{
     ARBITRUM_CHAIN_ID, ARBITRUM_POOL_MANAGER, ARBITRUM_SEPOLIA_CHAIN_ID,
     ARBITRUM_SEPOLIA_PERP_FACTORY, ARBITRUM_SEPOLIA_POOL_MANAGER, ARBITRUM_SEPOLIA_USDC,
-    ARBITRUM_USDC, MAX_MAKER_EQUITY_BATCH, MakerEquityKind, MakerEquityOutcome, PerpClient,
-    TxBuilder,
+    ARBITRUM_USDC, ChainReader, MAX_MAKER_EQUITY_BATCH, MakerEquityKind, MakerEquityOutcome,
+    MarketReader, PerpClient, TxBuilder,
 };
 
 #[doc(inline)]
@@ -84,7 +84,7 @@ pub use transport::{config::TransportConfig, provider::HftTransport};
 #[doc(inline)]
 pub use types::{
     AdjustMakerParams, AdjustMakerResult, AdjustTakerParams, AdjustTakerResult, Bounds,
-    Deployments, ExactAdjustTakerParams, ExactOpenTakerParams, Fees, MarginRatioTriple,
+    ChainDeployments, ExactAdjustTakerParams, ExactOpenTakerParams, Fees, MarginRatioTriple,
     MarginRatios, OpenInterest, OpenMakerParams, OpenResult, OpenTakerParams, PerpData,
     PerpSnapshot, PriceImpactPoint, Side,
 };

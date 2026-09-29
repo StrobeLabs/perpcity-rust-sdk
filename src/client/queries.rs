@@ -1,6 +1,6 @@
 //! Read operations: market data, positions, balances, and multicall batches.
 //!
-//! The client is bound to a single `Perp` market (`deployments.perp`). There is
+//! The client is bound to a single `Perp` market, the one it was built with. There is
 //! no `PerpManager` and no `perp_id` — the market is identified by which `Perp`
 //! contract the client points at. Positions are keyed by `posId` (ERC721 token
 //! id) within that `Perp`.
@@ -13,18 +13,12 @@
 use std::collections::BTreeMap;
 
 use alloy::eips::BlockId;
-use alloy::network::Ethereum;
 use alloy::primitives::{Address, B256, U256};
-use alloy::providers::{Empty, MulticallBuilder, MulticallError, Provider, RootProvider};
-use alloy::sol_types::{SolCall, SolValue};
+use alloy::providers::{MulticallError, Provider};
 
-use crate::constants::{
-    MAX_SWAP_SQRT_PRICE_X96, MAX_TICK, MIN_SWAP_SQRT_PRICE_X96, MIN_TICK, MULTICALL3,
-    SNAPSHOT_BLOCK_LAG,
-};
+use crate::constants::{MAX_SWAP_SQRT_PRICE_X96, MAX_TICK, MIN_SWAP_SQRT_PRICE_X96, MIN_TICK};
 use crate::contracts::{
-    IBeacon, IERC20, IFees, IMarginRatios, IMulticall3, IPoolManagerState, IPriceImpact, Perp,
-    Position,
+    IBeacon, IFees, IMarginRatios, IPoolManagerState, IPriceImpact, Perp, Position,
 };
 use crate::convert::{margin_ratio_to_leverage, price_x96_to_f64, scale_from_6dec};
 use crate::errors::{ContractError, PerpCityError, Result, ValidationError};
@@ -39,6 +33,7 @@ use crate::types::{
     Bounds, Fees, MarginRatioTriple, MarginRatios, OpenInterest, PerpData, PerpSnapshot,
 };
 
+use super::market::MarketReader;
 use super::{PerpClient, SCALE_F64, i24_to_i32, now_secs, u24_to_u32};
 
 /// Funding/utilization rates are scaled by 1e18 per day on-chain.
@@ -119,52 +114,53 @@ fn funding_per_day_to_f64(rate: alloy::primitives::Signed<88, 2>) -> f64 {
     i128::try_from(rate).unwrap_or(0) as f64 / WAD_F64
 }
 
-impl PerpClient {
+impl MarketReader {
     // ── Read operations ──────────────────────────────────────────────
 
-    /// Cache key for this client's market: the `Perp` address left-padded to 32 bytes.
+    /// Cache key for this market: the `Perp` address left-padded to 32 bytes.
     fn market_key(&self) -> [u8; 32] {
-        self.deployments.perp.into_word().0
+        self.perp.into_word().0
     }
 
-    /// A typed Multicall3 batch pinned to `block`. Add calls with `add`
-    /// and read them with `aggregate`, which fails as a whole if any call
-    /// reverts (map its error with [`multicall_error`]).
-    pub(super) fn multicall_at(
-        &self,
-        block: BlockId,
-    ) -> MulticallBuilder<Empty, &RootProvider<Ethereum>, Ethereum> {
-        self.provider.multicall().address(MULTICALL3).block(block)
-    }
+    /// The deployment-fixed values the taker book loader needs, from the
+    /// chain reader's per-market cache, or three RPC reads the first time
+    /// any reader of this market asks.
+    async fn book_immutables(&self) -> Result<BookImmutables> {
+        {
+            let cached = self.chain.immutables().lock().unwrap();
+            if let Some(immutables) = cached.get(&self.perp) {
+                return Ok(*immutables);
+            }
+        }
 
-    /// Fetch and cache the deployment-fixed values the taker book loader
-    /// needs. The first call costs three RPC reads; every later call is free.
-    async fn book_immutables(&self) -> Result<&BookImmutables> {
-        self.book_immutables
-            .get_or_try_init(|| async {
-                let perp = Perp::new(self.deployments.perp, &self.provider);
-                let pool_id_call = perp.POOL_ID();
-                let pool_key_call = perp.poolKey();
-                let ema_window_call = perp.EMA_WINDOW();
-                let (pool_id, pool_key, ema_window) = tokio::try_join!(
-                    pool_id_call.call(),
-                    pool_key_call.call(),
-                    ema_window_call.call(),
-                )?;
-                let tick_spacing = i24_to_i32(pool_key.tickSpacing);
-                if tick_spacing <= 0 {
-                    return Err(ValidationError::InvalidConfig {
-                        reason: format!("invalid tick spacing {tick_spacing}"),
-                    }
-                    .into());
-                }
-                Ok(BookImmutables {
-                    pool_id,
-                    tick_spacing,
-                    ema_window: ema_window_secs(ema_window)?,
-                })
-            })
-            .await
+        let perp = Perp::new(self.perp, self.chain.provider());
+        let pool_id_call = perp.POOL_ID();
+        let pool_key_call = perp.poolKey();
+        let ema_window_call = perp.EMA_WINDOW();
+        let (pool_id, pool_key, ema_window) = tokio::try_join!(
+            pool_id_call.call(),
+            pool_key_call.call(),
+            ema_window_call.call(),
+        )?;
+        let tick_spacing = i24_to_i32(pool_key.tickSpacing);
+        if tick_spacing <= 0 {
+            return Err(ValidationError::InvalidConfig {
+                reason: format!("invalid tick spacing {tick_spacing}"),
+            }
+            .into());
+        }
+        let immutables = BookImmutables {
+            pool_id,
+            tick_spacing,
+            ema_window: ema_window_secs(ema_window)?,
+        };
+
+        self.chain
+            .immutables()
+            .lock()
+            .unwrap()
+            .insert(self.perp, immutables);
+        Ok(immutables)
     }
 
     /// The contract's mark at `block`, as `PerpLogic.accrue` sets it: the
@@ -181,7 +177,7 @@ impl PerpClient {
         views: MarkViews,
     ) -> Result<U256> {
         let beacon = registered_module(views.beacon, "IBeacon")?;
-        let index = IBeacon::new(beacon, &self.provider)
+        let index = IBeacon::new(beacon, self.chain.provider())
             .index()
             .block(BlockId::hash(block.hash))
             .call()
@@ -204,7 +200,7 @@ impl PerpClient {
     /// Read the contract's mark: the deployed fair price
     /// ([`fair_price_x96`]) of the pool price, the beacon index and the
     /// EMAs advanced to the block, pinned to one lagged block (see
-    /// [`SNAPSHOT_BLOCK_LAG`]).
+    /// [`SNAPSHOT_BLOCK_LAG`](crate::constants::SNAPSHOT_BLOCK_LAG)).
     ///
     /// This is the price every health check, `valPnl` and utilization
     /// accrual uses, and the mark [`Self::get_maker_equities`] prices at.
@@ -216,9 +212,10 @@ impl PerpClient {
     /// [`ContractError::BlockUnavailable`] when the pinned header is missing
     /// from the serving replica.
     pub async fn get_fair_price(&self) -> Result<FairPrice> {
-        let (block, block_id) = self.lagged_snapshot_block().await?;
-        let perp = Perp::new(self.deployments.perp, &self.provider);
+        let (block, block_id) = self.chain.lagged_snapshot_block().await?;
+        let perp = Perp::new(self.perp, self.chain.provider());
         let (modules, pool_state, stored_emas, rates, ema_window) = self
+            .chain
             .multicall_at(block_id)
             .add(perp.modules())
             .add(perp.poolState())
@@ -242,33 +239,6 @@ impl PerpClient {
         Ok(FairPrice { block, price_x96 })
     }
 
-    /// Resolve the lagged, reorg-safe block that snapshot reads pin to.
-    ///
-    /// Lagging [`SNAPSHOT_BLOCK_LAG`] blocks behind the head keeps every
-    /// replica of a load-balanced endpoint able to serve the pinned state;
-    /// a replica that still misses the header is a failed read
-    /// ([`ContractError::BlockUnavailable`]), never a silent degrade.
-    pub(super) async fn lagged_snapshot_block(&self) -> Result<(BlockContext, BlockId)> {
-        let number = self
-            .provider
-            .get_block_number()
-            .await?
-            .saturating_sub(SNAPSHOT_BLOCK_LAG);
-        let block = self
-            .provider
-            .get_block_by_number(number.into())
-            .await?
-            .ok_or(ContractError::BlockUnavailable { number })?;
-        Ok((
-            BlockContext {
-                number: block.header.number,
-                hash: block.header.hash,
-                timestamp: block.header.timestamp,
-            },
-            BlockId::hash(block.header.hash),
-        ))
-    }
-
     /// Load an exact concentrated-liquidity snapshot at a lagged canonical
     /// block for the deployed Perp contract (`perpcity-contracts@4bbe554f`).
     ///
@@ -276,14 +246,15 @@ impl PerpClient {
     /// advances it with the contract's exact arithmetic, and evaluates the
     /// configured price-impact module. Every contract and PoolManager read is
     /// pinned to the returned block hash, resolved via the same
-    /// [`SNAPSHOT_BLOCK_LAG`] policy as the maker-equity reads.
+    /// [`SNAPSHOT_BLOCK_LAG`](crate::constants::SNAPSHOT_BLOCK_LAG) policy as the maker-equity reads.
     pub async fn load_taker_market_snapshot(&self) -> Result<TakerMarketSnapshot> {
-        let immutables = *self.book_immutables().await?;
-        let (block, block_id) = self.lagged_snapshot_block().await?;
-        let perp = Perp::new(self.deployments.perp, &self.provider);
+        let immutables = self.book_immutables().await?;
+        let (block, block_id) = self.chain.lagged_snapshot_block().await?;
+        let perp = Perp::new(self.perp, self.chain.provider());
         let stored_emas = self
-            .provider
-            .get_storage_at(self.deployments.perp, perp_emas_slot())
+            .chain
+            .provider()
+            .get_storage_at(self.perp, perp_emas_slot())
             .block_id(block_id)
             .await?;
         let pool_state_call = perp.poolState().block(block_id);
@@ -294,7 +265,7 @@ impl PerpClient {
             modules_call.call(),
             rates_call.call(),
         )?;
-        let index = IBeacon::new(modules.beacon, &self.provider)
+        let index = IBeacon::new(modules.beacon, self.chain.provider())
             .index()
             .block(block_id)
             .call()
@@ -311,7 +282,7 @@ impl PerpClient {
             block.timestamp,
             immutables.ema_window,
         )?;
-        let bounds = IPriceImpact::new(modules.priceImpact, &self.provider)
+        let bounds = IPriceImpact::new(modules.priceImpact, self.chain.provider())
             .sqrtPriceBounds(
                 state.ammPrice,
                 index,
@@ -344,14 +315,15 @@ impl PerpClient {
             pool_id,
             tick_spacing: spacing,
             ..
-        } = *self.book_immutables().await?;
+        } = self.book_immutables().await?;
 
         let min_word = MIN_TICK.div_euclid(spacing).div_euclid(256);
         let max_word = MAX_TICK.div_euclid(spacing).div_euclid(256);
         let bitmap_slots: Vec<B256> = (min_word..=max_word)
             .map(|word| B256::from(v4_tick_bitmap_slot(pool_id, word)))
             .collect();
-        let manager = IPoolManagerState::new(self.deployments.pool_manager, &self.provider);
+        let manager =
+            IPoolManagerState::new(self.chain.deployments().pool_manager, self.chain.provider());
         let bitmaps = manager
             .extsload_1(bitmap_slots)
             .block(block_id)
@@ -425,7 +397,7 @@ impl PerpClient {
     ///
     /// Uses the [`crate::hft::state_cache::StateCache`] for fees and bounds (60s TTL).
     pub async fn get_perp_config(&self) -> Result<PerpData> {
-        let perp = Perp::new(self.deployments.perp, &self.provider);
+        let perp = Perp::new(self.perp, self.chain.provider());
 
         let modules = perp.modules().call().await?;
         let pool_key = perp.poolKey().call().await?;
@@ -436,7 +408,7 @@ impl PerpClient {
         let bounds = self.get_or_fetch_bounds(modules.marginRatios).await?;
 
         Ok(PerpData {
-            perp: self.deployments.perp,
+            perp: self.perp,
             tick_spacing: i24_to_i32(pool_key.tickSpacing),
             mark,
             beacon: modules.beacon,
@@ -449,7 +421,7 @@ impl PerpClient {
     ///
     /// Lighter-weight than [`Self::get_perp_config`] — skips fees/bounds lookups.
     pub async fn get_perp_data(&self) -> Result<(Address, i32, f64)> {
-        let perp = Perp::new(self.deployments.perp, &self.provider);
+        let perp = Perp::new(self.perp, self.chain.provider());
         let modules = perp.modules().call().await?;
         let pool_key = perp.poolKey().call().await?;
         let pool_state = perp.poolState().call().await?;
@@ -463,7 +435,7 @@ impl PerpClient {
     /// Returns the raw contract position struct. Use [`crate::math::position`]
     /// functions to compute derived values (entry price, PnL, etc.).
     pub async fn get_position(&self, pos_id: U256) -> Result<Position> {
-        let perp = Perp::new(self.deployments.perp, &self.provider);
+        let perp = Perp::new(self.perp, self.chain.provider());
         let pos = perp.positions(pos_id).call().await?;
 
         // A non-existent or burned position decodes to an all-zero struct.
@@ -482,7 +454,7 @@ impl PerpClient {
     /// **Note:** This is O(n) in total positions ever minted. For high-throughput
     /// use cases, prefer the bot API's position endpoints instead.
     pub async fn get_positions_by_owner(&self, owner: Address) -> Result<Vec<U256>> {
-        let perp = Perp::new(self.deployments.perp, &self.provider);
+        let perp = Perp::new(self.perp, self.chain.provider());
         let next_pos_id: U256 = perp.nextPosId().call().await?;
 
         let total: u64 = next_pos_id
@@ -533,7 +505,7 @@ impl PerpClient {
 
         // Check cache
         {
-            let cache = self.state_cache.lock().unwrap();
+            let cache = self.chain.state_cache().lock().unwrap();
             if let Some(price) = cache.get_mark_price(&key, now_ts) {
                 tracing::trace!(price, "mark price cache hit");
                 return Ok(price);
@@ -541,7 +513,7 @@ impl PerpClient {
         }
 
         // Fetch from chain
-        let perp = Perp::new(self.deployments.perp, &self.provider);
+        let perp = Perp::new(self.perp, self.chain.provider());
         let pool_state = perp.poolState().call().await?;
         let price = price_x96_to_f64(pool_state.ammPrice)?;
 
@@ -549,33 +521,11 @@ impl PerpClient {
 
         // Update cache
         {
-            let mut cache = self.state_cache.lock().unwrap();
+            let mut cache = self.chain.state_cache().lock().unwrap();
             cache.put_mark_price(key, price, now_ts);
         }
 
         Ok(price)
-    }
-
-    /// Get the oracle index price from a beacon contract.
-    ///
-    /// The beacon address is available from `PerpData.beacon` (returned by
-    /// [`get_perp_config`](Self::get_perp_config)).
-    ///
-    /// Note: `index()` is a state-mutating function on-chain; this performs an
-    /// `eth_call` (simulation) and does not send a transaction.
-    pub async fn get_index_price(&self, beacon: Address) -> Result<f64> {
-        let contract = IBeacon::new(beacon, &self.provider);
-        let index_x96: U256 = contract.index().call().await?;
-
-        if index_x96.is_zero() {
-            return Err(ValidationError::InvalidPrice {
-                reason: "beacon returned zero index".into(),
-            }
-            .into());
-        }
-
-        let index = price_x96_to_f64(index_x96)?;
-        Ok(index)
     }
 
     /// Read the market's `IMarginRatios` module: the maker and taker
@@ -595,12 +545,12 @@ impl PerpClient {
     /// is the zero address; [`ContractError::BlockUnavailable`] when the
     /// pinned header is missing from the serving replica.
     pub async fn get_margin_ratios(&self) -> Result<MarginRatios> {
-        let (_, block_id) = self.lagged_snapshot_block().await?;
-        let perp = Perp::new(self.deployments.perp, &self.provider);
+        let (_, block_id) = self.chain.lagged_snapshot_block().await?;
+        let perp = Perp::new(self.perp, self.chain.provider());
         let modules = perp.modules().block(block_id).call().await?;
         let ratios = IMarginRatios::new(
             registered_module(modules.marginRatios, "IMarginRatios")?,
-            &self.provider,
+            self.chain.provider(),
         );
         let maker_call = ratios.makerMarginRatios().block(block_id);
         let taker_call = ratios.takerMarginRatios().block(block_id);
@@ -625,7 +575,7 @@ impl PerpClient {
     /// interest in atoms at a known block, next to the capacity it draws
     /// on, use [`Self::get_capacity`].
     pub async fn get_open_interest(&self) -> Result<OpenInterest> {
-        let perp = Perp::new(self.deployments.perp, &self.provider);
+        let perp = Perp::new(self.perp, self.chain.provider());
         let oi = perp.openInterest().call().await?;
 
         Ok(OpenInterest {
@@ -635,7 +585,7 @@ impl PerpClient {
     }
 
     /// Read the market's taker capacity and open interest, pinned to one
-    /// lagged block (see [`SNAPSHOT_BLOCK_LAG`]).
+    /// lagged block (see [`SNAPSHOT_BLOCK_LAG`](crate::constants::SNAPSHOT_BLOCK_LAG)).
     ///
     /// [`MarketCapacity`] derives each side's headroom (open interest a
     /// taker can still add) and utilization as the contract computes it.
@@ -645,9 +595,10 @@ impl PerpClient {
     /// [`ContractError::BlockUnavailable`] when the pinned header is missing
     /// from the serving replica.
     pub async fn get_capacity(&self) -> Result<MarketCapacity> {
-        let (block, block_id) = self.lagged_snapshot_block().await?;
-        let perp = Perp::new(self.deployments.perp, &self.provider);
+        let (block, block_id) = self.chain.lagged_snapshot_block().await?;
+        let perp = Perp::new(self.perp, self.chain.provider());
         let (capacity, oi) = self
+            .chain
             .multicall_at(block_id)
             .add(perp.capacity())
             .add(perp.openInterest())
@@ -673,14 +624,14 @@ impl PerpClient {
 
         // Check cache
         {
-            let cache = self.state_cache.lock().unwrap();
+            let cache = self.chain.state_cache().lock().unwrap();
             if let Some(rate) = cache.get_funding_rate(&key, now_ts) {
                 tracing::trace!(rate, "funding rate cache hit");
                 return Ok(rate);
             }
         }
 
-        let perp = Perp::new(self.deployments.perp, &self.provider);
+        let perp = Perp::new(self.perp, self.chain.provider());
         let rates = perp.rates().call().await?;
         let daily_rate = funding_per_day_to_f64(rates.fundingPerDay);
 
@@ -688,152 +639,11 @@ impl PerpClient {
 
         // Update cache
         {
-            let mut cache = self.state_cache.lock().unwrap();
+            let mut cache = self.chain.state_cache().lock().unwrap();
             cache.put_funding_rate(key, daily_rate, now_ts);
         }
 
         Ok(daily_rate)
-    }
-
-    /// Get the USDC balance of the signer's address.
-    ///
-    /// Uses the fast cache layer (2s TTL).
-    pub async fn get_usdc_balance(&self) -> Result<f64> {
-        let now_ts = now_secs();
-
-        // Check cache
-        {
-            let cache = self.state_cache.lock().unwrap();
-            if let Some(bal) = cache.get_usdc_balance(now_ts) {
-                tracing::trace!(balance = bal, "USDC balance cache hit");
-                return Ok(bal);
-            }
-        }
-
-        let usdc = IERC20::new(self.deployments.usdc, &self.provider);
-        let raw: U256 = usdc.balanceOf(self.address).call().await?;
-        let raw_i128 = i128::try_from(raw).map_err(|_| ValidationError::Overflow {
-            context: format!("USDC balance {} exceeds i128::MAX", raw),
-        })?;
-        let balance = scale_from_6dec(raw_i128);
-
-        tracing::debug!(balance, "USDC balance fetched");
-
-        // Update cache
-        {
-            let mut cache = self.state_cache.lock().unwrap();
-            cache.put_usdc_balance(balance, now_ts);
-        }
-
-        Ok(balance)
-    }
-
-    // ── Batch reads (via Multicall3) ──────────────────────────────────
-
-    /// Get the USDC and ETH balances of an address in a single RPC call.
-    ///
-    /// Uses Multicall3 to bundle a `balanceOf` (USDC) and `getEthBalance`
-    /// (native ETH) into one `eth_call`. The RPC provider charges 1 CU
-    /// regardless of how many sub-calls the multicall executes.
-    ///
-    /// Returns `(usdc_balance, eth_balance)` where USDC is in human units
-    /// (e.g. `100.0` = 100 USDC) and ETH is in wei.
-    pub async fn get_balances(&self, address: Address) -> Result<(f64, U256)> {
-        let results = self.get_balances_batch(&[address]).await?;
-        Ok(results.into_iter().next().unwrap())
-    }
-
-    /// Get the USDC and ETH balances for multiple addresses in a single RPC call.
-    ///
-    /// Uses Multicall3 to bundle N × `balanceOf` + N × `getEthBalance` into
-    /// one `eth_call`. For 10 addresses, this is 1 CU instead of 20.
-    ///
-    /// Returns a `Vec<(usdc_balance, eth_balance)>` in the same order as
-    /// the input addresses.
-    pub async fn get_balances_batch(&self, addresses: &[Address]) -> Result<Vec<(f64, U256)>> {
-        if addresses.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        let usdc_addr = self.deployments.usdc;
-        let n = addresses.len();
-
-        // Build sub-calls: N × USDC balanceOf + N × ETH getEthBalance
-        let mut calls = Vec::with_capacity(2 * n);
-
-        for &addr in addresses {
-            // USDC balanceOf(addr)
-            let calldata = IERC20::balanceOfCall { account: addr }.abi_encode();
-            calls.push(IMulticall3::Call3 {
-                target: usdc_addr,
-                allowFailure: false,
-                callData: calldata.into(),
-            });
-        }
-
-        for &addr in addresses {
-            // getEthBalance(addr) — Multicall3 built-in
-            let calldata = IMulticall3::getEthBalanceCall { addr }.abi_encode();
-            calls.push(IMulticall3::Call3 {
-                target: MULTICALL3,
-                allowFailure: false,
-                callData: calldata.into(),
-            });
-        }
-
-        let multicall = IMulticall3::new(MULTICALL3, &self.provider);
-        let results = multicall.aggregate3(calls).call().await?;
-
-        if results.len() != 2 * n {
-            return Err(ContractError::MulticallFailed {
-                reason: format!(
-                    "multicall returned {} results, expected {}",
-                    results.len(),
-                    2 * n
-                ),
-            }
-            .into());
-        }
-
-        let mut out = Vec::with_capacity(n);
-        for i in 0..n {
-            // Decode USDC balance (first N results)
-            let usdc_result = &results[i];
-            if !usdc_result.success {
-                return Err(ContractError::MulticallFailed {
-                    reason: format!("USDC balanceOf failed for address {}", addresses[i]),
-                }
-                .into());
-            }
-            let usdc_raw = U256::abi_decode(&usdc_result.returnData).map_err(|e| {
-                ValidationError::DecodeFailed {
-                    context: format!("failed to decode USDC balance: {e}"),
-                }
-            })?;
-            let usdc_i128 = i128::try_from(usdc_raw).map_err(|_| ValidationError::Overflow {
-                context: format!("USDC balance {} exceeds i128::MAX", usdc_raw),
-            })?;
-            let usdc = scale_from_6dec(usdc_i128);
-
-            // Decode ETH balance (last N results)
-            let eth_result = &results[n + i];
-            if !eth_result.success {
-                return Err(ContractError::MulticallFailed {
-                    reason: format!("getEthBalance failed for address {}", addresses[i]),
-                }
-                .into());
-            }
-            let eth = U256::abi_decode(&eth_result.returnData).map_err(|e| {
-                ValidationError::DecodeFailed {
-                    context: format!("failed to decode ETH balance: {e}"),
-                }
-            })?;
-
-            out.push((usdc, eth));
-        }
-
-        tracing::debug!(count = n, "batch balances fetched via multicall");
-        Ok(out)
     }
 
     /// Get perp config and live market data in a single multicall (plus the
@@ -851,8 +661,9 @@ impl PerpClient {
     /// multicall and the beacon read are separate calls, so a trade between
     /// them can put the index one block after the pool state.
     pub async fn get_perp_snapshot(&self) -> Result<(PerpData, PerpSnapshot)> {
-        let perp = Perp::new(self.deployments.perp, &self.provider);
+        let perp = Perp::new(self.perp, self.chain.provider());
         let (modules, pool_key, pool_state, rates, oi) = self
+            .chain
             .multicall_at(BlockId::latest())
             .add(perp.modules())
             .add(perp.poolKey())
@@ -871,14 +682,14 @@ impl PerpClient {
         };
 
         // Index price from the beacon (1 CU).
-        let index_price = self.get_index_price(modules.beacon).await?;
+        let index_price = self.chain.get_index_price(modules.beacon).await?;
 
         // Fees/bounds (from cache or chain).
         let fees = self.get_or_fetch_fees(modules.fees).await?;
         let bounds = self.get_or_fetch_bounds(modules.marginRatios).await?;
 
         let perp_data = PerpData {
-            perp: self.deployments.perp,
+            perp: self.perp,
             tick_spacing: i24_to_i32(pool_key.tickSpacing),
             mark,
             beacon: modules.beacon,
@@ -905,7 +716,7 @@ impl PerpClient {
         let key: [u8; 20] = fees_addr.into();
 
         let cached = {
-            let cache = self.state_cache.lock().unwrap();
+            let cache = self.chain.state_cache().lock().unwrap();
             cache.get_fees(&key, now_ts).cloned()
         };
 
@@ -913,7 +724,7 @@ impl PerpClient {
             Some(cached) => Ok(Fees::from(cached)),
             None => {
                 let fees = self.fetch_fees(fees_addr).await?;
-                let mut cache = self.state_cache.lock().unwrap();
+                let mut cache = self.chain.state_cache().lock().unwrap();
                 cache.put_fees(key, CachedFees::from(fees), now_ts);
                 Ok(fees)
             }
@@ -926,7 +737,7 @@ impl PerpClient {
         let key: [u8; 20] = ratios_addr.into();
 
         let cached = {
-            let cache = self.state_cache.lock().unwrap();
+            let cache = self.chain.state_cache().lock().unwrap();
             cache.get_bounds(&key, now_ts).cloned()
         };
 
@@ -934,7 +745,7 @@ impl PerpClient {
             Some(cached) => Ok(Bounds::from(cached)),
             None => {
                 let bounds = self.fetch_bounds(ratios_addr).await?;
-                let mut cache = self.state_cache.lock().unwrap();
+                let mut cache = self.chain.state_cache().lock().unwrap();
                 cache.put_bounds(key, CachedBounds::from(bounds), now_ts);
                 Ok(bounds)
             }
@@ -943,7 +754,10 @@ impl PerpClient {
 
     /// Fetch fees from the `IFees` module contract.
     async fn fetch_fees(&self, fees_addr: Address) -> Result<Fees> {
-        let fees_contract = IFees::new(registered_module(fees_addr, "IFees")?, &self.provider);
+        let fees_contract = IFees::new(
+            registered_module(fees_addr, "IFees")?,
+            self.chain.provider(),
+        );
 
         let fee_result = fees_contract.fees().call().await?;
         let c_fee = u24_to_u32(fee_result.cFee);
@@ -965,7 +779,7 @@ impl PerpClient {
     async fn fetch_bounds(&self, ratios_addr: Address) -> Result<Bounds> {
         let ratios_contract = IMarginRatios::new(
             registered_module(ratios_addr, "IMarginRatios")?,
-            &self.provider,
+            self.chain.provider(),
         );
         let taker = ratios_contract.takerMarginRatios().call().await?;
 
@@ -977,5 +791,1033 @@ impl PerpClient {
             max_taker_leverage: margin_ratio_to_leverage(u24_to_u32(taker.init))?,
             liquidation_taker_ratio: u24_to_u32(taker.liq) as f64 / scale,
         })
+    }
+}
+
+impl PerpClient {
+    /// The signer's USDC balance:
+    /// [`ChainReader::balance_of`](super::ChainReader::balance_of) at this
+    /// client's address. Every other read is on [`Self::market`] or
+    /// [`Self::chain`]; this one stays here because only the client knows
+    /// whose balance "mine" is.
+    pub async fn get_usdc_balance(&self) -> Result<f64> {
+        self.chain().balance_of(self.address).await
+    }
+}
+
+/// Characterisation of the reads as deployed: each test pins what a read
+/// asks the chain, what it makes of the answer, and what it keeps.
+#[cfg(test)]
+mod tests {
+    use alloy::primitives::Uint;
+
+    use super::*;
+    use crate::client::mock::{self, BEACON, Rpc, e6, failed_row, ok_row, returns, x96};
+    use crate::constants::SNAPSHOT_BLOCK_LAG;
+    use crate::contracts::{IERC20, IMulticall3, Modules, Rates};
+    use crate::errors::PerpCityError;
+    use crate::math::capacity::Capacity;
+
+    /// The market's tick spacing in these tests.
+    const SPACING: i32 = 30;
+
+    /// The three `Perp` reads that open `get_perp_config` and
+    /// `get_perp_data`: modules, pool key, pool state.
+    fn perp_answers(rpc: &Rpc) {
+        rpc.call::<Perp::modulesCall>(&mock::modules());
+        rpc.call::<Perp::poolKeyCall>(&mock::pool_key(SPACING));
+        rpc.call::<Perp::poolStateCall>(&mock::pool_state(x96(3, 1)));
+    }
+
+    /// The `IFees` module's two reads, and what they decode to.
+    fn fees_answers(rpc: &Rpc) {
+        rpc.call::<IFees::feesCall>(&IFees::feesReturn {
+            cFee: e6(1_000),
+            insFee: e6(2_000),
+            lpFee: e6(3_000),
+        });
+        rpc.call::<IFees::liqFeeCall>(&e6(50_000));
+    }
+
+    fn expected_fees() -> Fees {
+        Fees {
+            creator_fee: 0.001,
+            insurance_fee: 0.002,
+            lp_fee: 0.003,
+            liquidation_fee: 0.05,
+        }
+    }
+
+    /// The `IMarginRatios` module's taker read, and what it decodes to.
+    fn bounds_answers(rpc: &Rpc) {
+        rpc.call::<IMarginRatios::takerMarginRatiosCall>(&IMarginRatios::takerMarginRatiosReturn {
+            init: e6(100_000),
+            liq: e6(50_000),
+            backstop: e6(20_000),
+        });
+    }
+
+    fn expected_bounds() -> Bounds {
+        Bounds {
+            min_margin: 5.0,
+            min_taker_leverage: 1.0,
+            max_taker_leverage: 10.0,
+            liquidation_taker_ratio: 0.05,
+        }
+    }
+
+    // ── Narrowing a helper to the reads it makes ──────────────────────
+
+    /// What a downstream read helper looks like once it says it only
+    /// reads: bounded on the market reader, not the client.
+    async fn mark_of(market: impl AsRef<MarketReader>) -> Result<f64> {
+        market.as_ref().get_mark_price().await
+    }
+
+    /// A helper narrowed to `impl AsRef<MarketReader>` still takes the
+    /// client a caller already holds, and takes the bare reader too — so
+    /// narrowing costs the caller nothing.
+    #[tokio::test]
+    async fn a_helper_narrowed_to_the_market_reader_accepts_the_client() {
+        let (client, rpc) = mock::client();
+        rpc.call::<Perp::poolStateCall>(&mock::pool_state(x96(3, 1)));
+
+        assert_eq!(mark_of(&client).await.unwrap(), 1.5);
+        assert_eq!(mark_of(client.market()).await.unwrap(), 1.5, "cache hit");
+        assert!(rpc.is_drained());
+    }
+
+    // ── Fast layer: mark, funding, balance ────────────────────────────
+
+    /// `poolState().ammPrice` is Q96; the read hands back the plain price.
+    #[tokio::test]
+    async fn mark_price_is_the_pool_price_scaled_from_x96() {
+        let (client, rpc) = mock::client();
+        rpc.call::<Perp::poolStateCall>(&mock::pool_state(x96(3, 1)));
+
+        assert_eq!(client.market().get_mark_price().await.unwrap(), 1.5);
+        assert!(rpc.is_drained(), "one eth_call");
+    }
+
+    /// The fast layer answers a second read without an RPC — the queue is
+    /// empty, so an RPC would fail — until the caller invalidates it.
+    #[tokio::test]
+    async fn mark_price_is_served_from_the_fast_layer_until_invalidated() {
+        let (client, rpc) = mock::client();
+        rpc.call::<Perp::poolStateCall>(&mock::pool_state(x96(3, 1)));
+        assert_eq!(client.market().get_mark_price().await.unwrap(), 1.5);
+
+        assert_eq!(
+            client.market().get_mark_price().await.unwrap(),
+            1.5,
+            "cache hit"
+        );
+
+        client.chain().invalidate_fast_cache();
+        rpc.call::<Perp::poolStateCall>(&mock::pool_state(x96(1, 0)));
+        assert_eq!(client.market().get_mark_price().await.unwrap(), 1.0);
+        assert!(rpc.is_drained());
+    }
+
+    /// `rates().fundingPerDay` is an `int88` scaled by 1e18; the sign is
+    /// the contract's (positive: longs pay shorts).
+    #[tokio::test]
+    async fn funding_rate_scales_the_per_day_rate_from_wad() {
+        let (client, rpc) = mock::client();
+        rpc.call::<Perp::ratesCall>(&mock::rates(-5_000_000_000_000_000));
+
+        assert_eq!(client.market().get_funding_rate().await.unwrap(), -0.005);
+        assert_eq!(
+            client.market().get_funding_rate().await.unwrap(),
+            -0.005,
+            "cache hit"
+        );
+
+        client.chain().invalidate_fast_cache();
+        rpc.call::<Perp::ratesCall>(&mock::rates(2_000_000_000_000_000));
+        assert_eq!(client.market().get_funding_rate().await.unwrap(), 0.002);
+        assert!(rpc.is_drained());
+    }
+
+    /// The signer's USDC balance, scaled from six decimals, and cached in
+    /// the fast layer alongside the prices.
+    #[tokio::test]
+    async fn usdc_balance_is_scaled_from_6dec_and_cached() {
+        let (client, rpc) = mock::client();
+        rpc.call::<IERC20::balanceOfCall>(&U256::from(1_234_567u32));
+
+        assert_eq!(client.get_usdc_balance().await.unwrap(), 1.234_567);
+        assert_eq!(
+            client.get_usdc_balance().await.unwrap(),
+            1.234_567,
+            "cache hit"
+        );
+
+        client.chain().invalidate_fast_cache();
+        rpc.call::<IERC20::balanceOfCall>(&U256::ZERO);
+        assert_eq!(client.get_usdc_balance().await.unwrap(), 0.0);
+        assert!(rpc.is_drained());
+    }
+
+    /// A balance beyond `i128` is an overflow, not a saturated number.
+    #[tokio::test]
+    async fn usdc_balance_beyond_i128_is_an_overflow() {
+        let (client, rpc) = mock::client();
+        rpc.call::<IERC20::balanceOfCall>(&(U256::from(i128::MAX) + U256::from(1u8)));
+
+        let err = client.get_usdc_balance().await.unwrap_err();
+        assert!(
+            matches!(
+                err,
+                PerpCityError::Validation(ValidationError::Overflow { .. })
+            ),
+            "{err}"
+        );
+    }
+
+    // ── Failure surface ───────────────────────────────────────────────
+
+    /// A transport failure inside a contract call surfaces as an ABI
+    /// error wrapping the transport error — which [`PerpCityError::
+    /// is_transient`] does not classify as transient. Recorded as is;
+    /// the classification is #115.
+    #[tokio::test]
+    async fn a_transport_failure_in_a_contract_call_is_an_abi_error() {
+        let (client, rpc) = mock::client();
+        rpc.fails("connection reset");
+
+        let err = client.market().get_mark_price().await.unwrap_err();
+        assert!(
+            matches!(
+                err,
+                PerpCityError::Abi(alloy::contract::Error::TransportError(_))
+            ),
+            "{err}"
+        );
+        assert!(!err.is_transient(), "not classified transient today");
+    }
+
+    // ── Uncached single reads ─────────────────────────────────────────
+
+    /// The beacon's `index()` is Q96, read by `eth_call` without sending.
+    #[tokio::test]
+    async fn index_price_is_the_beacon_index_scaled_from_x96() {
+        let (client, rpc) = mock::client();
+        rpc.call::<IBeacon::indexCall>(&x96(5, 2));
+
+        assert_eq!(client.chain().get_index_price(BEACON).await.unwrap(), 1.25);
+        assert!(rpc.is_drained(), "one eth_call, nothing cached");
+    }
+
+    /// A zero index is a beacon with nothing to say, not a price of zero.
+    #[tokio::test]
+    async fn a_zero_index_is_an_invalid_price() {
+        let (client, rpc) = mock::client();
+        rpc.call::<IBeacon::indexCall>(&U256::ZERO);
+
+        let err = client.chain().get_index_price(BEACON).await.unwrap_err();
+        assert!(
+            matches!(
+                err,
+                PerpCityError::Validation(ValidationError::InvalidPrice { .. })
+            ),
+            "{err}"
+        );
+    }
+
+    /// `positions(id)` comes back as the raw contract struct, untouched.
+    #[tokio::test]
+    async fn a_position_is_the_raw_contract_struct() {
+        let (client, rpc) = mock::client();
+        rpc.call::<Perp::positionsCall>(&mock::position(1_000_000));
+
+        let position = client.market().get_position(U256::from(7u8)).await.unwrap();
+        assert_eq!(position.margin, 1_000_000);
+        assert!(position.delta.is_zero());
+        assert!(rpc.is_drained());
+    }
+
+    /// The contract answers a burned or never-minted id with an all-zero
+    /// struct rather than a revert; the read names it.
+    #[tokio::test]
+    async fn an_all_zero_position_is_not_found() {
+        let (client, rpc) = mock::client();
+        rpc.call::<Perp::positionsCall>(&mock::position(0));
+
+        let Err(err) = client.market().get_position(U256::from(7u8)).await else {
+            panic!("an all-zero struct must not decode as a position");
+        };
+        assert!(
+            matches!(
+                err,
+                PerpCityError::Contract(ContractError::PositionNotFound { pos_id })
+                    if pos_id == U256::from(7u8)
+            ),
+            "{err}"
+        );
+    }
+
+    /// Open interest is stored in perp atoms (six decimals).
+    #[tokio::test]
+    async fn open_interest_scales_atoms_to_perp_tokens() {
+        let (client, rpc) = mock::client();
+        rpc.call::<Perp::openInterestCall>(&mock::open_interest(1_500_000, 250_000));
+
+        let oi = client.market().get_open_interest().await.unwrap();
+        assert_eq!((oi.long_oi, oi.short_oi), (1.5, 0.25));
+        assert!(rpc.is_drained());
+    }
+
+    // ── Positions by owner: an `ownerOf` walk ─────────────────────────
+
+    /// Every id below `nextPosId` is asked; a revert means a burned token
+    /// and is skipped, another owner's token is skipped, and the walk
+    /// costs one RPC per id plus the counter.
+    #[tokio::test]
+    async fn positions_by_owner_walks_every_minted_id_and_skips_burned_ones() {
+        let owner = Address::repeat_byte(0xaa);
+        let (client, rpc) = mock::client();
+        rpc.call::<Perp::nextPosIdCall>(&U256::from(4u8));
+        rpc.call::<Perp::ownerOfCall>(&owner);
+        rpc.call::<Perp::ownerOfCall>(&Address::repeat_byte(0xbb));
+        rpc.reverts(&[0xde, 0xad, 0xbe, 0xef]);
+
+        let owned = client.market().get_positions_by_owner(owner).await.unwrap();
+        assert_eq!(owned, vec![U256::from(1u8)]);
+        assert!(rpc.is_drained(), "nextPosId plus one ownerOf per id");
+    }
+
+    /// A node error with no revert data is a network condition, not a
+    /// burned token: the walk stops and says so instead of dropping ids.
+    #[tokio::test]
+    async fn positions_by_owner_propagates_a_transport_failure() {
+        let owner = Address::repeat_byte(0xaa);
+        let (client, rpc) = mock::client();
+        rpc.call::<Perp::nextPosIdCall>(&U256::from(3u8));
+        rpc.call::<Perp::ownerOfCall>(&owner);
+        rpc.fails("connection reset");
+
+        let err = client
+            .market()
+            .get_positions_by_owner(owner)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                PerpCityError::Abi(alloy::contract::Error::TransportError(_))
+            ),
+            "{err}"
+        );
+    }
+
+    /// Ids start at 1, so a `nextPosId` of 0 or 1 means nothing was ever
+    /// minted, and the counter is the only RPC.
+    #[tokio::test]
+    async fn positions_by_owner_of_an_empty_market_is_one_rpc() {
+        let owner = Address::repeat_byte(0xaa);
+        for next in [0u8, 1] {
+            let (client, rpc) = mock::client();
+            rpc.call::<Perp::nextPosIdCall>(&U256::from(next));
+
+            assert!(
+                client
+                    .market()
+                    .get_positions_by_owner(owner)
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+            assert!(rpc.is_drained());
+        }
+    }
+
+    /// The walk is bounded by `u64`; a counter beyond it is an overflow,
+    /// not a walk that never ends.
+    #[tokio::test]
+    async fn positions_by_owner_rejects_a_counter_beyond_u64() {
+        let (client, rpc) = mock::client();
+        rpc.call::<Perp::nextPosIdCall>(&(U256::from(u64::MAX) + U256::from(1u8)));
+
+        let err = client
+            .market()
+            .get_positions_by_owner(Address::repeat_byte(0xaa))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                PerpCityError::Validation(ValidationError::Overflow { .. })
+            ),
+            "{err}"
+        );
+    }
+
+    // ── Slow layer: fees and bounds, keyed by module address ──────────
+
+    /// The config read asks the `Perp` for its modules, then asks the
+    /// modules it named: six RPCs, decoded into fractions.
+    #[tokio::test]
+    async fn perp_config_reads_the_perp_then_the_modules_it_names() {
+        let (client, rpc) = mock::client();
+        perp_answers(&rpc);
+        fees_answers(&rpc);
+        bounds_answers(&rpc);
+
+        let config = client.market().get_perp_config().await.unwrap();
+        assert_eq!(
+            config,
+            PerpData {
+                perp: mock::PERP,
+                tick_spacing: SPACING,
+                mark: 1.5,
+                beacon: BEACON,
+                bounds: expected_bounds(),
+                fees: expected_fees(),
+            }
+        );
+        assert!(
+            rpc.is_drained(),
+            "modules, poolKey, poolState, fees, liqFee, takerMarginRatios"
+        );
+    }
+
+    /// Fees and bounds live in the slow layer: a second config read asks
+    /// only the `Perp`, `invalidate_fast_cache` leaves them in place, and
+    /// `invalidate_all_cache` is what evicts them.
+    #[tokio::test]
+    async fn fees_and_bounds_survive_a_fast_invalidation_but_not_a_full_one() {
+        let (client, rpc) = mock::client();
+        perp_answers(&rpc);
+        fees_answers(&rpc);
+        bounds_answers(&rpc);
+        let first = client.market().get_perp_config().await.unwrap();
+
+        perp_answers(&rpc);
+        assert_eq!(client.market().get_perp_config().await.unwrap(), first);
+        assert!(rpc.is_drained(), "the modules were not asked again");
+
+        client.chain().invalidate_fast_cache();
+        perp_answers(&rpc);
+        assert_eq!(client.market().get_perp_config().await.unwrap(), first);
+        assert!(rpc.is_drained(), "the slow layer is untouched");
+
+        client.chain().invalidate_all_cache();
+        perp_answers(&rpc);
+        fees_answers(&rpc);
+        bounds_answers(&rpc);
+        assert_eq!(client.market().get_perp_config().await.unwrap(), first);
+        assert!(rpc.is_drained(), "evicted: the modules are asked again");
+    }
+
+    /// A zero module address is rejected by name before it is called, so
+    /// no RPC goes to the zero address.
+    #[tokio::test]
+    async fn an_unregistered_module_is_named_before_it_is_asked() {
+        let (client, rpc) = mock::client();
+        rpc.call::<Perp::modulesCall>(&Modules {
+            fees: Address::ZERO,
+            ..mock::modules()
+        });
+        rpc.call::<Perp::poolKeyCall>(&mock::pool_key(SPACING));
+        rpc.call::<Perp::poolStateCall>(&mock::pool_state(x96(3, 1)));
+
+        let err = client.market().get_perp_config().await.unwrap_err();
+        assert!(
+            matches!(
+                err,
+                PerpCityError::Contract(ContractError::ModuleNotRegistered { ref module })
+                    if module == "IFees"
+            ),
+            "{err}"
+        );
+        assert!(
+            rpc.is_drained(),
+            "the perp was read; the fees module was not"
+        );
+    }
+
+    /// The lighter read stops at the `Perp`: beacon, spacing, mark.
+    #[tokio::test]
+    async fn perp_data_stops_at_the_perp() {
+        let (client, rpc) = mock::client();
+        perp_answers(&rpc);
+
+        assert_eq!(
+            client.market().get_perp_data().await.unwrap(),
+            (BEACON, SPACING, 1.5)
+        );
+        assert!(rpc.is_drained());
+    }
+
+    // ── Pinned reads: head minus the lag ──────────────────────────────
+
+    /// Both triples come back as fractions. The two reads share one ABI
+    /// shape, so distinct values are what pin their order.
+    #[tokio::test]
+    async fn margin_ratios_decode_both_triples_as_fractions() {
+        let (client, rpc) = mock::client();
+        rpc.quantity(100);
+        rpc.block(100 - SNAPSHOT_BLOCK_LAG, 1_700_000_000);
+        rpc.call::<Perp::modulesCall>(&mock::modules());
+        rpc.call::<IMarginRatios::makerMarginRatiosCall>(&IMarginRatios::makerMarginRatiosReturn {
+            init: e6(1_000_000),
+            liq: e6(900_000),
+            backstop: e6(800_000),
+        });
+        rpc.call::<IMarginRatios::takerMarginRatiosCall>(&IMarginRatios::takerMarginRatiosReturn {
+            init: e6(100_000),
+            liq: e6(50_000),
+            backstop: e6(20_000),
+        });
+
+        let ratios = client.market().get_margin_ratios().await.unwrap();
+        assert_eq!(
+            (
+                ratios.maker.init,
+                ratios.maker.liquidation,
+                ratios.maker.backstop
+            ),
+            (1.0, 0.9, 0.8)
+        );
+        assert_eq!(
+            (
+                ratios.taker.init,
+                ratios.taker.liquidation,
+                ratios.taker.backstop
+            ),
+            (0.1, 0.05, 0.02)
+        );
+        assert!(
+            rpc.is_drained(),
+            "blockNumber, block, modules, maker, taker"
+        );
+    }
+
+    /// The pinned block is the head less the lag, and a replica that has
+    /// no header for it is a failed read that names the block — and is
+    /// transient, since the replica will catch up.
+    #[tokio::test]
+    async fn a_missing_lagged_header_is_block_unavailable_at_head_minus_lag() {
+        let (client, rpc) = mock::client();
+        rpc.quantity(100);
+        rpc.no_block();
+
+        let err = client.market().get_margin_ratios().await.unwrap_err();
+        assert!(
+            matches!(
+                err,
+                PerpCityError::Contract(ContractError::BlockUnavailable { number })
+                    if number == 100 - SNAPSHOT_BLOCK_LAG
+            ),
+            "{err}"
+        );
+        assert!(err.is_transient());
+        assert!(
+            rpc.is_drained(),
+            "nothing is read at a block that is missing"
+        );
+    }
+
+    /// A market with no ratios module fails after the modules read, not
+    /// with an opaque decode error from the zero address.
+    #[tokio::test]
+    async fn margin_ratios_without_a_module_fail_after_the_modules_read() {
+        let (client, rpc) = mock::client();
+        rpc.quantity(100);
+        rpc.block(100 - SNAPSHOT_BLOCK_LAG, 1_700_000_000);
+        rpc.call::<Perp::modulesCall>(&Modules {
+            marginRatios: Address::ZERO,
+            ..mock::modules()
+        });
+
+        let err = client.market().get_margin_ratios().await.unwrap_err();
+        assert!(
+            matches!(
+                err,
+                PerpCityError::Contract(ContractError::ModuleNotRegistered { ref module })
+                    if module == "IMarginRatios"
+            ),
+            "{err}"
+        );
+        assert!(rpc.is_drained());
+    }
+
+    // ── Multicall reads ───────────────────────────────────────────────
+
+    /// N addresses cost one RPC: N `balanceOf` rows then N `getEthBalance`
+    /// rows, paired back up in input order.
+    #[tokio::test]
+    async fn balances_batch_bundles_usdc_then_eth_into_one_multicall() {
+        let holders = [Address::repeat_byte(0xa1), Address::repeat_byte(0xa2)];
+        let (client, rpc) = mock::client();
+        rpc.aggregate3(vec![
+            ok_row(returns::<IERC20::balanceOfCall>(&U256::from(1_000_000u32))),
+            ok_row(returns::<IERC20::balanceOfCall>(&U256::from(2_500_000u32))),
+            ok_row(returns::<IMulticall3::getEthBalanceCall>(&U256::from(5u8))),
+            ok_row(returns::<IMulticall3::getEthBalanceCall>(&U256::ZERO)),
+        ]);
+
+        let balances = client.chain().get_balances_batch(&holders).await.unwrap();
+        assert_eq!(balances, vec![(1.0, U256::from(5u8)), (2.5, U256::ZERO)]);
+        assert!(rpc.is_drained(), "one eth_call for four sub-calls");
+    }
+
+    /// No addresses, no RPC.
+    #[tokio::test]
+    async fn balances_batch_of_nobody_makes_no_rpc() {
+        let (client, rpc) = mock::client();
+
+        assert!(
+            client
+                .chain()
+                .get_balances_batch(&[])
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(rpc.is_drained());
+    }
+
+    /// A multicall that answers with the wrong number of rows, or a row
+    /// that reverted, is a multicall failure rather than a partial answer.
+    #[tokio::test]
+    async fn a_short_or_reverted_balance_row_is_a_multicall_failure() {
+        let holders = [Address::repeat_byte(0xa1), Address::repeat_byte(0xa2)];
+        let usdc = || ok_row(returns::<IERC20::balanceOfCall>(&U256::ZERO));
+        let eth = || ok_row(returns::<IMulticall3::getEthBalanceCall>(&U256::ZERO));
+
+        let (client, rpc) = mock::client();
+        rpc.aggregate3(vec![usdc(), usdc(), eth()]);
+        let err = client
+            .chain()
+            .get_balances_batch(&holders)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                PerpCityError::Contract(ContractError::MulticallFailed { .. })
+            ),
+            "short: {err}"
+        );
+
+        rpc.aggregate3(vec![usdc(), failed_row(), eth(), eth()]);
+        let err = client
+            .chain()
+            .get_balances_batch(&holders)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                PerpCityError::Contract(ContractError::MulticallFailed { .. })
+            ),
+            "reverted row: {err}"
+        );
+        assert!(rpc.is_drained());
+    }
+
+    /// Capacity and open interest are read in one batch at the lagged
+    /// block, and the result carries that block.
+    #[tokio::test]
+    async fn capacity_carries_the_lagged_block_it_was_read_at() {
+        let (client, rpc) = mock::client();
+        rpc.quantity(100);
+        let hash = rpc.block(100 - SNAPSHOT_BLOCK_LAG, 1_700_000_000);
+        rpc.aggregate(
+            100 - SNAPSHOT_BLOCK_LAG,
+            [
+                returns::<Perp::capacityCall>(&mock::capacity(10, 20)),
+                returns::<Perp::openInterestCall>(&mock::open_interest(3, 4)),
+            ],
+        );
+
+        assert_eq!(
+            client.market().get_capacity().await.unwrap(),
+            MarketCapacity {
+                block: BlockContext {
+                    number: 100 - SNAPSHOT_BLOCK_LAG,
+                    hash,
+                    timestamp: 1_700_000_000,
+                },
+                capacity: Capacity {
+                    long_atoms: 10,
+                    short_atoms: 20,
+                },
+                long_open_interest_atoms: 3,
+                short_open_interest_atoms: 4,
+            }
+        );
+        assert!(rpc.is_drained(), "blockNumber, block, one multicall");
+    }
+
+    /// The snapshot is one multicall for the `Perp`'s five views, one
+    /// beacon read, and the slow layer — which a second snapshot skips.
+    #[tokio::test]
+    async fn perp_snapshot_is_one_multicall_plus_the_beacon_and_the_slow_layer() {
+        let perp_views = || {
+            [
+                returns::<Perp::modulesCall>(&mock::modules()),
+                returns::<Perp::poolKeyCall>(&mock::pool_key(SPACING)),
+                returns::<Perp::poolStateCall>(&mock::pool_state(x96(3, 1))),
+                returns::<Perp::ratesCall>(&mock::rates(-5_000_000_000_000_000)),
+                returns::<Perp::openInterestCall>(&mock::open_interest(1_500_000, 250_000)),
+            ]
+        };
+        let (client, rpc) = mock::client();
+        rpc.aggregate(100, perp_views());
+        rpc.call::<IBeacon::indexCall>(&x96(5, 2));
+        fees_answers(&rpc);
+        bounds_answers(&rpc);
+
+        let (data, snapshot) = client.market().get_perp_snapshot().await.unwrap();
+        assert_eq!(
+            data,
+            PerpData {
+                perp: mock::PERP,
+                tick_spacing: SPACING,
+                mark: 1.5,
+                beacon: BEACON,
+                bounds: expected_bounds(),
+                fees: expected_fees(),
+            }
+        );
+        assert_eq!(
+            snapshot,
+            PerpSnapshot {
+                mark_price: 1.5,
+                index_price: 1.25,
+                funding_rate_daily: -0.005,
+                open_interest: OpenInterest {
+                    long_oi: 1.5,
+                    short_oi: 0.25,
+                },
+            }
+        );
+        assert!(rpc.is_drained(), "multicall, index, fees, liqFee, ratios");
+
+        rpc.aggregate(101, perp_views());
+        rpc.call::<IBeacon::indexCall>(&x96(5, 2));
+        assert_eq!(
+            client.market().get_perp_snapshot().await.unwrap(),
+            (data, snapshot)
+        );
+        assert!(rpc.is_drained(), "fees and bounds came from the slow layer");
+    }
+
+    /// With pool, index and EMAs all equal and no time since the last
+    /// touch, the fair price is that price: the plumbing is pinned without
+    /// re-deriving the EMA math, which has its own tests.
+    #[tokio::test]
+    async fn fair_price_reads_the_mark_inputs_at_the_lagged_block() {
+        const TOUCHED_AT: u64 = 1_700_000_000;
+        let one = x96(1, 0);
+        let (client, rpc) = mock::client();
+        rpc.quantity(100);
+        let hash = rpc.block(100 - SNAPSHOT_BLOCK_LAG, TOUCHED_AT);
+        rpc.aggregate(
+            100 - SNAPSHOT_BLOCK_LAG,
+            [
+                returns::<Perp::modulesCall>(&mock::modules()),
+                returns::<Perp::poolStateCall>(&mock::pool_state(one)),
+                returns::<Perp::emasCall>(&mock::emas(one.to::<u128>(), one.to::<u128>())),
+                returns::<Perp::ratesCall>(&Rates {
+                    lastTouch: Uint::from(TOUCHED_AT),
+                    ..mock::rates(0)
+                }),
+                returns::<Perp::EMA_WINDOWCall>(&U256::from(3_600u32)),
+            ],
+        );
+        rpc.call::<IBeacon::indexCall>(&one);
+
+        assert_eq!(
+            client.market().get_fair_price().await.unwrap(),
+            FairPrice {
+                block: BlockContext {
+                    number: 100 - SNAPSHOT_BLOCK_LAG,
+                    hash,
+                    timestamp: TOUCHED_AT,
+                },
+                price_x96: one,
+            }
+        );
+        assert!(rpc.is_drained(), "blockNumber, block, multicall, index");
+    }
+
+    /// A perp with no beacon fails by name after the batch, before the
+    /// index read that would otherwise decode nothing from the zero
+    /// address.
+    #[tokio::test]
+    async fn fair_price_without_a_beacon_names_the_missing_interface() {
+        let one = x96(1, 0);
+        let (client, rpc) = mock::client();
+        rpc.quantity(100);
+        rpc.block(100 - SNAPSHOT_BLOCK_LAG, 1_700_000_000);
+        rpc.aggregate(
+            100 - SNAPSHOT_BLOCK_LAG,
+            [
+                returns::<Perp::modulesCall>(&Modules {
+                    beacon: Address::ZERO,
+                    ..mock::modules()
+                }),
+                returns::<Perp::poolStateCall>(&mock::pool_state(one)),
+                returns::<Perp::emasCall>(&mock::emas(0, 0)),
+                returns::<Perp::ratesCall>(&mock::rates(0)),
+                returns::<Perp::EMA_WINDOWCall>(&U256::from(3_600u32)),
+            ],
+        );
+
+        let err = client.market().get_fair_price().await.unwrap_err();
+        assert!(
+            matches!(
+                err,
+                PerpCityError::Contract(ContractError::ModuleNotRegistered { ref module })
+                    if module == "IBeacon"
+            ),
+            "{err}"
+        );
+        assert!(rpc.is_drained());
+    }
+
+    // ── The taker snapshot: immutables, pinned views, and the book ────
+
+    /// The pool's id, as `POOL_ID()` reports it.
+    const POOL_ID: B256 = B256::repeat_byte(0x99);
+    /// When the market was last touched, and the block time in these
+    /// tests, so the stored EMAs need no advancing.
+    const TOUCHED_AT: u64 = 1_700_000_000;
+    /// Bitmap words the book walk covers at this spacing:
+    /// `MIN_TICK.div_euclid(30) = -4606`, `.div_euclid(256) = -18`, up to
+    /// `4606.div_euclid(256) = 17` — 36 words, word `w` at offset `w + 18`.
+    const BITMAP_WORDS: usize = 36;
+
+    /// The three immutables the first snapshot reads, in `try_join!` order.
+    fn immutables_answers(rpc: &Rpc) {
+        rpc.call::<Perp::POOL_IDCall>(&POOL_ID);
+        rpc.call::<Perp::poolKeyCall>(&mock::pool_key(SPACING));
+        rpc.call::<Perp::EMA_WINDOWCall>(&U256::from(3_600u32));
+    }
+
+    /// Everything after the immutables: the lagged block, the stored
+    /// EMAs, the three pinned `Perp` views, the beacon, the impact bounds,
+    /// then the bitmap and — if any tick is set — the tick words. Pool,
+    /// index and EMAs are all 1.0; returns the pinned block's hash.
+    fn snapshot_answers(
+        rpc: &Rpc,
+        liquidity: u128,
+        bitmap: Vec<B256>,
+        tick_words: Option<Vec<B256>>,
+    ) -> B256 {
+        let one = x96(1, 0);
+        rpc.quantity(100);
+        let hash = rpc.block(100 - SNAPSHOT_BLOCK_LAG, TOUCHED_AT);
+        rpc.storage((one << 128) | one);
+        rpc.call::<Perp::poolStateCall>(&Perp::poolStateReturn {
+            sqrtPrice: Uint::from(1u8) << 96,
+            liquidity,
+            ..mock::pool_state(one)
+        });
+        rpc.call::<Perp::modulesCall>(&mock::modules());
+        rpc.call::<Perp::ratesCall>(&Rates {
+            lastTouch: Uint::from(TOUCHED_AT),
+            ..mock::rates(0)
+        });
+        rpc.call::<IBeacon::indexCall>(&one);
+        rpc.call::<IPriceImpact::sqrtPriceBoundsCall>(&IPriceImpact::sqrtPriceBoundsReturn {
+            sqrtMin: one >> 1,
+            sqrtMax: one << 1,
+        });
+        rpc.call::<IPoolManagerState::extsload_1Call>(&bitmap);
+        if let Some(words) = tick_words {
+            rpc.call::<IPoolManagerState::extsload_1Call>(&words);
+        }
+        hash
+    }
+
+    /// A bitmap with these `(offset, bit)`s set.
+    fn bitmap(set: &[(usize, usize)]) -> Vec<B256> {
+        let mut words = vec![U256::ZERO; BITMAP_WORDS];
+        for &(offset, bit) in set {
+            words[offset] |= U256::from(1u8) << bit;
+        }
+        words.into_iter().map(B256::from).collect()
+    }
+
+    /// A tick's storage word: `liquidityNet` in the high half,
+    /// `liquidityGross` in the low.
+    fn tick_word(gross: u128, net: i128) -> B256 {
+        B256::from((U256::from(net as u128) << 128) | U256::from(gross))
+    }
+
+    fn expected_snapshot(hash: B256, liquidity: u128) -> TakerMarketSnapshot {
+        let one = x96(1, 0);
+        TakerMarketSnapshot {
+            block: BlockContext {
+                number: 100 - SNAPSHOT_BLOCK_LAG,
+                hash,
+                timestamp: TOUCHED_AT,
+            },
+            sqrt_price_x96: one,
+            tick: 0,
+            liquidity,
+            ticks: BTreeMap::new(),
+            protocol_sqrt_min_x96: MIN_SWAP_SQRT_PRICE_X96,
+            protocol_sqrt_max_x96: MAX_SWAP_SQRT_PRICE_X96,
+            impact_sqrt_min_x96: one >> 1,
+            impact_sqrt_max_x96: one << 1,
+        }
+    }
+
+    /// An empty bitmap means no tick words are asked for, and the empty
+    /// book reconciles with a pool holding no liquidity.
+    #[tokio::test]
+    async fn taker_snapshot_of_an_empty_book_skips_the_tick_words() {
+        let (client, rpc) = mock::client();
+        immutables_answers(&rpc);
+        let hash = snapshot_answers(&rpc, 0, bitmap(&[]), None);
+
+        assert_eq!(
+            client.market().load_taker_market_snapshot().await.unwrap(),
+            expected_snapshot(hash, 0)
+        );
+        assert!(rpc.is_drained(), "twelve answers, none left over");
+    }
+
+    /// Set bits become ticks at `compressed * spacing`, their words are
+    /// read in bitmap order, and the net liquidity of every tick at or
+    /// below the pool's must add up to what the pool reports.
+    #[tokio::test]
+    async fn taker_snapshot_rebuilds_the_book_from_the_bitmap() {
+        const L: u128 = 1_000;
+        let (client, rpc) = mock::client();
+        immutables_answers(&rpc);
+        // Tick -60 is compressed -2: word -1 (offset 17), bit 254.
+        // Tick 60 is compressed 2: word 0 (offset 18), bit 2.
+        let hash = snapshot_answers(
+            &rpc,
+            L,
+            bitmap(&[(17, 254), (18, 2)]),
+            Some(vec![tick_word(L, L as i128), tick_word(L, -(L as i128))]),
+        );
+
+        let snapshot = client.market().load_taker_market_snapshot().await.unwrap();
+        assert_eq!(
+            snapshot,
+            TakerMarketSnapshot {
+                ticks: BTreeMap::from([
+                    (
+                        -60,
+                        TickLiquidity {
+                            gross: L,
+                            net: L as i128
+                        }
+                    ),
+                    (
+                        60,
+                        TickLiquidity {
+                            gross: L,
+                            net: -(L as i128)
+                        }
+                    ),
+                ]),
+                ..expected_snapshot(hash, L)
+            }
+        );
+        assert!(rpc.is_drained(), "thirteen answers");
+    }
+
+    /// A book whose ticks do not add up to the pool's active liquidity is
+    /// a wrong read, not a snapshot.
+    #[tokio::test]
+    async fn a_book_that_does_not_reconcile_with_the_pool_is_rejected() {
+        const L: u128 = 1_000;
+        let (client, rpc) = mock::client();
+        immutables_answers(&rpc);
+        snapshot_answers(
+            &rpc,
+            L + 1,
+            bitmap(&[(17, 254), (18, 2)]),
+            Some(vec![tick_word(L, L as i128), tick_word(L, -(L as i128))]),
+        );
+
+        let err = client
+            .market()
+            .load_taker_market_snapshot()
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                PerpCityError::Contract(ContractError::MulticallFailed { ref reason })
+                    if reason.contains("liquidity mismatch")
+            ),
+            "{err}"
+        );
+    }
+
+    /// The immutables are read once per market: a second snapshot starts
+    /// at the lagged block.
+    #[tokio::test]
+    async fn book_immutables_are_read_once_per_market() {
+        let (client, rpc) = mock::client();
+        immutables_answers(&rpc);
+        snapshot_answers(&rpc, 0, bitmap(&[]), None);
+        client.market().load_taker_market_snapshot().await.unwrap();
+
+        let hash = snapshot_answers(&rpc, 0, bitmap(&[]), None);
+        assert_eq!(
+            client.market().load_taker_market_snapshot().await.unwrap(),
+            expected_snapshot(hash, 0)
+        );
+        assert!(rpc.is_drained(), "nine answers: no immutables");
+    }
+
+    /// The immutables belong to the market, not the reader: a second
+    /// reader of the same market over one chain reader inherits them, and
+    /// a reader of another market reads its own.
+    #[tokio::test]
+    async fn book_immutables_are_shared_per_market_across_readers() {
+        let (chain, rpc) = mock::chain();
+        let (first, second) = (chain.market(mock::PERP), chain.market(mock::PERP));
+        immutables_answers(&rpc);
+        snapshot_answers(&rpc, 0, bitmap(&[]), None);
+        first.load_taker_market_snapshot().await.unwrap();
+
+        snapshot_answers(&rpc, 0, bitmap(&[]), None);
+        second.load_taker_market_snapshot().await.unwrap();
+        assert!(rpc.is_drained(), "the second reader skipped the immutables");
+
+        let other = chain.market(Address::repeat_byte(0x12));
+        immutables_answers(&rpc);
+        snapshot_answers(&rpc, 0, bitmap(&[]), None);
+        other.load_taker_market_snapshot().await.unwrap();
+        assert!(rpc.is_drained(), "another market reads its own");
+    }
+
+    /// A non-positive spacing is rejected when the immutables are first
+    /// read, and the rejection is not cached: the next snapshot asks again.
+    #[tokio::test]
+    async fn a_non_positive_tick_spacing_is_rejected_and_asked_again() {
+        let (client, rpc) = mock::client();
+        for spacing in [0, -30] {
+            rpc.call::<Perp::POOL_IDCall>(&POOL_ID);
+            rpc.call::<Perp::poolKeyCall>(&mock::pool_key(spacing));
+            rpc.call::<Perp::EMA_WINDOWCall>(&U256::from(3_600u32));
+
+            let err = client
+                .market()
+                .load_taker_market_snapshot()
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(
+                    err,
+                    PerpCityError::Validation(ValidationError::InvalidConfig { .. })
+                ),
+                "{err}"
+            );
+            assert!(rpc.is_drained(), "three answers each time");
+        }
     }
 }

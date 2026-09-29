@@ -54,25 +54,29 @@ async fn main() -> Result<()> {
         .map(|s| s.parse::<Address>().expect("invalid PERPCITY_USDC address"))
         .unwrap_or(ARBITRUM_SEPOLIA_USDC);
 
-    let deployments = Deployments {
-        perp: env::var("PERPCITY_PERP")
-            .expect("set PERPCITY_PERP")
-            .parse::<Address>()
-            .unwrap(),
-        usdc,
-        pool_manager: ARBITRUM_SEPOLIA_POOL_MANAGER,
-    };
+    let perp: Address = env::var("PERPCITY_PERP")
+        .expect("set PERPCITY_PERP")
+        .parse()
+        .unwrap();
 
-    let client = PerpClient::new_arbitrum_sepolia(transport, signer, deployments)?;
+    let chain = ChainReader::new(
+        transport,
+        ChainDeployments {
+            usdc,
+            pool_manager: ARBITRUM_SEPOLIA_POOL_MANAGER,
+        },
+        ARBITRUM_SEPOLIA_CHAIN_ID,
+    );
+    let client = PerpClient::new(chain.market(perp), signer);
     println!("connected to {rpc_url}");
 
     // -- Warm caches --
     client.sync_nonce().await?;
-    client.refresh_gas().await?;
+    client.chain().refresh_gas().await?;
     client.ensure_approval(U256::MAX).await?;
 
     // -- Read market state --
-    let mark = client.get_mark_price().await?;
+    let mark = client.market().get_mark_price().await?;
     println!("mark price: {mark:.2}");
 
     // -- Calculate tick range (±5% around mark) --

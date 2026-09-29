@@ -50,25 +50,22 @@ async fn main() -> Result<()> {
             .build()?,
     )?;
 
-    let deployments = Deployments {
-        perp: env::var("PERPCITY_PERP")
-            .expect("set PERPCITY_PERP")
-            .parse::<Address>()
-            .unwrap(),
-        usdc: ARBITRUM_SEPOLIA_USDC,
-        pool_manager: ARBITRUM_SEPOLIA_POOL_MANAGER,
-    };
+    let perp: Address = env::var("PERPCITY_PERP")
+        .expect("set PERPCITY_PERP")
+        .parse()
+        .unwrap();
 
-    let client = PerpClient::new_arbitrum_sepolia(transport, signer, deployments)?;
+    let chain = ChainReader::arbitrum_sepolia(transport);
+    let client = PerpClient::new(chain.market(perp), signer);
     println!("connected to {rpc_url} as {}", client.address());
 
     // -- Warm caches --
     client.sync_nonce().await?;
-    client.refresh_gas().await?;
+    client.chain().refresh_gas().await?;
     client.ensure_approval(U256::MAX).await?;
 
     // -- Read market state, then open/close a tiny position via KMS signing --
-    let config = client.get_perp_config().await?;
+    let config = client.market().get_perp_config().await?;
     println!("mark price: {:.2}", config.mark);
 
     let open = client
@@ -83,7 +80,7 @@ async fn main() -> Result<()> {
         .await?;
     println!("opened position {} (signed via KMS)", open.pos_id);
 
-    client.refresh_gas().await?;
+    client.chain().refresh_gas().await?;
     let result = client
         .adjust_taker(
             &AdjustTakerParams {

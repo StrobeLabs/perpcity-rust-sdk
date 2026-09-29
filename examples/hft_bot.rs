@@ -42,8 +42,9 @@ use perpcity_sdk::hft::latency::LatencyTracker;
 use perpcity_sdk::hft::position_manager::{ManagedPosition, PositionManager, TriggerType};
 use perpcity_sdk::transport::config::Strategy;
 use perpcity_sdk::{
-    ARBITRUM_SEPOLIA_POOL_MANAGER, ARBITRUM_SEPOLIA_USDC, Deployments, HftTransport,
-    OpenTakerParams, PerpClient, TransportConfig, Urgency,
+    ARBITRUM_SEPOLIA_CHAIN_ID, ARBITRUM_SEPOLIA_POOL_MANAGER, ARBITRUM_SEPOLIA_USDC,
+    ChainDeployments, ChainReader, HftTransport, OpenTakerParams, PerpClient, TransportConfig,
+    Urgency,
 };
 
 /// Number of blocks to run the HFT loop before exiting.
@@ -71,22 +72,29 @@ fn load_signer() -> PrivateKeySigner {
         .expect("invalid private key hex")
 }
 
-fn load_deployments() -> Deployments {
-    let perp: Address = env::var("PERPCITY_PERP")
+fn load_perp() -> Address {
+    env::var("PERPCITY_PERP")
         .expect("PERPCITY_PERP must be set")
         .parse()
-        .expect("invalid PERPCITY_PERP address");
+        .expect("invalid PERPCITY_PERP address")
+}
 
+/// The chain reader, with the collateral token overridable for a
+/// deployment that settles in something other than the preset's USDC.
+fn load_chain(transport: HftTransport) -> ChainReader {
     let usdc = env::var("PERPCITY_USDC")
         .ok()
         .map(|s| s.parse::<Address>().expect("invalid PERPCITY_USDC address"))
         .unwrap_or(ARBITRUM_SEPOLIA_USDC);
 
-    Deployments {
-        perp,
-        usdc,
-        pool_manager: ARBITRUM_SEPOLIA_POOL_MANAGER,
-    }
+    ChainReader::new(
+        transport,
+        ChainDeployments {
+            usdc,
+            pool_manager: ARBITRUM_SEPOLIA_POOL_MANAGER,
+        },
+        ARBITRUM_SEPOLIA_CHAIN_ID,
+    )
 }
 
 /// Simple momentum signal: compare current price to a moving average.
@@ -111,10 +119,10 @@ fn momentum_signal(prices: &[f64]) -> Option<bool> {
 #[tokio::main]
 async fn main() -> perpcity_sdk::Result<()> {
     dotenvy::dotenv().ok();
-    let deployments = load_deployments();
+    let perp = load_perp();
     // The position manager keys positions by a [u8; 32]. There's no perp_id in
     // the new architecture, so derive the key from the Perp contract address.
-    let perp_key: [u8; 32] = deployments.perp.into_word().0;
+    let perp_key: [u8; 32] = perp.into_word().0;
 
     // ── 1. Multi-endpoint transport ─────────────────────────────────
     //
@@ -148,11 +156,11 @@ async fn main() -> perpcity_sdk::Result<()> {
     }
 
     // ── 2. Client setup ─────────────────────────────────────────────
-    let client = PerpClient::new_arbitrum_sepolia(transport, load_signer(), deployments)?;
+    let client = PerpClient::new(load_chain(transport).market(perp), load_signer());
     println!("\nHFT Bot — address: {}", client.address());
 
     client.sync_nonce().await?;
-    client.refresh_gas().await?;
+    client.chain().refresh_gas().await?;
     client.ensure_approval(U256::from(1_000_000_000u64)).await?;
 
     // ── 3. Initialize HFT infrastructure ────────────────────────────
@@ -164,7 +172,7 @@ async fn main() -> perpcity_sdk::Result<()> {
     let mut next_position_id_counter: u64 = 0;
 
     // Pre-fetch market config (cached for 60s in the slow layer)
-    let perp_config = client.get_perp_config().await?;
+    let perp_config = client.market().get_perp_config().await?;
     println!("\n=== Market Config ===");
     println!(
         "  Max leverage: {:.0}x",
@@ -182,18 +190,18 @@ async fn main() -> perpcity_sdk::Result<()> {
         let loop_start = Instant::now();
 
         // 4a. Refresh gas from latest block header
-        if let Err(e) = client.refresh_gas().await {
+        if let Err(e) = client.chain().refresh_gas().await {
             eprintln!("  [block {block}] gas refresh failed: {e}");
             tokio::time::sleep(Duration::from_secs(1)).await;
             continue;
         }
 
         // 4b. Invalidate fast cache (prices, funding, balance)
-        client.invalidate_fast_cache();
+        client.chain().invalidate_fast_cache();
 
         // 4c. Fetch mark price
         let price_start = Instant::now();
-        let mark = match client.get_mark_price().await {
+        let mark = match client.market().get_mark_price().await {
             Ok(p) => p,
             Err(e) => {
                 eprintln!("  [block {block}] price fetch failed: {e}");
@@ -318,7 +326,7 @@ async fn main() -> perpcity_sdk::Result<()> {
     println!("\n=== Shutting down ===");
     if pos_manager.count() > 0 {
         println!("Closing {} remaining positions...", pos_manager.count());
-        client.refresh_gas().await?;
+        client.chain().refresh_gas().await?;
 
         // Collect position IDs to close (avoid borrow issues)
         // In production you'd iterate open positions and close each one.
@@ -343,7 +351,13 @@ async fn main() -> perpcity_sdk::Result<()> {
 
     // ── 7. Print transport health ───────────────────────────────────
     println!("\n=== Final Transport Health ===");
-    for (i, status) in client.transport().health_status().iter().enumerate() {
+    for (i, status) in client
+        .chain()
+        .transport()
+        .health_status()
+        .iter()
+        .enumerate()
+    {
         println!(
             "  Endpoint {i}: state={:?}  avg_latency={:.1}ms  requests={}  errors={:.1}%",
             status.state,

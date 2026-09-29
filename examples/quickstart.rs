@@ -41,25 +41,30 @@ async fn main() -> Result<()> {
         .map(|s| s.parse::<Address>().expect("invalid PERPCITY_USDC address"))
         .unwrap_or(ARBITRUM_SEPOLIA_USDC);
 
-    let deployments = Deployments {
-        perp: env::var("PERPCITY_PERP")
-            .expect("set PERPCITY_PERP")
-            .parse::<Address>()
-            .unwrap(),
-        usdc,
-        pool_manager: ARBITRUM_SEPOLIA_POOL_MANAGER,
-    };
+    let perp: Address = env::var("PERPCITY_PERP")
+        .expect("set PERPCITY_PERP")
+        .parse()
+        .unwrap();
 
-    let client = PerpClient::new_arbitrum_sepolia(transport, signer, deployments)?;
+    // One chain reader per process; the client is a signer on one market.
+    let chain = ChainReader::new(
+        transport,
+        ChainDeployments {
+            usdc,
+            pool_manager: ARBITRUM_SEPOLIA_POOL_MANAGER,
+        },
+        ARBITRUM_SEPOLIA_CHAIN_ID,
+    );
+    let client = PerpClient::new(chain.market(perp), signer);
     println!("connected to {rpc_url}");
 
     // -- Warm caches --
     client.sync_nonce().await?;
-    client.refresh_gas().await?;
+    client.chain().refresh_gas().await?;
     client.ensure_approval(U256::MAX).await?;
 
     // -- Read market state --
-    let config = client.get_perp_config().await?;
+    let config = client.market().get_perp_config().await?;
     println!("mark price: {:.2}", config.mark);
 
     // -- Open a long with 10 USDC margin (perp_delta > 0 = long) --
@@ -77,7 +82,7 @@ async fn main() -> Result<()> {
     println!("opened position {pos_id}");
 
     // -- Close it by adjusting the taker with the opposing perp delta --
-    client.refresh_gas().await?;
+    client.chain().refresh_gas().await?;
     let result = client
         .adjust_taker(
             &AdjustTakerParams {

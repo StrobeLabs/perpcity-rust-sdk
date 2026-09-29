@@ -70,12 +70,15 @@ let transport = HftTransport::new(
         .build()?,
 )?;
 
-// 2. Client
-let client = PerpClient::new(transport, signer, deployments, 421614)?;
+// 2. One chain reader per process — every client and reader shares its caches
+let chain = ChainReader::arbitrum_sepolia(transport);
 
-// 3. Warm caches (required before first transaction)
+// 3. A signing client for one market
+let client = PerpClient::new(chain.market(perp), signer);
+
+// 4. Warm caches (required before first transaction)
 client.sync_nonce().await?;
-client.refresh_gas().await?;
+client.chain().refresh_gas().await?;
 client.ensure_approval(U256::MAX).await?;
 ```
 
@@ -108,20 +111,20 @@ Every write method takes an `Urgency` level that scales the EIP-1559 priority fe
 
 ```rust
 // Snapshot — config + live data in 2 multicalls (2 CUs instead of 5+)
-let (config, snapshot) = client.get_perp_snapshot().await?;
+let (config, snapshot) = client.market().get_perp_snapshot().await?;
 
 // Or individually
-let mark     = client.get_mark_price().await?;        // f64 price
-let funding  = client.get_funding_rate().await?;      // daily rate
-let oi       = client.get_open_interest().await?;      // long/short OI
-let cap      = client.get_capacity().await?;           // capacity + OI at one block
+let mark     = client.market().get_mark_price().await?;        // f64 price
+let funding  = client.market().get_funding_rate().await?;      // daily rate
+let oi       = client.market().get_open_interest().await?;      // long/short OI
+let cap      = client.market().get_capacity().await?;           // capacity + OI at one block
 let headroom = cap.headroom_atoms(Side::Short);        // short OI still openable, perp atoms
-let fair     = client.get_fair_price().await?;         // the contract's mark (X96)
-let position = client.get_position(open.pos_id).await?; // raw on-chain Position
+let fair     = client.market().get_fair_price().await?;         // the contract's mark (X96)
+let position = client.market().get_position(open.pos_id).await?; // raw on-chain Position
 
 // Batch balances — N addresses in 1 multicall (1 CU instead of 2N)
-let (usdc, eth) = client.get_balances(address).await?;
-let all = client.get_balances_batch(&addresses).await?;
+let (usdc, eth) = client.chain().get_balances(address).await?;
+let all = client.chain().get_balances_batch(&addresses).await?;
 ```
 
 ### Maker Equity and Liquidations
@@ -161,7 +164,7 @@ Three conventions to know:
   what-if pricing at a caller-chosen X96 mark over the same pinned state.
 
 ```rust
-for outcome in client.get_maker_equities(&pos_ids).await? {
+for outcome in client.market().get_maker_equities(&pos_ids).await? {
     if let MakerEquityKind::Computed(b) = outcome.kind {
         println!(
             "pos {}: equity {:.6} (accrued {:+.6})",
@@ -257,22 +260,18 @@ All math functions are pure, `O(1)`, and ported faithfully from PerpCity's Solid
 
 ## Configuration
 
-### Deployments
+### Chains and markets
 
-The `Deployments` struct holds contract addresses. For Arbitrum Sepolia:
+A `ChainReader` holds what every market on a chain shares — the transport, the collateral token, the pool manager, and the caches — and hands out a `MarketReader` per `Perp` contract. `ChainReader::arbitrum` and `ChainReader::arbitrum_sepolia` fill in the canonical addresses and chain id:
 
 ```rust
 let perp: Address = std::env::var("PERPCITY_PERP")?.parse()?;
 
-let deployments = Deployments {
-    perp,
-    usdc: ARBITRUM_SEPOLIA_USDC, // 0xBEF280BefeE2Cb28c20D1E4Cc1da999B4DA0f1fD (PerpCity test USDC, not Circle's)
-};
-
-let client = PerpClient::new_arbitrum_sepolia(transport, signer, deployments)?;
+let chain = ChainReader::arbitrum_sepolia(transport); // test USDC 0xBEF280Be…, not Circle's
+let client = PerpClient::new(chain.market(perp), signer);
 ```
 
-For Arbitrum One (mainnet), use `PerpClient::new_arbitrum()` which sets chain ID 42161, and pass `ARBITRUM_USDC` — canonical Circle USDC on Arbitrum One (`0xaf88d065e77c8cC2239327C5EDb3A432268e5831`) — in `Deployments`.
+For Arbitrum One, `ChainReader::arbitrum(transport)` uses canonical Circle USDC (`0xaf88d065e77c8cC2239327C5EDb3A432268e5831`) and chain id 42161. For any other collateral token or chain, build the reader with `ChainReader::new(transport, ChainDeployments { usdc, pool_manager }, chain_id)`. Reads need no signer: `chain.market(perp)` on its own answers every market read, and one chain reader serves any number of markets and clients.
 
 ### Release Profile
 

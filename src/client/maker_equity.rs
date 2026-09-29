@@ -11,7 +11,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::future::IntoFuture;
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
 
 use alloy::eips::BlockId;
 use alloy::primitives::{Address, B256, I256, U256};
@@ -35,8 +34,9 @@ use crate::storage::{
     v4_tick_fee_growth_outside1_slot,
 };
 
+use super::market::MarketReader;
 use super::queries::{MarkViews, multicall_error};
-use super::{PerpClient, i24_to_i32, u24_to_u32};
+use super::{i24_to_i32, u24_to_u32};
 
 /// Concurrency bound for the `eth_getStorageAt` fallback when the endpoint
 /// does not serve `eth_getProof`.
@@ -54,14 +54,14 @@ type TickFundingRead = std::result::Result<TickFunding, Arc<TransportError>>;
 
 /// Maximum position ids per RPC batch inside a maker-equity read.
 ///
-/// [`PerpClient::get_maker_equities`] chunks larger inputs internally at
+/// [`MarketReader::get_maker_equities`] chunks larger inputs internally at
 /// this size (every chunk still pins to the one shared block), keeping
 /// each row multicall and slot read inside RPC response-size and calldata
 /// limits. Exposed so callers sizing their own sweeps can align with it.
 pub const MAX_MAKER_EQUITY_BATCH: usize = 500;
 
 /// The batch outcome for one requested position id: every id passed to
-/// [`PerpClient::get_maker_equities`] comes back as exactly one of these,
+/// [`MarketReader::get_maker_equities`] comes back as exactly one of these,
 /// in input order.
 #[derive(Debug)]
 pub struct MakerEquityOutcome {
@@ -331,7 +331,7 @@ fn split_maker_rows(
     (pending, failed)
 }
 
-impl PerpClient {
+impl MarketReader {
     /// Read chain state and compute the settle-preview equity for each maker
     /// position in `pos_ids`, all pinned to one block.
     ///
@@ -486,7 +486,7 @@ impl PerpClient {
         block_id: BlockId,
         pos_ids: &[U256],
     ) -> Result<Vec<MakerEquityKind>> {
-        let perp_addr = self.deployments.perp;
+        let perp_addr = self.perp;
 
         // ── Position rows: one multicall, degrading per position ────
         let row_call = |calldata: Vec<u8>| IMulticall3::Call3 {
@@ -503,7 +503,7 @@ impl PerpClient {
                 ]
             })
             .collect();
-        let multicall = IMulticall3::new(MULTICALL3, &self.provider);
+        let multicall = IMulticall3::new(MULTICALL3, self.chain.provider());
         let rows = multicall.aggregate3(calls).block(block_id).call().await?;
         if rows.len() != 2 * pos_ids.len() {
             return Err(ContractError::MulticallFailed {
@@ -558,14 +558,15 @@ impl PerpClient {
         // the block timestamp would silently skew the accrual replay (a
         // slow clock reads as zero accrual). A settlement preview must not
         // quietly degrade — fail and let the caller retry.
-        let (block, block_id) = self.lagged_snapshot_block().await?;
+        let (block, block_id) = self.chain.lagged_snapshot_block().await?;
 
         // ── Market-wide state: one multicall, all-or-nothing ────────
         // (without a consistent market snapshot no position's equity can
         // be computed.)
-        let perp = Perp::new(self.deployments.perp, &self.provider);
+        let perp = Perp::new(self.perp, self.chain.provider());
         let (cumls, rates, pool_state, capacity, oi, pool_id, modules, stored_emas, ema_window) =
-            self.multicall_at(block_id)
+            self.chain
+                .multicall_at(block_id)
                 .add(perp.cumulatives())
                 .add(perp.rates())
                 .add(perp.poolState())
@@ -643,7 +644,7 @@ impl PerpClient {
             return Ok(Vec::new());
         }
 
-        let (layout, slots) = FeeGrowthLayout::new(pool_id, self.deployments.perp, pending);
+        let (layout, slots) = FeeGrowthLayout::new(pool_id, self.perp, pending);
         // Positions share band boundaries (a maker ladder reuses each inner
         // tick twice), so read each distinct tick's two funding words once.
         let ticks: BTreeSet<i32> = pending
@@ -652,7 +653,8 @@ impl PerpClient {
             .collect();
         // The tick set comes from the rows, not from the fee-growth words,
         // and both reads pin to the same block: run them concurrently.
-        let manager = IPoolManagerState::new(self.deployments.pool_manager, &self.provider);
+        let manager =
+            IPoolManagerState::new(self.chain.deployments().pool_manager, self.chain.provider());
         let fee_growth = async {
             manager
                 .extsload_1(slots)
@@ -751,14 +753,15 @@ impl PerpClient {
         block_id: BlockId,
         ticks: &BTreeSet<i32>,
     ) -> Result<BTreeMap<i32, TickFundingRead>> {
-        let perp_addr = self.deployments.perp;
-        if !self.get_proof_unsupported.load(Ordering::Relaxed) {
+        let perp_addr = self.perp;
+        if self.chain.transport().supports_get_proof() {
             let keys: Vec<B256> = ticks
                 .iter()
                 .flat_map(|&tick| perp_tick_funding_slots(tick).map(B256::from))
                 .collect();
             match self
-                .provider
+                .chain
+                .provider()
                 .get_proof(perp_addr, keys)
                 .block_id(block_id)
                 .await
@@ -807,7 +810,7 @@ impl PerpClient {
                         "eth_getProof unsupported by endpoint; \
                          falling back to eth_getStorageAt"
                     );
-                    self.get_proof_unsupported.store(true, Ordering::Relaxed);
+                    self.chain.transport().note_get_proof_unsupported();
                 }
                 // Any other failure (rate limit, timeout, a replica hiccup)
                 // falls back for this read only — the per-tick reads give
@@ -833,7 +836,8 @@ impl PerpClient {
             .map(|&tick| {
                 let [slot_opp, slot_div] = perp_tick_funding_slots(tick);
                 let read = |slot: U256| {
-                    self.provider
+                    self.chain
+                        .provider()
                         .get_storage_at(perp_addr, slot)
                         .block_id(block_id)
                         .into_future()
@@ -872,6 +876,7 @@ impl PerpClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::client::mock::{self, Rpc};
     use crate::contracts::{Capacity, MakerFunding};
     use alloy::primitives::I256;
 
@@ -1152,29 +1157,122 @@ mod tests {
     fn get_maker_equities_future_is_send() {
         fn require_send<T: Send>(_: &T) {}
 
-        let transport = crate::transport::provider::HftTransport::new(
-            crate::transport::config::TransportConfig::builder()
-                .shared_endpoint("http://127.0.0.1:1")
-                .build()
-                .unwrap(),
-        )
-        .unwrap();
-        let signer = alloy::signers::local::PrivateKeySigner::random();
-        let client = PerpClient::new(
-            transport,
-            signer,
-            crate::types::Deployments {
-                perp: Address::repeat_byte(1),
-                usdc: Address::repeat_byte(2),
-                pool_manager: Address::repeat_byte(3),
-            },
-            super::super::ARBITRUM_SEPOLIA_CHAIN_ID,
-        )
-        .unwrap();
+        let (client, _rpc) = mock::client();
 
         let ids = [U256::ONE];
-        let fut = client.get_maker_equities(&ids);
+        let fut = client.market().get_maker_equities(&ids);
         require_send(&fut);
         drop(fut);
+    }
+
+    // ── Tick funding: the eth_getProof latch and the storage fallback ─
+
+    /// One tick's two funding words, as the storage fallback reads them:
+    /// the opposite cumulative, then the one over sqrt price.
+    fn funding_words(rpc: &Rpc, opp: u8, div: u8) {
+        rpc.storage(U256::from(opp));
+        rpc.storage(U256::from(div));
+    }
+
+    /// An endpoint that answers `eth_getProof` with "method not found" is
+    /// remembered: the fallback serves that read, and the next read goes
+    /// straight to storage without probing again.
+    #[tokio::test]
+    async fn a_method_not_found_on_eth_getproof_latches_the_storage_fallback() {
+        let ticks = BTreeSet::from([60]);
+        let (client, rpc) = mock::client();
+        rpc.method_not_found();
+        funding_words(&rpc, 7, 9);
+
+        let funding = client
+            .market()
+            .get_tick_funding(BlockId::latest(), &ticks)
+            .await
+            .unwrap();
+        let read = funding[&60].as_ref().unwrap();
+        assert_eq!(read.cuml_funding_opp_x96, I256::from_raw(U256::from(7u8)));
+        assert_eq!(
+            read.cuml_funding_div_sqrt_p_opp_x96,
+            I256::from_raw(U256::from(9u8))
+        );
+        assert!(rpc.is_drained(), "the probe, then two storage reads");
+
+        funding_words(&rpc, 7, 9);
+        let funding = client
+            .market()
+            .get_tick_funding(BlockId::latest(), &ticks)
+            .await
+            .unwrap();
+        assert!(funding[&60].is_ok());
+        assert!(rpc.is_drained(), "latched: two storage reads and no probe");
+    }
+
+    /// Any other `eth_getProof` failure falls back for that read alone and
+    /// is not held against the next one, which probes again.
+    #[tokio::test]
+    async fn any_other_eth_getproof_failure_falls_back_without_latching() {
+        let ticks = BTreeSet::from([60]);
+        let (client, rpc) = mock::client();
+        for _ in 0..2 {
+            rpc.fails("rate limited");
+            funding_words(&rpc, 7, 9);
+
+            let funding = client
+                .market()
+                .get_tick_funding(BlockId::latest(), &ticks)
+                .await
+                .unwrap();
+            assert!(funding[&60].is_ok());
+            assert!(rpc.is_drained(), "probed again: three answers each time");
+        }
+    }
+
+    /// A tick whose storage read fails is reported failed on its own, with
+    /// the transport cause kept, while the other ticks' reads stand.
+    #[tokio::test]
+    async fn a_failed_tick_read_degrades_that_tick_alone() {
+        let ticks = BTreeSet::from([-60, 60]);
+        let (client, rpc) = mock::client();
+        rpc.method_not_found();
+        funding_words(&rpc, 7, 9);
+        rpc.storage(U256::from(7u8));
+        rpc.fails("replica dropped the read");
+
+        let funding = client
+            .market()
+            .get_tick_funding(BlockId::latest(), &ticks)
+            .await
+            .unwrap();
+        assert!(funding[&-60].is_ok());
+        assert!(funding[&60].is_err());
+        assert!(rpc.is_drained());
+    }
+
+    /// The latch belongs to the transport, not the client: a second client
+    /// over the same transport inherits what the first learned and goes
+    /// straight to storage, with no probe of its own.
+    #[tokio::test]
+    async fn the_latch_is_shared_by_every_client_over_one_transport() {
+        let ticks = BTreeSet::from([60]);
+        let transport = mock::transport();
+        let (first, first_rpc) = mock::client_sharing(transport.clone());
+        let (second, second_rpc) = mock::client_sharing(transport);
+
+        first_rpc.method_not_found();
+        funding_words(&first_rpc, 7, 9);
+        first
+            .market()
+            .get_tick_funding(BlockId::latest(), &ticks)
+            .await
+            .unwrap();
+
+        funding_words(&second_rpc, 7, 9);
+        let funding = second
+            .market()
+            .get_tick_funding(BlockId::latest(), &ticks)
+            .await
+            .unwrap();
+        assert!(funding[&60].is_ok());
+        assert!(second_rpc.is_drained(), "two storage reads and no probe");
     }
 }

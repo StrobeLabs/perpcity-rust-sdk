@@ -19,16 +19,13 @@ use std::fmt;
 use alloy::primitives::{Address, B256, U256};
 use serde::{Deserialize, Serialize};
 
-/// Deployed contract addresses for a PerpCity instance.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Deployments {
-    /// Perp contract address (one per market).
-    pub perp: Address,
-    /// USDC token address.
+/// The addresses every market on a chain shares.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChainDeployments {
+    /// The collateral token.
     pub usdc: Address,
-    /// Uniswap V4 `PoolManager` the market's pool lives in — one canonical
-    /// address per chain (see `ARBITRUM_POOL_MANAGER` /
-    /// `ARBITRUM_SEPOLIA_POOL_MANAGER`).
+    /// The Uniswap V4 `PoolManager` every market's pool lives in (see
+    /// `ARBITRUM_POOL_MANAGER` / `ARBITRUM_SEPOLIA_POOL_MANAGER`).
     pub pool_manager: Address,
 }
 
@@ -125,7 +122,7 @@ fn to_e6(ratio: f64) -> u32 {
 /// now on; an open position keeps the liquidation ratio stored on it at
 /// open (`positions(id).liqMarginRatio`, surfaced by
 /// [`MakerEquityBreakdown::liq_margin_ratio_e6`](crate::MakerEquityBreakdown::liq_margin_ratio_e6)).
-/// Read with [`PerpClient::get_margin_ratios`](crate::PerpClient::get_margin_ratios).
+/// Read with [`MarketReader::get_margin_ratios`](crate::MarketReader::get_margin_ratios).
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct MarginRatios {
     /// Maker (LP) thresholds.
@@ -181,7 +178,7 @@ pub struct OpenInterest {
 /// Live market data from a multicall snapshot.
 ///
 /// Pure market state — no static config. Returned alongside [`PerpData`]
-/// from [`PerpClient::get_perp_snapshot`](crate::PerpClient::get_perp_snapshot).
+/// from [`MarketReader::get_perp_snapshot`](crate::MarketReader::get_perp_snapshot).
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct PerpSnapshot {
     /// Pool (AMM spot) price in human-readable units — not a TWAP, and not
@@ -403,14 +400,13 @@ mod tests {
     }
 
     #[test]
-    fn deployments_serde_roundtrip() {
-        let deployments = Deployments {
-            perp: Address::ZERO,
+    fn chain_deployments_serde_roundtrip() {
+        let deployments = ChainDeployments {
             usdc: Address::ZERO,
             pool_manager: Address::ZERO,
         };
         let json = serde_json::to_string(&deployments).unwrap();
-        let recovered: Deployments = serde_json::from_str(&json).unwrap();
+        let recovered: ChainDeployments = serde_json::from_str(&json).unwrap();
         assert_eq!(deployments, recovered);
     }
 

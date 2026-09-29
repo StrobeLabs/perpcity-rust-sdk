@@ -1,7 +1,7 @@
 //! Write operations: open, close, adjust positions, transfers, approvals.
 
 use alloy::primitives::{Address, B256, Bytes, I256, U256};
-use alloy::sol_types::{SolCall, SolEvent};
+use alloy::sol_types::SolEvent;
 
 use crate::constants::{MAX_TICK, MIN_OPENING_MARGIN, MIN_TICK, TICK_SPACING};
 use crate::contracts::{IERC20, Perp};
@@ -15,6 +15,7 @@ use crate::types::{
     ExactAdjustTakerParams, ExactOpenTakerParams, OpenMakerParams, OpenResult, OpenTakerParams,
 };
 
+use super::market::{Book, validate_fee_recipient};
 use super::{MAX_APPROVAL, PerpClient, i32_to_i24};
 
 /// Extract the minted token ID from an ERC721 `Transfer(address(0), to, tokenId)` event.
@@ -63,54 +64,6 @@ fn parse_taker_swap(receipt: &alloy::rpc::types::TransactionReceipt) -> Option<(
         }
     }
     None
-}
-
-/// Which book, maker or taker, a liquidation targets. The two contract
-/// entry points are twins; only the encoded call differs.
-#[derive(Debug, Clone, Copy)]
-enum Book {
-    Maker,
-    Taker,
-}
-
-impl Book {
-    fn liquidation_calldata(self, pos_id: U256, fee_recipient: Address) -> Bytes {
-        match self {
-            Self::Maker => Perp::liquidateMakerCall {
-                posId: pos_id,
-                liquidationFeeRecipient: fee_recipient,
-            }
-            .abi_encode()
-            .into(),
-            Self::Taker => Perp::liquidateTakerCall {
-                posId: pos_id,
-                liquidationFeeRecipient: fee_recipient,
-            }
-            .abi_encode()
-            .into(),
-        }
-    }
-
-    fn label(self) -> &'static str {
-        match self {
-            Self::Maker => "maker",
-            Self::Taker => "taker",
-        }
-    }
-}
-
-/// Reject `Address::ZERO` as a liquidation fee recipient: the contract
-/// transfers the fee wherever it is told, so the zero address silently
-/// burns the caller's liquidation reward. Always a caller bug.
-fn validate_fee_recipient(fee_recipient: Address) -> std::result::Result<(), ValidationError> {
-    if fee_recipient == Address::ZERO {
-        return Err(ValidationError::InvalidConfig {
-            reason: "liquidation fee_recipient must not be the zero address \
-                     (the fee would be burned)"
-                .into(),
-        });
-    }
-    Ok(())
 }
 
 /// Scale and validate position margin against the protocol's opening minimum.
@@ -171,7 +124,7 @@ impl PerpClient {
             perpDelta: I256::try_from(params.perp_delta).expect("i128 fits I256"),
             amt1Limit: U256::from(params.amt1_limit),
         };
-        let contract = Perp::new(self.deployments.perp, &self.provider);
+        let contract = Perp::new(self.market.perp(), self.chain().provider());
 
         tracing::debug!(
             margin_atoms = params.margin,
@@ -182,7 +135,7 @@ impl PerpClient {
 
         let receipt = self
             .tx(
-                self.deployments.perp,
+                self.market.perp(),
                 contract.openTaker(wire_params).calldata().clone(),
             )
             .with_urgency(urgency)
@@ -245,11 +198,11 @@ impl PerpClient {
             "opening maker position"
         );
 
-        let contract = Perp::new(self.deployments.perp, &self.provider);
+        let contract = Perp::new(self.market.perp(), self.chain().provider());
         let calldata = contract.openMaker(wire_params).calldata().clone();
 
         let receipt = self
-            .tx(self.deployments.perp, calldata)
+            .tx(self.market.perp(), calldata)
             .with_urgency(urgency)
             .send()
             .await?;
@@ -298,7 +251,7 @@ impl PerpClient {
             perpDelta: I256::try_from(params.perp_delta).expect("i128 fits I256"),
             amt1Limit: U256::from(params.amt1_limit),
         };
-        let contract = Perp::new(self.deployments.perp, &self.provider);
+        let contract = Perp::new(self.market.perp(), self.chain().provider());
 
         tracing::debug!(
             pos_id = %params.pos_id,
@@ -310,7 +263,7 @@ impl PerpClient {
 
         let receipt = self
             .tx(
-                self.deployments.perp,
+                self.market.perp(),
                 contract.adjustTaker(wire_params).calldata().clone(),
             )
             .with_urgency(urgency)
@@ -393,11 +346,11 @@ impl PerpClient {
             "adjusting maker position"
         );
 
-        let contract = Perp::new(self.deployments.perp, &self.provider);
+        let contract = Perp::new(self.market.perp(), self.chain().provider());
         let calldata = contract.adjustMaker(wire_params).calldata().clone();
 
         let receipt = self
-            .tx(self.deployments.perp, calldata)
+            .tx(self.market.perp(), calldata)
             .with_urgency(urgency)
             .send()
             .await?;
@@ -481,7 +434,8 @@ impl PerpClient {
         pos_id: U256,
         fee_recipient: Address,
     ) -> Result<()> {
-        self.simulate_liquidation(Book::Maker, pos_id, fee_recipient)
+        self.market
+            .simulate_liquidate_maker(self.address, pos_id, fee_recipient)
             .await
     }
 
@@ -525,7 +479,8 @@ impl PerpClient {
         pos_id: U256,
         fee_recipient: Address,
     ) -> Result<()> {
-        self.simulate_liquidation(Book::Taker, pos_id, fee_recipient)
+        self.market
+            .simulate_liquidate_taker(self.address, pos_id, fee_recipient)
             .await
     }
 
@@ -545,27 +500,6 @@ impl PerpClient {
     ) -> Result<alloy::rpc::types::TransactionReceipt> {
         self.send_liquidation(Book::Taker, pos_id, fee_recipient, urgency)
             .await
-    }
-
-    /// Shared `eth_call` health probe behind the four public liquidation
-    /// methods: validates the fee recipient, encodes the book's call, and
-    /// preflights at the pinned [`GasLimits::LIQUIDATE`] cap.
-    async fn simulate_liquidation(
-        &self,
-        book: Book,
-        pos_id: U256,
-        fee_recipient: Address,
-    ) -> Result<()> {
-        validate_fee_recipient(fee_recipient)?;
-        let calldata = book.liquidation_calldata(pos_id, fee_recipient);
-        self.preflight_call(
-            self.deployments.perp,
-            &calldata,
-            0,
-            Some(GasLimits::LIQUIDATE),
-        )
-        .await?;
-        Ok(())
     }
 
     /// Shared send path behind the public liquidation methods: fixed
@@ -590,7 +524,7 @@ impl PerpClient {
         );
 
         let receipt = self
-            .tx(self.deployments.perp, calldata)
+            .tx(self.market.perp(), calldata)
             .with_gas_limit(GasLimits::LIQUIDATE)
             .with_urgency(urgency)
             .send()
@@ -608,9 +542,9 @@ impl PerpClient {
 
     /// Ensure USDC is approved for the Perp contract to spend.
     pub async fn ensure_approval(&self, min_amount: U256) -> Result<Option<B256>> {
-        let usdc = IERC20::new(self.deployments.usdc, &self.provider);
+        let usdc = IERC20::new(self.chain().deployments().usdc, self.chain().provider());
         let allowance: U256 = usdc
-            .allowance(self.address, self.deployments.perp)
+            .allowance(self.address, self.market.perp())
             .call()
             .await?;
 
@@ -622,11 +556,14 @@ impl PerpClient {
         tracing::debug!(allowance = %allowance, min_amount = %min_amount, "approving USDC");
 
         let calldata = usdc
-            .approve(self.deployments.perp, MAX_APPROVAL)
+            .approve(self.market.perp(), MAX_APPROVAL)
             .calldata()
             .clone();
 
-        let receipt = self.tx(self.deployments.usdc, calldata).send().await?;
+        let receipt = self
+            .tx(self.chain().deployments().usdc, calldata)
+            .send()
+            .await?;
 
         tracing::debug!(tx_hash = %receipt.transaction_hash, "USDC approved");
         Ok(Some(receipt.transaction_hash))
@@ -656,11 +593,11 @@ impl PerpClient {
     /// Transfer USDC to an address. `amount` is in human units (e.g. 100.0 = 100 USDC).
     pub async fn transfer_usdc(&self, to: Address, amount: f64, urgency: Urgency) -> Result<B256> {
         tracing::debug!(%to, amount, ?urgency, "transferring USDC");
-        let usdc = IERC20::new(self.deployments.usdc, &self.provider);
+        let usdc = IERC20::new(self.chain().deployments().usdc, self.chain().provider());
         let scaled = U256::from(scale_to_6dec(amount)? as u128);
         let calldata = usdc.transfer(to, scaled).calldata().clone();
         let receipt = self
-            .tx(self.deployments.usdc, calldata)
+            .tx(self.chain().deployments().usdc, calldata)
             .with_urgency(urgency)
             .send()
             .await?;
@@ -705,7 +642,7 @@ impl PerpClient {
             .into());
         }
 
-        let contract = Perp::new(self.deployments.perp, &self.provider);
+        let contract = Perp::new(self.market.perp(), self.chain().provider());
         let owner = contract.ownerOf(pos_id).call().await?;
         if owner != from {
             return Err(ContractError::PositionNotOwned {
@@ -721,7 +658,7 @@ impl PerpClient {
             .calldata()
             .clone();
         let receipt = self
-            .tx(self.deployments.perp, calldata)
+            .tx(self.market.perp(), calldata)
             .with_urgency(urgency)
             .send()
             .await?;

@@ -20,3 +20,6 @@ Thumbs.db
 NOTES.md
 orchestrate.py
 race.sh
+
+# Local design notes, not committed
+/docs

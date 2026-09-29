@@ -13,10 +13,7 @@
 //! # Example
 //!
 //! ```rust,no_run
-//! use perpcity_sdk::{
-//!     ARBITRUM_POOL_MANAGER, ARBITRUM_USDC, Deployments, HftTransport, PerpClient,
-//!     TransportConfig,
-//! };
+//! use perpcity_sdk::{ChainReader, HftTransport, PerpClient, TransportConfig};
 //! use alloy::primitives::address;
 //! use alloy::signers::local::PrivateKeySigner;
 //!
@@ -27,44 +24,43 @@
 //!         .build()?
 //! )?;
 //!
+//! // One chain reader per process; every client and reader shares it.
+//! let chain = ChainReader::arbitrum(transport);
+//! let perp = address!("0000000000000000000000000000000000000001"); // the market's Perp contract
+//!
 //! let signer: PrivateKeySigner = "your_private_key_hex".parse().unwrap();
-//!
-//! let deployments = Deployments {
-//!     perp: address!("0000000000000000000000000000000000000001"), // the market's Perp contract
-//!     usdc: ARBITRUM_USDC,
-//!     pool_manager: ARBITRUM_POOL_MANAGER,
-//! };
-//!
-//! let client = PerpClient::new_arbitrum(transport, signer, deployments)?;
+//! let client = PerpClient::new(chain.market(perp), signer);
 //! # Ok(())
 //! # }
 //! ```
 
+mod chain;
 mod maker_equity;
+mod market;
+#[cfg(test)]
+mod mock;
 mod queries;
 mod trades;
 mod transactions;
 
+pub use chain::ChainReader;
 pub use maker_equity::{MAX_MAKER_EQUITY_BATCH, MakerEquityKind, MakerEquityOutcome};
+pub use market::MarketReader;
 pub use transactions::TxBuilder;
 
 use std::sync::Mutex;
-use std::sync::atomic::AtomicBool;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use alloy::network::{Ethereum, EthereumWallet, TxSigner};
+use alloy::network::{EthereumWallet, TxSigner};
 use alloy::primitives::{Address, Signature, U256, address};
-use alloy::providers::{Provider, RootProvider};
-use alloy::rpc::client::RpcClient;
-use alloy::transports::BoxTransport;
+use alloy::providers::Provider;
 
 use crate::constants::SCALE_1E6;
-use crate::errors::{Result, TransactionError};
-use crate::hft::gas::{FeeCache, GasLimitCache};
+use crate::errors::Result;
+use crate::hft::gas::GasLimitCache;
 use crate::hft::pipeline::{PipelineConfig, TxPipeline};
-use crate::hft::state_cache::{CachedBounds, CachedFees, StateCache, StateCacheConfig};
-use crate::transport::provider::HftTransport;
-use crate::types::{Bounds, Deployments, Fees};
+use crate::hft::state_cache::{CachedBounds, CachedFees};
+use crate::types::{Bounds, Fees};
 
 // ── Network constants ──────────────────────────────────────────────────
 
@@ -169,126 +165,79 @@ impl From<Bounds> for CachedBounds {
 
 // ── PerpClient ───────────────────────────────────────────────────────
 
-/// High-level client for the PerpCity protocol.
+/// High-level client for the PerpCity protocol: one signer on one market.
 ///
-/// Combines transport, signing, transaction pipeline, state caching, and
-/// contract bindings into one ergonomic API. All write operations go
-/// through the [`TxPipeline`] for zero-RPC-on-hot-path nonce/gas resolution.
-/// Read operations use the [`StateCache`] to avoid redundant RPC calls.
+/// A client is a [`ChainReader`] — provider, transport, history, the
+/// base-fee and state caches, shared by every client over it — plus a
+/// signer, the market it trades, and the transaction pipeline. All write
+/// operations go through the [`TxPipeline`] for zero-RPC-on-hot-path
+/// nonce/gas resolution; reads go through the reader's caches.
 pub struct PerpClient {
-    /// Alloy provider wired to HftTransport (multi-endpoint, health-aware).
-    provider: RootProvider<Ethereum>,
-    /// The underlying transport (kept for health diagnostics).
-    transport: HftTransport,
+    /// The market this client trades. The chain — provider, transport,
+    /// history, the base-fee and state caches, shared by every reader and
+    /// client over it — is reached through it.
+    market: MarketReader,
     /// Wallet for signing transactions.
     wallet: EthereumWallet,
     /// The signer's address.
     address: Address,
-    /// Deployed contract addresses.
-    deployments: Deployments,
-    /// Chain ID for transaction building.
-    chain_id: u64,
     /// Transaction pipeline (nonce + gas). Mutex for interior mutability.
     pipeline: Mutex<TxPipeline>,
-    /// Gas fee cache, updated from block headers.
-    fee_cache: Mutex<FeeCache>,
     /// Cached gas estimates from `eth_estimateGas`, keyed by function selector.
     gas_limit_cache: Mutex<GasLimitCache>,
-    /// Multi-layer state cache for on-chain reads.
-    state_cache: Mutex<StateCache>,
-    /// Deployment-fixed Perp/pool values (pool id, tick spacing, EMA window),
-    /// fetched once on first taker book load.
-    book_immutables: tokio::sync::OnceCell<queries::BookImmutables>,
-    /// Latched when the endpoint rejects `eth_getProof` as an unknown
-    /// method, so maker-equity reads skip the probe and go straight to the
-    /// `eth_getStorageAt` fallback.
-    ///
-    /// The latch is client-global, not per endpoint: one replica of a
-    /// multi-endpoint transport answering "method not found" switches every
-    /// later read to the fallback, which every endpoint serves. Accepted —
-    /// a per-endpoint capability record in `transport::health` is future
-    /// work.
-    get_proof_unsupported: AtomicBool,
 }
 
 impl std::fmt::Debug for PerpClient {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PerpClient")
             .field("address", &self.address)
-            .field("chain_id", &self.chain_id)
-            .field("deployments", &self.deployments)
+            .field("market", &self.market)
             .finish_non_exhaustive()
     }
 }
 
+/// A read helper bounded on `impl AsRef<MarketReader>` or
+/// `impl AsRef<ChainReader>` takes a client where it takes a reader, so a
+/// `&PerpClient` argument keeps compiling when the helper narrows to the
+/// reads it makes. Use the bound, not `as_ref()` bare: with two targets,
+/// the bare call is ambiguous.
+impl AsRef<MarketReader> for PerpClient {
+    fn as_ref(&self) -> &MarketReader {
+        &self.market
+    }
+}
+
+impl AsRef<ChainReader> for PerpClient {
+    fn as_ref(&self) -> &ChainReader {
+        self.market.chain()
+    }
+}
+
 impl PerpClient {
-    /// Create a new PerpClient.
+    /// A signing client for `market`.
     ///
-    /// - `transport`: Multi-endpoint RPC transport (from [`crate::TransportConfig`])
-    /// - `signer`: Any transaction signer — a local
-    ///   [`PrivateKeySigner`](alloy::signers::local::PrivateKeySigner), an AWS KMS
-    ///   [`AwsSigner`](https://docs.rs/alloy-signer-aws) (enable the `aws` feature),
-    ///   or any other [`TxSigner`] implementation
-    /// - `deployments`: Contract addresses for this PerpCity instance
-    /// - `chain_id`: Chain ID (42161 for Arbitrum One, 421614 for Arbitrum Sepolia)
+    /// `signer` is any transaction signer — a local
+    /// [`PrivateKeySigner`](alloy::signers::local::PrivateKeySigner), an
+    /// AWS KMS [`AwsSigner`](https://docs.rs/alloy-signer-aws) (enable the
+    /// `aws` feature), or any other [`TxSigner`]. The market reader comes
+    /// from [`ChainReader::market`]; build one chain reader per process and
+    /// every client and reader over it shares its caches.
     ///
-    /// This does NOT make any network calls. Call [`Self::refresh_gas`] and
+    /// Makes no network calls. Call [`ChainReader::refresh_gas`] and
     /// [`Self::sync_nonce`] before submitting transactions.
-    pub fn new<S>(
-        transport: HftTransport,
-        signer: S,
-        deployments: Deployments,
-        chain_id: u64,
-    ) -> Result<Self>
+    pub fn new<S>(market: MarketReader, signer: S) -> Self
     where
         S: TxSigner<Signature> + Send + Sync + 'static,
     {
         let address = TxSigner::address(&signer);
-        let wallet = EthereumWallet::from(signer);
-
-        let boxed = BoxTransport::new(transport.clone());
-        let rpc_client = RpcClient::new(boxed, false);
-        let provider = RootProvider::<Ethereum>::new(rpc_client);
-
-        Ok(Self {
-            provider,
-            transport,
-            wallet,
+        Self {
+            market,
+            wallet: EthereumWallet::from(signer),
             address,
-            deployments,
-            chain_id,
             // Pipeline starts at nonce 0; call sync_nonce() before first tx
             pipeline: Mutex::new(TxPipeline::new(0, PipelineConfig::default())),
-            fee_cache: Mutex::new(FeeCache::new(DEFAULT_GAS_TTL_MS, DEFAULT_PRIORITY_FEE)),
             gas_limit_cache: Mutex::new(GasLimitCache::new()),
-            state_cache: Mutex::new(StateCache::new(StateCacheConfig::default())),
-            book_immutables: tokio::sync::OnceCell::new(),
-            get_proof_unsupported: AtomicBool::new(false),
-        })
-    }
-
-    /// Create a client pre-configured for Arbitrum One (mainnet).
-    pub fn new_arbitrum<S>(
-        transport: HftTransport,
-        signer: S,
-        deployments: Deployments,
-    ) -> Result<Self>
-    where
-        S: TxSigner<Signature> + Send + Sync + 'static,
-    {
-        Self::new(transport, signer, deployments, ARBITRUM_CHAIN_ID)
-    }
-
-    /// Create a client pre-configured for Arbitrum Sepolia (testnet).
-    pub fn new_arbitrum_sepolia<S>(
-        transport: HftTransport,
-        signer: S,
-        deployments: Deployments,
-    ) -> Result<Self>
-    where
-        S: TxSigner<Signature> + Send + Sync + 'static,
-    {
-        Self::new(transport, signer, deployments, ARBITRUM_SEPOLIA_CHAIN_ID)
+        }
     }
 
     // ── Initialization ───────────────────────────────────────────────
@@ -298,68 +247,15 @@ impl PerpClient {
     /// Must be called before the first transaction. After this, the
     /// pipeline manages nonces locally (zero RPC per transaction).
     pub async fn sync_nonce(&self) -> Result<()> {
-        let count = self.provider.get_transaction_count(self.address).await?;
+        let count = self
+            .chain()
+            .provider()
+            .get_transaction_count(self.address)
+            .await?;
         let mut pipeline = self.pipeline.lock().unwrap();
         *pipeline = TxPipeline::new(count, PipelineConfig::default());
         tracing::debug!(nonce = count, address = %self.address, "nonce synced");
         Ok(())
-    }
-
-    /// Refresh the gas cache from the latest block header.
-    ///
-    /// Fetches the latest block directly in a single RPC call and extracts
-    /// the base fee for EIP-1559 fee computation. Should be called
-    /// periodically (every 1-2 seconds) or from a `newHeads`
-    /// subscription callback.
-    pub async fn refresh_gas(&self) -> Result<()> {
-        let header = self
-            .provider
-            .get_block_by_number(alloy::eips::BlockNumberOrTag::Latest)
-            .await?
-            .ok_or_else(|| TransactionError::GasUnavailable {
-                reason: "latest block not found".into(),
-            })?;
-
-        let base_fee =
-            header
-                .header
-                .base_fee_per_gas
-                .ok_or_else(|| TransactionError::GasUnavailable {
-                    reason: "block has no base fee (pre-EIP-1559?)".into(),
-                })?;
-
-        let now = now_ms();
-        self.fee_cache.lock().unwrap().update(base_fee, now);
-        tracing::debug!(base_fee, "gas cache refreshed");
-        Ok(())
-    }
-
-    /// Inject a base fee from an external source (e.g. a shared poller).
-    ///
-    /// Updates the gas cache as if `refresh_gas` had been called, but without
-    /// any RPC calls. The cache TTL is reset to now.
-    pub fn set_base_fee(&self, base_fee: u64) {
-        let now = now_ms();
-        self.fee_cache.lock().unwrap().update(base_fee, now);
-        tracing::debug!(base_fee, "base fee injected");
-    }
-
-    /// Return the current cached base fee, if any (ignores TTL).
-    ///
-    /// Intended for reading the base fee after `refresh_gas` in order to
-    /// distribute it to other clients via [`set_base_fee`](Self::set_base_fee).
-    pub fn base_fee(&self) -> Option<u64> {
-        self.fee_cache.lock().unwrap().base_fee()
-    }
-
-    /// Override the gas cache TTL (milliseconds).
-    ///
-    /// When gas is managed externally via [`set_base_fee`](Self::set_base_fee),
-    /// the default 2s TTL may be too tight. Set this to match the poller's
-    /// cadence with headroom (e.g. `tick_secs * 2 * 1000`).
-    pub fn set_gas_ttl(&self, ttl_ms: u64) {
-        self.fee_cache.lock().unwrap().set_ttl(ttl_ms);
-        tracing::debug!(ttl_ms, "gas cache TTL updated");
     }
 
     // ── Accessors ────────────────────────────────────────────────────
@@ -369,44 +265,19 @@ impl PerpClient {
         self.address
     }
 
-    /// The deployed contract addresses.
-    pub fn deployments(&self) -> &Deployments {
-        &self.deployments
+    /// The chain reader this client's market is on.
+    pub fn chain(&self) -> &ChainReader {
+        self.market.chain()
     }
 
-    /// The underlying Alloy provider (for advanced queries).
-    pub fn provider(&self) -> &RootProvider<Ethereum> {
-        &self.provider
-    }
-
-    /// A [`History`](crate::history::History) handle over this client's
-    /// provider, for historical reads with the default lag policy.
-    pub fn history(&self) -> crate::history::History<&RootProvider<Ethereum>> {
-        crate::history::History::new(&self.provider)
+    /// The reader for the market this client trades.
+    pub fn market(&self) -> &MarketReader {
+        &self.market
     }
 
     /// The signing wallet (for building signed transactions outside the SDK).
     pub fn wallet(&self) -> &EthereumWallet {
         &self.wallet
-    }
-
-    /// The underlying HFT transport (for health diagnostics).
-    pub fn transport(&self) -> &HftTransport {
-        &self.transport
-    }
-
-    /// Invalidate the fast cache layer (prices, funding, balance).
-    ///
-    /// Call on new-block events to ensure fresh data.
-    pub fn invalidate_fast_cache(&self) {
-        let mut cache = self.state_cache.lock().unwrap();
-        cache.invalidate_fast_layer();
-    }
-
-    /// Invalidate all cached state.
-    pub fn invalidate_all_cache(&self) {
-        let mut cache = self.state_cache.lock().unwrap();
-        cache.invalidate_all();
     }
 
     /// Resolve a transaction (mined, reverted, or timed out).
@@ -474,7 +345,62 @@ fn now_secs() -> u64 {
 
 #[cfg(test)]
 mod tests {
+    use alloy::primitives::{B256, Bytes};
+    use alloy::rpc::types::{Filter, Log};
+
     use super::*;
+    use crate::client::mock;
+    use crate::history::test_support::{FakeNode, mined_log};
+
+    // ── The history handle ───────────────────────────────────────────
+
+    const EMITTER: Address = Address::repeat_byte(0xe1);
+    const TOPIC: B256 = B256::repeat_byte(0x70);
+
+    fn logs_every(step: u64, last: u64) -> Vec<Log> {
+        (0..=last)
+            .step_by(step as usize)
+            .map(|block| mined_log(EMITTER, TOPIC, Bytes::new(), block, 0))
+            .collect()
+    }
+
+    /// The client keeps one handle: what one scan learns about the
+    /// provider's `eth_getLogs` width, the next scan through the accessor
+    /// starts from, and the counters run across both.
+    #[tokio::test]
+    async fn history_is_one_handle_for_the_clients_lifetime() {
+        let cap = 10_000;
+        let node = FakeNode::new(logs_every(777, 120_000), cap);
+        let client = mock::client_over(node.provider());
+        let filter = Filter::new().address(EMITTER).event_signature(TOPIC);
+
+        client
+            .chain()
+            .history()
+            .logs(&filter, 0, Some(120_000))
+            .await
+            .unwrap();
+        let first = client.chain().history().stats();
+        let after_first = node.requests().len();
+        assert!(first.requests > 0);
+
+        client
+            .chain()
+            .history()
+            .logs(&filter, 120_001, Some(240_000))
+            .await
+            .unwrap();
+        let second = client.chain().history().stats();
+        assert!(
+            second.requests > first.requests,
+            "counters accumulate across calls to the accessor"
+        );
+        let (from, to) = node.requests()[after_first];
+        assert!(
+            to - from < cap,
+            "the second scan started at the learned width, not the full span"
+        );
+    }
 
     // ── Type conversion helpers ──────────────────────────────────────
 

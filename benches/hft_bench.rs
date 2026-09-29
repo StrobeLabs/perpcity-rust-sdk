@@ -13,7 +13,7 @@ use perpcity_sdk::hft::latency::LatencyTracker;
 use perpcity_sdk::hft::nonce::NonceManager;
 use perpcity_sdk::hft::pipeline::{PipelineConfig, TxPipeline, TxRequest};
 use perpcity_sdk::hft::position_manager::{ManagedPosition, PositionManager};
-use perpcity_sdk::hft::state_cache::{CachedFees, StateCache, StateCacheConfig};
+use perpcity_sdk::hft::state_cache::{BalanceKey, CachedFees, StateCache, StateCacheConfig};
 
 // ---------------------------------------------------------------------------
 // Nonce benchmarks
@@ -169,11 +169,15 @@ fn bench_state_cache(c: &mut Criterion) {
         b.iter(|| cache.get_fees(black_box(&addr), black_box(1050)))
     });
 
-    // USDC balance read (singleton, no HashMap)
-    group.bench_function("get_usdc_balance/hit", |b| {
+    // Balance read (keyed by token and holder)
+    group.bench_function("get_balance/hit", |b| {
         let mut cache = StateCache::new(StateCacheConfig::default());
-        cache.put_usdc_balance(10_000.0, 1000);
-        b.iter(|| cache.get_usdc_balance(black_box(1001)))
+        let key = BalanceKey {
+            token: [0xEE; 20],
+            holder: [0x01; 20],
+        };
+        cache.put_balance(key, 10_000.0, 1000);
+        b.iter(|| cache.get_balance(black_box(&key), black_box(1001)))
     });
 
     // Cold path: put_mark_price

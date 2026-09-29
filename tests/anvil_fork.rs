@@ -17,8 +17,8 @@ use alloy::sol;
 use alloy::sol_types::SolCall;
 
 use perpcity_sdk::{
-    AdjustTakerParams, Deployments, HftTransport, MakerEquityKind, OpenTakerParams, PerpCityError,
-    PerpClient, TransactionError, TransportConfig, Urgency,
+    AdjustTakerParams, ChainDeployments, ChainReader, HftTransport, MakerEquityKind,
+    OpenTakerParams, PerpCityError, PerpClient, TransactionError, TransportConfig, Urgency,
 };
 
 sol! {
@@ -212,12 +212,16 @@ async fn deal_usdc(anvil_url: &str, who: Address, amount: U256) {
     panic!("USDC mint did not reflect in balanceOf within timeout");
 }
 
-fn deployments() -> Deployments {
-    Deployments {
-        perp: PERP,
-        usdc: USDC,
-        pool_manager: perpcity_sdk::ARBITRUM_SEPOLIA_POOL_MANAGER,
-    }
+/// The forked chain's reader: the deployment's own USDC, not the preset's.
+fn chain(transport: HftTransport) -> ChainReader {
+    ChainReader::new(
+        transport,
+        ChainDeployments {
+            usdc: USDC,
+            pool_manager: perpcity_sdk::ARBITRUM_SEPOLIA_POOL_MANAGER,
+        },
+        CHAIN_ID,
+    )
 }
 
 // ── The test ──────────────────────────────────────────────────────────
@@ -241,7 +245,7 @@ async fn open_and_close_taker_on_fork() {
     )
     .unwrap();
 
-    let client = PerpClient::new(transport, signer, deployments(), CHAIN_ID).unwrap();
+    let client = PerpClient::new(chain(transport).market(PERP), signer);
 
     // 3. Fund the test wallet with ETH (for gas) and USDC
     deal_eth(&anvil.url, address).await;
@@ -254,7 +258,7 @@ async fn open_and_close_taker_on_fork() {
 
     // 4. Initialize client (sync nonce + gas)
     client.sync_nonce().await.unwrap();
-    client.refresh_gas().await.unwrap();
+    client.chain().refresh_gas().await.unwrap();
 
     // 5. Check USDC balance
     let balance = client.get_usdc_balance().await.unwrap();
@@ -272,14 +276,14 @@ async fn open_and_close_taker_on_fork() {
     println!("USDC approved");
 
     // 7. Read market data
-    let mark = client.get_mark_price().await.unwrap();
+    let mark = client.market().get_mark_price().await.unwrap();
     println!("Mark price: {mark}");
     assert!(mark > 0.0, "mark price should be positive");
 
-    let funding = client.get_funding_rate().await.unwrap();
+    let funding = client.market().get_funding_rate().await.unwrap();
     println!("Daily funding rate: {funding}");
 
-    let oi = client.get_open_interest().await.unwrap();
+    let oi = client.market().get_open_interest().await.unwrap();
     println!("OI — long: {}, short: {}", oi.long_oi, oi.short_oi);
 
     // 8. Open a long taker position (10 USDC margin, small perp size).
@@ -290,7 +294,7 @@ async fn open_and_close_taker_on_fork() {
     // on the fork needs an impersonated minter. Tracked separately; the
     // binding/scaling/approval path up to the on-chain transfer is exercised.
     println!("\nOpening LONG with 10 USDC margin...");
-    client.refresh_gas().await.unwrap();
+    client.chain().refresh_gas().await.unwrap();
 
     // CITI-NYC mark ≈ 7340 with small maker capacity, so size tiny.
     let params = OpenTakerParams {
@@ -325,14 +329,14 @@ async fn open_and_close_taker_on_fork() {
     // 9. Read position on-chain. `delta` is a packed BalanceDelta; `margin` is
     //    in USDC 6-decimal units. Price-impact / live position details deferred
     //    to the quoting stage — see issue #56.
-    let pos = client.get_position(pos_id).await.unwrap();
+    let pos = client.market().get_position(pos_id).await.unwrap();
     println!("  Margin (6-dec): {}", pos.margin);
     println!("  Packed delta:   {}", pos.delta);
     assert!(pos.margin > 0, "position margin should be positive");
 
     // 10. Adjust taker — reduce exposure by 0.5 perp (negative perp delta)
     println!("\nAdjusting taker -0.5 perp (reducing long exposure)...");
-    client.refresh_gas().await.unwrap();
+    client.chain().refresh_gas().await.unwrap();
 
     let adjust_result = client
         .adjust_taker(
@@ -365,7 +369,7 @@ async fn open_and_close_taker_on_fork() {
 
     // 11. Adjust margin — deposit 2 more USDC (margin-only adjustment)
     println!("\nAdjusting margin +2 USDC...");
-    client.refresh_gas().await.unwrap();
+    client.chain().refresh_gas().await.unwrap();
 
     let margin_result = client
         .adjust_taker(
@@ -386,7 +390,7 @@ async fn open_and_close_taker_on_fork() {
     //     notional on exactly zero — the contract auto-settles equity to the
     //     caller and burns the position NFT.
     println!("\nClosing position...");
-    client.refresh_gas().await.unwrap();
+    client.chain().refresh_gas().await.unwrap();
 
     let close_result = client
         .close_taker(pos_id, 0.0005, Urgency::Normal)
@@ -409,7 +413,7 @@ async fn open_and_close_taker_on_fork() {
     );
 
     // 13. Check final balance
-    client.invalidate_fast_cache();
+    client.chain().invalidate_fast_cache();
     let final_balance = client.get_usdc_balance().await.unwrap();
     println!("\nFinal USDC balance: {final_balance}");
     assert!(final_balance > 900.0, "lost too much USDC: {final_balance}");
@@ -435,14 +439,14 @@ async fn batch_balances_via_multicall() {
     )
     .unwrap();
 
-    let client = PerpClient::new(transport, signer, deployments(), CHAIN_ID).unwrap();
+    let client = PerpClient::new(chain(transport).market(PERP), signer);
 
     // 3. Fund test wallet
     deal_eth(&anvil.url, address).await;
     deal_usdc(&anvil.url, address, U256::from(500_000_000u64)).await; // 500 USDC
 
     // 4. Test get_balances (single address)
-    let (usdc, eth) = client.get_balances(address).await.unwrap();
+    let (usdc, eth) = client.chain().get_balances(address).await.unwrap();
     println!("get_balances: USDC={usdc}, ETH={eth}");
     assert!(usdc >= 500.0, "expected at least 500 USDC, got {usdc}");
     assert!(eth > U256::ZERO, "expected non-zero ETH balance");
@@ -460,7 +464,11 @@ async fn batch_balances_via_multicall() {
     deal_eth(&anvil.url, addr2).await;
     deal_usdc(&anvil.url, addr2, U256::from(200_000_000u64)).await; // 200 USDC
 
-    let results = client.get_balances_batch(&[address, addr2]).await.unwrap();
+    let results = client
+        .chain()
+        .get_balances_batch(&[address, addr2])
+        .await
+        .unwrap();
     assert_eq!(results.len(), 2);
 
     let (usdc1, eth1) = results[0];
@@ -474,7 +482,7 @@ async fn batch_balances_via_multicall() {
     assert!(eth2 > U256::ZERO, "addr2 should have ETH");
 
     // 6. Test empty batch
-    let empty = client.get_balances_batch(&[]).await.unwrap();
+    let empty = client.chain().get_balances_batch(&[]).await.unwrap();
     assert!(empty.is_empty());
 
     println!("\n=== Batch balances test passed! ===");
@@ -498,13 +506,13 @@ async fn perp_snapshot_via_multicall() {
     )
     .unwrap();
 
-    let client = PerpClient::new(transport, signer, deployments(), CHAIN_ID).unwrap();
+    let client = PerpClient::new(chain(transport).market(PERP), signer);
 
     // 3. Fund test wallet (needed for gas if any writes were required)
     deal_eth(&anvil.url, address).await;
 
     // 4. Fetch snapshot via multicall
-    let (perp_data, snapshot) = client.get_perp_snapshot().await.unwrap();
+    let (perp_data, snapshot) = client.market().get_perp_snapshot().await.unwrap();
 
     println!("PerpData:");
     println!("  perp: {}", perp_data.perp);
@@ -553,7 +561,7 @@ async fn perp_snapshot_via_multicall() {
     );
 
     // 8. Cross-check: individual methods should match multicall results
-    let mark_individual = client.get_mark_price().await.unwrap();
+    let mark_individual = client.market().get_mark_price().await.unwrap();
     assert!(
         (snapshot.mark_price - mark_individual).abs() < 0.01,
         "multicall mark ({}) should match individual ({})",
@@ -561,7 +569,7 @@ async fn perp_snapshot_via_multicall() {
         mark_individual,
     );
 
-    let funding_individual = client.get_funding_rate().await.unwrap();
+    let funding_individual = client.market().get_funding_rate().await.unwrap();
     assert!(
         (snapshot.funding_rate_daily - funding_individual).abs() < 0.001,
         "multicall funding ({}) should match individual ({})",
@@ -587,15 +595,22 @@ async fn maker_equities_via_batched_reads() {
             .unwrap(),
     )
     .unwrap();
-    let client = PerpClient::new(transport, signer, deployments(), CHAIN_ID).unwrap();
+    let client = PerpClient::new(chain(transport).market(PERP), signer);
 
     // 3. Empty input short-circuits without touching the chain.
-    assert!(client.get_maker_equities(&[]).await.unwrap().is_empty());
+    assert!(
+        client
+            .market()
+            .get_maker_equities(&[])
+            .await
+            .unwrap()
+            .is_empty()
+    );
 
     // 4. Preview a range of position ids. CITI-NYC has live maker liquidity,
     //    so at least one open maker position must exist among the early ids.
     let pos_ids: Vec<U256> = (1u64..=20).map(U256::from).collect();
-    let equities = client.get_maker_equities(&pos_ids).await.unwrap();
+    let equities = client.market().get_maker_equities(&pos_ids).await.unwrap();
 
     // One outcome per input id, in input order.
     assert_eq!(equities.len(), pos_ids.len());
@@ -650,7 +665,7 @@ async fn liquidation_simulation_returns_typed_reverts() {
             .unwrap(),
     )
     .unwrap();
-    let client = PerpClient::new(transport, signer, deployments(), CHAIN_ID).unwrap();
+    let client = PerpClient::new(chain(transport).market(PERP), signer);
 
     // 3. The zero address burns the liquidation fee — rejected before any RPC.
     let err = client
