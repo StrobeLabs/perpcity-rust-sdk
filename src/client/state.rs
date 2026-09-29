@@ -1,12 +1,10 @@
 //! A market's storage at one block, [`StateAt`].
 
-use std::fmt;
-
 use alloy::eips::BlockId;
 use alloy::primitives::U256;
 
 use crate::contracts::{IERC20, Perp, Position};
-use crate::convert::scale_from_6dec;
+use crate::convert::usdc_from_atoms;
 use crate::errors::{Result, ValidationError};
 use crate::math::BlockContext;
 use crate::math::range::MakerRange;
@@ -52,6 +50,11 @@ impl MarketReader {
 
     /// State reads pinned to block `number`.
     ///
+    /// The header is resolved here; the state behind it is only checked
+    /// by the reads, so a full (non-archive) endpoint hands out the handle
+    /// for an old block and then fails each read with the node's
+    /// "historical state is not available" transport error.
+    ///
     /// # Errors
     ///
     /// [`ContractError::BlockUnavailable`](crate::ContractError::BlockUnavailable)
@@ -90,8 +93,8 @@ impl StateAt {
         let perp = Perp::new(self.market.perp, self.market.chain.provider());
         let state = perp.solvencyState().block(self.id()).call().await?;
         Ok(SolvencyState {
-            bad_debt: usdc(state.badDebt, "badDebt")?,
-            total_margin: usdc(state.totalMargin, "totalMargin")?,
+            bad_debt: usdc_from_atoms(state.badDebt, "badDebt")?,
+            total_margin: usdc_from_atoms(state.totalMargin, "totalMargin")?,
         })
     }
 
@@ -168,20 +171,8 @@ impl StateAt {
             .block(self.id())
             .call()
             .await?;
-        usdc(raw, "collateral")
+        Ok(usdc_from_atoms(raw, "collateral")?)
     }
-}
-
-/// Six-decimal `atoms` as USDC. A value past `i128` is a broken read, not
-/// a balance any market holds.
-fn usdc<A>(atoms: A, what: &str) -> Result<f64>
-where
-    A: TryInto<i128> + fmt::Display + Copy,
-{
-    let atoms = atoms.try_into().map_err(|_| ValidationError::Overflow {
-        context: format!("{what} {atoms} exceeds i128"),
-    })?;
-    Ok(scale_from_6dec(atoms))
 }
 
 #[cfg(test)]
