@@ -160,7 +160,7 @@ async fn main() -> perpcity_sdk::Result<()> {
     println!("\nHFT Bot — address: {}", client.address());
 
     client.sync_nonce().await?;
-    client.refresh_gas().await?;
+    client.chain().refresh_gas().await?;
     client.ensure_approval(U256::from(1_000_000_000u64)).await?;
 
     // ── 3. Initialize HFT infrastructure ────────────────────────────
@@ -172,7 +172,7 @@ async fn main() -> perpcity_sdk::Result<()> {
     let mut next_position_id_counter: u64 = 0;
 
     // Pre-fetch market config (cached for 60s in the slow layer)
-    let perp_config = client.get_perp_config().await?;
+    let perp_config = client.market().get_perp_config().await?;
     println!("\n=== Market Config ===");
     println!(
         "  Max leverage: {:.0}x",
@@ -190,18 +190,18 @@ async fn main() -> perpcity_sdk::Result<()> {
         let loop_start = Instant::now();
 
         // 4a. Refresh gas from latest block header
-        if let Err(e) = client.refresh_gas().await {
+        if let Err(e) = client.chain().refresh_gas().await {
             eprintln!("  [block {block}] gas refresh failed: {e}");
             tokio::time::sleep(Duration::from_secs(1)).await;
             continue;
         }
 
         // 4b. Invalidate fast cache (prices, funding, balance)
-        client.invalidate_fast_cache();
+        client.chain().invalidate_fast_cache();
 
         // 4c. Fetch mark price
         let price_start = Instant::now();
-        let mark = match client.get_mark_price().await {
+        let mark = match client.market().get_mark_price().await {
             Ok(p) => p,
             Err(e) => {
                 eprintln!("  [block {block}] price fetch failed: {e}");
@@ -326,7 +326,7 @@ async fn main() -> perpcity_sdk::Result<()> {
     println!("\n=== Shutting down ===");
     if pos_manager.count() > 0 {
         println!("Closing {} remaining positions...", pos_manager.count());
-        client.refresh_gas().await?;
+        client.chain().refresh_gas().await?;
 
         // Collect position IDs to close (avoid borrow issues)
         // In production you'd iterate open positions and close each one.
@@ -351,7 +351,13 @@ async fn main() -> perpcity_sdk::Result<()> {
 
     // ── 7. Print transport health ───────────────────────────────────
     println!("\n=== Final Transport Health ===");
-    for (i, status) in client.transport().health_status().iter().enumerate() {
+    for (i, status) in client
+        .chain()
+        .transport()
+        .health_status()
+        .iter()
+        .enumerate()
+    {
         println!(
             "  Endpoint {i}: state={:?}  avg_latency={:.1}ms  requests={}  errors={:.1}%",
             status.state,

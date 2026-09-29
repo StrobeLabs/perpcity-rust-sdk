@@ -91,7 +91,7 @@ async fn main() -> perpcity_sdk::Result<()> {
 
     // ── 3. Sync nonce + gas (required before any transaction) ──────
     client.sync_nonce().await?;
-    client.refresh_gas().await?;
+    client.chain().refresh_gas().await?;
     println!("Nonce synced, gas cache refreshed");
 
     // ── 4. USDC approval ────────────────────────────────────────────
@@ -102,7 +102,7 @@ async fn main() -> perpcity_sdk::Result<()> {
     }
 
     // ── 5. Query market data ────────────────────────────────────────
-    let perp_data = client.get_perp_config().await?;
+    let perp_data = client.market().get_perp_config().await?;
     println!("\n=== Market: {perp} ===");
     println!("  Mark price:      {:.6}", perp_data.mark);
     println!("  Tick spacing:    {}", perp_data.tick_spacing);
@@ -117,10 +117,10 @@ async fn main() -> perpcity_sdk::Result<()> {
     );
     println!("  LP fee:          {:.4}%", perp_data.fees.lp_fee * 100.0);
 
-    let funding = client.get_funding_rate().await?;
+    let funding = client.market().get_funding_rate().await?;
     println!("  Daily funding:   {:.6}%", funding * 100.0);
 
-    let oi = client.get_open_interest().await?;
+    let oi = client.market().get_open_interest().await?;
     println!("  Long OI:         {:.2} USDC", oi.long_oi);
     println!("  Short OI:        {:.2} USDC", oi.short_oi);
 
@@ -145,7 +145,7 @@ async fn main() -> perpcity_sdk::Result<()> {
     // The position's `delta` is a packed Uniswap V4 BalanceDelta; `margin` is
     // in USDC 6-decimal units. Price-impact / live PnL details deferred to the
     // quoting stage — see issue #56.
-    let pos = client.get_position(position_id).await?;
+    let pos = client.market().get_position(position_id).await?;
     println!("\n=== Position {position_id} ===");
     println!("  Margin (6-dec): {}", pos.margin);
     println!("  Packed delta:   {}", pos.delta);
@@ -153,7 +153,7 @@ async fn main() -> perpcity_sdk::Result<()> {
     // ── 8. Close position (reverse the taker delta) ─────────────────
     println!("\nClosing position by reversing the taker delta...");
     // Refresh gas before sending another tx (in production, use a block subscription)
-    client.refresh_gas().await?;
+    client.chain().refresh_gas().await?;
 
     let close_result = client
         .adjust_taker(

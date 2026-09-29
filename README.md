@@ -78,7 +78,7 @@ let client = PerpClient::new(chain.market(perp), signer);
 
 // 4. Warm caches (required before first transaction)
 client.sync_nonce().await?;
-client.refresh_gas().await?;
+client.chain().refresh_gas().await?;
 client.ensure_approval(U256::MAX).await?;
 ```
 
@@ -111,20 +111,20 @@ Every write method takes an `Urgency` level that scales the EIP-1559 priority fe
 
 ```rust
 // Snapshot — config + live data in 2 multicalls (2 CUs instead of 5+)
-let (config, snapshot) = client.get_perp_snapshot().await?;
+let (config, snapshot) = client.market().get_perp_snapshot().await?;
 
 // Or individually
-let mark     = client.get_mark_price().await?;        // f64 price
-let funding  = client.get_funding_rate().await?;      // daily rate
-let oi       = client.get_open_interest().await?;      // long/short OI
-let cap      = client.get_capacity().await?;           // capacity + OI at one block
+let mark     = client.market().get_mark_price().await?;        // f64 price
+let funding  = client.market().get_funding_rate().await?;      // daily rate
+let oi       = client.market().get_open_interest().await?;      // long/short OI
+let cap      = client.market().get_capacity().await?;           // capacity + OI at one block
 let headroom = cap.headroom_atoms(Side::Short);        // short OI still openable, perp atoms
-let fair     = client.get_fair_price().await?;         // the contract's mark (X96)
-let position = client.get_position(open.pos_id).await?; // raw on-chain Position
+let fair     = client.market().get_fair_price().await?;         // the contract's mark (X96)
+let position = client.market().get_position(open.pos_id).await?; // raw on-chain Position
 
 // Batch balances — N addresses in 1 multicall (1 CU instead of 2N)
-let (usdc, eth) = client.get_balances(address).await?;
-let all = client.get_balances_batch(&addresses).await?;
+let (usdc, eth) = client.chain().get_balances(address).await?;
+let all = client.chain().get_balances_batch(&addresses).await?;
 ```
 
 ### Maker Equity and Liquidations
@@ -164,7 +164,7 @@ Three conventions to know:
   what-if pricing at a caller-chosen X96 mark over the same pinned state.
 
 ```rust
-for outcome in client.get_maker_equities(&pos_ids).await? {
+for outcome in client.market().get_maker_equities(&pos_ids).await? {
     if let MakerEquityKind::Computed(b) = outcome.kind {
         println!(
             "pos {}: equity {:.6} (accrued {:+.6})",

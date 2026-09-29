@@ -72,11 +72,11 @@ async fn main() -> Result<()> {
 
     // -- Warm caches --
     client.sync_nonce().await?;
-    client.refresh_gas().await?;
+    client.chain().refresh_gas().await?;
     client.ensure_approval(U256::MAX).await?;
 
     // -- Read market state --
-    let mark = client.get_mark_price().await?;
+    let mark = client.market().get_mark_price().await?;
     println!("mark price: {mark:.2}");
 
     // -- Calculate tick range (±5% around mark) --

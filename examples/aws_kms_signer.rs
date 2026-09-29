@@ -61,11 +61,11 @@ async fn main() -> Result<()> {
 
     // -- Warm caches --
     client.sync_nonce().await?;
-    client.refresh_gas().await?;
+    client.chain().refresh_gas().await?;
     client.ensure_approval(U256::MAX).await?;
 
     // -- Read market state, then open/close a tiny position via KMS signing --
-    let config = client.get_perp_config().await?;
+    let config = client.market().get_perp_config().await?;
     println!("mark price: {:.2}", config.mark);
 
     let open = client
@@ -80,7 +80,7 @@ async fn main() -> Result<()> {
         .await?;
     println!("opened position {} (signed via KMS)", open.pos_id);
 
-    client.refresh_gas().await?;
+    client.chain().refresh_gas().await?;
     let result = client
         .adjust_taker(
             &AdjustTakerParams {

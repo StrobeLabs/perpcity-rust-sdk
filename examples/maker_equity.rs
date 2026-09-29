@@ -53,7 +53,7 @@ async fn main() -> perpcity_sdk::Result<()> {
     );
     if !dry_run {
         client.sync_nonce().await?;
-        client.refresh_gas().await?;
+        client.chain().refresh_gas().await?;
     }
 
     // ── 1. One batched, block-pinned read ───────────────────────────
@@ -61,7 +61,7 @@ async fn main() -> perpcity_sdk::Result<()> {
     // settle preview each open maker would receive if touched now, priced
     // at the contract's own mark for the pinned block (the deployed fair
     // price of pool price, beacon index, and block-advanced EMAs).
-    let equities = client.get_maker_equities(&pos_ids).await?;
+    let equities = client.market().get_maker_equities(&pos_ids).await?;
     let mut candidates: Vec<(U256, &MakerEquityBreakdown)> = Vec::new();
     for outcome in &equities {
         let pos_id = outcome.pos_id;
@@ -96,7 +96,12 @@ async fn main() -> perpcity_sdk::Result<()> {
     // position — not the market-wide taker ratio, and not the margin.
     // The contract remains the oracle — the filter only saves eth_calls on
     // obviously healthy positions, so it keeps anything near the line.
-    let liq_fee = client.get_perp_config().await?.fees.liquidation_fee;
+    let liq_fee = client
+        .market()
+        .get_perp_config()
+        .await?
+        .fees
+        .liquidation_fee;
     candidates.retain(|(_, b)| {
         b.is_liquidatable(liq_fee) || b.margin_ratio() < b.liq_margin_ratio() * 1.1
     });

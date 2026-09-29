@@ -795,91 +795,13 @@ impl MarketReader {
 }
 
 impl PerpClient {
-    // ── Reads, on this client's market and chain readers ─────────────
-
-    /// [`MarketReader::get_fair_price`] on this client's market.
-    pub async fn get_fair_price(&self) -> Result<FairPrice> {
-        self.market.get_fair_price().await
-    }
-
-    /// [`MarketReader::load_taker_market_snapshot`] on this client's market.
-    pub async fn load_taker_market_snapshot(&self) -> Result<TakerMarketSnapshot> {
-        self.market.load_taker_market_snapshot().await
-    }
-
-    /// [`MarketReader::get_perp_config`] on this client's market.
-    pub async fn get_perp_config(&self) -> Result<PerpData> {
-        self.market.get_perp_config().await
-    }
-
-    /// [`MarketReader::get_perp_data`] on this client's market.
-    pub async fn get_perp_data(&self) -> Result<(Address, i32, f64)> {
-        self.market.get_perp_data().await
-    }
-
-    /// [`MarketReader::get_position`] on this client's market.
-    pub async fn get_position(&self, pos_id: U256) -> Result<Position> {
-        self.market.get_position(pos_id).await
-    }
-
-    /// [`MarketReader::get_positions_by_owner`] on this client's market.
-    pub async fn get_positions_by_owner(&self, owner: Address) -> Result<Vec<U256>> {
-        self.market.get_positions_by_owner(owner).await
-    }
-
-    /// [`MarketReader::get_mark_price`] on this client's market.
-    pub async fn get_mark_price(&self) -> Result<f64> {
-        self.market.get_mark_price().await
-    }
-
-    /// [`MarketReader::get_margin_ratios`] on this client's market.
-    pub async fn get_margin_ratios(&self) -> Result<MarginRatios> {
-        self.market.get_margin_ratios().await
-    }
-
-    /// [`MarketReader::get_open_interest`] on this client's market.
-    pub async fn get_open_interest(&self) -> Result<OpenInterest> {
-        self.market.get_open_interest().await
-    }
-
-    /// [`MarketReader::get_capacity`] on this client's market.
-    pub async fn get_capacity(&self) -> Result<MarketCapacity> {
-        self.market.get_capacity().await
-    }
-
-    /// [`MarketReader::get_funding_rate`] on this client's market.
-    pub async fn get_funding_rate(&self) -> Result<f64> {
-        self.market.get_funding_rate().await
-    }
-
-    /// [`MarketReader::get_perp_snapshot`] on this client's market.
-    pub async fn get_perp_snapshot(&self) -> Result<(PerpData, PerpSnapshot)> {
-        self.market.get_perp_snapshot().await
-    }
-
-    /// [`ChainReader::get_index_price`](super::ChainReader::get_index_price)
-    /// on this client's chain reader.
-    pub async fn get_index_price(&self, beacon: Address) -> Result<f64> {
-        self.chain.get_index_price(beacon).await
-    }
-
     /// The signer's USDC balance:
     /// [`ChainReader::balance_of`](super::ChainReader::balance_of) at this
-    /// client's address.
+    /// client's address. Every other read is on [`Self::market`] or
+    /// [`Self::chain`]; this one stays here because only the client knows
+    /// whose balance "mine" is.
     pub async fn get_usdc_balance(&self) -> Result<f64> {
         self.chain.balance_of(self.address).await
-    }
-
-    /// [`ChainReader::get_balances`](super::ChainReader::get_balances) on
-    /// this client's chain reader.
-    pub async fn get_balances(&self, address: Address) -> Result<(f64, U256)> {
-        self.chain.get_balances(address).await
-    }
-
-    /// [`ChainReader::get_balances_batch`](super::ChainReader::get_balances_batch)
-    /// on this client's chain reader.
-    pub async fn get_balances_batch(&self, addresses: &[Address]) -> Result<Vec<(f64, U256)>> {
-        self.chain.get_balances_batch(addresses).await
     }
 }
 
@@ -973,7 +895,7 @@ mod tests {
         let (client, rpc) = mock::client();
         rpc.call::<Perp::poolStateCall>(&mock::pool_state(x96(3, 1)));
 
-        assert_eq!(client.get_mark_price().await.unwrap(), 1.5);
+        assert_eq!(client.market().get_mark_price().await.unwrap(), 1.5);
         assert!(rpc.is_drained(), "one eth_call");
     }
 
@@ -983,13 +905,17 @@ mod tests {
     async fn mark_price_is_served_from_the_fast_layer_until_invalidated() {
         let (client, rpc) = mock::client();
         rpc.call::<Perp::poolStateCall>(&mock::pool_state(x96(3, 1)));
-        assert_eq!(client.get_mark_price().await.unwrap(), 1.5);
+        assert_eq!(client.market().get_mark_price().await.unwrap(), 1.5);
 
-        assert_eq!(client.get_mark_price().await.unwrap(), 1.5, "cache hit");
+        assert_eq!(
+            client.market().get_mark_price().await.unwrap(),
+            1.5,
+            "cache hit"
+        );
 
-        client.invalidate_fast_cache();
+        client.chain().invalidate_fast_cache();
         rpc.call::<Perp::poolStateCall>(&mock::pool_state(x96(1, 0)));
-        assert_eq!(client.get_mark_price().await.unwrap(), 1.0);
+        assert_eq!(client.market().get_mark_price().await.unwrap(), 1.0);
         assert!(rpc.is_drained());
     }
 
@@ -1000,16 +926,16 @@ mod tests {
         let (client, rpc) = mock::client();
         rpc.call::<Perp::ratesCall>(&mock::rates(-5_000_000_000_000_000));
 
-        assert_eq!(client.get_funding_rate().await.unwrap(), -0.005);
+        assert_eq!(client.market().get_funding_rate().await.unwrap(), -0.005);
         assert_eq!(
-            client.get_funding_rate().await.unwrap(),
+            client.market().get_funding_rate().await.unwrap(),
             -0.005,
             "cache hit"
         );
 
-        client.invalidate_fast_cache();
+        client.chain().invalidate_fast_cache();
         rpc.call::<Perp::ratesCall>(&mock::rates(2_000_000_000_000_000));
-        assert_eq!(client.get_funding_rate().await.unwrap(), 0.002);
+        assert_eq!(client.market().get_funding_rate().await.unwrap(), 0.002);
         assert!(rpc.is_drained());
     }
 
@@ -1027,7 +953,7 @@ mod tests {
             "cache hit"
         );
 
-        client.invalidate_fast_cache();
+        client.chain().invalidate_fast_cache();
         rpc.call::<IERC20::balanceOfCall>(&U256::ZERO);
         assert_eq!(client.get_usdc_balance().await.unwrap(), 0.0);
         assert!(rpc.is_drained());
@@ -1060,7 +986,7 @@ mod tests {
         let (client, rpc) = mock::client();
         rpc.fails("connection reset");
 
-        let err = client.get_mark_price().await.unwrap_err();
+        let err = client.market().get_mark_price().await.unwrap_err();
         assert!(
             matches!(
                 err,
@@ -1079,7 +1005,7 @@ mod tests {
         let (client, rpc) = mock::client();
         rpc.call::<IBeacon::indexCall>(&x96(5, 2));
 
-        assert_eq!(client.get_index_price(BEACON).await.unwrap(), 1.25);
+        assert_eq!(client.chain().get_index_price(BEACON).await.unwrap(), 1.25);
         assert!(rpc.is_drained(), "one eth_call, nothing cached");
     }
 
@@ -1089,7 +1015,7 @@ mod tests {
         let (client, rpc) = mock::client();
         rpc.call::<IBeacon::indexCall>(&U256::ZERO);
 
-        let err = client.get_index_price(BEACON).await.unwrap_err();
+        let err = client.chain().get_index_price(BEACON).await.unwrap_err();
         assert!(
             matches!(
                 err,
@@ -1105,7 +1031,7 @@ mod tests {
         let (client, rpc) = mock::client();
         rpc.call::<Perp::positionsCall>(&mock::position(1_000_000));
 
-        let position = client.get_position(U256::from(7u8)).await.unwrap();
+        let position = client.market().get_position(U256::from(7u8)).await.unwrap();
         assert_eq!(position.margin, 1_000_000);
         assert!(position.delta.is_zero());
         assert!(rpc.is_drained());
@@ -1118,7 +1044,7 @@ mod tests {
         let (client, rpc) = mock::client();
         rpc.call::<Perp::positionsCall>(&mock::position(0));
 
-        let Err(err) = client.get_position(U256::from(7u8)).await else {
+        let Err(err) = client.market().get_position(U256::from(7u8)).await else {
             panic!("an all-zero struct must not decode as a position");
         };
         assert!(
@@ -1137,7 +1063,7 @@ mod tests {
         let (client, rpc) = mock::client();
         rpc.call::<Perp::openInterestCall>(&mock::open_interest(1_500_000, 250_000));
 
-        let oi = client.get_open_interest().await.unwrap();
+        let oi = client.market().get_open_interest().await.unwrap();
         assert_eq!((oi.long_oi, oi.short_oi), (1.5, 0.25));
         assert!(rpc.is_drained());
     }
@@ -1156,7 +1082,7 @@ mod tests {
         rpc.call::<Perp::ownerOfCall>(&Address::repeat_byte(0xbb));
         rpc.reverts(&[0xde, 0xad, 0xbe, 0xef]);
 
-        let owned = client.get_positions_by_owner(owner).await.unwrap();
+        let owned = client.market().get_positions_by_owner(owner).await.unwrap();
         assert_eq!(owned, vec![U256::from(1u8)]);
         assert!(rpc.is_drained(), "nextPosId plus one ownerOf per id");
     }
@@ -1171,7 +1097,11 @@ mod tests {
         rpc.call::<Perp::ownerOfCall>(&owner);
         rpc.fails("connection reset");
 
-        let err = client.get_positions_by_owner(owner).await.unwrap_err();
+        let err = client
+            .market()
+            .get_positions_by_owner(owner)
+            .await
+            .unwrap_err();
         assert!(
             matches!(
                 err,
@@ -1192,6 +1122,7 @@ mod tests {
 
             assert!(
                 client
+                    .market()
                     .get_positions_by_owner(owner)
                     .await
                     .unwrap()
@@ -1209,6 +1140,7 @@ mod tests {
         rpc.call::<Perp::nextPosIdCall>(&(U256::from(u64::MAX) + U256::from(1u8)));
 
         let err = client
+            .market()
             .get_positions_by_owner(Address::repeat_byte(0xaa))
             .await
             .unwrap_err();
@@ -1232,7 +1164,7 @@ mod tests {
         fees_answers(&rpc);
         bounds_answers(&rpc);
 
-        let config = client.get_perp_config().await.unwrap();
+        let config = client.market().get_perp_config().await.unwrap();
         assert_eq!(
             config,
             PerpData {
@@ -1259,22 +1191,22 @@ mod tests {
         perp_answers(&rpc);
         fees_answers(&rpc);
         bounds_answers(&rpc);
-        let first = client.get_perp_config().await.unwrap();
+        let first = client.market().get_perp_config().await.unwrap();
 
         perp_answers(&rpc);
-        assert_eq!(client.get_perp_config().await.unwrap(), first);
+        assert_eq!(client.market().get_perp_config().await.unwrap(), first);
         assert!(rpc.is_drained(), "the modules were not asked again");
 
-        client.invalidate_fast_cache();
+        client.chain().invalidate_fast_cache();
         perp_answers(&rpc);
-        assert_eq!(client.get_perp_config().await.unwrap(), first);
+        assert_eq!(client.market().get_perp_config().await.unwrap(), first);
         assert!(rpc.is_drained(), "the slow layer is untouched");
 
-        client.invalidate_all_cache();
+        client.chain().invalidate_all_cache();
         perp_answers(&rpc);
         fees_answers(&rpc);
         bounds_answers(&rpc);
-        assert_eq!(client.get_perp_config().await.unwrap(), first);
+        assert_eq!(client.market().get_perp_config().await.unwrap(), first);
         assert!(rpc.is_drained(), "evicted: the modules are asked again");
     }
 
@@ -1290,7 +1222,7 @@ mod tests {
         rpc.call::<Perp::poolKeyCall>(&mock::pool_key(SPACING));
         rpc.call::<Perp::poolStateCall>(&mock::pool_state(x96(3, 1)));
 
-        let err = client.get_perp_config().await.unwrap_err();
+        let err = client.market().get_perp_config().await.unwrap_err();
         assert!(
             matches!(
                 err,
@@ -1312,7 +1244,7 @@ mod tests {
         perp_answers(&rpc);
 
         assert_eq!(
-            client.get_perp_data().await.unwrap(),
+            client.market().get_perp_data().await.unwrap(),
             (BEACON, SPACING, 1.5)
         );
         assert!(rpc.is_drained());
@@ -1339,7 +1271,7 @@ mod tests {
             backstop: e6(20_000),
         });
 
-        let ratios = client.get_margin_ratios().await.unwrap();
+        let ratios = client.market().get_margin_ratios().await.unwrap();
         assert_eq!(
             (
                 ratios.maker.init,
@@ -1371,7 +1303,7 @@ mod tests {
         rpc.quantity(100);
         rpc.no_block();
 
-        let err = client.get_margin_ratios().await.unwrap_err();
+        let err = client.market().get_margin_ratios().await.unwrap_err();
         assert!(
             matches!(
                 err,
@@ -1399,7 +1331,7 @@ mod tests {
             ..mock::modules()
         });
 
-        let err = client.get_margin_ratios().await.unwrap_err();
+        let err = client.market().get_margin_ratios().await.unwrap_err();
         assert!(
             matches!(
                 err,
@@ -1426,7 +1358,7 @@ mod tests {
             ok_row(returns::<IMulticall3::getEthBalanceCall>(&U256::ZERO)),
         ]);
 
-        let balances = client.get_balances_batch(&holders).await.unwrap();
+        let balances = client.chain().get_balances_batch(&holders).await.unwrap();
         assert_eq!(balances, vec![(1.0, U256::from(5u8)), (2.5, U256::ZERO)]);
         assert!(rpc.is_drained(), "one eth_call for four sub-calls");
     }
@@ -1436,7 +1368,14 @@ mod tests {
     async fn balances_batch_of_nobody_makes_no_rpc() {
         let (client, rpc) = mock::client();
 
-        assert!(client.get_balances_batch(&[]).await.unwrap().is_empty());
+        assert!(
+            client
+                .chain()
+                .get_balances_batch(&[])
+                .await
+                .unwrap()
+                .is_empty()
+        );
         assert!(rpc.is_drained());
     }
 
@@ -1450,7 +1389,11 @@ mod tests {
 
         let (client, rpc) = mock::client();
         rpc.aggregate3(vec![usdc(), usdc(), eth()]);
-        let err = client.get_balances_batch(&holders).await.unwrap_err();
+        let err = client
+            .chain()
+            .get_balances_batch(&holders)
+            .await
+            .unwrap_err();
         assert!(
             matches!(
                 err,
@@ -1460,7 +1403,11 @@ mod tests {
         );
 
         rpc.aggregate3(vec![usdc(), failed_row(), eth(), eth()]);
-        let err = client.get_balances_batch(&holders).await.unwrap_err();
+        let err = client
+            .chain()
+            .get_balances_batch(&holders)
+            .await
+            .unwrap_err();
         assert!(
             matches!(
                 err,
@@ -1487,7 +1434,7 @@ mod tests {
         );
 
         assert_eq!(
-            client.get_capacity().await.unwrap(),
+            client.market().get_capacity().await.unwrap(),
             MarketCapacity {
                 block: BlockContext {
                     number: 100 - SNAPSHOT_BLOCK_LAG,
@@ -1524,7 +1471,7 @@ mod tests {
         fees_answers(&rpc);
         bounds_answers(&rpc);
 
-        let (data, snapshot) = client.get_perp_snapshot().await.unwrap();
+        let (data, snapshot) = client.market().get_perp_snapshot().await.unwrap();
         assert_eq!(
             data,
             PerpData {
@@ -1552,7 +1499,10 @@ mod tests {
 
         rpc.aggregate(101, perp_views());
         rpc.call::<IBeacon::indexCall>(&x96(5, 2));
-        assert_eq!(client.get_perp_snapshot().await.unwrap(), (data, snapshot));
+        assert_eq!(
+            client.market().get_perp_snapshot().await.unwrap(),
+            (data, snapshot)
+        );
         assert!(rpc.is_drained(), "fees and bounds came from the slow layer");
     }
 
@@ -1582,7 +1532,7 @@ mod tests {
         rpc.call::<IBeacon::indexCall>(&one);
 
         assert_eq!(
-            client.get_fair_price().await.unwrap(),
+            client.market().get_fair_price().await.unwrap(),
             FairPrice {
                 block: BlockContext {
                     number: 100 - SNAPSHOT_BLOCK_LAG,
@@ -1618,7 +1568,7 @@ mod tests {
             ],
         );
 
-        let err = client.get_fair_price().await.unwrap_err();
+        let err = client.market().get_fair_price().await.unwrap_err();
         assert!(
             matches!(
                 err,
@@ -1728,7 +1678,7 @@ mod tests {
         let hash = snapshot_answers(&rpc, 0, bitmap(&[]), None);
 
         assert_eq!(
-            client.load_taker_market_snapshot().await.unwrap(),
+            client.market().load_taker_market_snapshot().await.unwrap(),
             expected_snapshot(hash, 0)
         );
         assert!(rpc.is_drained(), "twelve answers, none left over");
@@ -1751,7 +1701,7 @@ mod tests {
             Some(vec![tick_word(L, L as i128), tick_word(L, -(L as i128))]),
         );
 
-        let snapshot = client.load_taker_market_snapshot().await.unwrap();
+        let snapshot = client.market().load_taker_market_snapshot().await.unwrap();
         assert_eq!(
             snapshot,
             TakerMarketSnapshot {
@@ -1791,7 +1741,11 @@ mod tests {
             Some(vec![tick_word(L, L as i128), tick_word(L, -(L as i128))]),
         );
 
-        let err = client.load_taker_market_snapshot().await.unwrap_err();
+        let err = client
+            .market()
+            .load_taker_market_snapshot()
+            .await
+            .unwrap_err();
         assert!(
             matches!(
                 err,
@@ -1809,11 +1763,11 @@ mod tests {
         let (client, rpc) = mock::client();
         immutables_answers(&rpc);
         snapshot_answers(&rpc, 0, bitmap(&[]), None);
-        client.load_taker_market_snapshot().await.unwrap();
+        client.market().load_taker_market_snapshot().await.unwrap();
 
         let hash = snapshot_answers(&rpc, 0, bitmap(&[]), None);
         assert_eq!(
-            client.load_taker_market_snapshot().await.unwrap(),
+            client.market().load_taker_market_snapshot().await.unwrap(),
             expected_snapshot(hash, 0)
         );
         assert!(rpc.is_drained(), "nine answers: no immutables");
@@ -1851,7 +1805,11 @@ mod tests {
             rpc.call::<Perp::poolKeyCall>(&mock::pool_key(spacing));
             rpc.call::<Perp::EMA_WINDOWCall>(&U256::from(3_600u32));
 
-            let err = client.load_taker_market_snapshot().await.unwrap_err();
+            let err = client
+                .market()
+                .load_taker_market_snapshot()
+                .await
+                .unwrap_err();
             assert!(
                 matches!(
                     err,

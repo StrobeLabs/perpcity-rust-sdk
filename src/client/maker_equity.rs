@@ -36,7 +36,7 @@ use crate::storage::{
 
 use super::market::MarketReader;
 use super::queries::{MarkViews, multicall_error};
-use super::{PerpClient, i24_to_i32, u24_to_u32};
+use super::{i24_to_i32, u24_to_u32};
 
 /// Concurrency bound for the `eth_getStorageAt` fallback when the endpoint
 /// does not serve `eth_getProof`.
@@ -329,24 +329,6 @@ fn split_maker_rows(
         }
     }
     (pending, failed)
-}
-
-impl PerpClient {
-    /// [`MarketReader::get_maker_equities`] on this client's market.
-    pub async fn get_maker_equities(&self, pos_ids: &[U256]) -> Result<Vec<MakerEquityOutcome>> {
-        self.market.get_maker_equities(pos_ids).await
-    }
-
-    /// [`MarketReader::get_maker_equities_at_mark`] on this client's market.
-    pub async fn get_maker_equities_at_mark(
-        &self,
-        pos_ids: &[U256],
-        mark_price_x96: U256,
-    ) -> Result<Vec<MakerEquityOutcome>> {
-        self.market
-            .get_maker_equities_at_mark(pos_ids, mark_price_x96)
-            .await
-    }
 }
 
 impl MarketReader {
@@ -1178,7 +1160,7 @@ mod tests {
         let (client, _rpc) = mock::client();
 
         let ids = [U256::ONE];
-        let fut = client.get_maker_equities(&ids);
+        let fut = client.market().get_maker_equities(&ids);
         require_send(&fut);
         drop(fut);
     }

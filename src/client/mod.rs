@@ -51,17 +51,15 @@ pub use transactions::TxBuilder;
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use alloy::network::{Ethereum, EthereumWallet, TxSigner};
+use alloy::network::{EthereumWallet, TxSigner};
 use alloy::primitives::{Address, Signature, U256, address};
-use alloy::providers::{Provider, RootProvider};
+use alloy::providers::Provider;
 
 use crate::constants::SCALE_1E6;
 use crate::errors::Result;
 use crate::hft::gas::GasLimitCache;
 use crate::hft::pipeline::{PipelineConfig, TxPipeline};
 use crate::hft::state_cache::{CachedBounds, CachedFees};
-use crate::history::History;
-use crate::transport::provider::HftTransport;
 use crate::types::{Bounds, Fees};
 
 // ── Network constants ──────────────────────────────────────────────────
@@ -262,38 +260,6 @@ impl PerpClient {
         Ok(())
     }
 
-    // ── Chain-scoped gas and caches, on the chain reader ─────────────
-
-    /// [`ChainReader::refresh_gas`] on this client's chain reader.
-    pub async fn refresh_gas(&self) -> Result<()> {
-        self.chain.refresh_gas().await
-    }
-
-    /// [`ChainReader::set_base_fee`] on this client's chain reader.
-    pub fn set_base_fee(&self, base_fee: u64) {
-        self.chain.set_base_fee(base_fee);
-    }
-
-    /// [`ChainReader::base_fee`] on this client's chain reader.
-    pub fn base_fee(&self) -> Option<u64> {
-        self.chain.base_fee()
-    }
-
-    /// [`ChainReader::set_gas_ttl`] on this client's chain reader.
-    pub fn set_gas_ttl(&self, ttl_ms: u64) {
-        self.chain.set_gas_ttl(ttl_ms);
-    }
-
-    /// [`ChainReader::invalidate_fast_cache`] on this client's chain reader.
-    pub fn invalidate_fast_cache(&self) {
-        self.chain.invalidate_fast_cache();
-    }
-
-    /// [`ChainReader::invalidate_all_cache`] on this client's chain reader.
-    pub fn invalidate_all_cache(&self) {
-        self.chain.invalidate_all_cache();
-    }
-
     // ── Accessors ────────────────────────────────────────────────────
 
     /// The signer's Ethereum address.
@@ -311,24 +277,9 @@ impl PerpClient {
         &self.market
     }
 
-    /// [`ChainReader::provider`] on this client's chain reader.
-    pub fn provider(&self) -> &RootProvider<Ethereum> {
-        self.chain.provider()
-    }
-
-    /// [`ChainReader::history`] on this client's chain reader.
-    pub fn history(&self) -> &History<RootProvider<Ethereum>> {
-        self.chain.history()
-    }
-
     /// The signing wallet (for building signed transactions outside the SDK).
     pub fn wallet(&self) -> &EthereumWallet {
         &self.wallet
-    }
-
-    /// [`ChainReader::transport`] on this client's chain reader.
-    pub fn transport(&self) -> &HftTransport {
-        self.chain.transport()
     }
 
     /// Resolve a transaction (mined, reverted, or timed out).
@@ -426,20 +377,22 @@ mod tests {
         let filter = Filter::new().address(EMITTER).event_signature(TOPIC);
 
         client
+            .chain()
             .history()
             .logs(&filter, 0, Some(120_000))
             .await
             .unwrap();
-        let first = client.history().stats();
+        let first = client.chain().history().stats();
         let after_first = node.requests().len();
         assert!(first.requests > 0);
 
         client
+            .chain()
             .history()
             .logs(&filter, 120_001, Some(240_000))
             .await
             .unwrap();
-        let second = client.history().stats();
+        let second = client.chain().history().stats();
         assert!(
             second.requests > first.requests,
             "counters accumulate across calls to the accessor"

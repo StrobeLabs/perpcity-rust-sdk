@@ -60,11 +60,11 @@ async fn main() -> Result<()> {
 
     // -- Warm caches --
     client.sync_nonce().await?;
-    client.refresh_gas().await?;
+    client.chain().refresh_gas().await?;
     client.ensure_approval(U256::MAX).await?;
 
     // -- Read market state --
-    let config = client.get_perp_config().await?;
+    let config = client.market().get_perp_config().await?;
     println!("mark price: {:.2}", config.mark);
 
     // -- Open a long with 10 USDC margin (perp_delta > 0 = long) --
@@ -82,7 +82,7 @@ async fn main() -> Result<()> {
     println!("opened position {pos_id}");
 
     // -- Close it by adjusting the taker with the opposing perp delta --
-    client.refresh_gas().await?;
+    client.chain().refresh_gas().await?;
     let result = client
         .adjust_taker(
             &AdjustTakerParams {

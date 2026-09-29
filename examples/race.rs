@@ -69,7 +69,7 @@ async fn main() -> Result<()> {
 
     // ── Phase: refresh_gas ───────────────────────────────────────────
     let t = Instant::now();
-    client.refresh_gas().await?;
+    client.chain().refresh_gas().await?;
     phase_times.push(("refresh_gas", ms(t)));
 
     // ── Phase: ensure_approval ───────────────────────────────────────
@@ -79,7 +79,7 @@ async fn main() -> Result<()> {
 
     // ── Phase: read_state ────────────────────────────────────────────
     let t = Instant::now();
-    let _config = client.get_perp_config().await?;
+    let _config = client.market().get_perp_config().await?;
     phase_times.push(("read_state", ms(t)));
 
     // ── Trade iterations ─────────────────────────────────────────────
@@ -89,7 +89,7 @@ async fn main() -> Result<()> {
     for i in 0..iterations {
         // Refresh gas every iteration to keep cache warm (mimics real HFT)
         if i > 0 {
-            client.refresh_gas().await?;
+            client.chain().refresh_gas().await?;
         }
         // Re-sync nonce after reverts (reverted txs still consume the nonce on Anvil)
         if i > 0 && reverts > 0 {
