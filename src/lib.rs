@@ -84,9 +84,9 @@ pub use transport::{config::TransportConfig, provider::HftTransport};
 #[doc(inline)]
 pub use types::{
     AdjustMakerParams, AdjustMakerResult, AdjustTakerParams, AdjustTakerResult, Bounds,
-    ChainDeployments, Deployments, ExactAdjustTakerParams, ExactOpenTakerParams, Fees,
-    MarginRatioTriple, MarginRatios, OpenInterest, OpenMakerParams, OpenResult, OpenTakerParams,
-    PerpData, PerpSnapshot, PriceImpactPoint, Side,
+    ChainDeployments, ExactAdjustTakerParams, ExactOpenTakerParams, Fees, MarginRatioTriple,
+    MarginRatios, OpenInterest, OpenMakerParams, OpenResult, OpenTakerParams, PerpData,
+    PerpSnapshot, PriceImpactPoint, Side,
 };
 
 #[doc(inline)]

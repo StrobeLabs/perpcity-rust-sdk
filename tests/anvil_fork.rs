@@ -17,8 +17,8 @@ use alloy::sol;
 use alloy::sol_types::SolCall;
 
 use perpcity_sdk::{
-    AdjustTakerParams, Deployments, HftTransport, MakerEquityKind, OpenTakerParams, PerpCityError,
-    PerpClient, TransactionError, TransportConfig, Urgency,
+    AdjustTakerParams, ChainDeployments, ChainReader, HftTransport, MakerEquityKind,
+    OpenTakerParams, PerpCityError, PerpClient, TransactionError, TransportConfig, Urgency,
 };
 
 sol! {
@@ -212,12 +212,16 @@ async fn deal_usdc(anvil_url: &str, who: Address, amount: U256) {
     panic!("USDC mint did not reflect in balanceOf within timeout");
 }
 
-fn deployments() -> Deployments {
-    Deployments {
-        perp: PERP,
-        usdc: USDC,
-        pool_manager: perpcity_sdk::ARBITRUM_SEPOLIA_POOL_MANAGER,
-    }
+/// The forked chain's reader: the deployment's own USDC, not the preset's.
+fn chain(transport: HftTransport) -> ChainReader {
+    ChainReader::new(
+        transport,
+        ChainDeployments {
+            usdc: USDC,
+            pool_manager: perpcity_sdk::ARBITRUM_SEPOLIA_POOL_MANAGER,
+        },
+        CHAIN_ID,
+    )
 }
 
 // ── The test ──────────────────────────────────────────────────────────
@@ -241,7 +245,7 @@ async fn open_and_close_taker_on_fork() {
     )
     .unwrap();
 
-    let client = PerpClient::new(transport, signer, deployments(), CHAIN_ID).unwrap();
+    let client = PerpClient::new(chain(transport).market(PERP), signer);
 
     // 3. Fund the test wallet with ETH (for gas) and USDC
     deal_eth(&anvil.url, address).await;
@@ -435,7 +439,7 @@ async fn batch_balances_via_multicall() {
     )
     .unwrap();
 
-    let client = PerpClient::new(transport, signer, deployments(), CHAIN_ID).unwrap();
+    let client = PerpClient::new(chain(transport).market(PERP), signer);
 
     // 3. Fund test wallet
     deal_eth(&anvil.url, address).await;
@@ -498,7 +502,7 @@ async fn perp_snapshot_via_multicall() {
     )
     .unwrap();
 
-    let client = PerpClient::new(transport, signer, deployments(), CHAIN_ID).unwrap();
+    let client = PerpClient::new(chain(transport).market(PERP), signer);
 
     // 3. Fund test wallet (needed for gas if any writes were required)
     deal_eth(&anvil.url, address).await;
@@ -587,7 +591,7 @@ async fn maker_equities_via_batched_reads() {
             .unwrap(),
     )
     .unwrap();
-    let client = PerpClient::new(transport, signer, deployments(), CHAIN_ID).unwrap();
+    let client = PerpClient::new(chain(transport).market(PERP), signer);
 
     // 3. Empty input short-circuits without touching the chain.
     assert!(client.get_maker_equities(&[]).await.unwrap().is_empty());
@@ -650,7 +654,7 @@ async fn liquidation_simulation_returns_typed_reverts() {
             .unwrap(),
     )
     .unwrap();
-    let client = PerpClient::new(transport, signer, deployments(), CHAIN_ID).unwrap();
+    let client = PerpClient::new(chain(transport).market(PERP), signer);
 
     // 3. The zero address burns the liquidation fee — rejected before any RPC.
     let err = client

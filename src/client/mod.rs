@@ -13,10 +13,7 @@
 //! # Example
 //!
 //! ```rust,no_run
-//! use perpcity_sdk::{
-//!     ARBITRUM_POOL_MANAGER, ARBITRUM_USDC, Deployments, HftTransport, PerpClient,
-//!     TransportConfig,
-//! };
+//! use perpcity_sdk::{ChainReader, HftTransport, PerpClient, TransportConfig};
 //! use alloy::primitives::address;
 //! use alloy::signers::local::PrivateKeySigner;
 //!
@@ -27,15 +24,12 @@
 //!         .build()?
 //! )?;
 //!
+//! // One chain reader per process; every client and reader shares it.
+//! let chain = ChainReader::arbitrum(transport);
+//! let perp = address!("0000000000000000000000000000000000000001"); // the market's Perp contract
+//!
 //! let signer: PrivateKeySigner = "your_private_key_hex".parse().unwrap();
-//!
-//! let deployments = Deployments {
-//!     perp: address!("0000000000000000000000000000000000000001"), // the market's Perp contract
-//!     usdc: ARBITRUM_USDC,
-//!     pool_manager: ARBITRUM_POOL_MANAGER,
-//! };
-//!
-//! let client = PerpClient::new_arbitrum(transport, signer, deployments)?;
+//! let client = PerpClient::new(chain.market(perp), signer);
 //! # Ok(())
 //! # }
 //! ```
@@ -68,7 +62,7 @@ use crate::hft::pipeline::{PipelineConfig, TxPipeline};
 use crate::hft::state_cache::{CachedBounds, CachedFees};
 use crate::history::History;
 use crate::transport::provider::HftTransport;
-use crate::types::{Bounds, Deployments, Fees};
+use crate::types::{Bounds, Fees};
 
 // ── Network constants ──────────────────────────────────────────────────
 
@@ -223,70 +217,31 @@ impl AsRef<ChainReader> for PerpClient {
 }
 
 impl PerpClient {
-    /// Create a new PerpClient.
+    /// A signing client for `market`.
     ///
-    /// - `transport`: Multi-endpoint RPC transport (from [`crate::TransportConfig`])
-    /// - `signer`: Any transaction signer — a local
-    ///   [`PrivateKeySigner`](alloy::signers::local::PrivateKeySigner), an AWS KMS
-    ///   [`AwsSigner`](https://docs.rs/alloy-signer-aws) (enable the `aws` feature),
-    ///   or any other [`TxSigner`] implementation
-    /// - `deployments`: Contract addresses for this PerpCity instance
-    /// - `chain_id`: Chain ID (42161 for Arbitrum One, 421614 for Arbitrum Sepolia)
+    /// `signer` is any transaction signer — a local
+    /// [`PrivateKeySigner`](alloy::signers::local::PrivateKeySigner), an
+    /// AWS KMS [`AwsSigner`](https://docs.rs/alloy-signer-aws) (enable the
+    /// `aws` feature), or any other [`TxSigner`]. The market reader comes
+    /// from [`ChainReader::market`]; build one chain reader per process and
+    /// every client and reader over it shares its caches.
     ///
-    /// This does NOT make any network calls. Call [`Self::refresh_gas`] and
+    /// Makes no network calls. Call [`ChainReader::refresh_gas`] and
     /// [`Self::sync_nonce`] before submitting transactions.
-    pub fn new<S>(
-        transport: HftTransport,
-        signer: S,
-        deployments: Deployments,
-        chain_id: u64,
-    ) -> Result<Self>
-    where
-        S: TxSigner<Signature> + Send + Sync + 'static,
-    {
-        let chain = ChainReader::new(transport, deployments.chain(), chain_id);
-        Ok(Self::from_parts(chain, signer, deployments.perp))
-    }
-
-    /// A signing client for `perp` over an existing chain reader.
-    fn from_parts<S>(chain: ChainReader, signer: S, perp: Address) -> Self
+    pub fn new<S>(market: MarketReader, signer: S) -> Self
     where
         S: TxSigner<Signature> + Send + Sync + 'static,
     {
         let address = TxSigner::address(&signer);
         Self {
-            market: chain.market(perp),
-            chain,
+            chain: market.chain().clone(),
+            market,
             wallet: EthereumWallet::from(signer),
             address,
             // Pipeline starts at nonce 0; call sync_nonce() before first tx
             pipeline: Mutex::new(TxPipeline::new(0, PipelineConfig::default())),
             gas_limit_cache: Mutex::new(GasLimitCache::new()),
         }
-    }
-
-    /// Create a client pre-configured for Arbitrum One (mainnet).
-    pub fn new_arbitrum<S>(
-        transport: HftTransport,
-        signer: S,
-        deployments: Deployments,
-    ) -> Result<Self>
-    where
-        S: TxSigner<Signature> + Send + Sync + 'static,
-    {
-        Self::new(transport, signer, deployments, ARBITRUM_CHAIN_ID)
-    }
-
-    /// Create a client pre-configured for Arbitrum Sepolia (testnet).
-    pub fn new_arbitrum_sepolia<S>(
-        transport: HftTransport,
-        signer: S,
-        deployments: Deployments,
-    ) -> Result<Self>
-    where
-        S: TxSigner<Signature> + Send + Sync + 'static,
-    {
-        Self::new(transport, signer, deployments, ARBITRUM_SEPOLIA_CHAIN_ID)
     }
 
     // ── Initialization ───────────────────────────────────────────────
@@ -354,17 +309,6 @@ impl PerpClient {
     /// The reader for the market this client trades.
     pub fn market(&self) -> &MarketReader {
         &self.market
-    }
-
-    /// The market and chain addresses as one bundle, the shape the
-    /// constructors take.
-    pub fn deployments(&self) -> Deployments {
-        let chain = self.chain.deployments();
-        Deployments {
-            perp: self.market.perp(),
-            usdc: chain.usdc,
-            pool_manager: chain.pool_manager,
-        }
     }
 
     /// [`ChainReader::provider`] on this client's chain reader.

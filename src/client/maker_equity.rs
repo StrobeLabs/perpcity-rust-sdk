@@ -1175,25 +1175,7 @@ mod tests {
     fn get_maker_equities_future_is_send() {
         fn require_send<T: Send>(_: &T) {}
 
-        let transport = crate::transport::provider::HftTransport::new(
-            crate::transport::config::TransportConfig::builder()
-                .shared_endpoint("http://127.0.0.1:1")
-                .build()
-                .unwrap(),
-        )
-        .unwrap();
-        let signer = alloy::signers::local::PrivateKeySigner::random();
-        let client = PerpClient::new(
-            transport,
-            signer,
-            crate::types::Deployments {
-                perp: Address::repeat_byte(1),
-                usdc: Address::repeat_byte(2),
-                pool_manager: Address::repeat_byte(3),
-            },
-            super::super::ARBITRUM_SEPOLIA_CHAIN_ID,
-        )
-        .unwrap();
+        let (client, _rpc) = mock::client();
 
         let ids = [U256::ONE];
         let fut = client.get_maker_equities(&ids);

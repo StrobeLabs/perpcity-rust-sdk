@@ -18,9 +18,8 @@ use std::env;
 use alloy::primitives::{Address, U256};
 use alloy::signers::local::PrivateKeySigner;
 use perpcity_sdk::{
-    ARBITRUM_SEPOLIA_POOL_MANAGER, ARBITRUM_SEPOLIA_USDC, Deployments, HftTransport,
-    MakerEquityBreakdown, MakerEquityKind, Perp, PerpCityError, PerpClient, TransactionError,
-    TransportConfig, Urgency,
+    ChainReader, HftTransport, MakerEquityBreakdown, MakerEquityKind, Perp, PerpCityError,
+    PerpClient, TransactionError, TransportConfig, Urgency,
 };
 
 #[tokio::main]
@@ -48,15 +47,10 @@ async fn main() -> perpcity_sdk::Result<()> {
             .shared_endpoint(&rpc_url)
             .build()?,
     )?;
-    let client = PerpClient::new_arbitrum_sepolia(
-        transport,
+    let client = PerpClient::new(
+        ChainReader::arbitrum_sepolia(transport).market(perp),
         signer,
-        Deployments {
-            perp,
-            usdc: ARBITRUM_SEPOLIA_USDC,
-            pool_manager: ARBITRUM_SEPOLIA_POOL_MANAGER,
-        },
-    )?;
+    );
     if !dry_run {
         client.sync_nonce().await?;
         client.refresh_gas().await?;

@@ -54,16 +54,20 @@ async fn main() -> Result<()> {
         .map(|s| s.parse::<Address>().expect("invalid PERPCITY_USDC address"))
         .unwrap_or(ARBITRUM_SEPOLIA_USDC);
 
-    let deployments = Deployments {
-        perp: env::var("PERPCITY_PERP")
-            .expect("set PERPCITY_PERP")
-            .parse::<Address>()
-            .unwrap(),
-        usdc,
-        pool_manager: ARBITRUM_SEPOLIA_POOL_MANAGER,
-    };
+    let perp: Address = env::var("PERPCITY_PERP")
+        .expect("set PERPCITY_PERP")
+        .parse()
+        .unwrap();
 
-    let client = PerpClient::new_arbitrum_sepolia(transport, signer, deployments)?;
+    let chain = ChainReader::new(
+        transport,
+        ChainDeployments {
+            usdc,
+            pool_manager: ARBITRUM_SEPOLIA_POOL_MANAGER,
+        },
+        ARBITRUM_SEPOLIA_CHAIN_ID,
+    );
+    let client = PerpClient::new(chain.market(perp), signer);
     println!("connected to {rpc_url}");
 
     // -- Warm caches --

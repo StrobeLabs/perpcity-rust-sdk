@@ -70,10 +70,13 @@ let transport = HftTransport::new(
         .build()?,
 )?;
 
-// 2. Client
-let client = PerpClient::new(transport, signer, deployments, 421614)?;
+// 2. One chain reader per process — every client and reader shares its caches
+let chain = ChainReader::arbitrum_sepolia(transport);
 
-// 3. Warm caches (required before first transaction)
+// 3. A signing client for one market
+let client = PerpClient::new(chain.market(perp), signer);
+
+// 4. Warm caches (required before first transaction)
 client.sync_nonce().await?;
 client.refresh_gas().await?;
 client.ensure_approval(U256::MAX).await?;
@@ -257,22 +260,18 @@ All math functions are pure, `O(1)`, and ported faithfully from PerpCity's Solid
 
 ## Configuration
 
-### Deployments
+### Chains and markets
 
-The `Deployments` struct holds contract addresses. For Arbitrum Sepolia:
+A `ChainReader` holds what every market on a chain shares — the transport, the collateral token, the pool manager, and the caches — and hands out a `MarketReader` per `Perp` contract. `ChainReader::arbitrum` and `ChainReader::arbitrum_sepolia` fill in the canonical addresses and chain id:
 
 ```rust
 let perp: Address = std::env::var("PERPCITY_PERP")?.parse()?;
 
-let deployments = Deployments {
-    perp,
-    usdc: ARBITRUM_SEPOLIA_USDC, // 0xBEF280BefeE2Cb28c20D1E4Cc1da999B4DA0f1fD (PerpCity test USDC, not Circle's)
-};
-
-let client = PerpClient::new_arbitrum_sepolia(transport, signer, deployments)?;
+let chain = ChainReader::arbitrum_sepolia(transport); // test USDC 0xBEF280Be…, not Circle's
+let client = PerpClient::new(chain.market(perp), signer);
 ```
 
-For Arbitrum One (mainnet), use `PerpClient::new_arbitrum()` which sets chain ID 42161, and pass `ARBITRUM_USDC` — canonical Circle USDC on Arbitrum One (`0xaf88d065e77c8cC2239327C5EDb3A432268e5831`) — in `Deployments`.
+For Arbitrum One, `ChainReader::arbitrum(transport)` uses canonical Circle USDC (`0xaf88d065e77c8cC2239327C5EDb3A432268e5831`) and chain id 42161. For any other collateral token or chain, build the reader with `ChainReader::new(transport, ChainDeployments { usdc, pool_manager }, chain_id)`. Reads need no signer: `chain.market(perp)` on its own answers every market read, and one chain reader serves any number of markets and clients.
 
 ### Release Profile
 

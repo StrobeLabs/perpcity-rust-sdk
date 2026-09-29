@@ -29,30 +29,6 @@ pub struct ChainDeployments {
     pub pool_manager: Address,
 }
 
-/// One market's `Perp` contract and the chain-wide addresses it settles
-/// against — the bundle the client constructors take.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Deployments {
-    /// Perp contract address (one per market).
-    pub perp: Address,
-    /// USDC token address.
-    pub usdc: Address,
-    /// Uniswap V4 `PoolManager` the market's pool lives in — one canonical
-    /// address per chain (see `ARBITRUM_POOL_MANAGER` /
-    /// `ARBITRUM_SEPOLIA_POOL_MANAGER`).
-    pub pool_manager: Address,
-}
-
-impl Deployments {
-    /// The chain-scoped half: everything but the market.
-    pub fn chain(&self) -> ChainDeployments {
-        ChainDeployments {
-            usdc: self.usdc,
-            pool_manager: self.pool_manager,
-        }
-    }
-}
-
 /// Metadata about a perpetual market.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PerpData {
@@ -424,14 +400,13 @@ mod tests {
     }
 
     #[test]
-    fn deployments_serde_roundtrip() {
-        let deployments = Deployments {
-            perp: Address::ZERO,
+    fn chain_deployments_serde_roundtrip() {
+        let deployments = ChainDeployments {
             usdc: Address::ZERO,
             pool_manager: Address::ZERO,
         };
         let json = serde_json::to_string(&deployments).unwrap();
-        let recovered: Deployments = serde_json::from_str(&json).unwrap();
+        let recovered: ChainDeployments = serde_json::from_str(&json).unwrap();
         assert_eq!(deployments, recovered);
     }
 

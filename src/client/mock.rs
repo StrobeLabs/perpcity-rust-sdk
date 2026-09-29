@@ -98,7 +98,7 @@ fn chain_with(provider: RootProvider<Ethereum>, transport: HftTransport) -> Chai
 fn client_with(provider: RootProvider<Ethereum>, transport: HftTransport) -> PerpClient {
     let signer = PrivateKeySigner::from_bytes(&B256::repeat_byte(0x01))
         .expect("a non-zero scalar is a valid key");
-    PerpClient::from_parts(chain_with(provider, transport), signer, PERP)
+    PerpClient::new(chain_with(provider, transport).market(PERP), signer)
 }
 
 /// The mock's answer queue, in the vocabulary of the reads.

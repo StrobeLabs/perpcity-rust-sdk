@@ -50,16 +50,13 @@ async fn main() -> Result<()> {
             .build()?,
     )?;
 
-    let deployments = Deployments {
-        perp: env::var("PERPCITY_PERP")
-            .expect("set PERPCITY_PERP")
-            .parse::<Address>()
-            .unwrap(),
-        usdc: ARBITRUM_SEPOLIA_USDC,
-        pool_manager: ARBITRUM_SEPOLIA_POOL_MANAGER,
-    };
+    let perp: Address = env::var("PERPCITY_PERP")
+        .expect("set PERPCITY_PERP")
+        .parse()
+        .unwrap();
 
-    let client = PerpClient::new_arbitrum_sepolia(transport, signer, deployments)?;
+    let chain = ChainReader::arbitrum_sepolia(transport);
+    let client = PerpClient::new(chain.market(perp), signer);
     println!("connected to {rpc_url} as {}", client.address());
 
     // -- Warm caches --

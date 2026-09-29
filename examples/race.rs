@@ -51,12 +51,15 @@ async fn main() -> Result<()> {
             .build()?,
     )?;
     let signer: PrivateKeySigner = private_key.parse().unwrap();
-    let deployments = Deployments {
-        perp,
-        usdc,
-        pool_manager: ARBITRUM_SEPOLIA_POOL_MANAGER,
-    };
-    let client = PerpClient::new_arbitrum_sepolia(transport, signer, deployments)?;
+    let chain = ChainReader::new(
+        transport,
+        ChainDeployments {
+            usdc,
+            pool_manager: ARBITRUM_SEPOLIA_POOL_MANAGER,
+        },
+        ARBITRUM_SEPOLIA_CHAIN_ID,
+    );
+    let client = PerpClient::new(chain.market(perp), signer);
     phase_times.push(("init", ms(t)));
 
     // ── Phase: sync_nonce ────────────────────────────────────────────

@@ -35,8 +35,9 @@ use alloy::signers::local::PrivateKeySigner;
 use perpcity_sdk::math::liquidity::estimate_liquidity;
 use perpcity_sdk::math::tick::{align_tick_down, align_tick_up, price_to_tick};
 use perpcity_sdk::{
-    ARBITRUM_SEPOLIA_POOL_MANAGER, ARBITRUM_SEPOLIA_USDC, Deployments, HftTransport,
-    OpenMakerParams, PerpClient, TransportConfig, Urgency,
+    ARBITRUM_SEPOLIA_CHAIN_ID, ARBITRUM_SEPOLIA_POOL_MANAGER, ARBITRUM_SEPOLIA_USDC,
+    ChainDeployments, ChainReader, HftTransport, OpenMakerParams, PerpClient, TransportConfig,
+    Urgency,
 };
 
 /// How far above/below the current price to set the range, as a fraction.
@@ -53,22 +54,29 @@ fn load_signer() -> PrivateKeySigner {
         .expect("invalid private key hex")
 }
 
-fn load_deployments() -> Deployments {
-    let perp: Address = env::var("PERPCITY_PERP")
+fn load_perp() -> Address {
+    env::var("PERPCITY_PERP")
         .expect("PERPCITY_PERP must be set")
         .parse()
-        .expect("invalid PERPCITY_PERP address");
+        .expect("invalid PERPCITY_PERP address")
+}
 
+/// The chain reader, with the collateral token overridable for a
+/// deployment that settles in something other than the preset's USDC.
+fn load_chain(transport: HftTransport) -> ChainReader {
     let usdc = env::var("PERPCITY_USDC")
         .ok()
         .map(|s| s.parse::<Address>().expect("invalid PERPCITY_USDC address"))
         .unwrap_or(ARBITRUM_SEPOLIA_USDC);
 
-    Deployments {
-        perp,
-        usdc,
-        pool_manager: ARBITRUM_SEPOLIA_POOL_MANAGER,
-    }
+    ChainReader::new(
+        transport,
+        ChainDeployments {
+            usdc,
+            pool_manager: ARBITRUM_SEPOLIA_POOL_MANAGER,
+        },
+        ARBITRUM_SEPOLIA_CHAIN_ID,
+    )
 }
 
 #[tokio::main]
@@ -85,7 +93,7 @@ async fn main() -> perpcity_sdk::Result<()> {
             .build()?,
     )?;
 
-    let client = PerpClient::new_arbitrum_sepolia(transport, load_signer(), load_deployments())?;
+    let client = PerpClient::new(load_chain(transport).market(load_perp()), load_signer());
 
     println!("Market Maker — address: {}", client.address());
 
