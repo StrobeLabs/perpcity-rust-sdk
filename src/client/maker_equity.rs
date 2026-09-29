@@ -872,6 +872,7 @@ impl PerpClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::client::mock::{self, Rpc};
     use crate::contracts::{Capacity, MakerFunding};
     use alloy::primitives::I256;
 
@@ -1176,5 +1177,84 @@ mod tests {
         let fut = client.get_maker_equities(&ids);
         require_send(&fut);
         drop(fut);
+    }
+
+    // ── Tick funding: the eth_getProof latch and the storage fallback ─
+
+    /// One tick's two funding words, as the storage fallback reads them:
+    /// the opposite cumulative, then the one over sqrt price.
+    fn funding_words(rpc: &Rpc, opp: u8, div: u8) {
+        rpc.storage(U256::from(opp));
+        rpc.storage(U256::from(div));
+    }
+
+    /// An endpoint that answers `eth_getProof` with "method not found" is
+    /// remembered: the fallback serves that read, and the next read goes
+    /// straight to storage without probing again.
+    #[tokio::test]
+    async fn a_method_not_found_on_eth_getproof_latches_the_storage_fallback() {
+        let ticks = BTreeSet::from([60]);
+        let (client, rpc) = mock::client();
+        rpc.method_not_found();
+        funding_words(&rpc, 7, 9);
+
+        let funding = client
+            .get_tick_funding(BlockId::latest(), &ticks)
+            .await
+            .unwrap();
+        let read = funding[&60].as_ref().unwrap();
+        assert_eq!(read.cuml_funding_opp_x96, I256::from_raw(U256::from(7u8)));
+        assert_eq!(
+            read.cuml_funding_div_sqrt_p_opp_x96,
+            I256::from_raw(U256::from(9u8))
+        );
+        assert!(rpc.is_drained(), "the probe, then two storage reads");
+
+        funding_words(&rpc, 7, 9);
+        let funding = client
+            .get_tick_funding(BlockId::latest(), &ticks)
+            .await
+            .unwrap();
+        assert!(funding[&60].is_ok());
+        assert!(rpc.is_drained(), "latched: two storage reads and no probe");
+    }
+
+    /// Any other `eth_getProof` failure falls back for that read alone and
+    /// is not held against the next one, which probes again.
+    #[tokio::test]
+    async fn any_other_eth_getproof_failure_falls_back_without_latching() {
+        let ticks = BTreeSet::from([60]);
+        let (client, rpc) = mock::client();
+        for _ in 0..2 {
+            rpc.fails("rate limited");
+            funding_words(&rpc, 7, 9);
+
+            let funding = client
+                .get_tick_funding(BlockId::latest(), &ticks)
+                .await
+                .unwrap();
+            assert!(funding[&60].is_ok());
+            assert!(rpc.is_drained(), "probed again: three answers each time");
+        }
+    }
+
+    /// A tick whose storage read fails is reported failed on its own, with
+    /// the transport cause kept, while the other ticks' reads stand.
+    #[tokio::test]
+    async fn a_failed_tick_read_degrades_that_tick_alone() {
+        let ticks = BTreeSet::from([-60, 60]);
+        let (client, rpc) = mock::client();
+        rpc.method_not_found();
+        funding_words(&rpc, 7, 9);
+        rpc.storage(U256::from(7u8));
+        rpc.fails("replica dropped the read");
+
+        let funding = client
+            .get_tick_funding(BlockId::latest(), &ticks)
+            .await
+            .unwrap();
+        assert!(funding[&-60].is_ok());
+        assert!(funding[&60].is_err());
+        assert!(rpc.is_drained());
     }
 }

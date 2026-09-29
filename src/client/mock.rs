@@ -127,6 +127,16 @@ impl Rpc {
         self.0.push_failure_msg(message);
     }
 
+    /// The next request is refused as a method the endpoint does not
+    /// serve (JSON-RPC `-32601`), the one answer worth remembering.
+    pub(super) fn method_not_found(&self) {
+        self.0.push_failure(ErrorPayload {
+            code: -32601,
+            message: "the method does not exist/is not available".into(),
+            data: None,
+        });
+    }
+
     /// The next `eth_call` reverts, carrying `data` the way a node reports
     /// `execution reverted` (JSON-RPC code 3).
     pub(super) fn reverts(&self, data: &[u8]) {
