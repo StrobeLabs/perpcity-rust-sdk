@@ -9,7 +9,7 @@ use std::sync::Arc;
 use alloy::primitives::B256;
 use tokio::sync::watch;
 
-use crate::PerpClient;
+use crate::MarketReader;
 use crate::math::swap::TakerMarketSnapshot;
 use crate::transport::ws::WsManager;
 
@@ -31,8 +31,11 @@ impl LiveTakerMarket {
 
     /// Load immediately, then refresh atomically on every WebSocket `newHeads`
     /// notification. Failed refreshes leave the last good snapshot published.
-    pub async fn subscribe(client: Arc<PerpClient>, ws: &WsManager) -> crate::Result<Self> {
-        let initial = client.load_taker_market_snapshot().await?;
+    ///
+    /// Takes the market reader by value: the refresh task owns it, and a
+    /// feed needs no signer.
+    pub async fn subscribe(reader: MarketReader, ws: &WsManager) -> crate::Result<Self> {
+        let initial = reader.load_taker_market_snapshot().await?;
         let (market, publisher) = Self::from_snapshot(initial);
         let mut blocks = ws.subscribe_blocks().await?;
         tokio::spawn(async move {
@@ -50,7 +53,7 @@ impl LiveTakerMarket {
                         // head) regardless, so a backlog is purely
                         // redundant RPC work.
                         while blocks.try_recv().is_ok() {}
-                        match client.load_taker_market_snapshot().await {
+                        match reader.load_taker_market_snapshot().await {
                             Ok(snapshot) => publisher.publish(snapshot),
                             Err(error) => {
                                 tracing::warn!(%error, "taker snapshot refresh failed");
