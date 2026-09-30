@@ -13,6 +13,7 @@ use crate::nodes::Node;
 
 const WIRE_SUFFIXES: [&str; 5] = ["_x96", "_x128", "_atoms", "_e6", "_wad"];
 
+/// Run every enforced invariant, appending a sentence per violation.
 pub fn enforced(index: &Index, graph: &Graph, nodes: &[Node], problems: &mut Vec<String>) {
     no_read_takes_a_block(index, problems);
     snapshots_carry_a_block(index, problems);
@@ -23,6 +24,8 @@ pub fn enforced(index: &Index, graph: &Graph, nodes: &[Node], problems: &mut Vec
     surface_is_in_one_table(index, graph, nodes, problems);
 }
 
+/// Print the findings of the invariants that are measured but not yet
+/// enforced.
 pub fn reported(index: &Index) {
     println!("\nReported invariants (not enforced until #124's conversions land):");
     let mut n = 0;
@@ -87,6 +90,7 @@ pub fn reported(index: &Index) {
     println!("  {n} finding(s)");
 }
 
+/// A type as a reader would name it, for messages and suffix checks.
 fn type_name(ty: &Type) -> String {
     match ty {
         Type::ResolvedPath(p) => p.path.rsplit("::").next().unwrap_or(&p.path).to_string(),

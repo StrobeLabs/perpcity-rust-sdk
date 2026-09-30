@@ -52,6 +52,7 @@ pub struct Table {
     pub rows: Vec<Row>,
 }
 
+/// The root node and every `src/*/DESIGN.md`, in path order.
 pub fn discover(root: &Path) -> Result<Vec<Node>> {
     let mut nodes = vec![Node {
         name: String::new(),
@@ -188,6 +189,7 @@ pub fn table(node: &Node) -> Result<Table> {
     )
 }
 
+/// A table row's cells, trimmed; empty for a line that is not a row.
 fn cells(line: &str) -> Vec<String> {
     let t = line.trim();
     if !t.starts_with('|') {

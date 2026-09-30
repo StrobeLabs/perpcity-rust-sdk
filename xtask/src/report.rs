@@ -8,6 +8,7 @@ use crate::design::{EdgeKind, Graph};
 use crate::index::{Index, Kind};
 use crate::nodes::Node;
 
+/// Print the graph's numbers and the structures worth a second look.
 pub fn print(index: &Index, graph: &Graph, nodes: &[Node]) {
     let name = |id: Id| {
         index

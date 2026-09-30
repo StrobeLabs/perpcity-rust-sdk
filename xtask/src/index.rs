@@ -471,6 +471,7 @@ impl Index {
     }
 }
 
+/// An item's source file and first line, empty when rustdoc has none.
 fn span_of(item: &Item) -> (String, usize) {
     match &item.span {
         Some(s) => (s.filename.to_string_lossy().into_owned(), s.begin.0),
@@ -478,6 +479,8 @@ fn span_of(item: &Item) -> (String, usize) {
     }
 }
 
+/// Reduce rustdoc's signature to the type ids each parameter and the
+/// return mention.
 fn signature(sig: &rustdoc_types::FunctionSignature) -> Signature {
     let mut out = Signature::default();
     for (name, ty) in &sig.inputs {
@@ -501,6 +504,8 @@ pub fn mentions(ty: &Type) -> Vec<Id> {
     out
 }
 
+/// Collect the ids a type mentions, through references, tuples, arrays,
+/// generic arguments, trait objects and function pointers.
 fn walk(ty: &Type, out: &mut Vec<Id>) {
     match ty {
         Type::ResolvedPath(p) => {
@@ -550,12 +555,14 @@ fn walk(ty: &Type, out: &mut Vec<Id>) {
     }
 }
 
+/// The ids in a path's generic arguments.
 fn walk_args(p: &RdPath, out: &mut Vec<Id>) {
     if let Some(a) = &p.args {
         walk_generic_args(a, out);
     }
 }
 
+/// The ids in generic arguments, associated-type constraints included.
 fn walk_generic_args(a: &GenericArgs, out: &mut Vec<Id>) {
     match a {
         GenericArgs::AngleBracketed { args, constraints } => {
@@ -626,6 +633,7 @@ pub fn mentions_primitive(ty: &Type, prim: &str) -> bool {
     }
 }
 
+/// Whether generic arguments mention a primitive by name.
 fn args_mention_primitive(a: &GenericArgs, prim: &str) -> bool {
     match a {
         GenericArgs::AngleBracketed { args, .. } => args

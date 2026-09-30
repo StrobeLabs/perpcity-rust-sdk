@@ -26,6 +26,7 @@ cargo xtask design [--check] [--fmt] [--report] [--open]
   --open    write target/design/index.html and open it
 ";
 
+/// Exit non-zero when the check found problems or the tool failed.
 fn main() -> ExitCode {
     match run() {
         Ok(true) => ExitCode::SUCCESS,
@@ -37,6 +38,8 @@ fn main() -> ExitCode {
     }
 }
 
+/// Parse the command line and dispatch; `Ok(false)` means problems were
+/// printed.
 fn run() -> Result<bool> {
     let args: Vec<String> = env::args().skip(1).collect();
     let Some(cmd) = args.first() else {

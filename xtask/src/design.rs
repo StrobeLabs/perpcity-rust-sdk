@@ -118,6 +118,8 @@ impl Graph {
     }
 }
 
+/// Build the graph, verify the nodes against it, and do what the flags ask;
+/// `Ok(false)` when problems were printed.
 pub fn run(opts: Options) -> Result<bool> {
     let root = repo_root()?;
     let krate = rustdoc::load(&root)?;
@@ -153,7 +155,22 @@ pub fn run(opts: Options) -> Result<bool> {
     if opts.open {
         let out = page::write(&root, &index, &graph, &nodes)?;
         println!("wrote {}", out.display());
-        let _ = Command::new("open").arg(&out).status();
+        let mut opener = if cfg!(target_os = "macos") {
+            Command::new("open")
+        } else if cfg!(windows) {
+            let mut c = Command::new("cmd");
+            c.args(["/C", "start", ""]);
+            c
+        } else {
+            Command::new("xdg-open")
+        };
+        match opener.arg(&out).status() {
+            Ok(s) if s.success() => {}
+            other => eprintln!(
+                "could not open the page ({other:?}); open {} yourself",
+                out.display()
+            ),
+        }
     }
 
     if problems.is_empty() {
@@ -178,6 +195,7 @@ pub fn run(opts: Options) -> Result<bool> {
     Ok(false)
 }
 
+/// The repository: the nearest ancestor holding the root node and a manifest.
 fn repo_root() -> Result<PathBuf> {
     let dir = env::current_dir()?;
     let mut cur: &Path = &dir;
@@ -382,6 +400,7 @@ fn mechanical(index: &Index, root: &Path) -> Graph {
     }
 }
 
+/// Add an edge, or another function and label to one that exists.
 fn push_edge(
     edges: &mut BTreeMap<(Id, Id, EdgeKind), Edge>,
     src: Id,
@@ -548,6 +567,34 @@ pub fn resolve(link: &Link, node: &Node, index: &Index) -> Result<Ref, String> {
                 || index.entries[id].module.starts_with(&prefix)
         })
         .collect();
+    // A file target says which item of that name is meant: the source file
+    // it links, or the design node of the component it links.
+    if cands.len() > 1
+        && let Some(t) = link.target.as_deref().filter(|t| !t.contains("::"))
+    {
+        let file = t.split('#').next().unwrap_or(t);
+        let named: Vec<Id> = if file.ends_with("DESIGN.md") {
+            let comp = Path::new(file)
+                .parent()
+                .and_then(|p| p.file_name())
+                .map(|s| s.to_string_lossy().into_owned());
+            cands
+                .iter()
+                .copied()
+                .filter(|id| Some(index.entries[id].top().to_string()) == comp)
+                .collect()
+        } else {
+            let abs = fs::canonicalize(node.dir().join(file)).unwrap_or_default();
+            cands
+                .iter()
+                .copied()
+                .filter(|id| abs.ends_with(&index.entries[id].file))
+                .collect()
+        };
+        if !named.is_empty() {
+            cands = named;
+        }
+    }
     if cands.len() > 1 {
         let own: Vec<Id> = cands
             .iter()
@@ -639,6 +686,7 @@ pub fn resolve(link: &Link, node: &Node, index: &Index) -> Result<Ref, String> {
     })
 }
 
+/// `Result<T>` as `Result`.
 fn strip_generics(s: &str) -> &str {
     match s.find('<') {
         Some(i) => &s[..i],
@@ -646,12 +694,14 @@ fn strip_generics(s: &str) -> &str {
     }
 }
 
+/// A function or module name, by Rust's convention.
 fn starts_lower(s: &str) -> bool {
     s.chars()
         .next()
         .is_some_and(|c| c.is_ascii_lowercase() || c == '_')
 }
 
+/// A type or variant name, by Rust's convention.
 fn starts_upper(s: &str) -> bool {
     s.chars().next().is_some_and(|c| c.is_ascii_uppercase())
 }
@@ -851,6 +901,8 @@ fn built_from(t: Id, y: Id, index: &Index) -> bool {
     })
 }
 
+/// Whether a signature returns `Self`, bare or inside a `Result`, an
+/// `Option` or a tuple.
 fn returns_self(sig: &Signature) -> bool {
     fn is_self(t: &Type) -> bool {
         matches!(t, Type::Generic(g) if g == "Self")
@@ -868,6 +920,7 @@ fn returns_self(sig: &Signature) -> bool {
     }
 }
 
+/// The crate's types a signature returns, for an error message.
 fn describe_output(sig: &Signature, index: &Index) -> String {
     if sig.outputs.is_empty() {
         return "nothing of the crate's".into();
@@ -933,10 +986,12 @@ fn canonical_links(node: &Node, index: &Index, root: &Path) -> String {
     out
 }
 
+/// A link from a node's directory to a source line.
 fn source_link(dir: &Path, file: &str, line: usize) -> String {
     format!("{}#L{line}", relative(dir, Path::new(file)))
 }
 
+/// A link from a node's directory to another component's node.
 fn node_link(dir: &Path, component: &str) -> String {
     relative(dir, &Path::new("src").join(component).join("DESIGN.md"))
 }

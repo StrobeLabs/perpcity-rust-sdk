@@ -46,6 +46,7 @@ struct Data {
     root: String,
 }
 
+/// Write the page with the graph's data inlined, and return its path.
 pub fn write(root: &Path, index: &Index, graph: &Graph, nodes: &[Node]) -> Result<PathBuf> {
     let repo = repository_url(root);
     let key = |id: Id| index.entries[&id].path();
@@ -122,6 +123,7 @@ pub fn write(root: &Path, index: &Index, graph: &Graph, nodes: &[Node]) -> Resul
     Ok(out)
 }
 
+/// The manifest's repository as a `blob/main/` base, empty when it has none.
 fn repository_url(root: &Path) -> String {
     let manifest = fs::read_to_string(root.join("Cargo.toml")).unwrap_or_default();
     manifest
@@ -158,6 +160,7 @@ fn html_cell(cell: &str, node: &Node, index: &Index, graph: &Graph) -> String {
     out
 }
 
+/// Markdown code spans as `<code>`, everything else escaped.
 fn code_spans(s: &str) -> String {
     let mut out = String::new();
     let mut in_code = false;
@@ -174,6 +177,7 @@ fn code_spans(s: &str) -> String {
     out
 }
 
+/// Escape text for an HTML attribute or body.
 fn html_escape(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")

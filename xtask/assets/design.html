@@ -176,8 +176,9 @@
       const cls = e.data('designed') ? '' : ' class="faint"';
       return `<li${cls}><span class="arrow">${dir === 'in' ? '←' : '→'}</span><a data-node="${other.id()}">${esc(other.data('label'))}</a>${fn}</li>`;
     };
-    const designUrl = G.repo + 'src/' + d.node + '/DESIGN.md';
-    const srcUrl = d.file ? G.repo + d.file + '#L' + d.line : null;
+    const base = G.repo || '../../';
+    const designUrl = base + (d.node ? 'src/' + d.node + '/DESIGN.md' : 'DESIGN.md');
+    const srcUrl = d.file ? base + d.file + '#L' + d.line : null;
     const editorUrl = d.file ? 'vscode://file/' + G.root + '/' + d.file + ':' + d.line : null;
     const rowNote = d.invariant ? '' : `<p class="empty">No row of its own in a design node yet.</p>`;
     panel.innerHTML = `
