@@ -56,6 +56,50 @@ hash; `resolve` or `fail` ends it. A transaction older than the
 configured timeout is stuck, and `prepare_bump` makes a replacement at
 the same nonce with higher fees.
 
+```text
+                       sync_nonce (once, from the chain's count)
+                                       │
+                                       ▼
+                              ┌─────────────────┐
+              ┌──────────────►│     SYNCED      │◄──────────────────────┐
+              │               │ next = n        │                       │
+              │               └────────┬────────┘                       │
+              │        prepare: acquire n, next = n+1 (no lock, no RPC)  │
+              │                        ▼                                │
+              │               ┌─────────────────┐   fail (provably      │
+              │               │   IN FLIGHT n   │   local: signing)      │
+              │               │ tracked by hash │──────────────────────►│ nonce released
+              │               └───┬─────┬───┬───┘                       │
+              │   resolve         │     │   │  older than the timeout   │
+              │ (mined: ok,       │     │   └──────────► STUCK n ───────┤ prepare_bump:
+              │  reverted,        │     │                                │ same n, higher fees,
+              │  out of gas)      │     │ broadcast failed /             │ back to IN FLIGHT
+              └───────────────────┘     │ receipt timed out              │
+                                        ▼                                │
+                              ┌─────────────────┐                       │
+                              │    DESYNCED     │  no new send starts    │
+                              │ n's fate unknown│                       │
+                              └────────┬────────┘                       │
+                                       │ in-flight count reaches 0      │
+                                       ▼                                │
+                              resync: take the chain's count ───────────┘
+                              (counts n iff n is live)
+```
+
+The loop on the left is the steady state and costs nothing: acquire is
+an atomic increment, and a resolved transaction just stops being
+tracked. The two exits on the right are the cases where the manager
+learns something it cannot verify locally. A signing failure is provably
+local, nothing left the process, so the nonce goes back and the next
+prepare reuses it. A broadcast failure or a receipt timeout is not: the
+transaction may be in a mempool or mined, and either reusing or
+rewinding `n` is a guess that is wrong half the time and, when wrong,
+spins forever. So the sequence is marked `DESYNCED`, sends fail fast
+until everything in flight has resolved, and then one read of the chain's
+transaction count re-establishes the truth, counting `n` exactly when it
+landed. A stuck transaction is the one case that stays `IN FLIGHT`: the
+bump replaces it at the same nonce, so ordering is never disturbed.
+
 Urgency is the one knob a caller has on price: a multiplier over the base
 fee, from background to liquidation defence. The gas limit is the other
 knob, cached per selector after the first estimate, with fixed limits

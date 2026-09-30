@@ -78,6 +78,44 @@ address that emitted it, and its chain position is the log's block and
 index; `history` attaches those as a `TapeEvent`, and the feed's consumer
 already knows which subscription delivered it.
 
+```text
+      the present                                       the past
+      ───────────                                       ────────
+   WebSocket subscription                        eth_getLogs scan
+   (MarketFeed, one market)                      (History, a block range)
+            │                                             │
+            │ raw Log, as emitted                         │ raw Log, from the archive
+            └──────────────────┐         ┌────────────────┘
+                               ▼         ▼
+                          ┌───────────────────┐
+                          │    decode_log     │   one function
+                          │  every era's ABI  │   unknown → None
+                          └─────────┬─────────┘   malformed → error
+                                    ▼
+                          ┌───────────────────┐
+                          │    MarketEvent    │   human units; raw where exact
+                          └───┬───────────┬───┘
+                    feed      │           │      tape: + ChainPoint
+                              ▼           ▼            (block, log index)
+                      consumer's loop   TapeEvent ─── in chain order
+                      (live cache,           │
+                       a strategy)           ▼
+                                    folds: OwnershipLog, economics,
+                                           a series, a reconciliation
+
+           the same log yields the same MarketEvent from either side
+```
+
+The shape is a funnel, and the point is the neck. Two transports deliver
+logs, and neither interprets them; both hand the raw log to the one
+decoder and receive the same value back. Above the neck the two tenses
+diverge only in what is attached: the feed's consumer already knows
+which subscription delivered the event, while the tape stamps each one
+with its chain point so that folds can join on order. That is why a fold
+written over a tape, custody over time, a market's economics, an index
+series, runs unchanged on a live stream: it was never written against a
+transport, only against the vocabulary.
+
 ## The type system
 
 | Type | What it is | The invariant it carries |

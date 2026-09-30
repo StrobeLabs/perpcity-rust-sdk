@@ -144,6 +144,38 @@ block*, through a handle that resolved one header and pins every read to
 its hash, so that values read through one handle agree by construction.
 The receiver type says which tense a read is in. There is no third tense.
 
+```text
+   now                                      at a block
+   ───────────────────────────────          ─────────────────────────────────
+   MarketReader::get_*                      MarketReader::state()      ─┐
+                                            MarketReader::state_at(n)  ─┤
+       │ each call on its own                                           ▼
+       ▼                                                            StateAt
+   ┌────────────┐  hit   ┌───────┐              resolves ONE header:  { block: number, hash, ts }
+   │ state cache│───────►│ value │                                          │
+   └─────┬──────┘        └───────┘              every read on the handle    │
+         │ miss / uncached                      is pinned to that hash      ▼
+         ▼                                       ┌────────┬─────────┬──────────┐
+   ┌────────────┐                                │capacity│  pool   │   mark   │ ...
+   │  the head  │  whatever block it is now      └────────┴─────────┴──────────┘
+   └────────────┘                                     all from the same block
+
+   head ──────────────────────────────────────────────────────────► block number
+                                     ▲                        ▲
+                                     └─ state(): head − 8 ────┘  the lagged snapshot block
+                                        (every replica has it)
+```
+
+The left side is the tense a caller gets without asking: whatever the
+head is at the moment of the call, or the cache's copy within its TTL,
+and two such reads promise nothing about each other. The right side is
+the tense a caller asks for by taking a handle. `state()` pins the lagged
+block, eight behind the head, because on a load-balanced endpoint the
+newest block is not yet on every replica; `state_at(n)` pins a block the
+caller names. Once the handle exists, the reads on it are the same
+functions with the same names and no block argument, because the block
+is the handle's, not the call's.
+
 **Two tenses of events, one vocabulary.** The feed streams the present
 over a WebSocket; the tape replays the past from log scans. Both produce
 the same decoded `MarketEvent`, so anything that folds events, ownership,

@@ -21,6 +21,31 @@ machine at any time. That is what makes it testable against the chain: a
 port is right when it reproduces a real on-chain outcome from the chain
 state before it, and the golden tests are those reproductions.
 
+```text
+   client                                   math
+   ───────────────────────                  ───────────────────────────────
+   reads at one block         snapshot      pure functions over the snapshot
+   ┌─────────────────┐   ───────────────►   ┌──────────────────────────────┐
+   │ StateAt::pool   │   PoolSnapshot       │ quote_perp, quote_to_price   │
+   │ StateAt::mark   │   Mark               │ fair_price_x96               │
+   │ StateAt::capacity│  MarketCapacity     │ headroom, utilization        │
+   │ maker batch     │   MakerMarketSnapshot│ maker_equity → Breakdown     │
+   └─────────────────┘   + MakerState rows  └──────────────────────────────┘
+        knows blocks,          inert,             knows no block,
+        providers, caches      block-stamped,     no provider, no clock
+                               exact
+                                                  same inputs → same result,
+                                                  on any machine, at any time
+```
+
+The snapshot is the contract between the two halves, and it is a
+one-way door. Everything to its left may touch the network and must
+know which block it is reading; everything to its right may not, and
+does not know a block exists except as a field it carries through. That
+is what makes the right side testable against the chain: a golden test
+is a snapshot captured from real state and an outcome the chain actually
+produced, and the function between them has nothing else to depend on.
+
 ## What matters
 
 **Exactness is binary.** The contract settles in integers with defined
@@ -72,6 +97,38 @@ the moment the liquidity was placed and never re-evaluated. The market's
 capacity is the running sum of those moments, which is why it can drift
 from the sum of the live bands. Open interest draws on it; headroom is
 the remainder; utilization is the ratio the fees module prices from.
+
+```text
+   price ──────────────────────────────────────────────────────────────►
+   tick     lower                    pool price                    upper
+            │                            │                            │
+            ▼                            ▼                            ▼
+   ─────────┼────────────────────────────┼────────────────────────────┼─────────
+            │◄────── backs SHORTS ───────┼──────── backs LONGS ───────►│
+            │   liquidity L held as USD  │  liquidity L held as perp   │
+            │   (below the price)        │  (above the price)          │
+            └────────────────────────────┴────────────────────────────┘
+                                 one MakerBand { range, liquidity }
+
+   capacity.short = perp amount of L between lower and the price
+   capacity.long  = perp amount of L between the price and upper
+   fixed at the moment the liquidity was placed; the price moving later
+   changes what the band HOLDS, never what the contract says it BACKS.
+
+   band entirely above the price: all long capacity, holds only perp
+   band entirely below the price: all short capacity, holds only USD
+```
+
+A band is an interval on the pool's tick grid with liquidity standing
+in it, and the pool price cuts it in two. The part above the price is
+perp inventory waiting to be bought, so it can absorb longs; the part
+below is USD waiting to buy, so it can absorb shorts. `band_capacity` is
+that split in perp atoms, and `liquidity_for_capacity` is its inverse:
+the least liquidity that gives one side a target. The line at the bottom
+is the subtlety the contract adds: it records the split once, when the
+liquidity is placed, and never again, so a market's capacity is a sum of
+past moments rather than a function of the current price, and it can
+drift from what the live bands would compute today.
 
 **Pricing** (`pricing`): the three prices and the one relation. The pool
 price and the index are observations; the EMAs are the contract's

@@ -62,6 +62,57 @@ the write pool, else shared. Each endpoint is a boxed HTTP transport
 behind its own breaker; a breaker that opens takes the endpoint out of
 rotation until a probe succeeds.
 
+```text
+                        a request (tower::Service<RequestPacket>)
+                                        │
+                              classify: read or write?
+                          ┌─────────────┴──────────────┐
+                        READ                          WRITE
+                          │                             │
+             read pool healthy?                 write pool healthy?
+              yes │    │ no → shared pool          yes │    │ no → shared pool
+                  ▼    ▼                               ▼    ▼
+        ┌──────────────────────┐             ┌──────────────────────┐
+        │ Strategy             │             │ one endpoint         │
+        │  round robin         │             │ same signed bytes    │
+        │  latency-based       │             └──────────┬───────────┘
+        │  hedged: fan out,    │                        │
+        │   first answer wins, │              answered?
+        │   others cancelled   │           no │        │ rejected pre-mempool
+        └──────────┬───────────┘              │        │ (nonce too low, gas, …)
+                   │                          │        ▼
+             answered?                        │   retry, same bytes
+        no │            │ declined            │
+           ▼            ▼                     ▼
+     retry w/ backoff  return as is,     retry, same bytes; outcome of
+     (endpoint failed  health untouched  the first attempt unknown →
+      to answer)       (endpoint did     the caller trusts the receipt
+                        its job)
+
+   per endpoint:   ┌────────┐ failures ≥ threshold ┌──────┐ cooldown ┌──────────┐
+                   │ CLOSED │─────────────────────►│ OPEN │─────────►│ HALF-OPEN│
+                   └────────┘                      └──────┘          └────┬─────┘
+                        ▲   probe succeeds                                │ one probe
+                        └─────────────────────────────────────────────────┘ (ProbePermit)
+                                            probe fails → OPEN again
+```
+
+The top is the decision every request goes through, and the two columns
+differ in exactly one way: what "try again" is allowed to mean. A read is
+stateless at the node, so it can be sent again to anyone, hedged across
+several, and retried with backoff when the endpoint failed to answer.
+A write is a signed transaction, so "again" can only ever be the same
+bytes, which the node treats as idempotent, and never a fresh
+transaction; and when the first attempt got no answer, its outcome is
+unknown, which is why the send path reports the hash and the caller
+reconciles by receipt. The middle distinction, declined versus no answer,
+is the one that keeps scans from tripping breakers: an endpoint that says
+no to a too-wide log request has done its job, and that answer goes back
+to the caller with the endpoint's health untouched. The bottom is the
+per-endpoint breaker: it takes an endpoint out of rotation on repeated
+failures, lets one probe through after the cooldown, and closes again
+only when the probe succeeds.
+
 A read retries with backoff when the endpoint failed to answer, never
 when it declined. A write retries when the node rejected it before the
 mempool, and when the node did not answer, with the same signed bytes;
