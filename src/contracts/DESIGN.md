@@ -36,41 +36,6 @@ bindings include every shape a live market has emitted,
 `PerpDeployedEvents` where the deployed shape differs from main, and the
 decoder recognises both. Calls do not get this exception.
 
-```text
-   contract history ─────────────────────────────────────────────────────►
-
-        earlier bytecode          DEPLOYED (4bbe554f)            repository main
-        ┌───────────────┐         ┌───────────────────┐          ┌──────────────────┐
-        │ MakerClosed / │         │ what is live on   │          │ post-release     │
-        │ MakerConverted│         │ Arbitrum today    │          │ work; not on     │
-        │ with liqFee,  │         │                   │          │ chain             │
-        │ isLiquidation │         │                   │          │                   │
-        └───────┬───────┘         └─────────┬─────────┘          └────────┬─────────┘
-                │                           │                             │
-   calls  ──────┼───────────────────────────┤ the ONLY target             │ never called
-                │                           │ (selector probe + abi_lock) │
-                │                           │                             │
-   events ──────┴───────────────────────────┴─────────────────────────────┤
-          every shape a live market ever emitted stays decodable          │ shapes the
-          (PerpDeployedEvents alongside Perp)                             │ next era will
-                                                                          │ emit; not yet
-   a market's tape:  ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓
-                     ▲ deploy block                        ▲ now
-                     logs from every era it lived through, forever
-```
-
-Calls and events have different relationships to time, and the diagram
-is the reason the era rule has one exception. A call is made now, so it
-targets exactly one bytecode: the deployed one, verified by a selector
-probe and locked by the ABI tests, and never the repository's head,
-whose selectors the chain does not have. An event was emitted at some
-block in the past and is on chain forever, so a scan of a market's tape
-from its deploy block meets every shape that market ever emitted,
-including ones from bytecode that has since been upgraded. The decoder
-therefore knows every era's event shapes, while the calls know only the
-present one. The bar at the bottom is why: a tape does not get shorter
-when the contract changes.
-
 **A slot is a layout fact, locked by an outcome.** A storage slot is
 derived by the Solidity mapping rule from a base slot and an offset, and
 the base slots and offsets are transcribed from the deployed layout. They

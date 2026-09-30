@@ -98,41 +98,27 @@ and the transaction pipeline. Every write goes through it, and it is
 a client unchanged.
 
 ```text
-   ┌─────────────────────────────────────────────────────────────────────┐
-   │ ChainReader                       one per process                   │
-   │   transport · provider · chain id · deployments · history()         │
-   │   base-fee cache · state cache · immutables cache                   │
-   │   reads addressed to no market: balances, a beacon's index          │
-   │                                                                     │
-   │   ┌───────────────────────────────────────────────────────────┐     │
-   │   │ MarketReader = ChainReader + perp address    one per market│     │
-   │   │   get_* (now) · state() / state_at(n) → StateAt (at block) │     │
-   │   │   probes · maker-equity batch                              │     │
-   │   │                                                            │     │
-   │   │   ┌──────────────────────────────────────────────────┐     │     │
-   │   │   │ PerpClient = MarketReader + signer   one per wallet│    │     │
-   │   │   │   pipeline (owns the nonce) · tx() · the trades   │     │     │
-   │   │   └──────────────────────────────────────────────────┘     │     │
-   │   └───────────────────────────────────────────────────────────┘     │
-   └─────────────────────────────────────────────────────────────────────┘
+   ChainReader                                          one per process
+   │   transport, provider, deployments, history(), the caches
+   │
+   └─ MarketReader  = ChainReader + a Perp address       one per market
+      │   get_* (now) · state() / state_at(n) → StateAt (at a block)
+      │
+      └─ PerpClient = MarketReader + a signer            one per wallet
+             tx() · the trades · a pipeline that owns the nonce
 
-   AsRef<ChainReader>  : ChainReader, MarketReader, PerpClient
-   AsRef<MarketReader> : MarketReader, PerpClient
-
-   fn balance_of(chain: impl AsRef<ChainReader>, ..)     takes any of the three
-   fn pool_price(market: impl AsRef<MarketReader>, ..)   takes a reader or a client
-   fn open_taker(client: &PerpClient, ..)                only a signer can
+   AsRef<ChainReader>   ChainReader, MarketReader, PerpClient
+   AsRef<MarketReader>  MarketReader, PerpClient
 ```
 
-Each box holds exactly what its scope owns and nothing from an inner
-one: the chain reader has no market, the market reader has no signer.
-Nesting goes inward with lifetime and outward with sharing, so one chain
-reader serves every market in a process and every client of a market
-shares its reader's caches. The `AsRef` lines at the bottom are the
-whole API for "what does this function need": a bound names the
-innermost scope the function uses, and anything built over that scope
-satisfies it. A helper that takes `&PerpClient` to read is over-asking,
-and the bound is how a reviewer sees it.
+Each rung adds one thing to the rung above and owns nothing from below:
+the chain reader has no market, the market reader has no signer. Sharing
+runs the other way, so one chain reader serves every market in a
+process and every client of a market shares its reader's caches. The two
+`AsRef` lines are the whole API for "what does this function need": a
+bound names the innermost rung a function uses, and anything built over
+that rung satisfies it. A helper that takes `&PerpClient` to read is
+over-asking, and the bound is how a reviewer sees it.
 
 The path is the send. `TxBuilder` collects one transaction's parameters
 and `send` does the whole thing: repair the nonce sequence if the last

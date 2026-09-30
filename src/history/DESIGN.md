@@ -58,42 +58,6 @@ order regardless. A newest-first scan is different on purpose: it exists
 to stop early, so it sends one request at a time from the top and stops
 the moment the caller has enough.
 
-```text
-   span asked   ───────────────────────────────────────────────────────►  time
-   (blocks)
-
-   initial ─┐ accepted
-            │  ▲
-            │  │ doubled                                  narrowed in on the limit:
-            │  ▼                                          between the widest accepted
-   ×2   ────┼──── accepted                                and the narrowest rejected
-            │     ▲
-   ×4   ────┼─────┼──── REJECTED ──┐ halved
-            │     │                ▼
-   ×2   ────┼─────┴──── accepted   accepted  accepted ─── REJECTED ─┐  a span that
-            │                                            (denser    │  passed before
-   ×1   ────┼──────────────────────────────────────────── stretch)  ▼  now fails:
-            │                                                   halve again,   forget the
-            │                                                   re-learn       learned limit
-            └───────────────────────────────────────────────────────────────────────────►
-
-   after a run of accepted requests the scan re-tests the rejected span once;
-   each time the limit holds, the run before the next test doubles.
-```
-
-The scan never asks the provider what its limit is, because providers
-do not say and the answer changes with the density of the range. It
-finds the limit by working: double while accepted, halve on rejection,
-then narrow in between the last width that passed and the first that
-did not. The second rejection in the picture is the case a fixed chunk
-size gets wrong: a span the provider accepted a moment ago fails in a
-denser stretch, which means the cap is on results or bytes rather than
-on blocks, so the scan drops what it learned and halves again rather
-than trusting a number that is no longer true. The periodic re-test is
-what lets it widen again once the dense stretch is behind it. On a
-`History` handle the learned width survives across scans, so a process
-that scans repeatedly pays this search once.
-
 Over the scan sit the series. The **tape** is one market's logs, decoded
 through the same decoder the feed uses, each stamped with its chain
 point. The **prints** are one beacon's `IndexUpdated` logs as an index

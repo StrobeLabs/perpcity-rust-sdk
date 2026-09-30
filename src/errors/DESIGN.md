@@ -72,48 +72,6 @@ serde errors underneath, so any module returns its own family with `?`
 and a caller matches one enum. `is_transient` is the one question it
 answers for all of them.
 
-```text
-                              a PerpCityError
-                                     │
-                   what should the caller do with it?
-          ┌──────────────────────────┼──────────────────────────────┐
-          ▼                          ▼                              ▼
-   TRY AGAIN                   FIX THE INPUT                READ IT AS AN ANSWER
-   is_transient() == true      ValidationError              a typed contract revert
-   ─────────────────────       ─────────────────            ───────────────────────
-   Rpc (transport spent        InvalidPrice, InvalidMargin  is_revert::<E>():
-     its retries)              InvalidTickRange, Overflow     NotLiquidatable → healthy
-   BlockUnavailable            InvalidBlockRange, ...         NonMakerPosition → wrong kind
-   GasUnavailable                                             MarginTooLow → would revert
-   BroadcastFailed  (hash!)    nothing was sent; the same
-   ReceiptTimeout   (hash!)    call fails the same way          not a failure at all
-   NonceDesynced
-   TooManyInFlight
-   StorageReadFailed { source: Some }
-
-                        THE FIX IS ELSEWHERE
-                        is_transient() == false, not the caller's input
-                        ────────────────────────────────────────────────
-                        StateUnavailable   → an archive endpoint
-                        LogsRejected       → a different provider or range
-                        ModuleNotRegistered→ the market's governance
-                        SimulationReverted → the contract's answer (see right)
-                        SimulationFailed   → a selector the deployed code lacks
-                        Reverted, OutOfGas → the send is over; hash carried
-                        MulticallFailed, StorageReadFailed { source: None }
-```
-
-The three families in the code are by where a failure came from; this
-is the same set arranged by what a caller does, which is the question a
-retry loop, a batch, or a runner actually asks. The left column is the
-one `is_transient` answers, and two of its members carry a hash because
-"try again" for a send means look the first attempt up, never send a
-second. The middle column never sent a request. The right column is not
-an error in any useful sense: the contract answered a question, and the
-caller branches on the selector. The box at the bottom is where the
-taxonomy earns its keep, because those are the failures that look
-retryable and are not; each names what would actually fix it.
-
 ## The type system
 
 | Type | What it is | The invariant it carries |

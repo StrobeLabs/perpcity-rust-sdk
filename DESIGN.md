@@ -83,50 +83,7 @@ utilization accrual all price at the mark. Liquidity geometry, capacity,
 and the effect of a trade all live in pool-price space. Confusing the two
 is the single most consequential naming error available in this system,
 and the crate's names are chosen so that it cannot be made silently.
-
-```text
-      the pool                      the beacon
-      poolState().ammPrice          index()
-      ──────────┬─────────          ────┬────
-                │ observed              │ observed
-                ▼                       ▼
-          ┌────────────┐          ┌───────────┐
-          │ pool price │          │   index   │        at one block
-          └─────┬──────┘          └─────┬─────┘
-                │                       │
-                │     stored EMAs       │
-                │  (as of last touch)   │
-                │     ┌───────────┐     │
-                ├────►│ ema(pool) │◄────┤   advanced to the block's timestamp
-                │     │ ema(index)│     │   by exp(−Δt / EMA_WINDOW)
-                │     └─────┬─────┘     │
-                │           │           │
-                ▼           ▼           ▼
-          ┌──────────────────────────────────┐
-          │ fairPrice(pool, index,           │
-          │           ema_pool, ema_index)   │   = the MARK
-          └────────────────┬─────────────────┘
-                           │
-           ┌───────────────┴───────────────────┐
-           ▼                                   ▼
-     priced AT the mark                  lives IN pool-price space
-     ──────────────────                  ────────────────────────
-     health checks, valPnl               band geometry, capacity
-     liquidation, backstop               the tick map, the quote
-     utilization accrual                 what a trade moves
-     maker equity                        where a band sits
-```
-
-Two things the picture says that the sentence cannot. The mark has a
-time input: the stored EMAs are the contract's smoothing as of the last
-touch, and the contract advances them to the block it is valuing at, so
-between touches the mark drifts even when nothing trades, and a mark
-computed from the last events alone is stale. And the fork at the bottom
-is the whole reason the two prices have two names. Everything on the
-left is a valuation the contract performs, and it uses the mark.
-Everything on the right is geometry on the pool's own grid, and it uses
-the pool price. `Mark` is the four inputs at one block;
-`Mark::fair_price_x96` is the price.
+The [`math`](src/math/DESIGN.md) node draws the relation.
 
 **Two kinds of position.** A taker holds a signed exposure opened by
 swapping against the pool. A maker holds collateral as concentrated

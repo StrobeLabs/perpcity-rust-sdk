@@ -21,31 +21,6 @@ machine at any time. That is what makes it testable against the chain: a
 port is right when it reproduces a real on-chain outcome from the chain
 state before it, and the golden tests are those reproductions.
 
-```text
-   client                                   math
-   ───────────────────────                  ───────────────────────────────
-   reads at one block         snapshot      pure functions over the snapshot
-   ┌─────────────────┐   ───────────────►   ┌──────────────────────────────┐
-   │ StateAt::pool   │   PoolSnapshot       │ quote_perp, quote_to_price   │
-   │ StateAt::mark   │   Mark               │ fair_price_x96               │
-   │ StateAt::capacity│  MarketCapacity     │ headroom, utilization        │
-   │ maker batch     │   MakerMarketSnapshot│ maker_equity → Breakdown     │
-   └─────────────────┘   + MakerState rows  └──────────────────────────────┘
-        knows blocks,          inert,             knows no block,
-        providers, caches      block-stamped,     no provider, no clock
-                               exact
-                                                  same inputs → same result,
-                                                  on any machine, at any time
-```
-
-The snapshot is the contract between the two halves, and it is a
-one-way door. Everything to its left may touch the network and must
-know which block it is reading; everything to its right may not, and
-does not know a block exists except as a field it carries through. That
-is what makes the right side testable against the chain: a golden test
-is a snapshot captured from real state and an outcome the chain actually
-produced, and the function between them has nothing else to depend on.
-
 ## What matters
 
 **Exactness is binary.** The contract settles in integers with defined
@@ -91,6 +66,32 @@ them; a `TickRange` is an aligned, validated interval; liquidity is the
 pool's own unit `L`, sized from collateral and converted back to the
 token amounts a band holds at a price.
 
+```text
+   tick        lower                        current                        upper
+               │      spacing 30              │                              │
+   ────────────┼──┼──┼──┼──┼──┼──┼──┼──┼──┼──┼──┼──┼──┼──┼──┼──┼──┼──┼──┼──┼──┼─────►
+   price       1.0001^lower                pool price                 1.0001^upper
+   sqrt × 2^96 √P_lower                       √P                        √P_upper
+
+               │◄──────── L held as USD ─────►│◄────────── L held as perp ─────►│
+               │  usd  = L · (√P − √P_lower)  │  perp = L · (1/√P − 1/√P_upper)  │
+               │  backs shorts                │  backs longs                     │
+               └──────────────────────────────┴──────────────────────────────────┘
+                          MakerBand { range: TickRange [lower, upper), liquidity: L }
+```
+
+Three coordinate systems for one axis, and the geometry lives in the
+third. A tick is an integer on a grid of spacing 30; its price is
+`1.0001^tick`; the pool stores the square root of that price times
+`2^96`, and every amount formula is linear in the square root. That is
+why liquidity `L` is the pool's own unit rather than a token amount: for
+a fixed `L`, the USD a band holds below the price and the perp it holds
+above are both differences of square roots, so moving the price just
+slides the boundary between the two legs. The lower leg is USD waiting
+to buy, so it backs shorts; the upper leg is perp waiting to be sold, so
+it backs longs. A `MakerBand` is the range and the `L`, and every sizing
+and capacity function is one of these two formulas or its inverse.
+
 **Capacity** (`capacity`): what a band can back. The perp its liquidity
 spans above the pool price backs longs, below it backs shorts, fixed at
 the moment the liquidity was placed and never re-evaluated. The market's
@@ -98,44 +99,56 @@ capacity is the running sum of those moments, which is why it can drift
 from the sum of the live bands. Open interest draws on it; headroom is
 the remainder; utilization is the ratio the fees module prices from.
 
-```text
-   price ──────────────────────────────────────────────────────────────►
-   tick     lower                    pool price                    upper
-            │                            │                            │
-            ▼                            ▼                            ▼
-   ─────────┼────────────────────────────┼────────────────────────────┼─────────
-            │◄────── backs SHORTS ───────┼──────── backs LONGS ───────►│
-            │   liquidity L held as USD  │  liquidity L held as perp   │
-            │   (below the price)        │  (above the price)          │
-            └────────────────────────────┴────────────────────────────┘
-                                 one MakerBand { range, liquidity }
-
-   capacity.short = perp amount of L between lower and the price
-   capacity.long  = perp amount of L between the price and upper
-   fixed at the moment the liquidity was placed; the price moving later
-   changes what the band HOLDS, never what the contract says it BACKS.
-
-   band entirely above the price: all long capacity, holds only perp
-   band entirely below the price: all short capacity, holds only USD
-```
-
-A band is an interval on the pool's tick grid with liquidity standing
-in it, and the pool price cuts it in two. The part above the price is
-perp inventory waiting to be bought, so it can absorb longs; the part
-below is USD waiting to buy, so it can absorb shorts. `band_capacity` is
-that split in perp atoms, and `liquidity_for_capacity` is its inverse:
-the least liquidity that gives one side a target. The line at the bottom
-is the subtlety the contract adds: it records the split once, when the
-liquidity is placed, and never again, so a market's capacity is a sum of
-past moments rather than a function of the current price, and it can
-drift from what the live bands would compute today.
-
 **Pricing** (`pricing`): the three prices and the one relation. The pool
 price and the index are observations; the EMAs are the contract's
 smoothing of both, advanced from the last touch by the exact exponential
 the contract uses; the mark is the fair price of all four. `Mark` is
 those inputs at one block, and its fair price is what every health check
 prices at. The f64 `fair_price` is the twin for simulators.
+
+```text
+      the pool                      the beacon
+      poolState().ammPrice          index()
+      ──────────┬─────────          ────┬────
+                │ observed              │ observed
+                ▼                       ▼
+          ┌────────────┐          ┌───────────┐
+          │ pool price │          │   index   │        at one block
+          └─────┬──────┘          └─────┬─────┘
+                │                       │
+                │     stored EMAs       │
+                │  (as of last touch)   │
+                │     ┌───────────┐     │
+                ├────►│ ema(pool) │◄────┤   advanced to the block's timestamp
+                │     │ ema(index)│     │   by exp(−Δt / EMA_WINDOW)
+                │     └─────┬─────┘     │
+                │           │           │
+                ▼           ▼           ▼
+          ┌──────────────────────────────────┐
+          │ fairPrice(pool, index,           │
+          │           ema_pool, ema_index)   │   = the MARK
+          └────────────────┬─────────────────┘
+                           │
+           ┌───────────────┴───────────────────┐
+           ▼                                   ▼
+     priced AT the mark                  lives IN pool-price space
+     ──────────────────                  ────────────────────────
+     health checks, valPnl               band geometry, capacity
+     liquidation, backstop               the tick map, the quote
+     utilization accrual                 what a trade moves
+     maker equity                        where a band sits
+```
+
+Two things the picture says that the sentence cannot. The mark has a
+time input: the stored EMAs are the contract's smoothing as of the last
+touch, and the contract advances them to the block it is valuing at, so
+between touches the mark drifts even when nothing trades, and a mark
+computed from the last events alone is stale. And the fork at the bottom
+is the whole reason the two prices have two names. Everything on the
+left is a valuation the contract performs, and it uses the mark.
+Everything on the right is geometry on the pool's own grid, and it uses
+the pool price. `Mark` is the four inputs at one block;
+`Mark::fair_price_x96` is the price.
 
 **The swap** (`swap`): what a taker trade does, computed by walking the
 pool's tick map exactly as V4 does, in Q64.96 with V4's rounding, for the
