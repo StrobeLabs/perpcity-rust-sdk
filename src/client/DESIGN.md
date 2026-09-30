@@ -27,7 +27,7 @@ deployment set, caches every reader shares), a market on it (one `Perp`),
 and a signer on a market (one wallet, one nonce sequence). Before the
 split these were one type, and every consumer that was not one bot on one
 market built its own workaround: a research reader without a signer, a
-quaestor holding a vector of clients over one cloned transport, a tool
+treasury service holding a vector of clients over one cloned transport, a tool
 building a fresh client per market inside a loop. The workarounds were
 the evidence the type was wrong. Now `ChainReader`, `MarketReader` and
 `PerpClient` are the three rungs, each cheap to clone, each holding
@@ -106,6 +106,55 @@ and gas from the pipeline with no RPC, sign, broadcast, poll for the
 receipt. Each stage has its own failure variants, and the receipt is the
 only success.
 
+```text
+ stage         success             failure ──► variant           transient?  nonce      hash
+ ────────────  ──────────────────  ──────────────────────────────  ──────────  ─────────  ─────
+ resync        sequence repaired   in flight, cannot repair yet
+   (only if    from the chain's    └─► NonceDesynced               yes         untouched  none
+   desynced)   count
+     │
+     ▼
+ simulate      gas limit known;    contract reverts (typed)
+   estimate    a revert would      └─► SimulationReverted          no          untouched  none
+   or cached   have been decoded   empty revert, or out of gas at the cap
+   + preflight                     └─► SimulationFailed            no          untouched  none
+                                   node unreachable, fee stale
+     │                             └─► GasUnavailable              yes         untouched  none
+     ▼
+ prepare       nonce acquired,     pipeline full
+   zero RPC    fees resolved       └─► TooManyInFlight             yes         untouched  none
+     │
+     ▼
+ sign          signed bytes        local failure
+   local                           └─► SigningFailed               no          RELEASED   none
+     │
+     ▼
+ broadcast     hash accepted       request failed after signing
+                                   └─► BroadcastFailed             yes         DOUBTFUL   known
+     │
+     ▼
+ receipt       mined, succeeded ─► Ok(receipt)                                 RESOLVED   known
+   poll        mined, reverted     └─► Reverted                    no          RESOLVED   known
+               mined, out of gas   └─► OutOfGas                    no          RESOLVED   known
+               no receipt in time  └─► ReceiptTimeout              yes         DOUBTFUL   known
+```
+
+The two right-hand columns are the whole point of the diagram: they are
+the two facts a caller must know after any failure, and every row
+answers both. Before `sign`, nothing has left the process, so the nonce
+is untouched and no hash exists; a signing failure is provably local, so
+the nonce it acquired is handed straight back. From `broadcast` on, the
+hash is known before the request is made, so a caller can always look
+the transaction up. `RESOLVED` means the chain consumed the nonce, for
+better or worse. `DOUBTFUL` is the state the design exists for: the
+transaction may or may not have landed, no local bookkeeping can tell,
+and both reusing and rewinding the nonce are wrong. So the pipeline is
+marked desynced, no send starts until nothing is in flight, and the next
+send takes the chain's transaction count, which includes the doubtful
+transaction if and only if it is live. Nothing is ever rewound. The
+transience column is what a retry loop keys on: a `no` means the same
+send would fail the same way.
+
 Around the path sit the trades, thin over it: each takes human-unit
 parameters, scales them once, and delegates to an exact twin that is the
 single submission path. Limits follow the swap's direction. And the
@@ -168,10 +217,10 @@ passes the transport's error through.
   their transience; this module decides which variant a node's answer is.
 - To `contracts` and `storage`: the bindings the reads call and the slots
   the batches read. Shapes, not policy.
-- Out to Legion: every reader Legion holds is one of these three handles;
-  the research crate's `StateSource` is implemented by `StateAt`; the
-  live plane's cache is seeded from `get_perp_snapshot` and then follows
-  the feed.
+- Out to the strategy layer: every reader a strategy holds is one of
+  these three handles; a research source over block-pinned reads is
+  `StateAt` behind a trait; a live cache is seeded from
+  `get_perp_snapshot` and then follows the feed.
 
 ## Terminology
 

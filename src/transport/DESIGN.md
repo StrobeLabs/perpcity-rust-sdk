@@ -102,8 +102,8 @@ callers re-subscribe.
   through.
 - From [`feeds`](../feeds/DESIGN.md): the WebSocket manager is here;
   the feeds are subscriptions on it.
-- Out to Legion: the runners build one transport per process from
-  environment; the redaction of keyed endpoint URLs in logs is Legion's
+- Out to the strategy layer: a process builds one transport from its
+  environment; redacting keyed endpoint URLs in logs is the caller's
   rule, since the key is in the URL and this module never logs one.
 
 ## Terminology

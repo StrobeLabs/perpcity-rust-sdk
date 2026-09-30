@@ -42,8 +42,8 @@ place with its age visible.
 
 **Costs are per subscription, not per read.** A header subscription
 bills every block on some providers; on a chain producing four blocks a
-second that burned a monthly allotment once. The base-fee poller in
-Legion replaced it for that reason. A feed that is cheap to read is not
+second that burned a monthly allotment once. The strategy layer replaced
+it with a base-fee poller for that reason. A feed that is cheap to read is not
 necessarily cheap to hold, and the choice is the consumer's, made with
 the bill in view.
 
@@ -92,7 +92,7 @@ leaving re-subscription to its callers.
 - To [`client`](../client/DESIGN.md): the taker feed's publisher refreshes
   through `MarketReader::get_pool_snapshot`; the header feed's consumers
   push the base fee into `ChainReader::set_base_fee`.
-- Out to Legion: the live plane's market-data cache is fed by
+- Out to the strategy layer: a live market-data cache is fed by
   `MarketFeed` and seeded from a snapshot read; its staleness guard is
   how silence is treated as staleness.
 
@@ -113,7 +113,7 @@ leaving re-subscription to its callers.
 - **`LiveTakerMarket` keeps its old name.** It is a live `PoolSnapshot`
   for takers; the type should say pool, as the snapshot it publishes now
   does.
-- **The header feed's cost is the reason Legion polls instead.** A
+- **The header feed's cost is the reason consumers poll instead.** A
   cheaper header source, or a feed that coalesces, would let the gas cache
   follow the chain again rather than a timer.
 - **Re-subscription after reconnect is manual.** Every consumer writes

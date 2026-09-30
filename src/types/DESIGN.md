@@ -87,9 +87,9 @@ without risk.
   exactly; `MarginRatioTriple` is the fraction of the e6 the contract
   holds; a `TickRange` is what two loose ticks here would want to be, and
   is why they are not here.
-- Out to Legion: the agent vocabulary's snapshots and views are built
-  from these, and Legion's own `mark_price` field, which held the pool
-  price, is the naming mistake this module's `pool_price` refuses to
+- Out to the strategy layer: a strategy's snapshots and views are built
+  from these, and a downstream field named `mark_price` that held the
+  pool price is the naming mistake this module's `pool_price` refuses to
   make.
 
 ## Terminology

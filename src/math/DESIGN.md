@@ -138,10 +138,11 @@ hunt.
 - To `types` and `convert`: the f64 twins and the unit conversions live
   at the surface. `math` produces exact values and offers f64 accessors;
   `convert` is where a caller's human input becomes a wire unit.
-- Out to Legion: a strategy's band is a `MakerBand`, its sizing goes
-  through `estimate_liquidity`, its quoting through `PoolSnapshot`, its
-  maker valuation through `MakerEquityBreakdown`. Legion ports no contract
-  math; where it once did, that was the defect this module fixes.
+- Out to the strategy layer: a strategy's band is a `MakerBand`, its
+  sizing goes through `estimate_liquidity`, its quoting through
+  `PoolSnapshot`, its maker valuation through `MakerEquityBreakdown`. The
+  layer above ports no contract math; where a consumer once did, that was
+  the defect this module fixes.
 
 ## Terminology
 

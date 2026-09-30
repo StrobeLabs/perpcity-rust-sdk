@@ -112,10 +112,10 @@ feature.
   The caller owns the retry policy.
 - Sideways to `feeds`: the same decoder, the other tense. A consumer that
   bootstraps from the tape and then follows the feed sees one vocabulary.
-- Out to Legion: the research crate's sources, the tape, the fleet walk,
-  the index series, are scans through a `History` handle; the estimator
-  bootstraps from `beacon_prints`; the treasury ledger reads
-  `token_transfers`.
+- Out to the strategy layer: research sources, a market's tape, a walk
+  over a wallet set's transfers, an index series, are scans through a
+  `History` handle; an estimator bootstraps from `beacon_prints`; a
+  treasury ledger reads `token_transfers`.
 
 ## Terminology
 

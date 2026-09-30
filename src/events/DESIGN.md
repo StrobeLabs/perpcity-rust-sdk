@@ -106,8 +106,8 @@ one kind may.
   too, and attaches the chain position to make a `TapeEvent`. The
   ownership fold, the prints and the economics above are all folds over
   this vocabulary.
-- Out to Legion: the live cache's `update_from_event` and the research
-  crate's tape folds both match on `MarketEvent`. Neither decodes.
+- Out to the strategy layer: a live cache's event handler and a research
+  tape's folds both match on `MarketEvent`. Neither decodes.
 
 ## Terminology
 
@@ -137,5 +137,5 @@ one kind may.
   changes are separate scans. A market-shaped scan across addresses is
   SDK #101.
 - **The path `feeds::events` still re-exports this module** from before it
-  moved to the crate root. It should go once Legion imports from the new
-  path.
+  moved to the crate root. It should go once downstream imports from the
+  new path.

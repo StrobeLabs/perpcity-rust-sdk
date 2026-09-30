@@ -84,6 +84,50 @@ and the effect of a trade all live in pool-price space. Confusing the two
 is the single most consequential naming error available in this system,
 and the crate's names are chosen so that it cannot be made silently.
 
+```text
+      the pool                      the beacon
+      poolState().ammPrice          index()
+      ──────────┬─────────          ────┬────
+                │ observed              │ observed
+                ▼                       ▼
+          ┌────────────┐          ┌───────────┐
+          │ pool price │          │   index   │        at one block
+          └─────┬──────┘          └─────┬─────┘
+                │                       │
+                │     stored EMAs       │
+                │  (as of last touch)   │
+                │     ┌───────────┐     │
+                ├────►│ ema(pool) │◄────┤   advanced to the block's timestamp
+                │     │ ema(index)│     │   by exp(−Δt / EMA_WINDOW)
+                │     └─────┬─────┘     │
+                │           │           │
+                ▼           ▼           ▼
+          ┌──────────────────────────────────┐
+          │ fairPrice(pool, index,           │
+          │           ema_pool, ema_index)   │   = the MARK
+          └────────────────┬─────────────────┘
+                           │
+           ┌───────────────┴───────────────────┐
+           ▼                                   ▼
+     priced AT the mark                  lives IN pool-price space
+     ──────────────────                  ────────────────────────
+     health checks, valPnl               band geometry, capacity
+     liquidation, backstop               the tick map, the quote
+     utilization accrual                 what a trade moves
+     maker equity                        where a band sits
+```
+
+Two things the picture says that the sentence cannot. The mark has a
+time input: the stored EMAs are the contract's smoothing as of the last
+touch, and the contract advances them to the block it is valuing at, so
+between touches the mark drifts even when nothing trades, and a mark
+computed from the last events alone is stale. And the fork at the bottom
+is the whole reason the two prices have two names. Everything on the
+left is a valuation the contract performs, and it uses the mark.
+Everything on the right is geometry on the pool's own grid, and it uses
+the pool price. `Mark` is the four inputs at one block;
+`Mark::fair_price_x96` is the price.
+
 **Two kinds of position.** A taker holds a signed exposure opened by
 swapping against the pool. A maker holds collateral as concentrated
 liquidity in a band, a tick range with liquidity standing in it, and
@@ -174,6 +218,53 @@ invariant is the smell this shape exists to remove.
 ## Edges
 
 The component nodes, what each provides to the rest, and what it takes.
+The shape first, then the reasons.
+
+```text
+                     ┌───────────────────────────────┐
+                     │      the strategy layer       │  downstream, above the crate
+                     └───────────────┬───────────────┘
+       builds on every public type   │
+  ┌──────────────────────────────────┼─────────────────────────────────┐
+  │                                  ▼                                 │
+  │   ┌────────────┐   fills    ┌──────────┐   consumes      ┌──────┐  │
+  │   │   types    │◄───────────│  client  │────────────────►│ math │  │
+  │   │  convert   │  human     │ handles  │  snapshots in,  │ pure │  │
+  │   └────────────┘  surface   │  sends   │  results out    └──┬───┘  │
+  │                             └─┬──┬───┬─┘                    │      │
+  │          history() ┌──────────┘  │   └──────────┐ shapes    │      │
+  │                    ▼             ▼              ▼           ▼      │
+  │   ┌──────────┐  ┌─────────┐  ┌─────────┐  ┌───────────────────┐    │
+  │   │  feeds   │  │ history │  │   hft   │  │ contracts storage │    │
+  │   │ present  │  │  past   │  │ execute │  │  deployed shapes  │    │
+  │   └────┬─────┘  └────┬────┘  └────┬────┘  └─────────┬─────────┘    │
+  │        │ decode      │ decode     │                 │ bindings     │
+  │        └──────┬──────┘            │                 │              │
+  │               ▼                   │                 │              │
+  │         ┌───────────┐             │                 │              │
+  │         │  events   │  one vocabulary, either tense │              │
+  │         └───────────┘             │                 │              │
+  │                                   ▼                 ▼              │
+  │   ┌─────────────────────────────────────────────────────────────┐  │
+  │   │ transport   every request; reads and writes classified      │  │
+  │   ├─────────────────────────────────────────────────────────────┤  │
+  │   │ errors      every failure typed, with a stated transience   │  │
+  │   └─────────────────────────────────────────────────────────────┘  │
+  └────────────────────────────────────────────────────────────────────┘
+```
+
+Read it top down as "who depends on whom". An arrow is an edge in the
+graph: the node at its tail is why the types at its head are shaped as
+they are. `client` is the centre because it is the only place a caller
+addresses the chain: it fills the human surface on the left, hands
+snapshots to `math` on the right, and reaches down to the three
+machineries. `feeds` and `history` are the two tenses of the same
+vocabulary, which is why both arrows land on `events`. The two bands at
+the bottom have no arrows because everything above them uses them: every
+request passes through `transport`, and every failure is one of `errors`'
+variants. The strategy layer above the crate consumes the public surface
+and nothing else; it appears because its needs are why several types
+exist, and it is the one edge that leaves the repository.
 
 - **`client`**: the handles and the reads. Provides `ChainReader`,
   `MarketReader`, `StateAt`, `PerpClient`, `TxBuilder`. Consumes
@@ -203,12 +294,12 @@ The component nodes, what each provides to the rest, and what it takes.
 - **`types`** and **`convert`**: the human surface and the unit boundary.
   Consumed by `client` on the way out and by callers on the way in.
 
-**Legion** is the edge out of this crate. Its agent vocabulary builds on
-these types rather than redefining them: a strategy's band is a
-`MakerBand`, its range a `TickRange`, its pool snapshot a `PoolSnapshot`,
-its events `MarketEvent`s. Where Legion had its own copy of a chain fact,
-the copy was a defect and this crate grew the type. Legion's root node
-records what it consumes and why.
+**Downstream** is the edge out of this crate: the strategy layer built on
+it, ours or anyone's. Its vocabulary builds on these types rather than
+redefining them: a strategy's band is a `MakerBand`, its range a
+`TickRange`, its pool snapshot a `PoolSnapshot`, its events
+`MarketEvent`s. Where a consumer had its own copy of a chain fact, the
+copy was a defect and this crate grew the type.
 
 ## Terminology
 

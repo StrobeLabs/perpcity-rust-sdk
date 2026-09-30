@@ -101,10 +101,10 @@ would branch on it, and existing callers with a wildcard keep compiling.
   transient at this level.
 - From [`math`](../math/DESIGN.md): only `ValidationError`, because pure
   math can fail only on its inputs.
-- Out to Legion: retry loops, the maker-equity batch's per-position
-  retry decision, the research tools' refusal to treat a pruned block as
-  a missing position, all key on `is_transient`. Legion adds context with
-  `anyhow` at its binaries and never re-classifies.
+- Out to the strategy layer: retry loops, the maker-equity batch's
+  per-position retry decision, a forensic tool's refusal to treat a
+  pruned block as a missing position, all key on `is_transient`. The
+  layer above adds context at its binaries and never re-classifies.
 
 ## Terminology
 

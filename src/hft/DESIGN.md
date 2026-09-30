@@ -94,12 +94,12 @@ above can be measured rather than asserted.
   transaction error variants, `GasUnavailable`, `TooManyInFlight`,
   `NonceDesynced`, each with its stated transience.
 - From [`feeds`](../feeds/DESIGN.md): the base fee reaches the fee cache
-  from a header feed, or from Legion's poller where the feed proved too
-  expensive to hold.
-- Out to Legion: the runners set the base fee and sync the nonce at
-  startup, and the quaestor's warning about out-of-band use of the master
-  wallet is this module's ownership rule seen from outside: a nonce the
-  manager did not hand out is a desync it will discover at the next send.
+  from a header feed, or from a poller in the layer above where the feed
+  proved too expensive to hold.
+- Out to the strategy layer: a runner sets the base fee and syncs the
+  nonce at startup, and a wallet used out of band by another process is
+  this module's ownership rule seen from outside: a nonce the manager did
+  not hand out is a desync it will discover at the next send.
 
 ## Terminology
 
@@ -120,8 +120,8 @@ above can be measured rather than asserted.
 
 - **`position_manager` is a bot's strategy state, not chain truth.** It
   predates the boundary rule and is the one module here an outside
-  market maker would not want from an SDK. It should move to Legion or be
-  removed.
+  market maker would not want from an SDK. It should move to the strategy
+  layer or be removed.
 - **`state_cache` is shaped for one bot on one market**, keyed by market
   word and wallet, and older than the handle split. The chain reader
   shares it correctly, but its API still speaks of "a perp id".
