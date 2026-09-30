@@ -1,5 +1,11 @@
 # perpcity-rust-sdk — assistant guidelines
 
+Read `DESIGN.md` first: it is the root of the design graph, the aerial
+view of the crate, its type system and its vocabulary. A component with
+its own `DESIGN.md` is described there; read it before changing that
+component, and update it in the same change. `TERMINOLOGY.md` is the
+crate-wide vocabulary until each node carries its own.
+
 ## What this crate is
 
 The single source of truth for everything that is true of the CHAIN:
