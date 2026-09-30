@@ -11,6 +11,12 @@ The changes below break the public API, so the next release is 0.5.0 (a minor bu
 
 ### Breaking
 
+- **A read's block policy is the type it hangs off.** `MarketReader` reads the market as it is now: served from the cache within its TTL, or from the head at the moment of the call, each read on its own. `StateAt` reads it at one block: the handle resolves the header once, every read on it is by that hash, and two values read through one handle agree by construction. The three reads that pinned their own lagged block — capacity, margin ratios, and the pool — are now `StateAt::capacity()`, `StateAt::margin_ratios()` and `StateAt::pool()`; `get_capacity()`, `get_margin_ratios()` and `get_pool_snapshot()` remain as the single-read conveniences, each `state().await?.<read>()`. A caller that reads twice and needs the values to agree takes `state()` once. `load_taker_market_snapshot` is the renamed `get_pool_snapshot`.
+- **The pool price is the pool's, the mark is the contract's.** Every read of `poolState().ammPrice` was named for the mark, which the contract computes as a different price (the fair price of the pool price, the index and the EMAs). `get_mark_price` is `get_pool_price`, `PerpSnapshot.mark_price` and `PerpData.mark` are `pool_price`, and the `StateCache` fast layer speaks of `pool_prices` (`get_pool_price`, `put_pool_price`). `get_fair_price` is `get_mark` and returns **`Mark`**: what the contract marks from at a block — `amm_price_x96`, `index_x96`, and the EMAs advanced to its timestamp — with `fair_price_x96()` the price it marks at. `FairPrice`, which was a projection of that, is removed; `StateAt::mark()` is the same read at a block of the caller's choosing, and `get_maker_equities` prices at it.
+- **The pool is a pool, not a book.** `TakerMarketSnapshot` is `PoolSnapshot`: the V4 pool at one block — its price, active liquidity, initialized ticks, and the bounds a taker swap runs within. Nothing else about the type changed.
+- **`PerpSnapshot` carries `block: u64`**, the head block every field was read at (see *Changed*). Struct literals must name it.
+- **`math::ema` is gone; `PricePair` and `calculate_emas` live in `math::pricing`** beside `Mark` and the fair price, and are re-exported at the crate root. The pricing module states the model once: the pool price, the index, their contract-exact EMAs, and the mark as the fair price of all four. `exp_wad` is fixed-point arithmetic and is crate-private.
+- **A pool whose tick map does not reproduce its active liquidity fails as `ContractError::StorageReadFailed`** (no source, not transient) rather than `MulticallFailed`. It was never a multicall failure, and at a pinned hash the mismatch is deterministic.
 - **A maker's geometry is two types, and the maker math takes them.** `TickRange::new(lower, upper)?` is a tick interval valid by construction (`lower < upper`, both in the V4 domain; private fields, checked on deserialise), and `MakerBand { range, liquidity }` is a range holding liquidity — the shape `makerDetails` stores. `estimate_liquidity(&range, usd)`, `liquidity_for_target_ratio(margin, &range, sqrt_price, ratio)` and `liquidity_for_capacity(sqrt_price, &range, side, target)` take a `TickRange` instead of two loose ticks and no longer return `InvalidTickRange` — it can only come from `TickRange::new`; `band_capacity(sqrt_price, &band)` takes a `MakerBand`. `band_amounts(sqrt_price, &band)` is the typed form of `amounts_for_liquidity`. Callers build the range once at the boundary the ticks entered and pass it down.
 - **`PriceImpactPoint` is removed.** Nothing in the SDK produced or consumed it; the local swap simulation (`PoolSnapshot::quote_to_price`) is the price-impact query.
 - **`TransactionError::ReceiptTimeout` carries `tx_hash: FixedBytes<32>`.** The hash was only in `reason`, and a timeout whose last poll hit an RPC error left it out of the string too, so a caller could not look up the receipt. `reason` stays and now says only why polling stopped; `Display` reads `receipt timeout for 0x…: <reason>`. Patterns that use `..` are unaffected; exhaustive patterns and constructions must name the new field. `is_transient()` is unchanged (true), and the send path still never reuses the timed-out transaction's nonce.
@@ -39,6 +45,19 @@ The changes below break the public API, so the next release is 0.5.0 (a minor bu
 
 ### Changed
 
+- **`get_perp_snapshot` is one block.** The batch and the beacon read were
+  two calls at the head, so a trade between them could put the index one
+  block after the pool state. The batch now runs as `blockAndAggregate`,
+  the index is read at the block hash it reports, and the snapshot
+  carries that block by number. A perp with no beacon is
+  `ModuleNotRegistered` rather than a decode error from the zero address.
+- **The pool snapshot is one multicall plus three pinned calls**, down
+  from five separate calls and a raw storage read. The stored EMAs come
+  from the `emas()` view rather than a hand-derived slot (verified equal
+  on HORMUZ-TRAFFIC at block 510200629), the mark's inputs are the same
+  `Mark` read the fair price and maker equity use, and the tick map's
+  reconciliation is a pure function with its own tests. The deployment
+  immutables are two reads on first load rather than three.
 - **The event vocabulary moved to `events`, out from under `feeds`.**
   `MarketEvent`, `SwapInfo`, `MakerSettle`, `CumulativesInfo`,
   `decode_log` and `decode_raw` now live at `perpcity_sdk::events`:
@@ -62,6 +81,11 @@ The changes below break the public API, so the next release is 0.5.0 (a minor bu
   prunes the state, so it hands out the handle and each read then fails
   with the new `ContractError::StateUnavailable`, which `is_transient()`
   refuses: an archive endpoint is the fix, not a retry.
+- **`StateAt::capacity()`, `margin_ratios()`, `pool()` and `mark()`** —
+  the market's taker capacity with the open interest drawing on it, the
+  `IMarginRatios` thresholds, the pool a taker swap is quoted against, and
+  what the contract marks from, each at the handle's block (see
+  *Breaking*).
 - **`SolvencyState { bad_debt, total_margin }`**, the contract's own
   struct in USDC, and **`convert::usdc_from_atoms`**, the one checked
   widening from a `uint128` or `uint256` into the `i128` that
