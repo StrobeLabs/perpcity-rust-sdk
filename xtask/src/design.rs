@@ -213,37 +213,38 @@ pub fn run(opts: Options) -> Result<bool> {
     Ok(false)
 }
 
-/// The graph at another commit: a worktree of `git_ref`, documented with
-/// the same toolchain, read by the same code. Its nodes' problems are its
-/// own and are not reported.
+/// The graph at another commit: `git_ref`'s tree extracted under our
+/// target directory, documented with the same toolchain into a target
+/// directory of its own, read by the same code. Plain files, so nothing
+/// is registered with git and nothing is left to prune; the root manifest
+/// excludes the path from the workspace so cargo treats the extracted
+/// package as its own root. Its nodes' problems are its own and are not
+/// reported.
 fn at_ref(root: &Path, git_ref: &str) -> Result<Summary> {
-    // Outside the repository, or cargo would find this workspace above it.
-    let dir = env::temp_dir().join(format!("perpcity-design-base-{}", std::process::id()));
-    // Quiet: the diff's stdout is markdown a job posts verbatim.
-    let git = |args: &[&str]| {
-        Command::new("git")
-            .args(args)
-            .current_dir(root)
-            .stdout(Stdio::null())
-            .status()
-    };
+    let dir = rustdoc::target_dir(root).join("base");
+    let target = rustdoc::target_dir(root).join("base-target");
     if dir.exists() {
-        let _ = git(&["worktree", "remove", "--force", &dir.to_string_lossy()]);
-        let _ = fs::remove_dir_all(&dir);
+        fs::remove_dir_all(&dir).with_context(|| format!("clearing {}", dir.display()))?;
     }
-    let status = git(&[
-        "worktree",
-        "add",
-        "--detach",
-        &dir.to_string_lossy(),
-        git_ref,
-    ])
-    .context("running git")?;
-    if !status.success() {
-        anyhow::bail!("git could not check out `{git_ref}` into a worktree");
+    fs::create_dir_all(&dir)?;
+    let mut archive = Command::new("git")
+        .args(["archive", "--format=tar", git_ref])
+        .current_dir(root)
+        .stdout(Stdio::piped())
+        .spawn()
+        .context("running git archive")?;
+    let tar_status = Command::new("tar")
+        .args(["-x", "-C"])
+        .arg(&dir)
+        .stdin(archive.stdout.take().context("git archive's output")?)
+        .status()
+        .context("running tar")?;
+    let archive_status = archive.wait()?;
+    if !archive_status.success() || !tar_status.success() {
+        anyhow::bail!("git could not archive `{git_ref}`");
     }
     let result = (|| -> Result<Summary> {
-        let krate = rustdoc::load(&dir)?;
+        let krate = rustdoc::load_into(&dir, &target)?;
         let index = Index::build(krate);
         let mut graph = mechanical(&index, &dir);
         // A base without nodes, or with nodes the tool cannot read, still
@@ -256,8 +257,9 @@ fn at_ref(root: &Path, git_ref: &str) -> Result<Summary> {
         }
         Ok(Summary::of(&index, &graph))
     })();
-    let _ = git(&["worktree", "remove", "--force", &dir.to_string_lossy()]);
-    let _ = git(&["worktree", "prune"]);
+    // The extracted tree goes; the base's target directory stays as the
+    // cache for the next diff.
+    let _ = fs::remove_dir_all(&dir);
     result
 }
 

@@ -58,8 +58,14 @@ pub fn parse(path: &Path, toolchain: &str) -> Result<Crate> {
 
 /// Run rustdoc with JSON output and load the crate.
 pub fn load(root: &Path) -> Result<Crate> {
+    load_into(root, &target_dir(root))
+}
+
+/// Run rustdoc with JSON output on the checkout at `root`, building into
+/// `target`, and load the crate. The base of a diff builds into a target
+/// directory of its own under ours, so its dependencies stay cached.
+pub fn load_into(root: &Path, target: &Path) -> Result<Crate> {
     let toolchain = toolchain();
-    let target = target_dir(root);
     let status = Command::new("rustup")
         .args([
             "run",
@@ -72,7 +78,7 @@ pub fn load(root: &Path) -> Result<Crate> {
             "perpcity-sdk",
             "--target-dir",
         ])
-        .arg(&target)
+        .arg(target)
         .env("RUSTDOCFLAGS", FLAGS)
         .current_dir(root)
         .status()

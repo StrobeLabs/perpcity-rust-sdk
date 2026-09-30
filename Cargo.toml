@@ -17,6 +17,9 @@ exclude = ["CLAUDE.md", "AGENTS.md", "/xtask", "/.cargo"]
 # not part of the published crate.
 [workspace]
 members = ["xtask"]
+# `cargo xtask design --diff` extracts the base commit here and builds it as
+# its own package; without this cargo would take it for a member.
+exclude = ["target/design/base"]
 
 [features]
 # AWS KMS signing: pulls in alloy's AwsSigner (alloy::signers::aws) so clients
