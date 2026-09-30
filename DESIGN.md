@@ -162,28 +162,28 @@ that carries it, the invariant it holds, and the node that owns it.
 
 | Concept | Type | Invariant | Home |
 |---|---|---|---|
-| A chain | [`ChainReader`] | one transport, one deployment set, shared caches | [`client`] |
-| A market, now | [`MarketReader`] | one `Perp` over a `ChainReader`; every read is current | [`client`] |
-| A market, at a block | [`StateAt`] | the handle is the block; every read pinned to its hash | [`client`] |
-| A market with a signer | [`PerpClient`] | a `MarketReader` plus the send pipeline | [`client`] |
-| A send | [`TxBuilder`] | one transaction, one nonce, one outcome | [`client`] |
-| A tick interval | [`TickRange`] | `lower < upper`, both in the V4 domain, checked at construction | [`math::range`] |
-| A maker's geometry | [`MakerBand`] | a `TickRange` with liquidity | [`math::range`] |
-| The mark's inputs | [`Mark`] | pool price, index and EMAs from one block, advanced to it | [`math::pricing`] |
-| A price pair | [`PricePair`] | the contract's `uint128` pair, spot or EMA | [`math::pricing`] |
-| Capacity and its draw | [`MarketCapacity`] | capacity and open interest from one block | [`math::capacity`] |
-| The pool at a block | [`PoolSnapshot`] | price, liquidity and a tick map that reconciles with it | [`math::swap`] |
-| A settle previewed | [`MakerEquityBreakdown`] | exact atoms, the contract's arithmetic | [`math::maker_equity`] |
-| A block | [`BlockContext`] | number, hash, timestamp of one header | [`math`] |
-| An event | [`MarketEvent`] | the market's vocabulary, human units, either tense | [`events`] |
-| An event in chain order | [`TapeEvent`](history::TapeEvent), [`ChainPoint`](history::ChainPoint) | block and log index | [`history`] |
-| Custody over time | [`OwnershipLog`](history::OwnershipLog) | a fold of transfers; owner at a chain point | [`history`] |
-| A print | [`IndexPrint`](history::IndexPrint) | the index at a chain point and time | [`history`] |
-| A failure | [`PerpCityError`] | typed, with a stated transience | [`errors`] |
-| A transport | [`HftTransport`] | many endpoints, one provider, reads and writes classified | [`transport`] |
-| The send path | [`TxPipeline`](hft::pipeline::TxPipeline), [`NonceManager`](hft::nonce::NonceManager) | zero RPC to prepare; the next nonce is owned | [`hft`] |
-| The chain's shapes | [`contracts`], `storage` | bindings match deployed bytecode; slots match the deployed layout | [`contracts`] |
-| The human surface | [`types`], [`convert`] | inert data in human units; conversion once, at the edge | [`types`] |
+| A chain | [`ChainReader`](src/client/chain.rs#L44) | one transport, one deployment set, shared caches | [`client`](src/client/DESIGN.md) |
+| A market, now | [`MarketReader`](src/client/market.rs#L23) | one `Perp` over a `ChainReader`; every read is current | [`client`](src/client/DESIGN.md) |
+| A market, at a block | [`StateAt`](src/client/state.rs#L47) | the handle is the block; every read pinned to its hash | [`client`](src/client/DESIGN.md) |
+| A market with a signer | [`PerpClient`](src/client/mod.rs#L179) | a `MarketReader` plus the send pipeline | [`client`](src/client/DESIGN.md) |
+| A send | [`TxBuilder`](src/client/transactions.rs#L40) | one transaction, one nonce, one outcome | [`client`](src/client/DESIGN.md) |
+| A tick interval | [`TickRange`](src/math/range.rs#L25) | `lower < upper`, both in the V4 domain, checked at construction | [`math::range`](src/math/range.rs#L1) |
+| A maker's geometry | [`MakerBand`](src/math/range.rs#L115) | a `TickRange` with liquidity | [`math::range`](src/math/range.rs#L1) |
+| The mark's inputs | [`Mark`](src/math/pricing.rs#L113) | pool price, index and EMAs from one block, advanced to it | [`math::pricing`](src/math/pricing.rs#L1) |
+| A price pair | [`PricePair`](src/math/pricing.rs#L40) | the contract's `uint128` pair, spot or EMA | [`math::pricing`](src/math/pricing.rs#L1) |
+| Capacity and its draw | [`MarketCapacity`](src/math/capacity.rs#L78) | capacity and open interest from one block | [`math::capacity`](src/math/capacity.rs#L1) |
+| The pool at a block | [`PoolSnapshot`](src/math/swap.rs#L70) | price, liquidity and a tick map that reconciles with it | [`math::swap`](src/math/swap.rs#L1) |
+| A settle previewed | [`MakerEquityBreakdown`](src/math/maker_equity.rs#L189) | exact atoms, the contract's arithmetic | [`math::maker_equity`](src/math/maker_equity.rs#L1) |
+| A block | [`BlockContext`](src/math/mod.rs#L47) | number, hash, timestamp of one header | [`math`](src/math/DESIGN.md) |
+| An event | [`MarketEvent`](src/events.rs#L120) | the market's vocabulary, human units, either tense | [`events`](src/events/DESIGN.md) |
+| An event in chain order | [`TapeEvent`](src/history/tape.rs#L56), [`ChainPoint`](src/history/tape.rs#L47) | block and log index | [`history`](src/history/DESIGN.md) |
+| Custody over time | [`OwnershipLog`](src/history/tape.rs#L100) | a fold of transfers; owner at a chain point | [`history`](src/history/DESIGN.md) |
+| A print | [`IndexPrint`](src/history/beacon.rs#L20) | the index at a chain point and time | [`history`](src/history/DESIGN.md) |
+| A failure | [`PerpCityError`](src/errors/mod.rs#L45) | typed, with a stated transience | [`errors`](src/errors/DESIGN.md) |
+| A transport | [`HftTransport`](src/transport/provider.rs#L523) | many endpoints, one provider, reads and writes classified | [`transport`](src/transport/DESIGN.md) |
+| The send path | [`TxPipeline`](src/hft/pipeline.rs#L125), [`NonceManager`](src/hft/nonce.rs#L42) | zero RPC to prepare; the next nonce is owned | [`hft`](src/hft/DESIGN.md) |
+| The chain's shapes | [`contracts`](src/contracts/DESIGN.md), `storage` | bindings match deployed bytecode; slots match the deployed layout | [`contracts`](src/contracts/DESIGN.md) |
+| The human surface | [`types`](src/types/DESIGN.md), [`convert`](src/types/DESIGN.md) | inert data in human units; conversion once, at the edge | [`types`](src/types/DESIGN.md) |
 
 This table is the index; where each type flows is in the component
 nodes. Each node's type table has the same two right-hand columns,
@@ -193,6 +193,19 @@ from it, with the reason it is shaped for that consumer. A method on the
 type itself is neither. The phrase "the strategy layer" in a consumer
 cell marks a type as part of the surface the layer above the crate
 builds on. A type with no producer or no consumer is a type to question.
+
+The type graph itself is not written; it is read out of the signatures.
+`cargo xtask design` builds rustdoc's JSON for the crate and takes every
+public function's parameters and return as edges between the crate's
+types, so the graph is a fact about the code, and the tables are the
+curated layer over it: every producer and consumer a row names is
+checked against a real signature, and the flows a row names are the
+designed edges, drawn solid on the page beside the ones no node explains.
+`--check` is the gate, `--fmt` rewrites the tables' links to their
+canonical files, `--report` prints the graph's numbers, and `--open`
+draws it: types as nodes clustered by component, edges labelled with the
+function that carries one type into another, each type's row and source
+a click away.
 
 Three shapes recur and are worth naming, because a new type should be one
 of them or have a reason not to be.
@@ -212,6 +225,30 @@ invariant is checked: `TickRange` is the model. The check happens at the
 boundary the value entered, a chain read, a config, an event, and the
 math downstream trusts it. A loose pair of fields that together carry an
 invariant is the smell this shape exists to remove.
+
+## Invariants
+
+The claims about the type system that the gate enforces, over the graph
+the signatures give. Each is one sentence here and one predicate in
+`xtask`, and the sentence is the error. A change that breaks one either
+restores it or changes this list, in the same PR, with the reason.
+
+- No read on a handle takes a block argument: the block is the handle's,
+  and `state_at` is the one door to a named one.
+- Every snapshot in `math` carries a `BlockContext`.
+- A validated value, a public type in `math` with no public field, comes
+  only through fallible constructors: every public function returning it
+  returns a `Result` or an `Option`.
+- Nothing in `math` takes or returns a provider, a transport or a handle.
+- Every fallible public function returns one of the crate's errors, or
+  the crate's `Result`.
+- Every variant of `ContractError` and `TransactionError` says in its doc
+  whether it is transient.
+- Every public type is in exactly one node's table.
+
+Two more are reported, not enforced, until #124's unit conversions land:
+no `f64` in a function or field whose name carries a wire suffix, and a
+suffixed field has the primitive its suffix names.
 
 ## Efficiency
 

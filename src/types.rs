@@ -17,7 +17,7 @@
 //! [`Deserialize`] for logging, dashboards, persistence,
 //! and inter-process communication.
 
-#![doc = include_str!("types/DESIGN.md")]
+#![doc = "\n\nThe design of this module: [`src/types/DESIGN.md`](https://github.com/StrobeLabs/perpcity-rust-sdk/blob/main/src/types/DESIGN.md)."]
 
 use std::fmt;
 

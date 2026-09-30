@@ -11,7 +11,12 @@ documentation = "https://docs.rs/perpcity-sdk"
 homepage = "https://docs.perp.city"
 keywords = ["perpetuals", "defi", "trading", "ethereum", "uniswap"]
 categories = ["api-bindings", "cryptography::cryptocurrencies", "finance"]
-exclude = ["CLAUDE.md"]
+exclude = ["CLAUDE.md", "AGENTS.md", "/xtask", "/.cargo"]
+
+# The repo's tooling lives in `xtask` (`cargo xtask design --check`); it is
+# not part of the published crate.
+[workspace]
+members = ["xtask"]
 
 [features]
 # AWS KMS signing: pulls in alloy's AwsSigner (alloy::signers::aws) so clients

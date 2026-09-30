@@ -51,7 +51,7 @@
 //!
 //! [`ContractError::LogsRejected`]: crate::errors::ContractError::LogsRejected
 
-#![doc = include_str!("DESIGN.md")]
+#![doc = "\n\nThe design of this module: [`src/history/DESIGN.md`](https://github.com/StrobeLabs/perpcity-rust-sdk/blob/main/src/history/DESIGN.md)."]
 
 mod beacon;
 mod scan;

@@ -63,28 +63,29 @@ the chain would refuse.
 
 | Type | Invariant | Produced by | Consumed by |
 |---|---|---|---|
-| [`OpenTakerParams`] | what a caller wants to do, in human units: none beyond field types; scaled once at the call | the caller | [`PerpClient::open_taker`](crate::client::PerpClient::open_taker), which scales it once into the exact form. |
-| [`ExactOpenTakerParams`] | the same in atoms: the single submission path; no float round-trip | [`PerpClient::open_taker`](crate::client::PerpClient::open_taker), by scaling; or the caller, sizing to the atom | [`PerpClient::open_taker_exact`](crate::client::PerpClient::open_taker_exact). A market maker that must not round-trip through `f64` builds this one. |
-| [`AdjustTakerParams`] | an adjustment in human units; a close is an adjustment by the whole size | the caller; [`PerpClient::close_taker`](crate::client::PerpClient::close_taker) builds one | [`PerpClient::adjust_taker`](crate::client::PerpClient::adjust_taker). |
-| [`ExactAdjustTakerParams`] | the same in atoms; the single submission path | [`PerpClient::adjust_taker`](crate::client::PerpClient::adjust_taker), by scaling; or the caller | [`PerpClient::adjust_taker_exact`](crate::client::PerpClient::adjust_taker_exact). |
-| [`OpenMakerParams`] | a band to open: margin in USDC, two ticks, liquidity | the caller | [`PerpClient::open_maker`](crate::client::PerpClient::open_maker). The two loose ticks here are the debt a [`TickRange`](crate::math::range::TickRange) exists to remove. |
-| [`AdjustMakerParams`] | a maker adjustment; a close is the whole liquidity | the caller; [`PerpClient::close_maker`](crate::client::PerpClient::close_maker) builds one | [`PerpClient::adjust_maker`](crate::client::PerpClient::adjust_maker). |
-| [`OpenResult`] | what an open did: the hash, the id, the realised deltas from the receipt's event, not the request | [`PerpClient::open_taker_exact`](crate::client::PerpClient::open_taker_exact) and [`PerpClient::open_maker`](crate::client::PerpClient::open_maker) | nothing in the crate. The strategy layer records what actually filled. |
-| [`AdjustTakerResult`], [`AdjustMakerResult`] | what an adjustment did, from the receipt | [`PerpClient::adjust_taker_exact`](crate::client::PerpClient::adjust_taker_exact) and [`PerpClient::adjust_maker`](crate::client::PerpClient::adjust_maker), and the closes over them | nothing in the crate. The strategy layer. |
-| [`PerpData`], [`Bounds`], [`Fees`] | the market's configuration: fractions and human units, from e6 once; the fees and bounds convert to and from the slow cache's entries | [`MarketReader::get_perp_config`](crate::client::MarketReader::get_perp_config); [`MarketReader::get_perp_snapshot`](crate::client::MarketReader::get_perp_snapshot), alongside the snapshot | nothing in the crate. The strategy layer reads it once per market. |
-| [`MarginRatios`], [`MarginRatioTriple`] | the two kinds' margin ratios as fractions: init, liquidation, backstop | [`StateAt::margin_ratios`](crate::client::StateAt::margin_ratios); [`MarketReader::get_margin_ratios`](crate::client::MarketReader::get_margin_ratios) as the convenience | nothing in the crate. The strategy layer's sizing and health checks. |
-| [`PerpSnapshot`] | the market's live state, now: pool price, index, funding, open interest, and the block number it was read at | [`MarketReader::get_perp_snapshot`](crate::client::MarketReader::get_perp_snapshot), one multicall | nothing in the crate. The strategy layer seeds a live cache from it and then follows the feed. |
-| [`OpenInterest`] | the two sides' draw in perp tokens | [`MarketReader::get_open_interest`](crate::client::MarketReader::get_open_interest) | [`PerpSnapshot`], as a field; the strategy layer's capacity gauges. |
-| [`SolvencyState`] | the market's solvency in USDC, at a block | [`StateAt::solvency`](crate::client::StateAt::solvency) | nothing in the crate. The strategy layer's solvency audits. |
-| [`ChainDeployments`] | the addresses a chain shares: collateral and pool manager | the known chains' constants, or the caller for another | [`ChainReader::new`](crate::client::ChainReader::new). |
-| [`Side`] | long or short: the taker direction, nothing else | the caller | [`Capacity::atoms`](crate::math::capacity::Capacity::atoms), [`MarketCapacity::headroom_atoms`](crate::math::capacity::MarketCapacity::headroom_atoms) and the other side-keyed reads on capacity; [`liquidity_for_capacity`](crate::math::capacity::liquidity_for_capacity), which sizes for one side. |
+| [`OpenTakerParams`](../types.rs#L222) | what a caller wants to do, in human units: none beyond field types; scaled once at the call | the caller | [`PerpClient::open_taker`](../client/DESIGN.md), which scales it once into the exact form. |
+| [`ExactOpenTakerParams`](../types.rs#L234) | the same in atoms: the single submission path; no float round-trip | the caller, sizing to the atom; the human-unit open builds one by scaling, inside `PerpClient::open_taker` rather than as a conversion, which is a debt | [`PerpClient::open_taker_exact`](../client/DESIGN.md). A market maker that must not round-trip through `f64` builds this one. |
+| [`AdjustTakerParams`](../types.rs#L269) | an adjustment in human units; a close is an adjustment by the whole size | the caller; `PerpClient::close_taker` builds one inside | [`PerpClient::adjust_taker`](../client/DESIGN.md). |
+| [`ExactAdjustTakerParams`](../types.rs#L283) | the same in atoms; the single submission path | the caller; the human-unit adjustment builds one by scaling inside `PerpClient::adjust_taker` | [`PerpClient::adjust_taker_exact`](../client/DESIGN.md). |
+| [`OpenMakerParams`](../types.rs#L249) | a band to open: margin in USDC, two ticks, liquidity | the caller | [`PerpClient::open_maker`](../client/DESIGN.md). The two loose ticks here are the debt a `TickRange` exists to remove. |
+| [`AdjustMakerParams`](../types.rs#L296) | a maker adjustment; a close is the whole liquidity | the caller; `PerpClient::close_maker` builds one inside | [`PerpClient::adjust_maker`](../client/DESIGN.md). |
+| [`OpenResult`](../types.rs#L318) | what an open did: the hash, the id, the realised deltas from the receipt's event, not the request | [`PerpClient::open_taker_exact`](../client/DESIGN.md) and [`PerpClient::open_maker`](../client/DESIGN.md) | nothing in the crate. The strategy layer records what actually filled. |
+| [`AdjustTakerResult`](../types.rs#L336) | what a taker adjustment did, from the receipt | [`PerpClient::adjust_taker_exact`](../client/DESIGN.md), and the human-unit adjustment and close over it | nothing in the crate. The strategy layer. |
+| [`AdjustMakerResult`](../types.rs#L349) | what a maker adjustment did, from the receipt | [`PerpClient::adjust_maker`](../client/DESIGN.md), and the close over it | nothing in the crate. The strategy layer. |
+| [`PerpData`](../types.rs#L39), [`Bounds`](../types.rs#L61), [`Fees`](../types.rs#L143) | the market's configuration: fractions and human units, from e6 once; the fees and bounds convert to and from the slow cache's entries | [`MarketReader::get_perp_config`](../client/DESIGN.md); [`MarketReader::get_perp_snapshot`](../client/DESIGN.md), alongside the snapshot | nothing in the crate. The strategy layer reads it once per market. |
+| [`MarginRatios`](../types.rs#L132), [`MarginRatioTriple`](../types.rs#L78) | the two kinds' margin ratios as fractions: init, liquidation, backstop | [`StateAt::margin_ratios`](../client/DESIGN.md); [`MarketReader::get_margin_ratios`](../client/DESIGN.md) as the convenience | nothing in the crate. The strategy layer's sizing and health checks. |
+| [`PerpSnapshot`](../types.rs#L200) | the market's live state, now: pool price, index, funding, open interest, and the block number it was read at | [`MarketReader::get_perp_snapshot`](../client/DESIGN.md), one multicall | nothing in the crate. The strategy layer seeds a live cache from it and then follows the feed. |
+| [`OpenInterest`](../types.rs#L176) | the two sides' draw in perp tokens | [`MarketReader::get_open_interest`](../client/DESIGN.md) | [`PerpSnapshot`](../types.rs#L200), as a field; the strategy layer's capacity gauges. |
+| [`SolvencyState`](../types.rs#L188) | the market's solvency in USDC, at a block | [`StateAt::solvency`](../client/DESIGN.md) | nothing in the crate. The strategy layer's solvency audits. |
+| [`ChainDeployments`](../types.rs#L29) | the addresses a chain shares: collateral and pool manager | the known chains' constants, or the caller for another | [`ChainReader::new`](../client/DESIGN.md). |
+| [`Side`](../types.rs#L157) | long or short: the taker direction, nothing else | the caller | [`Capacity::atoms`](../math/DESIGN.md), [`MarketCapacity::headroom_atoms`](../math/DESIGN.md) and the other side-keyed reads on capacity; [`liquidity_for_capacity`](../math/DESIGN.md), which sizes for one side. |
 
 `convert` has no row because its functions are edges, not nodes. Every
-read that returns a price calls [`price_x96_to_f64`](crate::convert::price_x96_to_f64)
-once; the trades call [`scale_to_6dec`](crate::convert::scale_to_6dec)
+read that returns a price calls [`price_x96_to_f64`](../convert.rs#L205)
+once; the trades call [`scale_to_6dec`](../convert.rs#L55)
 once; the balance and solvency reads call
-[`usdc_from_atoms`](crate::convert::usdc_from_atoms); the decoder and the
-maker-equity batch call [`unpack_balance_delta`](crate::convert::unpack_balance_delta).
+[`usdc_from_atoms`](../convert.rs#L105); the decoder and the
+maker-equity batch call [`unpack_balance_delta`](../convert.rs#L374).
 Each validates and refuses what the chain would, and none is called from
 the middle of a computation.
 

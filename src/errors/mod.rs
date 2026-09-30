@@ -13,7 +13,7 @@
 //! conversions, so module-internal code can return specific error types
 //! with `?` and callers receive a unified enum.
 
-#![doc = include_str!("DESIGN.md")]
+#![doc = "\n\nThe design of this module: [`src/errors/DESIGN.md`](https://github.com/StrobeLabs/perpcity-rust-sdk/blob/main/src/errors/DESIGN.md)."]
 
 pub mod contract;
 pub mod decode;

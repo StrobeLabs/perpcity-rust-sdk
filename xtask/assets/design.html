@@ -1,0 +1,275 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Perp City SDK Type Graph</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+  :root {
+    --ground: #eceff3; --panel: #ffffff; --ink: #171a20; --muted: #5f6776; --line: #d5dae2;
+    --accent: #b45309; --accent-ink: #ffffff; --edge: #9aa3b1; --node: #ffffff; --node-line: #3c4350;
+    --chip: #f3f5f8; --code: #eef1f5;
+    --c-client: #2563eb; --c-math: #0f766e; --c-events: #7c3aed; --c-feeds: #0891b2; --c-history: #4d7c0f;
+    --c-hft: #be123c; --c-transport: #b45309; --c-errors: #dc2626; --c-contracts: #6b7280; --c-types: #9333ea;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --ground: #15181d; --panel: #1c2027; --ink: #e7e9ee; --muted: #98a1b0; --line: #2c323c;
+      --accent: #f59e0b; --accent-ink: #15181d; --edge: #4b5361; --node: #232830; --node-line: #aeb6c3;
+      --chip: #262b33; --code: #262b33;
+      --c-client: #60a5fa; --c-math: #2dd4bf; --c-events: #a78bfa; --c-feeds: #22d3ee; --c-history: #a3e635;
+      --c-hft: #fb7185; --c-transport: #fbbf24; --c-errors: #f87171; --c-contracts: #9ca3af; --c-types: #c084fc;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body { margin: 0; background: var(--ground); color: var(--ink); font-family: "IBM Plex Sans", system-ui, sans-serif; font-size: 14px; line-height: 1.45; }
+  code, .mono { font-family: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace; }
+  .app { display: grid; grid-template-rows: auto 1fr; height: 100vh; height: 100dvh; }
+  header { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px; padding: 10px 16px; border-bottom: 1px solid var(--line); background: var(--panel); }
+  header h1 { font-size: 15px; font-weight: 600; margin: 0; white-space: nowrap; }
+  header h1 small { color: var(--muted); font-weight: 400; margin-left: 8px; }
+  .search { flex: 1 1 200px; min-width: 160px; max-width: 360px; }
+  .search input { width: 100%; padding: 6px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--ground); color: var(--ink); font: inherit; font-family: "IBM Plex Mono", monospace; font-size: 13px; }
+  .search input:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; }
+  .chip { display: inline-flex; align-items: center; gap: 6px; padding: 3px 9px; border-radius: 999px; border: 1px solid var(--line); background: var(--chip); color: var(--ink); font: inherit; font-size: 12px; cursor: pointer; }
+  .chip .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--swatch); }
+  .chip.off { opacity: 0.45; text-decoration: line-through; }
+  .chip:focus-visible, button:focus-visible, a:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .toggle { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); white-space: nowrap; }
+  .toggle input { accent-color: var(--accent); }
+  main { display: grid; grid-template-columns: 1fr 400px; min-height: 0; }
+  #cy { min-height: 0; position: relative; }
+  #cy .hint { position: absolute; left: 12px; bottom: 12px; font-size: 12px; color: var(--muted); background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 6px 10px; pointer-events: none; }
+  aside { border-left: 1px solid var(--line); background: var(--panel); overflow: auto; padding: 18px 20px 28px; }
+  aside h2 { font-family: "IBM Plex Mono", monospace; font-size: 20px; font-weight: 500; margin: 0 0 4px; word-break: break-word; }
+  .meta { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; color: var(--muted); font-size: 12px; margin-bottom: 12px; }
+  .meta .comp { display: inline-flex; align-items: center; gap: 6px; padding: 2px 8px; border-radius: 999px; background: var(--chip); color: var(--ink); }
+  .meta .comp .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--swatch); }
+  .meta .pub { border: 1.5px solid var(--ink); border-radius: 4px; padding: 1px 6px; color: var(--ink); }
+  .actions { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 16px; }
+  .actions a, .actions button { font: inherit; font-size: 12px; padding: 5px 10px; border-radius: 6px; border: 1px solid var(--line); background: var(--chip); color: var(--ink); text-decoration: none; cursor: pointer; }
+  .actions .primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+  section.block { margin-top: 14px; }
+  section.block h3, .neigh h3 { font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); margin: 0 0 4px; font-weight: 600; }
+  section.block p { margin: 0; max-width: 62ch; }
+  section.block code { font-size: 12.5px; background: var(--code); padding: 1px 4px; border-radius: 3px; }
+  section.block a[data-node] { font-family: "IBM Plex Mono", monospace; font-size: 12.5px; color: var(--accent); text-decoration: underline; cursor: pointer; }
+  .empty { color: var(--muted); max-width: 44ch; }
+  .neigh { margin-top: 18px; }
+  .neigh ul { list-style: none; margin: 4px 0 0; padding: 0; display: grid; gap: 4px; }
+  .neigh li { display: flex; gap: 8px; align-items: baseline; font-size: 12.5px; }
+  .neigh li .fn { color: var(--muted); font-family: "IBM Plex Mono", monospace; font-size: 11.5px; }
+  .neigh li a { font-family: "IBM Plex Mono", monospace; color: var(--ink); cursor: pointer; text-decoration: none; }
+  .neigh li a:hover { color: var(--accent); }
+  .neigh li.faint a, .neigh li.faint .fn { color: var(--muted); }
+  .neigh .arrow { color: var(--muted); }
+  .legend { margin-top: 20px; font-size: 12px; color: var(--muted); display: grid; gap: 4px; }
+  .legend span.sw { display: inline-block; width: 28px; border-top: 2px solid var(--ink); vertical-align: middle; margin-right: 6px; }
+  .legend span.sw.faint { border-top: 2px dashed var(--edge); }
+  .legend span.sw.dot { border-top: 2px dotted var(--edge); }
+  @media (max-width: 800px) {
+    main { grid-template-columns: 1fr; grid-template-rows: 1fr minmax(160px, 42vh); }
+    aside { border-left: 0; border-top: 1px solid var(--line); }
+  }
+</style>
+</head>
+<body>
+<div class="app">
+  <header>
+    <h1>Perp City SDK Type Graph <small>from the signatures; the nodes' tables say why</small></h1>
+    <div class="search"><input id="q" type="search" placeholder="find a type… (Enter selects)" aria-label="Find a type" autocomplete="off"></div>
+    <div class="chips" id="chips" aria-label="Components"></div>
+    <label class="toggle"><input id="designed" type="checkbox"> designed edges only</label>
+    <label class="toggle"><input id="surface" type="checkbox"> surface only</label>
+    <button class="chip" id="reset" type="button">Fit everything</button>
+  </header>
+  <main>
+    <div id="cy"><div class="hint">scroll to zoom, drag to pan · a component chip jumps to it · click a type · double-click to focus on its neighbourhood · Esc clears</div></div>
+    <aside id="panel">
+      <h2>Pick a type</h2>
+      <p class="empty">Every node is a public type, placed in the component that owns it. An arrow from A to B means a B is made from an A, by the function on the arrow. A solid arrow is one a design node names; a faint one is in the code and no node explains it. A dotted line is containment. A thick border marks a type the strategy layer above the crate builds on.</p>
+      <div class="legend">
+        <div><span class="sw"></span>designed: a node's table names this flow</div>
+        <div><span class="sw faint"></span>in the code, unexplained by any node</div>
+        <div><span class="sw dot"></span>contains, or is built from</div>
+      </div>
+    </aside>
+  </main>
+</div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/cytoscape/3.30.2/cytoscape.min.js"></script>
+<script>
+(function () {
+  const G = /*DATA*/null;
+  const byId = Object.fromEntries(G.nodes.map(n => [n.id, n]));
+  const css = () => getComputedStyle(document.documentElement);
+  const tok = name => css().getPropertyValue(name).trim();
+  const compColor = c => tok('--c-' + c) || tok('--muted');
+  const shapeOf = k => ({ struct: 'round-rectangle', enum: 'rectangle', trait: 'hexagon', fn: 'ellipse', module: 'cut-rectangle', type: 'round-rectangle' })[k] || 'round-rectangle';
+
+  const elements = [];
+  for (const c of G.components) elements.push({ data: { id: 'comp:' + c, label: c, comp: c, isComp: true } });
+  for (const n of G.nodes) elements.push({ data: { id: n.id, label: n.name, kind: n.kind, comp: n.component, parent: 'comp:' + n.component, pub: n.public } });
+  G.edges.forEach((e, i) => elements.push({ data: { id: 'e' + i, source: e.source, target: e.target, label: e.label, kind: e.kind, designed: e.designed } }));
+
+  function styleSheet() {
+    return [
+      { selector: 'node', style: { 'label': 'data(label)', 'font-family': '"IBM Plex Mono", monospace', 'font-size': 11, 'color': tok('--ink'), 'background-color': tok('--node'), 'border-color': tok('--node-line'), 'border-width': 1, 'shape': ele => shapeOf(ele.data('kind')), 'width': 'label', 'height': 22, 'padding': '6px', 'text-valign': 'center', 'text-halign': 'center' } },
+      { selector: 'node[?pub]', style: { 'border-width': 2.5 } },
+      { selector: 'node[kind = "fn"]', style: { 'background-color': tok('--chip'), 'font-size': 10, 'color': tok('--muted') } },
+      { selector: 'node[kind = "module"]', style: { 'background-color': tok('--chip') } },
+      { selector: 'node[?isComp]', style: { 'label': 'data(label)', 'shape': 'round-rectangle', 'background-color': ele => compColor(ele.data('comp')), 'background-opacity': 0.06, 'border-color': ele => compColor(ele.data('comp')), 'border-width': 1, 'border-opacity': 0.5, 'text-valign': 'top', 'text-halign': 'center', 'font-family': '"IBM Plex Sans", sans-serif', 'font-size': 18, 'font-weight': 600, 'color': ele => compColor(ele.data('comp')), 'padding': '28px', 'text-margin-y': -6 } },
+      { selector: 'edge', style: { 'width': 1, 'line-color': tok('--edge'), 'target-arrow-color': tok('--edge'), 'target-arrow-shape': 'triangle', 'arrow-scale': 0.7, 'curve-style': 'bezier', 'label': 'data(label)', 'font-family': '"IBM Plex Mono", monospace', 'font-size': 9, 'color': tok('--ink'), 'text-opacity': 0, 'text-rotation': 'autorotate', 'text-background-color': tok('--panel'), 'text-background-opacity': 0.9, 'text-background-padding': 2, 'line-opacity': 0.2, 'line-style': 'dashed' } },
+      { selector: 'edge[?designed]', style: { 'line-opacity': 0.7, 'line-style': 'solid', 'width': 1.4 } },
+      { selector: 'edge[kind = "carries"]', style: { 'line-style': 'dotted', 'target-arrow-shape': 'none', 'line-opacity': 0.35 } },
+      { selector: 'edge[kind = "uses"]', style: { 'line-style': 'dashed', 'line-opacity': 0.25 } },
+      { selector: '.dim', style: { 'opacity': 0.1 } },
+      { selector: 'node.sel', style: { 'border-color': tok('--accent'), 'border-width': 3 } },
+      { selector: 'node.nb', style: { 'border-color': tok('--accent') } },
+      { selector: 'edge.hi', style: { 'line-color': tok('--accent'), 'target-arrow-color': tok('--accent'), 'width': 2, 'text-opacity': 1, 'line-opacity': 1, 'z-index': 10 } },
+      { selector: 'node.match', style: { 'background-color': tok('--accent'), 'color': tok('--accent-ink') } },
+      { selector: '.hidden', style: { 'display': 'none' } },
+    ];
+  }
+
+  const cy = cytoscape({ container: document.getElementById('cy'), elements, style: styleSheet(), layout: { name: 'preset' }, wheelSensitivity: 0.2, minZoom: 0.05, maxZoom: 4 });
+
+  // Each component is a block of its types in a grid, hubs first; the
+  // blocks sit in a fixed order that follows the design graph, the
+  // client at the top left. Deterministic, and every label legible at the
+  // zoom the page opens at.
+  const ORDER = ['client', 'math', 'types', 'hft', 'errors', 'events', 'feeds', 'history', 'transport', 'contracts'];
+  function blockLayout() {
+    const degree = n => n.connectedEdges().length;
+    const comps = [...G.components].sort((a, b) => (ORDER.indexOf(a) + 1 || 99) - (ORDER.indexOf(b) + 1 || 99));
+    const colW = 210, rowStep = 46, gapX = 120, gapY = 110, maxW = 2600;
+    let x0 = 0, y0 = 0, rowH = 0;
+    for (const c of comps) {
+      const nodes = cy.nodes(`[comp = "${c}"][!isComp]`).sort((a, b) => degree(b) - degree(a));
+      const n = nodes.length; if (!n) continue;
+      const cols = Math.min(n, Math.max(2, Math.round(Math.sqrt(n * 1.8))));
+      const rows = Math.ceil(n / cols);
+      const bw = cols * colW, bh = rows * rowStep + 40;
+      if (x0 > 0 && x0 + bw > maxW) { x0 = 0; y0 += rowH + gapY; rowH = 0; }
+      nodes.forEach((nd, i) => nd.position({ x: x0 + (i % cols) * colW + colW / 2, y: y0 + 40 + Math.floor(i / cols) * rowStep }));
+      x0 += bw + gapX; rowH = Math.max(rowH, bh);
+    }
+  }
+  blockLayout();
+  const home = {}; cy.nodes().forEach(n => { home[n.id()] = { x: n.position('x'), y: n.position('y') }; });
+  const prefersReduced = () => window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const block = comp => cy.$(`#comp\\:${comp}`);
+  const goTo = comp => cy.animate({ fit: { eles: block(comp), padding: 40 } }, { duration: prefersReduced() ? 0 : 300 });
+  cy.fit(block(G.components.includes('client') ? 'client' : G.components[0]), 40);
+
+  const panel = document.getElementById('panel');
+  const esc = s => String(s).replace(/[&<>]/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[ch]));
+  function show(n) {
+    const d = byId[n.id()];
+    const inc = cy.edges(`[target = "${d.id}"]`);
+    const out = cy.edges(`[source = "${d.id}"]`);
+    const li = (e, dir) => {
+      const other = dir === 'in' ? e.source() : e.target();
+      const fn = e.data('label') ? `<span class="fn">${esc(e.data('label'))}</span>` : (e.data('kind') === 'carries' ? '<span class="fn">contains</span>' : e.data('kind') === 'uses' ? '<span class="fn">uses</span>' : '');
+      const cls = e.data('designed') ? '' : ' class="faint"';
+      return `<li${cls}><span class="arrow">${dir === 'in' ? '←' : '→'}</span><a data-node="${other.id()}">${esc(other.data('label'))}</a>${fn}</li>`;
+    };
+    const designUrl = G.repo + 'src/' + d.node + '/DESIGN.md';
+    const srcUrl = d.file ? G.repo + d.file + '#L' + d.line : null;
+    const editorUrl = d.file ? 'vscode://file/' + G.root + '/' + d.file + ':' + d.line : null;
+    const rowNote = d.invariant ? '' : `<p class="empty">No row of its own in a design node yet.</p>`;
+    panel.innerHTML = `
+      <h2>${esc(d.name)}</h2>
+      <div class="meta"><span>${esc(d.kind)}</span><span class="comp" style="--swatch:${compColor(d.component)}"><span class="dot"></span>${esc(d.component)}</span>${d.public ? '<span class="pub">consumed by the strategy layer</span>' : ''}</div>
+      <div class="actions">
+        <button type="button" class="primary" id="focus">Focus on its neighbourhood</button>
+        <a href="${designUrl}" target="_blank" rel="noopener">Design node</a>
+        ${srcUrl ? `<a href="${srcUrl}" target="_blank" rel="noopener">Source <span class="mono">${esc(d.file)}:${d.line}</span></a>` : ''}
+        ${editorUrl ? `<a href="${editorUrl}">Open in editor</a>` : ''}
+      </div>
+      ${rowNote}
+      ${d.invariant ? `<section class="block"><h3>Invariant</h3><p>${d.invariant}</p></section>` : ''}
+      ${d.produced ? `<section class="block"><h3>Produced by</h3><p>${d.produced}</p></section>` : ''}
+      ${d.consumed ? `<section class="block"><h3>Consumed by</h3><p>${d.consumed}</p></section>` : ''}
+      <section class="neigh"><h3>Edges in the code</h3>
+        <ul>${inc.map(e => li(e, 'in')).join('')}${out.map(e => li(e, 'out')).join('')}${inc.length + out.length ? '' : '<li class="empty">none: an island</li>'}</ul></section>`;
+    panel.querySelectorAll('a[data-node]').forEach(a => a.addEventListener('click', ev => { ev.preventDefault(); select(cy.getElementById(a.dataset.node), true); }));
+    document.getElementById('focus').addEventListener('click', () => focus(n));
+    panel.scrollTop = 0;
+  }
+
+  function clearMarks() { cy.elements().removeClass('dim sel nb hi match'); }
+  function select(n, pan) {
+    if (!n || n.empty()) return;
+    clearMarks();
+    const nb = n.closedNeighborhood();
+    cy.elements().not(nb).not('[?isComp]').addClass('dim');
+    n.addClass('sel'); nb.nodes().not(n).addClass('nb'); nb.edges().addClass('hi');
+    show(n);
+    if (pan) cy.animate({ center: { eles: n } }, { duration: prefersReduced() ? 0 : 250 });
+  }
+  function focus(n) {
+    const nb = n.closedNeighborhood();
+    const parents = nb.nodes().parents();
+    cy.elements().not(nb).not(parents).addClass('hidden');
+    // The chosen type at the centre, what it is made from on the left,
+    // what it makes on the right.
+    const ins = nb.nodes().filter(m => !m.same(n) && cy.edges(`[source = "${m.id()}"][target = "${n.id()}"]`).length);
+    const outs = nb.nodes().filter(m => !m.same(n) && !ins.contains(m));
+    const place = (col, x) => col.forEach((m, i) => m.position({ x, y: (i - (col.length - 1) / 2) * 48 }));
+    n.position({ x: 0, y: 0 }); place(ins, -420); place(outs, 420);
+    select(n, false);
+    cy.fit(nb.union(parents), 60);
+  }
+  function reset() {
+    cy.elements().removeClass('hidden');
+    cy.nodes().forEach(n => { if (home[n.id()]) n.position(home[n.id()]); });
+    clearMarks(); applyChips(); applyToggles();
+    cy.fit(undefined, 40);
+  }
+
+  cy.on('tap', 'node[!isComp]', ev => select(ev.target, false));
+  cy.on('dbltap', 'node[!isComp]', ev => focus(ev.target));
+  cy.on('tap', ev => { if (ev.target === cy) { clearMarks(); applyToggles(); } });
+  document.addEventListener('keydown', ev => { if (ev.key === 'Escape') { clearMarks(); applyToggles(); } });
+  document.getElementById('reset').addEventListener('click', reset);
+
+  const chips = document.getElementById('chips');
+  for (const c of G.components) {
+    const b = document.createElement('button'); b.type = 'button'; b.className = 'chip'; b.style.setProperty('--swatch', compColor(c));
+    b.innerHTML = `<span class="dot"></span>${esc(c)}`; b.title = 'jump to ' + c;
+    b.addEventListener('click', () => { cy.elements().removeClass('hidden'); applyToggles(); goTo(c); });
+    chips.appendChild(b);
+  }
+  function applyChips() {}
+  const surface = document.getElementById('surface');
+  const designedOnly = document.getElementById('designed');
+  function applyToggles() {
+    if (surface.checked) cy.nodes('[!isComp][!pub]').addClass('dim'); else if (!cy.nodes('.sel').length) cy.elements().removeClass('dim');
+    cy.edges('[!designed]').toggleClass('hidden', designedOnly.checked);
+  }
+  surface.addEventListener('change', () => { clearMarks(); applyToggles(); });
+  designedOnly.addEventListener('change', () => { applyChips(); applyToggles(); });
+
+  const q = document.getElementById('q');
+  const matches = () => { const s = q.value.trim().toLowerCase(); return s ? cy.nodes('[!isComp]').filter(n => n.data('label').toLowerCase().includes(s)) : cy.collection(); };
+  q.addEventListener('input', () => {
+    clearMarks(); applyToggles();
+    const m = matches(); if (!q.value.trim()) return;
+    cy.nodes('[!isComp]').not(m).addClass('dim'); m.addClass('match');
+  });
+  q.addEventListener('keydown', ev => {
+    if (ev.key !== 'Enter') return;
+    const m = matches(); if (!m.length) return;
+    const exact = m.filter(n => n.data('label').toLowerCase() === q.value.trim().toLowerCase());
+    select(exact.length ? exact.first() : m.first(), true);
+  });
+
+  const restyle = () => { cy.style(styleSheet()); chips.querySelectorAll('.chip').forEach((b, i) => b.style.setProperty('--swatch', compColor(G.components[i]))); };
+  window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', restyle);
+})();
+</script>
+</body>
+</html>

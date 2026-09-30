@@ -16,4 +16,5 @@ verification. For a behaviour change: what was measured. -->
 - [ ] `cargo clippy --all-targets` with zero warnings
 - [ ] `cargo test`
 - [ ] `RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features`
+- [ ] `cargo xtask design --check`, after `--fmt` if a type table changed
 - [ ] `CHANGELOG.md` updated under `[Unreleased]` if a caller can observe the change
