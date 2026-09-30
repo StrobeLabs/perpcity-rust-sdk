@@ -140,7 +140,7 @@ impl TakerQuote {
     /// Derive the contract `amt1Limit` with a directional slippage cushion.
     ///
     /// Buys return the maximum USD payment; sells return the minimum USD
-    /// proceeds. `slippage_bps=25` corresponds to the Legion default of 0.25%.
+    /// proceeds. `slippage_bps=25` is a 0.25% cushion.
     /// `slippage_bps` is clamped to 10 000 (100%) so a sell can never
     /// silently produce a zero minimum-proceeds limit from an oversized
     /// cushion.

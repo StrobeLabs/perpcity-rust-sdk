@@ -29,6 +29,7 @@
 // `PerpFactory::createPerp` legitimately takes 7 params, which trips clippy's
 // `too_many_arguments` lint on generated code.
 #![allow(clippy::too_many_arguments)]
+#![doc = include_str!("contracts/DESIGN.md")]
 
 use alloy::sol;
 

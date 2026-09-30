@@ -15,6 +15,8 @@
 //! All modules accept explicit timestamps for deterministic testing —
 //! no hidden clock dependencies.
 
+#![doc = include_str!("DESIGN.md")]
+
 pub mod gas;
 pub mod latency;
 pub mod nonce;

@@ -13,6 +13,8 @@
 //! conversions, so module-internal code can return specific error types
 //! with `?` and callers receive a unified enum.
 
+#![doc = include_str!("DESIGN.md")]
+
 pub mod contract;
 pub mod decode;
 pub mod transaction;

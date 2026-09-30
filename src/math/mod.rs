@@ -17,6 +17,8 @@
 //! Storage-slot derivation for the deployed contract layouts is not math
 //! and lives in the crate-internal `storage` module beside `contracts`.
 
+#![doc = include_str!("DESIGN.md")]
+
 use alloy::primitives::B256;
 use serde::{Deserialize, Serialize};
 

@@ -35,6 +35,7 @@
 
 #![deny(unreachable_pub)]
 #![warn(missing_debug_implementations, missing_docs, rust_2018_idioms)]
+#![doc = include_str!("../DESIGN.md")]
 
 pub mod client;
 pub mod constants;

@@ -50,6 +50,8 @@
 //! # }
 //! ```
 
+#![doc = include_str!("events/DESIGN.md")]
+
 use alloy::primitives::{Address, B256, I256, U256};
 use alloy::rpc::types::Log;
 use alloy::sol_types::SolEvent;

@@ -1,0 +1,51 @@
+reviews:
+  path_instructions:
+    - path: "src/**"
+      instructions: |
+        This crate is design-anchored. Review the diff against DESIGN.md at the
+        root and the DESIGN.md of the module changed, not only against the
+        code. Flag a change that contradicts a node's mental model or a rule
+        in AGENTS.md, a type that carries an invariant as loose fields, a
+        ported computation with no golden vector from real chain state, a
+        read that takes a block argument instead of hanging off StateAt, a
+        failure variant with no stated transience, and a public type or
+        method whose name is not the word the owning node's terminology
+        section uses for the concept.
+        A change to a module that does not update that module's DESIGN.md
+        table, edges or debts is incomplete.
+    - path: "src/client/**"
+      instructions: |
+        Read src/client/DESIGN.md. Reads are now on MarketReader (get_*) or at
+        a block on StateAt (no prefix); nothing takes a block argument. A send
+        must leave its nonce and hash accountable. Helpers that only read
+        should be bounded on AsRef<MarketReader> or AsRef<ChainReader>.
+    - path: "src/math/**"
+      instructions: |
+        Read src/math/DESIGN.md. No provider or block in this module. Exact
+        ports in U256/I256 with the contract's rounding, suffixed _x96/_atoms
+        /_e6; f64 twins unsuffixed. Every port names the Solidity it
+        transcribes and has a golden vector from the chain.
+    - path: "src/contracts.rs"
+      instructions: |
+        Read src/contracts/DESIGN.md. Bindings match the deployed commit, not
+        the contracts repository's main; a changed binding needs live
+        verification and an abi_lock update with evidence.
+    - path: "src/events.rs"
+      instructions: |
+        Read src/events/DESIGN.md. One decoder, every era's shape, human
+        units except the raw accounting trackers; unknown logs are None,
+        a malformed known log is a recorded debt (it is None today and
+        should be a typed error).
+    - path: "src/errors/**"
+      instructions: |
+        Read src/errors/DESIGN.md. A variant exists because a caller branches
+        on it, and its doc states whether it is transient.
+    - path: "**/DESIGN.md"
+      instructions: |
+        A design node is the argument for why the component is shaped as it
+        is: purpose, what matters, the mental model, the type system and how
+        it maps to the model, edges, terminology, debts. Flag recapitulation
+        of the rustdoc, a type in the table with no invariant stated, a type
+        row whose Produced by or Consumed by cell does not link the functions
+        that make or take it, an edge that restates another node's content
+        instead of pointing at it, and a term defined in two nodes.

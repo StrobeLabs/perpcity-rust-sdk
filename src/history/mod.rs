@@ -51,6 +51,8 @@
 //!
 //! [`ContractError::LogsRejected`]: crate::errors::ContractError::LogsRejected
 
+#![doc = include_str!("DESIGN.md")]
+
 mod beacon;
 mod scan;
 mod tape;
