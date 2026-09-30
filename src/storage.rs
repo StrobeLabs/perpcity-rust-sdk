@@ -11,8 +11,8 @@
 //!   tick bitmap and the fee-growth accounting (read via `extsload`).
 //!
 //! The offsets encode the deployed contract layouts and are locked by
-//! chain-backed tests at the call sites (the taker book loader verifies its
-//! reconstruction against the pool's reported liquidity, and the maker
+//! chain-backed tests at the call sites (the pool snapshot verifies its
+//! tick map against the pool's reported liquidity, and the maker
 //! equity math reproduces a real on-chain settle).
 
 use alloy::primitives::{Address, B256, I256, U256, keccak256};

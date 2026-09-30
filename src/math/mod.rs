@@ -12,7 +12,7 @@
 //! | [`position`] | Entry price, size, value, leverage, liquidation price |
 //! | [`ema`] | Contract-exact EMA advancement (Solady `expWad` port) |
 //! | [`pricing`] | The deployed pricing module's fair price (the contract's mark) |
-//! | [`swap`] | Local V4 taker swap simulation over a block-pinned book |
+//! | [`swap`] | Local V4 taker swap simulation over a block-pinned pool |
 //! | [`maker_equity`] | Contract-exact maker settle preview over a block-pinned snapshot |
 //!
 //! Storage-slot derivation for the deployed contract layouts is not math
@@ -34,7 +34,7 @@ pub mod tick;
 
 /// The block a market snapshot's state was read at.
 ///
-/// Shared by [`swap::TakerMarketSnapshot`] and
+/// Shared by [`swap::PoolSnapshot`] and
 /// [`maker_equity::MakerMarketSnapshot`]: every field in a snapshot comes
 /// from this one block, and chain reads derived from the snapshot pin to
 /// [`Self::hash`].

@@ -108,9 +108,7 @@ pub use math::tick::{
 };
 
 #[doc(inline)]
-pub use math::swap::{
-    QuoteConstraints, QuoteLimit, TakerMarketSnapshot, TakerQuote, TickLiquidity,
-};
+pub use math::swap::{PoolSnapshot, QuoteConstraints, QuoteLimit, TakerQuote, TickLiquidity};
 
 #[doc(inline)]
 pub use math::capacity::{Capacity, MarketCapacity, band_capacity, liquidity_for_capacity};

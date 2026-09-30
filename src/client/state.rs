@@ -24,12 +24,12 @@ use crate::math::capacity::MarketCapacity;
 use crate::math::ema::PricePair;
 use crate::math::pricing::Mark;
 use crate::math::range::{MakerBand, TickRange};
-use crate::math::swap::{TakerMarketSnapshot, TickLiquidity, active_liquidity};
+use crate::math::swap::{PoolSnapshot, TickLiquidity, active_liquidity};
 use crate::storage::{v4_tick_bitmap_slot, v4_tick_slot};
 use crate::types::{MarginRatioTriple, MarginRatios, SolvencyState};
 
 use super::market::MarketReader;
-use super::queries::{BookImmutables, multicall_error, registered_module};
+use super::queries::{MarketImmutables, multicall_error, registered_module};
 use super::{i24_to_i32, u24_to_u32};
 
 /// One market's storage, every read pinned to one block.
@@ -102,14 +102,14 @@ impl MarketReader {
         self.state().await?.margin_ratios().await
     }
 
-    /// [`StateAt::taker_book`] at the lagged snapshot block.
+    /// [`StateAt::pool`] at the lagged snapshot block.
     ///
     /// The deployment immutables are read first: they are not the block's
     /// to give, and a market whose immutables are rejected never resolves
     /// a block at all.
-    pub async fn load_taker_market_snapshot(&self) -> Result<TakerMarketSnapshot> {
-        self.book_immutables().await?;
-        self.state().await?.taker_book().await
+    pub async fn get_pool_snapshot(&self) -> Result<PoolSnapshot> {
+        self.immutables().await?;
+        self.state().await?.pool().await
     }
 }
 
@@ -338,19 +338,19 @@ impl StateAt {
         self.mark_from(&views).await
     }
 
-    /// The taker book: an exact concentrated-liquidity snapshot of the
-    /// deployed Perp (`perpcity-contracts@4bbe554f`) at this block — the
-    /// pool's price and active liquidity, its initialized ticks from the
-    /// PoolManager's bitmap, and the swap bounds the price-impact module
-    /// sets at this block's [`Mark`].
+    /// The pool at this block, exact to the deployed Perp
+    /// (`perpcity-contracts@4bbe554f`): its price and active liquidity,
+    /// its initialized ticks from the PoolManager's bitmap, and the swap
+    /// bounds the price-impact module sets at this block's [`Mark`]. What
+    /// a taker swap is quoted against.
     ///
     /// # Errors
     ///
     /// [`ContractError::ModuleNotRegistered`] when the perp has no beacon
     /// or no price-impact module; [`ContractError::StorageReadFailed`]
     /// when the tick map does not reproduce the pool's active liquidity.
-    pub async fn taker_book(&self) -> Result<TakerMarketSnapshot> {
-        let immutables = self.market.book_immutables().await?;
+    pub async fn pool(&self) -> Result<PoolSnapshot> {
+        let immutables = self.market.immutables().await?;
         let views = self.perp_views().await?;
         let mark = self.mark_from(&views).await?;
         let bounds = self.impact_bounds(views.modules.priceImpact, &mark).await?;
@@ -369,7 +369,7 @@ impl StateAt {
             }
             .into());
         }
-        Ok(TakerMarketSnapshot {
+        Ok(PoolSnapshot {
             block: self.block,
             sqrt_price_x96: pool.sqrtPrice.to::<U256>(),
             tick,
@@ -453,8 +453,11 @@ impl StateAt {
     /// The pool's initialized ticks at this block: the PoolManager's tick
     /// bitmap over the whole tick range, then the tick word of every set
     /// bit, both by pinned `extsload`.
-    async fn tick_map(&self, immutables: &BookImmutables) -> Result<BTreeMap<i32, TickLiquidity>> {
-        let BookImmutables {
+    async fn tick_map(
+        &self,
+        immutables: &MarketImmutables,
+    ) -> Result<BTreeMap<i32, TickLiquidity>> {
+        let MarketImmutables {
             pool_id,
             tick_spacing: spacing,
         } = *immutables;
@@ -959,14 +962,14 @@ mod tests {
         assert!(rpc.is_drained(), "blockNumber, block, one multicall");
     }
 
-    // ── The taker book: immutables, pinned views, and the bitmap ──────
+    // ── The pool: immutables, pinned views, and the tick map ──────────
 
     /// The pool's id, as `POOL_ID()` reports it.
     const POOL_ID: B256 = B256::repeat_byte(0x99);
     /// When the market was last touched, and the block time in these
     /// tests, so the stored EMAs need no advancing.
     const TOUCHED_AT: u64 = TIMESTAMP;
-    /// Bitmap words the book walk covers at this spacing:
+    /// Bitmap words the tick map covers at this spacing:
     /// `MIN_TICK.div_euclid(30) = -4606`, `.div_euclid(256) = -18`, up to
     /// `4606.div_euclid(256) = 17` — 36 words, word `w` at offset `w + 18`.
     const BITMAP_WORDS: usize = 36;
@@ -1040,9 +1043,9 @@ mod tests {
         B256::from((U256::from(net as u128) << 128) | U256::from(gross))
     }
 
-    fn expected_snapshot(hash: B256, liquidity: u128) -> TakerMarketSnapshot {
+    fn expected_snapshot(hash: B256, liquidity: u128) -> PoolSnapshot {
         let one = x96(1, 0);
-        TakerMarketSnapshot {
+        PoolSnapshot {
             block: BlockContext {
                 number: 100 - SNAPSHOT_BLOCK_LAG,
                 hash,
@@ -1060,15 +1063,15 @@ mod tests {
     }
 
     /// An empty bitmap means no tick words are asked for, and the empty
-    /// book reconciles with a pool holding no liquidity.
+    /// tick map reconciles with a pool holding no liquidity.
     #[tokio::test]
-    async fn taker_snapshot_of_an_empty_book_skips_the_tick_words() {
+    async fn an_empty_pool_skips_the_tick_words() {
         let (client, rpc) = mock::client();
         immutables_answers(&rpc);
         let hash = snapshot_answers(&rpc, 0, bitmap(&[]), None);
 
         assert_eq!(
-            client.market().load_taker_market_snapshot().await.unwrap(),
+            client.market().get_pool_snapshot().await.unwrap(),
             expected_snapshot(hash, 0)
         );
         assert!(rpc.is_drained(), "eight answers, none left over");
@@ -1078,7 +1081,7 @@ mod tests {
     /// read in bitmap order, and the net liquidity of every tick at or
     /// below the pool's must add up to what the pool reports.
     #[tokio::test]
-    async fn taker_snapshot_rebuilds_the_book_from_the_bitmap() {
+    async fn the_pool_rebuilds_its_tick_map_from_the_bitmap() {
         const L: u128 = 1_000;
         let (client, rpc) = mock::client();
         immutables_answers(&rpc);
@@ -1091,10 +1094,10 @@ mod tests {
             Some(vec![tick_word(L, L as i128), tick_word(L, -(L as i128))]),
         );
 
-        let snapshot = client.market().load_taker_market_snapshot().await.unwrap();
+        let snapshot = client.market().get_pool_snapshot().await.unwrap();
         assert_eq!(
             snapshot,
-            TakerMarketSnapshot {
+            PoolSnapshot {
                 ticks: BTreeMap::from([
                     (
                         -60,
@@ -1117,10 +1120,10 @@ mod tests {
         assert!(rpc.is_drained(), "nine answers");
     }
 
-    /// A book whose ticks do not add up to the pool's active liquidity is
-    /// a wrong read, not a snapshot.
+    /// A tick map whose ticks do not add up to the pool's active liquidity
+    /// is a wrong read, not a snapshot.
     #[tokio::test]
-    async fn a_book_that_does_not_reconcile_with_the_pool_is_rejected() {
+    async fn a_tick_map_that_does_not_reconcile_with_the_pool_is_rejected() {
         const L: u128 = 1_000;
         let (client, rpc) = mock::client();
         immutables_answers(&rpc);
@@ -1131,11 +1134,7 @@ mod tests {
             Some(vec![tick_word(L, L as i128), tick_word(L, -(L as i128))]),
         );
 
-        let err = client
-            .market()
-            .load_taker_market_snapshot()
-            .await
-            .unwrap_err();
+        let err = client.market().get_pool_snapshot().await.unwrap_err();
         assert!(
             matches!(
                 err,
@@ -1153,15 +1152,15 @@ mod tests {
     /// The immutables are read once per market: a second snapshot starts
     /// at the lagged block.
     #[tokio::test]
-    async fn book_immutables_are_read_once_per_market() {
+    async fn immutables_are_read_once_per_market() {
         let (client, rpc) = mock::client();
         immutables_answers(&rpc);
         snapshot_answers(&rpc, 0, bitmap(&[]), None);
-        client.market().load_taker_market_snapshot().await.unwrap();
+        client.market().get_pool_snapshot().await.unwrap();
 
         let hash = snapshot_answers(&rpc, 0, bitmap(&[]), None);
         assert_eq!(
-            client.market().load_taker_market_snapshot().await.unwrap(),
+            client.market().get_pool_snapshot().await.unwrap(),
             expected_snapshot(hash, 0)
         );
         assert!(rpc.is_drained(), "six answers: no immutables");
@@ -1171,21 +1170,21 @@ mod tests {
     /// reader of the same market over one chain reader inherits them, and
     /// a reader of another market reads its own.
     #[tokio::test]
-    async fn book_immutables_are_shared_per_market_across_readers() {
+    async fn immutables_are_shared_per_market_across_readers() {
         let (chain, rpc) = mock::chain();
         let (first, second) = (chain.market(PERP), chain.market(PERP));
         immutables_answers(&rpc);
         snapshot_answers(&rpc, 0, bitmap(&[]), None);
-        first.load_taker_market_snapshot().await.unwrap();
+        first.get_pool_snapshot().await.unwrap();
 
         snapshot_answers(&rpc, 0, bitmap(&[]), None);
-        second.load_taker_market_snapshot().await.unwrap();
+        second.get_pool_snapshot().await.unwrap();
         assert!(rpc.is_drained(), "the second reader skipped the immutables");
 
         let other = chain.market(Address::repeat_byte(0x12));
         immutables_answers(&rpc);
         snapshot_answers(&rpc, 0, bitmap(&[]), None);
-        other.load_taker_market_snapshot().await.unwrap();
+        other.get_pool_snapshot().await.unwrap();
         assert!(rpc.is_drained(), "another market reads its own");
     }
 
@@ -1198,11 +1197,7 @@ mod tests {
             rpc.call::<Perp::POOL_IDCall>(&POOL_ID);
             rpc.call::<Perp::poolKeyCall>(&mock::pool_key(spacing));
 
-            let err = client
-                .market()
-                .load_taker_market_snapshot()
-                .await
-                .unwrap_err();
+            let err = client.market().get_pool_snapshot().await.unwrap_err();
             assert!(
                 matches!(
                     err,

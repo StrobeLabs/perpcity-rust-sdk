@@ -53,7 +53,7 @@ All examples load configuration from `.env` automatically via `dotenvy`.
 | **open_position** | `cargo run --example open_position` | Full taker lifecycle: market data, open, monitor PnL/funding/liquidation, close. |
 | **market_maker** | `cargo run --example market_maker` | LP position: calculate tick range around mark, estimate liquidity, open maker position. *Note: makers are currently subject to a 7-day lockup, so this example shouldn't run.* |
 | **hft_bot** | `cargo run --example hft_bot` | Full trading loop: multi-endpoint transport, momentum strategy, position manager with SL/TP/trailing stop, latency stats. |
-| **taker_price_impact** | `cargo run --example taker_price_impact` | Local, exact taker quoting over a block-pinned liquidity book: price impact, target-price sizing, hypothetical liquidity. |
+| **taker_price_impact** | `cargo run --example taker_price_impact` | Local, exact taker quoting over a block-pinned pool snapshot: price impact, target-price sizing, hypothetical liquidity. |
 | **maker_equity** | `cargo run --example maker_equity` | Batched maker settle previews (`get_maker_equities`) plus a liquidation gated on the contract's own health check. |
 
 ## API Overview

@@ -85,8 +85,8 @@ pub const ERC721_SYMBOL: &str = "PERPCITY";
 
 // ── SDK read policy (not mirrored from Constants.sol) ─────────────────
 
-/// Blocks to lag behind the head when pinning snapshot reads (the taker
-/// book and maker equity batches): on load-balanced RPC endpoints the
+/// Blocks to lag behind the head when pinning snapshot reads (the pool
+/// snapshot and maker equity batches): on load-balanced RPC endpoints the
 /// newest block's state may not be materialized on every replica yet, and
 /// Arbitrum produces ~4 blocks/s so the lag stays under two seconds of
 /// staleness.

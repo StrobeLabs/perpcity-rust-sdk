@@ -23,7 +23,7 @@ use crate::math::BlockContext;
 use crate::transport::provider::HftTransport;
 use crate::types::ChainDeployments;
 
-use super::queries::BookImmutables;
+use super::queries::MarketImmutables;
 use super::transactions::{classify_simulation_failure, preflight_request};
 use super::{
     ARBITRUM_CHAIN_ID, ARBITRUM_POOL_MANAGER, ARBITRUM_SEPOLIA_CHAIN_ID,
@@ -65,7 +65,7 @@ struct Inner {
     /// Each market's deployment-fixed pool values, read once per market
     /// by whichever reader asks first. Immutables never go stale, so
     /// there is no TTL.
-    immutables: Mutex<HashMap<Address, BookImmutables>>,
+    immutables: Mutex<HashMap<Address, MarketImmutables>>,
 }
 
 impl fmt::Debug for ChainReader {
@@ -186,7 +186,7 @@ impl ChainReader {
     }
 
     /// The per-market immutables, for the market reads.
-    pub(super) fn immutables(&self) -> &Mutex<HashMap<Address, BookImmutables>> {
+    pub(super) fn immutables_cache(&self) -> &Mutex<HashMap<Address, MarketImmutables>> {
         &self.inner.immutables
     }
 

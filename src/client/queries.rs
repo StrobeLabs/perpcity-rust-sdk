@@ -64,11 +64,11 @@ pub(super) fn multicall_error(e: MulticallError) -> PerpCityError {
     }
 }
 
-/// Perp/pool values fixed at deployment, cached after the first taker book
-/// load. All are Solidity `immutable`s (or built from them), so no block
-/// pinning is needed and they can never go stale.
+/// Perp/pool values fixed at deployment, cached after the first pool
+/// snapshot. All are Solidity `immutable`s (or built from them), so no
+/// block pinning is needed and they can never go stale.
 #[derive(Debug, Clone, Copy)]
-pub(super) struct BookImmutables {
+pub(super) struct MarketImmutables {
     /// Uniswap V4 `PoolId` of the market's pool.
     pub(super) pool_id: B256,
     /// Pool tick spacing (validated positive at load).
@@ -89,13 +89,13 @@ impl MarketReader {
         self.perp.into_word().0
     }
 
-    /// The deployment-fixed values the taker book loader needs, from the
-    /// chain reader's per-market cache, or two RPC reads the first time
-    /// any reader of this market asks. Not a block's to give, so it lives
-    /// here rather than on the handle.
-    pub(super) async fn book_immutables(&self) -> Result<BookImmutables> {
+    /// The deployment-fixed values the pool snapshot needs, from the chain
+    /// reader's per-market cache, or two RPC reads the first time any
+    /// reader of this market asks. Not a block's to give, so it lives here
+    /// rather than on the handle.
+    pub(super) async fn immutables(&self) -> Result<MarketImmutables> {
         {
-            let cached = self.chain.immutables().lock().unwrap();
+            let cached = self.chain.immutables_cache().lock().unwrap();
             if let Some(immutables) = cached.get(&self.perp) {
                 return Ok(*immutables);
             }
@@ -112,13 +112,13 @@ impl MarketReader {
             }
             .into());
         }
-        let immutables = BookImmutables {
+        let immutables = MarketImmutables {
             pool_id,
             tick_spacing,
         };
 
         self.chain
-            .immutables()
+            .immutables_cache()
             .lock()
             .unwrap()
             .insert(self.perp, immutables);
