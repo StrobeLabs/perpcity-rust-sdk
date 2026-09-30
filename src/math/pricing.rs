@@ -196,6 +196,47 @@ mod tests {
     use crate::constants::{Q96, Q96_PRECISION};
     use crate::convert::price_x96_to_f64;
 
+    /// A live accrue, reproduced to the digit: HORMUZ-TRAFFIC's
+    /// `RatesAndEmasRefreshed` at Arbitrum One block 510213600 (tx
+    /// `0x0961…26c4`, log 8), 300 s after the last touch. The stored pair
+    /// and `lastTouch` are the state at block 510213599; the spot pool
+    /// price is `poolState().ammPrice` at block 510213600, since the swap
+    /// in that transaction ran before the accrue; the index is the beacon's
+    /// at either block. The fair price is the deployed pricing module's
+    /// `fairPrice` of the result, by `eth_call` at the same block.
+    #[test]
+    fn advancing_the_mark_reproduces_a_live_accrue() {
+        let block = BlockContext {
+            number: 510213600,
+            timestamp: 1790734624,
+            ..BlockContext::default()
+        };
+        let stored = PricePair {
+            amm: 3320491901781519017281026778664,
+            index: 3084589206424849219740478559607,
+        };
+        let mark = Mark::advanced(
+            block,
+            uint!(3333452930552967749837079299470_U256),
+            uint!(3248354663084837841335301963776_U256),
+            stored,
+            1790734324,
+            3600,
+        )
+        .unwrap();
+        assert_eq!(
+            mark.emas,
+            PricePair {
+                amm: 3321528208423946384037633669774,
+                index: 3097683169375594803637957648468,
+            }
+        );
+        assert_eq!(
+            mark.fair_price_x96(),
+            uint!(3402826316343078585786028642276_U256)
+        );
+    }
+
     #[test]
     fn ema_stays_put_at_same_timestamp() {
         let stored = PricePair {
