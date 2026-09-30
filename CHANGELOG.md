@@ -26,6 +26,7 @@ The changes below break the public API, so the next release is 0.5.0 (a minor bu
 
 ### Fixed
 
+- **`get_perp_snapshot` pins to a block on the chain it reads.** It took its block from Multicall3's `blockAndAggregate`, whose `block.number` on Arbitrum is the L1 block number and whose `blockhash` of it is zero, so the beacon read pinned to a block that does not exist and every call failed with `BlockUnavailable` (every Legion centurion start, mainnet 2026-09-30). The snapshot now resolves the lagged snapshot block from the node's header, as `StateAt` and `get_mark` do, and pins the multicall and the index read to its hash. `PerpSnapshot.block` is that block, `SNAPSHOT_BLOCK_LAG` behind the head.
 - **A request an endpoint declines no longer counts against its health,
   and a declined read is no longer retried.** `HftTransport` treated every
   non-200 as evidence the endpoint was failing, so a provider that answers
