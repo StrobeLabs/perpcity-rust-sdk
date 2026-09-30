@@ -74,14 +74,13 @@ answers for all of them.
 
 ## The type system
 
-| Type | What it is | The invariant it carries |
-|---|---|---|
-| [`PerpCityError`] | the umbrella | one enum for every failure; [`is_transient`](PerpCityError::is_transient) answers for all; [`tx_hash`](PerpCityError::tx_hash) for any post-broadcast send |
-| [`ValidationError`] | the caller's input refused | typed per input kind; never transient; no request was sent |
-| [`ContractError`] | the chain's state refusing | each variant states its transience in its doc; [`BlockUnavailable`](ContractError::BlockUnavailable) and [`StateUnavailable`](ContractError::StateUnavailable) are the pair every pinned read distinguishes |
-| [`TransactionError`] | the send's stages | the variant is the stage; every variant after broadcast carries `tx_hash`; [`is_revert`](TransactionError::is_revert) reads a typed revert |
-| [`decode`] | raw revert data to a name and selector | the bridge from the node's hex to a typed answer |
-| [`Result`] | the crate's result | `PerpCityError` throughout; a module-specific `Result<T, ValidationError>` only inside `math`, where nothing else can fail |
+| Type | Invariant | Produced by | Consumed by |
+|---|---|---|---|
+| [`ValidationError`] | the caller's input refused: typed per input kind; never transient; no request was sent | every constructor and conversion that checks its input, [`TickRange::new`](crate::math::range::TickRange::new) and [`TransportConfigBuilder::build`](crate::transport::config::TransportConfigBuilder::build) among them; every port in `math` and every function in `convert` returns it alone, since pure code can fail only on its inputs | [`PerpCityError`], by conversion. The strategy layer refuses a config or a parameter before any request is made, which is why this family is separate from the chain's answers. |
+| [`ContractError`] | the chain's state refusing: each variant states its transience in its doc; [`BlockUnavailable`](ContractError::BlockUnavailable) and [`StateUnavailable`](ContractError::StateUnavailable) are the pair every pinned read distinguishes | the pinned reads on [`StateAt`](crate::client::StateAt), which classify a node's pruned-state and missing-block answers; the batches on [`MarketReader`](crate::client::MarketReader) and [`ChainReader`](crate::client::ChainReader), for a multicall or storage read that failed; the scans on [`History`](crate::history::History), for a range no narrowing can serve; the receipt parsers in the trades, for an event that was not emitted | [`PerpCityError`], by conversion. A retry loop keys on the transience the variant states; a forensic read keys on which of the pair it was. |
+| [`TransactionError`] | the send's stages: the variant is the stage; every variant after broadcast carries `tx_hash`; [`is_revert`](TransactionError::is_revert) reads a typed revert | the stages of [`TxBuilder::send`](crate::client::TxBuilder::send); [`TxPipeline::prepare`](crate::hft::pipeline::TxPipeline::prepare), for the pipeline's own refusals; the simulation stage names a revert through [`try_extract_revert`](decode::try_extract_revert), the bridge from the node's hex to a selector | [`PerpCityError`], by conversion. The strategy layer reads the stage to know whether money may have moved, and the hash to find out. |
+| [`PerpCityError`] | the umbrella: one enum for every failure; [`is_transient`](PerpCityError::is_transient) answers for all; [`tx_hash`](PerpCityError::tx_hash) for any post-broadcast send | conversion from [`ValidationError`], [`ContractError`], [`TransactionError`] and the transport's error; nothing constructs it directly | [`Result`]; [`MakerEquityOutcome`](crate::client::MakerEquityOutcome), as the `Failed` payload. The strategy layer's retry loops and per-position decisions key on `is_transient` and never re-classify. |
+| [`Result`] | the crate's result: `PerpCityError` throughout; `Result<T, ValidationError>` only inside `math` and `convert`, where nothing else can fail | every read, scan and send | the strategy layer, which adds context at its binaries and nowhere else. |
 
 The enums are `#[non_exhaustive]`. A new variant is added when a caller
 would branch on it, and existing callers with a wildcard keep compiling.

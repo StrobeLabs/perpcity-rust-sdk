@@ -186,15 +186,21 @@ send would ask.
 
 ## The type system
 
-| Type | What it is | The invariant it carries |
-|---|---|---|
-| [`ChainReader`] | one chain | one transport, one deployment set, one set of caches shared by everything built over it |
-| [`MarketReader`] | one market, read now | a `Perp` over a `ChainReader`; every read is independently current; no read takes a block |
-| [`StateAt`] | one market, read at a block | the handle resolved one header; every read is pinned to its hash; results carry the block |
-| [`PerpClient`] | one signer on one market | a `MarketReader` plus a wallet and a pipeline; the pipeline owns the next nonce |
-| [`TxBuilder`] | one transaction, not yet sent | one nonce, one hash, one typed outcome |
-| [`MakerEquityOutcome`], [`MakerEquityKind`] | one position's result in a batch | one outcome per input id, in input order; `Failed` carries an error whose transience says whether to retry |
-| `MarketImmutables` (crate-private) | a market's deployment-fixed values | read once per market, never pinned, cached on the chain reader |
+| Type | Invariant | Produced by | Consumed by |
+|---|---|---|---|
+| [`ChainReader`] | one chain: one transport, one deployment set, one set of caches shared by everything built over it | [`ChainReader::new`] over an [`HftTransport`](crate::transport::provider::HftTransport) and a [`ChainDeployments`](crate::types::ChainDeployments); [`ChainReader::arbitrum`] and [`ChainReader::arbitrum_sepolia`] for the known chains | [`ChainReader::market`], which is how every market reader is made; [`ChainReader::history`], which hands out the scanning handle; the wallet and index reads; any helper bounded on `AsRef<ChainReader>`. The strategy layer builds one per process, and that sharing is why the caches live here and not on a market. |
+| [`MarketReader`] | one market, read now: a `Perp` over a `ChainReader`; every read is independently current; no read takes a block | [`ChainReader::market`] | [`MarketReader::state`] and [`MarketReader::state_at`], the door to the other tense; [`PerpClient::new`], as the market a signer trades; [`LiveTakerMarket::subscribe`](crate::feeds::LiveTakerMarket::subscribe), as the reader a publisher refreshes through; any helper bounded on `AsRef<MarketReader>`. It is the reader a live cache seeds from and the one a research process holds without a signer, which is why it exists apart from `PerpClient`. |
+| [`StateAt`] | one market at one block: the handle resolved one header; every read is pinned to its hash; results carry the block | [`MarketReader::state`], at the lagged snapshot block; [`MarketReader::state_at`], at a block the caller names | its own reads, which fill the snapshots in `math` and the state types in `types`, and are where the tense rule is enforced; the strategy layer's block-pinned sources, which hold it behind a trait so a forensic read can be stubbed. |
+| [`PerpClient`] | one signer on one market: a `MarketReader` plus a wallet and a pipeline; the pipeline owns the next nonce | [`PerpClient::new`] from a [`MarketReader`] and any alloy signer | [`PerpClient::tx`] for a raw call, and the trades, probes and transfers over it, each a builder plus a decode of the receipt; the [`TxBuilder`] borrows it for the pipeline and the wallet. The strategy layer holds one per wallet; a helper that only reads should not take it. |
+| [`TxBuilder`] | one transaction, not yet sent: one nonce, one hash, one typed outcome | [`PerpClient::tx`] | [`TxBuilder::send`], the only way out, which drives the pipeline and returns the receipt. Every trade on `PerpClient` goes through it, and the strategy layer uses it directly for a call the trades do not cover. Its shape, parameters first and one `send`, is what makes every failure variant a stage. |
+| [`MakerEquityOutcome`], [`MakerEquityKind`] | one position's result in a batch: one outcome per input id, in input order; `Computed` carries a [`MakerEquityBreakdown`](crate::math::maker_equity::MakerEquityBreakdown); `Failed` carries an error whose transience says whether to retry | [`MarketReader::get_maker_equities`], [`MarketReader::get_maker_equities_at_mark`] | nothing in the crate. The strategy layer's liquidation scanners and equity audits, which retry the transient failures and act on the rest; the per-position shape exists so one bad row cannot fail the batch. |
+| `MarketImmutables` (crate-private) | a market's deployment-fixed values: pool id and tick spacing; read once per market, never pinned | the first pinned pool read on a market, then the chain reader's cache | the pool reads, and no caller |
+
+The two right-hand columns are where the type flows. A link under
+*Produced by* is the function that makes one, or the type it is built
+from. A link under *Consumed by* is a function that takes the type, or a
+type built from it, with the reason it is shaped for that consumer. A
+method on the type itself is neither.
 
 Three things about the shape are deliberate.
 

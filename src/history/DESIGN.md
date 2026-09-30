@@ -79,15 +79,15 @@ state.
 
 ## The type system
 
-| Type | What it is | The invariant it carries |
-|---|---|---|
-| [`History`] | the scanning handle over a provider | learned width across scans; a block lag; bounded in-flight windows; cumulative stats |
-| [`ChainPoint`] | where an event sits | block number and log index; the total order events are joined on |
-| [`TapeEvent`] | a `MarketEvent` at a chain point | the same vocabulary as the feed, plus its position |
-| [`OwnershipLog`] | custody over time | a fold of transfers in chain order; owner at a point, not merely latest |
-| [`IndexPrint`] | one beacon update | index, chain point and timestamp |
-| [`TokenTransfer`] | one ERC-20 transfer | between the address sets asked for; the sets are topic filters, not post-filters |
-| [`ScanStats`] | what a scan cost | requests, rejections, narrowings; the number a collector meters |
+| Type | Invariant | Produced by | Consumed by |
+|---|---|---|---|
+| [`History`] | the scanning handle over a provider: learned width across scans; a block lag; bounded in-flight windows; cumulative stats | [`History::new`] over any provider; [`ChainReader::history`](crate::client::ChainReader::history), the one handle a chain reader keeps so its scans share one learned width | nothing takes it; its reads produce the series below. The strategy layer's research sources take a reference to one so a whole run pays the width search once. |
+| [`ChainPoint`] | where an event sits: block number and log index; the total order events are joined on | [`TapeEvent::point`] | [`OwnershipLog::owner_at`], custody at that point. The strategy layer's joins, a print against the fills after it, are on this key, which is why it is a type and not two fields. |
+| [`TapeEvent`] | a [`MarketEvent`](crate::events::MarketEvent) at a chain point: the same vocabulary as the feed, plus its position and timestamp | [`History::market_events`] and [`History::latest_market_events`], and their handle-less twins | [`OwnershipLog::fold`]. The strategy layer's economics, classification and series are folds over a slice of these; every fold that depends on order can assert it. |
+| [`OwnershipLog`] | custody over time: a fold of transfers in chain order; owner at a point, not merely latest | [`OwnershipLog::fold`] over the tape | nothing in the crate. The strategy layer's attribution, which asks who held a position when a trade happened, not who holds it now. |
+| [`IndexPrint`] | one beacon update: index, chain point and timestamp | [`History::beacon_prints`] and [`History::latest_beacon_prints`] | nothing in the crate. The strategy layer's index series and estimator bootstrap; it keeps the chain point so a print can be joined to the fills after it. |
+| [`TokenTransfer`] | one ERC-20 transfer between the address sets asked for; the sets are topic filters, not post-filters | [`History::token_transfers`] | nothing in the crate. The strategy layer's fleet derivation and treasury ledger. |
+| [`ScanStats`] | what a scan cost: requests, rejections, narrowings, the learned width; the number a collector meters | [`History::stats`] | nothing in the crate. The strategy layer's collector, and the benchmark suite, which asserts a scan's request count. |
 
 Two decisions shape the surface. The free functions and the handle offer
 the same reads; the handle adds memory, concurrency and telemetry, and a

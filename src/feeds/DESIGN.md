@@ -70,12 +70,14 @@ leaving re-subscription to its callers.
 
 ## The type system
 
-| Type | What it is | The invariant it carries |
-|---|---|---|
-| [`MarketFeed`] | one market's events as they happen | filtered to the market and its beacon; every log decoded by [`decode_log`](crate::events::decode_log); nothing interpreted here |
-| [`BlockHeaderFeed`] | headers as they land | one header per block, in order |
-| [`LiveTakerMarket`], [`LiveTakerMarketPublisher`] | a shared pool snapshot | published only when every read succeeded at one block hash; consumers see the latest and its currency |
-| [`WsManager`](crate::transport::ws::WsManager), [`ReconnectConfig`](crate::transport::ws::ReconnectConfig) | the connection | one socket, many subscriptions; reconnects with backoff; re-subscription is the caller's |
+| Type | Invariant | Produced by | Consumed by |
+|---|---|---|---|
+| [`MarketFeed`] | one market's events as they happen: filtered to the market and its beacon; every log decoded by [`decode_log`](crate::events::decode_log); nothing interpreted here | [`MarketFeed::subscribe`] over a [`WsManager`](crate::transport::ws::WsManager) | nothing in the crate. The strategy layer's live cache calls `next` in a loop and folds each event into its view; the feed yields the same [`MarketEvent`](crate::events::MarketEvent) the tape does so that fold is one function. |
+| [`BlockHeaderFeed`] | headers as they land: one header per block, in order | [`BlockHeaderFeed::subscribe`] over a [`WsManager`](crate::transport::ws::WsManager) | nothing in the crate. The strategy layer, when it can afford the subscription, pushes each header's base fee into the chain reader. |
+| [`LiveTakerMarket`], [`LiveTakerMarketPublisher`] | a shared pool snapshot: published only when every read succeeded at one block hash; consumers see the latest and its currency | [`LiveTakerMarket::subscribe`] from a [`MarketReader`](crate::client::MarketReader), which refreshes on each header; [`LiveTakerMarket::from_snapshot`] from a [`PoolSnapshot`](crate::math::swap::PoolSnapshot) a caller reads itself | nothing in the crate. The strategy layer's taker quotes against `latest` in memory and checks `is_current` before acting, which is the feed shape for a value that is read rather than emitted. |
+
+The connection under all three is the WebSocket manager, which is
+`transport`'s type; its row is there.
 
 ## Efficiency
 

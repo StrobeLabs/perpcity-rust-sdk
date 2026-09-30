@@ -44,6 +44,7 @@ reviews:
         A design node is the argument for why the component is shaped as it
         is: purpose, what matters, the mental model, the type system and how
         it maps to the model, edges, terminology, debts. Flag recapitulation
-        of the rustdoc, a type in the table with no invariant stated, an edge
-        that restates another node's content instead of pointing at it, and
-        a term defined in two nodes.
+        of the rustdoc, a type in the table with no invariant stated, a type
+        row whose Produced by or Consumed by cell does not link the functions
+        that make or take it, an edge that restates another node's content
+        instead of pointing at it, and a term defined in two nodes.

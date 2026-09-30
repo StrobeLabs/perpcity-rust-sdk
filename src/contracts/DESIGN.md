@@ -67,15 +67,28 @@ sets of base slots, one mapping rule.
 
 ## The type system
 
-| Item | What it is | The invariant it carries |
-|---|---|---|
-| [`Perp`] | the market's binding | matches the deployed commit; every selector, struct and event locked |
-| [`PerpDeployedEvents`] | the deployed era's event shapes | decodable alongside `Perp`'s; the exception that keeps old logs readable |
-| [`IFees`], [`IFunding`], [`IMarginRatios`], [`IPriceImpact`], [`IPricing`], [`IBeacon`] | the modules | the views the SDK reads, no more |
-| [`PerpFactory`], [`IERC20`], [`IPoolManagerState`], [`IMulticall3`] | the surroundings | the calls the SDK makes, no more |
-| [`Modules`], [`Position`], [`Maker`], [`Taker`], [`SwapResult`], [`Rates`], [`PricePair`], [`Capacity`], [`OpenInterest`], [`Cumulatives`], [`SolvencyState`], [`FeeFund`], [`TickInfo`], [`PoolKey`], [`MakerFunding`] | the contract's structs | raw wire units; narrowed into `math` and `types` at the edge |
-| `abi_lock` | the tests | selectors, struct shapes and event topics as deployed, with evidence |
-| `storage::*_slot` | slot derivation | the Solidity mapping rule over transcribed base slots; locked by the reads' golden outcomes |
+| Type | Invariant | Produced by | Consumed by |
+|---|---|---|---|
+| [`Perp`], [`PerpDeployedEvents`] | the market's binding: matches the deployed commit; every selector, struct and event locked; the deployed era's event shapes decodable alongside | the ABI, through `sol!` | [`StateAt`](crate::client::StateAt), [`MarketReader`](crate::client::MarketReader) and [`PerpClient`](crate::client::PerpClient), for every call and every batch; [`decode_log`](crate::events::decode_log), for every event of both eras; the gas floor in `hft`, by selector. Nothing above the client calls it. |
+| [`IBeacon`] | the index module's binding: `index` and `IndexUpdated` | the ABI | the index reads on [`ChainReader`](crate::client::ChainReader) and [`StateAt`](crate::client::StateAt); [`History::beacon_prints`](crate::history::History::beacon_prints), for the print series; [`decode_log`](crate::events::decode_log). |
+| [`IFees`], [`IMarginRatios`], [`IPriceImpact`] | the rule modules' views the SDK reads, no more | the ABI | the configuration reads on [`MarketReader`](crate::client::MarketReader) and [`StateAt`](crate::client::StateAt): fees and bounds into the slow cache, margin ratios, the impact bounds the pool read needs. |
+| [`IFunding`], [`IPricing`] | the two rule modules the SDK never calls: their computations are ported in `math` | the ABI | nothing. They are bound so a live probe can confirm the deployed selectors, and so a port has the interface it transcribes beside it. |
+| [`IERC20`] | the collateral token, and the position NFT's `Transfer` | the ABI | the balance reads on [`ChainReader`](crate::client::ChainReader) and [`StateAt`](crate::client::StateAt); approvals and transfers on [`PerpClient`](crate::client::PerpClient); [`History::token_transfers`](crate::history::History::token_transfers). |
+| [`IPoolManagerState`] | `extsload`, the pool's storage read raw | the ABI | the tick map in [`StateAt::pool`](crate::client::StateAt::pool) and the fee-growth reads in the maker-equity batch on [`MarketReader`](crate::client::MarketReader), at slots `storage` derives. |
+| [`IMulticall3`] | the batching primitive, `aggregate3` | the ABI | [`ChainReader::get_balances_batch`](crate::client::ChainReader::get_balances_batch) and the maker-equity batch on [`MarketReader`](crate::client::MarketReader); the pinned reads batch through alloy's builder instead. |
+| [`PerpFactory`] | the factory's binding, for its error selectors | the ABI | [`try_extract_revert`](crate::errors::decode::try_extract_revert), which names a factory revert; the dormant `PerpCreated` shape is SDK #110. |
+| [`Capacity`] | `calcCapacity`'s pair, raw perp atoms | `capacity` and `makerDetails` | [`Capacity`](crate::math::capacity::Capacity) in `math`, by `From`; the accrual inputs and the `CapacityUpdated` event narrow it field by field. |
+| [`OpenInterest`] | the two sides' draw, raw | `openInterest` | [`OpenInterest`](crate::types::OpenInterest) at the surface; [`MarketCapacity`](crate::math::capacity::MarketCapacity) as its draw leg. |
+| [`PricePair`] | the `(ammPrice, index)` word, `uint128` each | `emas` and `RatesAndEmasRefreshed` | [`PricePair`](crate::math::pricing::PricePair), the same pair typed for the EMA arithmetic. |
+| [`Rates`] | funding and utilization rates with the last touch | `rates` | [`Mark`](crate::math::pricing::Mark), for the last touch it advances from; [`AccrualInputs`](crate::math::maker_equity::AccrualInputs); the funding reads at the surface. |
+| [`Cumulatives`] | the accounting trackers | `cumulatives` and `CumulativesAccrued` | [`MakerMarketSnapshot`](crate::math::maker_equity::MakerMarketSnapshot); [`CumulativesInfo`](crate::events::CumulativesInfo), verbatim. |
+| [`SolvencyState`] | the market's solvency words, raw | `solvencyState` | [`SolvencyState`](crate::types::SolvencyState) at the surface, in USDC. |
+| [`Position`], [`Maker`], [`MakerFunding`], [`TickInfo`] | a position's storage: the shared row, the maker's band and capacity, its funding trackers, the per-tick funding words | `positions`, `makerDetails`, and the slots `storage` derives | [`MakerBand`](crate::math::range::MakerBand), the band narrowed to a validated value; [`MakerState`](crate::math::maker_equity::MakerState) and [`TickFunding`](crate::math::maker_equity::TickFunding), the settle's per-position inputs. `Position` is also what the position reads on `StateAt` return raw; see the debts. |
+| [`SwapResult`] | a swap's outcome with its four fee legs | the taker events | [`SwapInfo`](crate::events::SwapInfo), in human units. |
+| [`Modules`], [`PoolKey`] | the five rule modules' addresses; the pool's key and tick spacing | `modules` and `poolKey` | the reads, which resolve a module's address before calling it, and the immutables cache. Never a caller's. |
+| [`Taker`], [`FeeFund`] | bound, unread | the ABI | nothing. They are locked so a struct change on the deployed contract fails a test here. |
+| `abi_lock` (tests) | selectors, struct shapes and event topics as deployed, with evidence | the on-chain evidence beside each | CI. |
+| `storage::*_slot` (crate-private) | slot derivation: the Solidity mapping rule over transcribed base slots; locked by the reads' golden outcomes | the deployed layouts | the tick map in the pool read and the fee-growth and tick-funding reads in the maker-equity batch. |
 
 The module doc names the deployed commit and lists what main has that
 the chain does not. That list is the cutover's checklist.

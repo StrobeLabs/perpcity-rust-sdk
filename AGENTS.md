@@ -41,6 +41,9 @@ graph of nodes, and it is part of what a change must keep true.
   the terminology, the debts. If the node became harder to write, say so
   in the PR; that is the design degrading and it is worth a conversation
   before it lands.
+- A new or changed type gets a row in the node's type table, and its
+  *Produced by* and *Consumed by* cells link the functions that make it
+  and take it, with the reason it is shaped for them.
 - A behaviour that a caller can observe gets a changelog entry under
   `[Unreleased]`, breaking changes first.
 - Imports at the top of the file, grouped std / external / crate, never

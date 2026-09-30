@@ -124,17 +124,18 @@ callers re-subscribe.
 
 ## The type system
 
-| Type | What it is | The invariant it carries |
-|---|---|---|
-| [`HftTransport`](provider::HftTransport) | the provider's transport | many endpoints, one `tower::Service`; every request classified read or write before routing |
-| [`TransportConfig`](config::TransportConfig), [`TransportConfigBuilder`](config::TransportConfigBuilder) | the pools and their policies | shared, read and write pools; per-endpoint timeouts; the retry and breaker settings |
-| [`ReadRetryConfig`](config::ReadRetryConfig), [`WriteRetryConfig`](config::WriteRetryConfig) | what is retried | reads on no answer only; writes on pre-mempool rejection or no answer, same bytes |
-| [`Strategy`](config::Strategy) | how a read is routed | round robin, latency-based, or hedged; a caller's choice |
-| [`EndpointPool`](provider::EndpointPool), [`EndpointHealth`](health::EndpointHealth), [`EndpointStatus`](health::EndpointStatus), [`CircuitState`](health::CircuitState) | health | per-endpoint breaker, latency EMA, decaying error rate; readable without a lock |
-| [`CircuitBreakerConfig`](config::CircuitBreakerConfig) | when a breaker trips | failure threshold, cooldown, probe |
-| [`ProbePermit`](provider::ProbePermit) | one half-open probe at a time | a breaker probes with one request, not a flood |
-| [`Reserved`](health::Reserved) | an endpoint held for a purpose | a scan's endpoint is not the trading loop's |
-| [`WsManager`](ws::WsManager), [`ReconnectConfig`](ws::ReconnectConfig) | the subscription side | one socket; reconnect with capped backoff; re-subscription is the caller's |
+| Type | Invariant | Produced by | Consumed by |
+|---|---|---|---|
+| [`HftTransport`](provider::HftTransport) | the provider's transport: many endpoints, one `tower::Service`; every request classified read or write before routing | [`HftTransport::new`](provider::HftTransport::new) from a [`TransportConfig`](config::TransportConfig) | [`ChainReader::new`](crate::client::ChainReader::new), [`ChainReader::arbitrum`](crate::client::ChainReader::arbitrum) and [`ChainReader::arbitrum_sepolia`](crate::client::ChainReader::arbitrum_sepolia), which build the provider over it, so every read and send in the crate passes through it. The strategy layer builds one per process, and a second one for scans so their declines and timeouts never touch the trading endpoints' health. |
+| [`TransportConfig`](config::TransportConfig), [`TransportConfigBuilder`](config::TransportConfigBuilder) | the pools and their policies: shared, read and write pools; per-endpoint timeouts; the retry and breaker settings; validated once at [`build`](config::TransportConfigBuilder::build) | the builder, and only the builder | [`HftTransport::new`](provider::HftTransport::new). The strategy layer assembles one from its environment; the builder is where a keyed URL enters the crate. |
+| [`Strategy`](config::Strategy) | how a read is routed: round robin, latency-based, or hedged; a caller's choice | the caller | [`TransportConfigBuilder::strategy`](config::TransportConfigBuilder::strategy). Hedging costs N requests per read, which is why it is a choice and not a default. |
+| [`ReadRetryConfig`](config::ReadRetryConfig) | what a read retries: no answer only, with backoff | the caller; `Default` is 2 retries | [`TransportConfigBuilder::read_retry`](config::TransportConfigBuilder::read_retry). |
+| [`WriteRetryConfig`](config::WriteRetryConfig) | what a write retries: pre-mempool rejection or no answer, the same bytes | the caller; `Default` is 3 retries | [`TransportConfigBuilder::write_retry`](config::TransportConfigBuilder::write_retry). |
+| [`CircuitBreakerConfig`](config::CircuitBreakerConfig) | when a breaker trips: failure threshold, cooldown, probe | the caller; `Default` is the trading defaults | [`TransportConfigBuilder::circuit_breaker`](config::TransportConfigBuilder::circuit_breaker); [`EndpointHealth::new`](health::EndpointHealth::new), one breaker per endpoint. |
+| [`EndpointHealth`](health::EndpointHealth), [`ProbePermit`](provider::ProbePermit), [`Reserved`](health::Reserved) | one endpoint's health: breaker, latency EMA, decaying error rate, readable without a lock; one half-open probe at a time; an endpoint held for a purpose | [`EndpointHealth::new`](health::EndpointHealth::new), one per endpoint in a pool | [`HftTransport`](provider::HftTransport), whose pools select over it. Internal: nothing outside this module selects an endpoint, and the pool type itself is hidden from the documentation for that reason. |
+| [`EndpointStatus`](health::EndpointStatus), [`CircuitState`](health::CircuitState) | one endpoint's health, read out | [`HftTransport::health_status`](provider::HftTransport::health_status) | nothing in the crate. The strategy layer's metrics, which is why it is a plain value and not a handle. |
+| [`WsManager`](ws::WsManager) | the subscription side: one socket; reconnect with capped backoff; re-subscription is the caller's | [`WsManager::connect`](ws::WsManager::connect) with a [`ReconnectConfig`](ws::ReconnectConfig) | [`MarketFeed::subscribe`](crate::feeds::MarketFeed::subscribe), [`BlockHeaderFeed::subscribe`](crate::feeds::BlockHeaderFeed::subscribe) and [`LiveTakerMarket::subscribe`](crate::feeds::LiveTakerMarket::subscribe), each one subscription over it. The strategy layer holds one per process. |
+| [`ReconnectConfig`](ws::ReconnectConfig) | the backoff: initial, maximum, multiplier, attempts | the caller; `Default` is capped exponential | [`WsManager::connect`](ws::WsManager::connect). |
 
 ## Efficiency
 

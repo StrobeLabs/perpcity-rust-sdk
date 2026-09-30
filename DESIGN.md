@@ -185,6 +185,15 @@ that carries it, the invariant it holds, and the node that owns it.
 | The chain's shapes | [`contracts`], `storage` | bindings match deployed bytecode; slots match the deployed layout | [`contracts`] |
 | The human surface | [`types`], [`convert`] | inert data in human units; conversion once, at the edge | [`types`] |
 
+This table is the index; where each type flows is in the component
+nodes. Each node's type table has the same two right-hand columns,
+*Produced by* and *Consumed by*: the function that makes the type or the
+type it is built from, and the function that takes it or the type built
+from it, with the reason it is shaped for that consumer. A method on the
+type itself is neither. The phrase "the strategy layer" in a consumer
+cell marks a type as part of the surface the layer above the crate
+builds on. A type with no producer or no consumer is a type to question.
+
 Three shapes recur and are worth naming, because a new type should be one
 of them or have a reason not to be.
 
@@ -370,6 +379,5 @@ these are the ones every node uses.
 - `hft::position_manager` and `hft::state_cache` are shaped for one bot on
   one market. They are older than the handle split and have not been
   re-examined against it.
-- Not every component has a design node yet. `client`, `math` and
-  `events` come with this root; the rest are written by the first change
-  that touches them, and until then this node is their only design.
+- A consumer named in a type table must exist, since the doc gate
+  resolves the link, but nothing yet checks that it takes the type.
