@@ -108,6 +108,7 @@ impl PerpCityError {
                 | Self::Transaction(TransactionError::BroadcastFailed { .. })
                 | Self::Transaction(TransactionError::ReceiptTimeout { .. })
                 | Self::Transaction(TransactionError::NonceDesynced { .. })
+                | Self::Transaction(TransactionError::TakerNotClosed { .. })
                 | Self::Contract(ContractError::BlockUnavailable { .. })
                 | Self::Contract(ContractError::StorageReadFailed {
                     source: Some(_),
@@ -136,6 +137,7 @@ pub type Result<T> = std::result::Result<T, PerpCityError>;
 
 #[cfg(test)]
 mod tests {
+    use alloy::primitives::U256;
     use alloy::transports::TransportErrorKind;
 
     use super::*;
@@ -180,6 +182,17 @@ mod tests {
             "the send evicts the estimate, so a retry is the caller's call — not a backoff loop's"
         );
         assert!(revert.is_simulation_revert());
+
+        let not_closed: PerpCityError = TransactionError::TakerNotClosed {
+            tx_hash: [0x22; 32].into(),
+            pos_id: U256::from(1837u64),
+        }
+        .into();
+        assert!(
+            not_closed.is_transient(),
+            "the close reads the delta again on retry, so the next attempt can close"
+        );
+        assert_eq!(not_closed.tx_hash(), Some([0x22; 32].into()));
 
         let range: PerpCityError = ValidationError::InvalidBlockRange {
             from_block: 2,

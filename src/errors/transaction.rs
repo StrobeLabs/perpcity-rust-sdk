@@ -1,6 +1,6 @@
 //! Transaction lifecycle errors.
 
-use alloy::primitives::FixedBytes;
+use alloy::primitives::{FixedBytes, U256};
 use alloy::transports::TransportError;
 use thiserror::Error;
 
@@ -56,6 +56,23 @@ pub enum TransactionError {
         gas_used: u64,
         /// Limit it was broadcast with.
         gas_limit: u64,
+    },
+
+    /// A taker close mined, but the contract adjusted the position instead
+    /// of closing it: the swap left a nonzero perp delta, so the position
+    /// is still open and still holds its margin. Gas was burned.
+    ///
+    /// The contract closes a taker only when its remaining perp delta is
+    /// exactly zero. [`PerpClient::close_taker`](crate::PerpClient::close_taker)
+    /// reverses the delta it reads on-chain, so this means the position
+    /// changed between that read and the block the close landed in.
+    /// Transient: a retry reads the delta again.
+    #[error("taker close left position {pos_id} open: {tx_hash}")]
+    TakerNotClosed {
+        /// Hash of the mined transaction.
+        tx_hash: FixedBytes<32>,
+        /// The position that is still open.
+        pos_id: U256,
     },
 
     /// Receipt polling timed out before the transaction was confirmed.
@@ -164,7 +181,8 @@ impl TransactionError {
             Self::BroadcastFailed { tx_hash, .. }
             | Self::ReceiptTimeout { tx_hash, .. }
             | Self::Reverted { tx_hash, .. }
-            | Self::OutOfGas { tx_hash, .. } => Some(*tx_hash),
+            | Self::OutOfGas { tx_hash, .. }
+            | Self::TakerNotClosed { tx_hash, .. } => Some(*tx_hash),
             _ => None,
         }
     }
