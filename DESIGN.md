@@ -251,6 +251,15 @@ Two more are reported, not enforced, until #124's unit conversions land:
 no `f64` in a function or field whose name carries a wire suffix, and a
 suffixed field has the primitive its suffix names.
 
+One more is a ratchet rather than a rule, and runs where there is a base
+to compare with, on every pull request: a structure the report
+questions, an island, a dead end, a two-cycle, a flow between documented
+types that no node names, may exist, but a new one arrives acknowledged.
+The pull request either removes it, names it in a type table, or names
+it in a node's debts, and the design job fails until one of those is
+true. What we accept is written down; what we did not notice cannot
+land.
+
 Each enforced invariant is proven able to fail. `xtask/tests/fixture/lib.rs`
 is a crate shaped like this one with one planted violation per invariant
 and, beside each, a neighbour that must not fire; the test documents it

@@ -10,6 +10,7 @@ use rustdoc_types::{Id, ItemEnum, Type};
 use crate::design::Graph;
 use crate::index::{Index, Kind, mentions_primitive, result_error};
 use crate::nodes::Node;
+use crate::summary::Summary;
 
 const WIRE_SUFFIXES: [&str; 5] = ["_x96", "_x128", "_atoms", "_e6", "_wad"];
 
@@ -22,6 +23,74 @@ pub fn enforced(index: &Index, graph: &Graph, nodes: &[Node], problems: &mut Vec
     results_are_the_crates(index, problems);
     error_variants_state_transience(index, problems);
     surface_is_in_one_table(index, graph, nodes, problems);
+}
+
+/// The ratchet: a structure the report questions may exist, but a new one
+/// arrives acknowledged. Every island, dead end and two-cycle the head has
+/// and the base did not is named in some node's debts, and every new flow
+/// between documented types is named by a table or, by function, in a
+/// debts section.
+pub fn ratchet(base: &Summary, head: &Summary, nodes: &[Node], problems: &mut Vec<String>) {
+    let debts: Vec<String> = nodes.iter().map(|n| debts_section(&n.text)).collect();
+    let acknowledged = |name: &str| debts.iter().any(|d| names_word(d, name));
+    let short = |p: &String| p.rsplit("::").next().unwrap_or(p).to_string();
+    for t in head.islands.difference(&base.islands) {
+        if !acknowledged(&short(t)) {
+            problems.push(format!(
+                "ratchet: {t} became an island, in no signature and no field with another of the crate's types; name it in a node's debts or connect it"
+            ));
+        }
+    }
+    for t in head.dead_ends.difference(&base.dead_ends) {
+        if !acknowledged(&short(t)) {
+            problems.push(format!(
+                "ratchet: {t} became a dead end, produced but consumed by nothing; name it in a node's debts, consume it, or mark it as the strategy layer's"
+            ));
+        }
+    }
+    for (a, b) in head.two_cycles.difference(&base.two_cycles) {
+        if !acknowledged(&short(a)) && !acknowledged(&short(b)) {
+            problems.push(format!(
+                "ratchet: {a} and {b} now flow both ways; name the pair in a node's debts or move the conversion to one side"
+            ));
+        }
+    }
+    for (a, b) in head.unnamed.difference(&base.unnamed) {
+        let fns = head
+            .flows
+            .get(&(a.clone(), b.clone()))
+            .cloned()
+            .unwrap_or_default();
+        if !fns.iter().any(|f| acknowledged(f)) {
+            problems.push(format!(
+                "ratchet: {a} now flows into {b} through {} and no node names it; add it to a type table's Produced by or Consumed by, or name the function in a debts section",
+                fns.iter().cloned().collect::<Vec<_>>().join(", ")
+            ));
+        }
+    }
+}
+
+/// The text of a node's `## Debts` section.
+fn debts_section(text: &str) -> String {
+    let Some(start) = text.find("\n## Debts") else {
+        return String::new();
+    };
+    let rest = &text[start + 1..];
+    let body = &rest[rest.find('\n').map(|i| i + 1).unwrap_or(rest.len())..];
+    match body.find("\n## ") {
+        Some(end) => body[..end].to_string(),
+        None => body.to_string(),
+    }
+}
+
+/// `text` contains `word` as a whole identifier.
+fn names_word(text: &str, word: &str) -> bool {
+    text.match_indices(word).any(|(i, _)| {
+        let before = text[..i].chars().next_back();
+        let after = text[i + word.len()..].chars().next();
+        !before.is_some_and(|c| c.is_alphanumeric() || c == '_')
+            && !after.is_some_and(|c| c.is_alphanumeric() || c == '_')
+    })
 }
 
 /// Print the findings of the invariants that are measured but not yet

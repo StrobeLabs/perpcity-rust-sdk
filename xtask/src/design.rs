@@ -158,7 +158,17 @@ pub fn run(opts: Options) -> Result<bool> {
     if let Some(base_ref) = &opts.diff {
         let base = at_ref(&root, base_ref)?;
         let head = Summary::of(&index, &graph);
-        print!("{}", summary::diff(&base, &head, base_ref));
+        let mut out = summary::diff(&base, &head, base_ref);
+        let mut ratchet = Vec::new();
+        invariants::ratchet(&base, &head, &nodes, &mut ratchet);
+        if !ratchet.is_empty() {
+            out.push_str("\n**Needs a decision**: a structure the design questions is new here and no node acknowledges it.\n");
+            for r in &ratchet {
+                out.push_str(&format!("- {r}\n"));
+            }
+        }
+        print!("{out}");
+        problems.extend(ratchet);
     }
     if opts.open {
         let out = page::write(&root, &index, &graph, &nodes)?;

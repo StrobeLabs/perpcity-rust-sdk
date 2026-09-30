@@ -96,24 +96,26 @@ jobs:
       - run: cargo test --locked -p xtask
       # On a pull request, what the change did to the type graph: built at
       # the base too, diffed, and posted to the job summary and as one
-      # comment on the PR that later runs update.
+      # comment on the PR that later runs update. The diff carries the
+      # ratchet: a new island, dead end, two-cycle or unnamed flow that no
+      # node acknowledges fails the job, after the comment is posted.
       - if: github.event_name == 'pull_request'
-        run: |
-          git fetch --no-tags --depth=1 origin "+refs/heads/${{ github.base_ref }}:refs/remotes/origin/${{ github.base_ref }}"
-          cargo xtask design --diff "origin/${{ github.base_ref }}" | tee design-diff.md >> "$GITHUB_STEP_SUMMARY"
-      - if: github.event_name == 'pull_request'
-        continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
           PR: ${{ github.event.pull_request.number }}
           REPO: ${{ github.repository }}
+          BASE: ${{ github.base_ref }}
         run: |
+          git fetch --no-tags --depth=1 origin "+refs/heads/$BASE:refs/remotes/origin/$BASE"
+          status=0
+          cargo xtask design --diff "origin/$BASE" > design-diff.md || status=$?
+          cat design-diff.md >> "$GITHUB_STEP_SUMMARY"
           marker='<!-- design-diff -->'
-          printf '%s\n' "$marker" > body.md
-          cat design-diff.md >> body.md
-          id=$(gh api "repos/$REPO/issues/$PR/comments" --paginate --jq ".[] | select(.body | startswith(\"$marker\")) | .id" | head -1)
+          { printf '%s\n' "$marker"; cat design-diff.md; } > body.md
+          id=$(gh api "repos/$REPO/issues/$PR/comments" --paginate --jq ".[] | select(.body | startswith(\"$marker\")) | .id" | head -1 || true)
           if [ -n "$id" ]; then
-            gh api -X PATCH "repos/$REPO/issues/comments/$id" -F body=@body.md > /dev/null
+            gh api -X PATCH "repos/$REPO/issues/comments/$id" -F body=@body.md > /dev/null || echo "could not update the PR comment"
           else
-            gh api "repos/$REPO/issues/$PR/comments" -F body=@body.md > /dev/null
+            gh api "repos/$REPO/issues/$PR/comments" -F body=@body.md > /dev/null || echo "could not post the PR comment"
           fi
+          exit $status

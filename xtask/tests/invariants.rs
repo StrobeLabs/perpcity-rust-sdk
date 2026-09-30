@@ -141,3 +141,63 @@ fn every_invariant_fires_on_its_plant_and_nowhere_else() {
         problems.join("\n")
     );
 }
+
+/// The ratchet fires on what is new and unacknowledged, and on nothing
+/// that a debts section names or that the base already had.
+#[test]
+fn the_ratchet_fires_on_new_unacknowledged_structures_only() {
+    use xtask::summary::Summary;
+    let mut base = Summary::default();
+    base.islands.insert("math::OldIsland".into());
+    let mut head = base.clone();
+    head.islands.insert("math::NewIsland".into());
+    head.islands.insert("math::NamedIsland".into());
+    head.dead_ends.insert("hft::Stub".into());
+    head.two_cycles
+        .insert(("client::A".into(), "client::B".into()));
+    head.flows.insert(
+        ("math::X".into(), "math::Y".into()),
+        ["convert_x".to_string()].into(),
+    );
+    head.unnamed.insert(("math::X".into(), "math::Y".into()));
+    let node = Node {
+        name: "math".into(),
+        path: PathBuf::from("src/math/DESIGN.md"),
+        text: "# math\n\n## Debts\n\n- **`NamedIsland` is an island** on purpose.\n- The pair `A` and `B`.\n\n## Terminology\n\nStub is not a debt here.\n".into(),
+    };
+    let mut problems = Vec::new();
+    invariants::ratchet(&base, &head, &[node], &mut problems);
+    assert!(
+        problems
+            .iter()
+            .any(|p| p.contains("math::NewIsland became an island")),
+        "{problems:?}"
+    );
+    assert!(
+        problems
+            .iter()
+            .any(|p| p.contains("hft::Stub became a dead end")),
+        "{problems:?}"
+    );
+    assert!(
+        problems
+            .iter()
+            .any(|p| p.contains("math::X now flows into math::Y through convert_x")),
+        "{problems:?}"
+    );
+    assert!(
+        !problems.iter().any(|p| p.contains("NamedIsland")),
+        "acknowledged: {problems:?}"
+    );
+    assert!(
+        !problems.iter().any(|p| p.contains("OldIsland")),
+        "already in the base: {problems:?}"
+    );
+    assert!(
+        !problems
+            .iter()
+            .any(|p| p.contains("client::A and client::B")),
+        "the pair is named: {problems:?}"
+    );
+    assert_eq!(problems.len(), 3, "{problems:?}");
+}
