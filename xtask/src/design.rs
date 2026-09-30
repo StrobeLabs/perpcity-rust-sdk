@@ -13,14 +13,17 @@ use rustdoc_types::{Id, Type};
 
 use crate::index::{Index, Kind, Signature};
 use crate::nodes::{self, Link, Node};
+use crate::summary::{self, Summary};
 use crate::{invariants, page, report, rustdoc};
 
-#[derive(Debug, Default, Clone, Copy)]
+#[derive(Debug, Default, Clone)]
 pub struct Options {
     pub check: bool,
     pub fmt: bool,
     pub report: bool,
     pub open: bool,
+    /// A git ref to build the graph at and diff against, `origin/main` say.
+    pub diff: Option<String>,
 }
 
 /// What a link names: an item, and a member of it when the link is
@@ -152,6 +155,11 @@ pub fn run(opts: Options) -> Result<bool> {
         report::print(&index, &graph, &nodes);
         invariants::reported(&index);
     }
+    if let Some(base_ref) = &opts.diff {
+        let base = at_ref(&root, base_ref)?;
+        let head = Summary::of(&index, &graph);
+        print!("{}", summary::diff(&base, &head, base_ref));
+    }
     if opts.open {
         let out = page::write(&root, &index, &graph, &nodes)?;
         println!("wrote {}", out.display());
@@ -193,6 +201,47 @@ pub fn run(opts: Options) -> Result<bool> {
     }
     eprintln!("{} problem(s)", problems.len());
     Ok(false)
+}
+
+/// The graph at another commit: a worktree of `git_ref`, documented with
+/// the same toolchain, read by the same code. Its nodes' problems are its
+/// own and are not reported.
+fn at_ref(root: &Path, git_ref: &str) -> Result<Summary> {
+    // Outside the repository, or cargo would find this workspace above it.
+    let dir = env::temp_dir().join(format!("perpcity-design-base-{}", std::process::id()));
+    let git = |args: &[&str]| Command::new("git").args(args).current_dir(root).status();
+    if dir.exists() {
+        let _ = git(&["worktree", "remove", "--force", &dir.to_string_lossy()]);
+        let _ = fs::remove_dir_all(&dir);
+    }
+    let status = git(&[
+        "worktree",
+        "add",
+        "--detach",
+        &dir.to_string_lossy(),
+        git_ref,
+    ])
+    .context("running git")?;
+    if !status.success() {
+        anyhow::bail!("git could not check out `{git_ref}` into a worktree");
+    }
+    let result = (|| -> Result<Summary> {
+        let krate = rustdoc::load(&dir)?;
+        let index = Index::build(krate);
+        let mut graph = mechanical(&index, &dir);
+        // A base without nodes, or with nodes the tool cannot read, still
+        // has a mechanical graph to diff against.
+        if let Ok(nodes) = nodes::discover(&dir) {
+            let mut ignored = Vec::new();
+            if let Err(e) = annotate(&mut graph, &nodes, &index, &dir, &mut ignored) {
+                eprintln!("note: the base's nodes were not read: {e:#}");
+            }
+        }
+        Ok(Summary::of(&index, &graph))
+    })();
+    let _ = git(&["worktree", "remove", "--force", &dir.to_string_lossy()]);
+    let _ = git(&["worktree", "prune"]);
+    result
 }
 
 /// The repository: the nearest ancestor holding the root node and a manifest.

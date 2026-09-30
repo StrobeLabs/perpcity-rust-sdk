@@ -77,6 +77,11 @@ jobs:
     runs-on: ubuntu-latest
     name: design
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    permissions:
+      contents: read
+      pull-requests: write
+    env:
+      DESIGN_TOOLCHAIN: nightly-2026-04-23
     steps:
       - uses: actions/checkout@v4
         with:
@@ -86,10 +91,29 @@ jobs:
           toolchain: nightly-2026-04-23
       - uses: Swatinem/rust-cache@v2
       - run: cargo xtask design --check
-        env:
-          DESIGN_TOOLCHAIN: nightly-2026-04-23
       # The invariants are proven able to fail: a fixture crate with one
       # planted violation each, documented by the same rustdoc.
       - run: cargo test --locked -p xtask
+      # On a pull request, what the change did to the type graph: built at
+      # the base too, diffed, and posted to the job summary and as one
+      # comment on the PR that later runs update.
+      - if: github.event_name == 'pull_request'
+        run: |
+          git fetch --no-tags --depth=1 origin "+refs/heads/${{ github.base_ref }}:refs/remotes/origin/${{ github.base_ref }}"
+          cargo xtask design --diff "origin/${{ github.base_ref }}" | tee design-diff.md >> "$GITHUB_STEP_SUMMARY"
+      - if: github.event_name == 'pull_request'
+        continue-on-error: true
         env:
-          DESIGN_TOOLCHAIN: nightly-2026-04-23
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          marker='<!-- design-diff -->'
+          printf '%s\n' "$marker" > body.md
+          cat design-diff.md >> body.md
+          id=$(gh api "repos/$REPO/issues/$PR/comments" --paginate --jq ".[] | select(.body | startswith(\"$marker\")) | .id" | head -1)
+          if [ -n "$id" ]; then
+            gh api -X PATCH "repos/$REPO/issues/comments/$id" -F body=@body.md > /dev/null
+          else
+            gh api "repos/$REPO/issues/$PR/comments" -F body=@body.md > /dev/null
+          fi

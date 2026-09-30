@@ -202,8 +202,9 @@ curated layer over it: every producer and consumer a row names is
 checked against a real signature, and the flows a row names are the
 designed edges, drawn solid on the page beside the ones no node explains.
 `--check` is the gate, `--fmt` rewrites the tables' links to their
-canonical files, `--report` prints the graph's numbers, and `--open`
-draws it: types as nodes clustered by component, edges labelled with the
+canonical files, `--report` prints the graph's numbers, `--diff` builds
+the graph at another commit and says what changed, which the design job
+posts on every pull request, and `--open` draws it: types as nodes clustered by component, edges labelled with the
 function that carries one type into another, each type's row and source
 a click away.
 

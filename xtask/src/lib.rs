@@ -12,3 +12,4 @@ pub mod nodes;
 pub mod page;
 pub mod report;
 pub mod rustdoc;
+pub mod summary;
