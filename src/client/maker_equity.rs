@@ -23,12 +23,11 @@ use crate::constants::MULTICALL3;
 use crate::contracts::{IBeacon, IMulticall3, IPoolManagerState, Maker, Perp, Position};
 use crate::convert::unpack_balance_delta;
 use crate::errors::{ContractError, PerpCityError, Result, ValidationError};
-use crate::math::ema::PricePair;
 use crate::math::maker_equity::{
     AccrualInputs, AccruedMakerSnapshot, MakerEquityBreakdown, MakerMarketSnapshot, MakerState,
     TickFunding, fee_growth_inside1,
 };
-use crate::math::pricing::Mark;
+use crate::math::pricing::{Mark, PricePair};
 use crate::math::tick::get_sqrt_ratio_at_tick;
 use crate::storage::{
     perp_tick_funding_slots, v4_fee_growth_global1_slot, v4_position_fee_growth_inside1_slot,

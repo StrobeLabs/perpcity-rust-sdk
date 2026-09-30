@@ -1,10 +1,14 @@
-//! The deployed pricing module's fair price — the contract's mark.
+//! The market's prices and how the contract marks from them.
 //!
-//! `PerpLogic.accrue` sets `snap.markPrice = pricing.fairPrice(spots.ammPrice,
-//! spots.index, emas.ammPrice, emas.index)`, with `emas` advanced to the
-//! block timestamp ([`crate::math::ema::calculate_emas`]). Every health
-//! check, `valPnl`, liquidation test and the utilization accrual leg price
-//! at this fair price, never at the raw pool price.
+//! Three prices, one relation. The pool price (`ammPrice` on chain) is the
+//! AMM's; the index is the beacon's; the contract smooths both into a
+//! [`PricePair`] of EMAs ([`calculate_emas`], exact to the Solady
+//! arithmetic); and the mark is the fair price of all four. `PerpLogic.accrue`
+//! sets `snap.markPrice = pricing.fairPrice(spots.ammPrice, spots.index,
+//! emas.ammPrice, emas.index)` with `emas` advanced to the block timestamp —
+//! [`Mark`] is those inputs at one block. Every health check, `valPnl`,
+//! liquidation test and the utilization accrual leg price at this fair
+//! price, never at the raw pool price.
 //!
 //! The live module is perpcity-contracts `test/mocks/Pricing.sol`, which
 //! `script/Deploy.s.sol` deploys as the production module (on Arbitrum One
@@ -21,12 +25,84 @@
 //! }
 //! ```
 
-use alloy::primitives::U256;
+use alloy::primitives::{I256, U256, uint};
 use serde::{Deserialize, Serialize};
 
 use crate::errors::ValidationError;
 use crate::math::BlockContext;
-use crate::math::ema::{PricePair, calculate_emas};
+use crate::math::fixed_point::exp_wad;
+
+const WAD_U256: U256 = uint!(1_000_000_000_000_000_000_U256);
+
+/// An `(amm, index)` price pair, mirroring the contract's `PricePair` struct
+/// (both prices scaled by 2^96).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PricePair {
+    /// AMM (pool) price observation or EMA.
+    pub amm: u128,
+    /// Beacon index observation or EMA.
+    pub index: u128,
+}
+
+impl PricePair {
+    /// Narrow a pair of X96 `uint256` observations (`poolState().ammPrice`,
+    /// the beacon's `index()`) to the contract's `uint128` pair.
+    ///
+    /// # Errors
+    ///
+    /// [`ValidationError::Overflow`] when either exceeds `u128::MAX` — the
+    /// contract would revert on the same cast.
+    pub fn try_from_x96(amm: U256, index: U256) -> Result<Self, ValidationError> {
+        let narrow = |value: U256, what: &str| {
+            u128::try_from(value).map_err(|_| ValidationError::Overflow {
+                context: format!("{what} exceeds uint128"),
+            })
+        };
+        Ok(Self {
+            amm: narrow(amm, "AMM price")?,
+            index: narrow(index, "index")?,
+        })
+    }
+}
+
+/// Advance a stored EMA pair to `timestamp` using the supplied spot
+/// observations and the contract EMA window.
+pub fn calculate_emas(
+    stored: PricePair,
+    spot: PricePair,
+    last_touch: u64,
+    timestamp: u64,
+    ema_window: u64,
+) -> Result<PricePair, ValidationError> {
+    if timestamp <= last_touch {
+        return Ok(stored);
+    }
+    if ema_window == 0 {
+        return Err(ValidationError::InvalidConfig {
+            reason: "EMA window is zero".into(),
+        });
+    }
+    let dt = timestamp - last_touch;
+    let ratio_wad =
+        U256::from(dt)
+            .checked_mul(WAD_U256)
+            .ok_or_else(|| ValidationError::Overflow {
+                context: "EMA dt".into(),
+            })?
+            / U256::from(ema_window);
+    let alpha = exp_wad(
+        -I256::try_from(ratio_wad).map_err(|_| ValidationError::Overflow {
+            context: "EMA alpha input".into(),
+        })?,
+    )?;
+    let one_minus = WAD_U256 - alpha;
+    let amm = (U256::from(stored.amm) * alpha + U256::from(spot.amm) * one_minus) / WAD_U256;
+    let index = (U256::from(stored.index) * alpha + U256::from(spot.index) * one_minus) / WAD_U256;
+    Ok(PricePair {
+        amm: amm.to::<u128>(),
+        index: index.to::<u128>(),
+    })
+}
 
 /// The contract's mark at one block, read by
 /// [`MarketReader::get_fair_price`](crate::MarketReader::get_fair_price).
@@ -128,6 +204,19 @@ mod tests {
     use super::*;
     use crate::constants::{Q96, Q96_PRECISION};
     use crate::convert::price_x96_to_f64;
+
+    #[test]
+    fn ema_stays_put_at_same_timestamp() {
+        let stored = PricePair {
+            amm: 100,
+            index: 200,
+        };
+        let spot = PricePair {
+            amm: 300,
+            index: 400,
+        };
+        assert_eq!(calculate_emas(stored, spot, 10, 10, 3600).unwrap(), stored);
+    }
 
     /// With no time since the last touch the stored EMAs stand, and with
     /// every input equal the fair price is that price.
