@@ -380,6 +380,16 @@ pub fn unpack_balance_delta(delta: I256) -> (i128, i128) {
     (amount0, amount1)
 }
 
+/// Pack two `int128` amounts into a V4 `BalanceDelta`: the inverse of
+/// [`unpack_balance_delta`], for building contract structs in tests.
+#[cfg(test)]
+pub(crate) fn pack_balance_delta(amount0: i128, amount1: i128) -> I256 {
+    let mut bytes = [0u8; 32];
+    bytes[0..16].copy_from_slice(&amount0.to_be_bytes());
+    bytes[16..32].copy_from_slice(&amount1.to_be_bytes());
+    I256::from_be_bytes(bytes)
+}
+
 // ── Tests ──────────────────────────────────────────────────────────────
 
 #[cfg(test)]

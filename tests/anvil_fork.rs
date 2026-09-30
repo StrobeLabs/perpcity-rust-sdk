@@ -387,17 +387,14 @@ async fn open_and_close_taker_on_fork() {
         .unwrap();
     println!("  tx_hash: {}", margin_result.tx_hash);
 
-    // 12. Close the position via the close_taker wrapper. The remaining delta
-    //     is 0.0005 (opened 0.001, reduced 0.0005), so reversing it lands the
-    //     notional on exactly zero — the contract auto-settles equity to the
-    //     caller and burns the position NFT.
+    // 12. Close the position via the close_taker wrapper. It reads the
+    //     remaining delta (opened 0.001, reduced 0.0005) on-chain and reverses
+    //     it, so the notional lands on exactly zero — the contract settles
+    //     equity to the caller and burns the position NFT.
     println!("\nClosing position...");
     client.chain().refresh_gas().await.unwrap();
 
-    let close_result = client
-        .close_taker(pos_id, 0.0005, Urgency::Normal)
-        .await
-        .unwrap();
+    let close_result = client.close_taker(pos_id, Urgency::Normal).await.unwrap();
 
     println!("Position closed! tx: {}", close_result.tx_hash);
     println!(

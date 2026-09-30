@@ -15,6 +15,7 @@ use super::test_support::{FakeNode, Mode, mined_log, timestamp_of};
 use super::*;
 use crate::constants::Q96;
 use crate::contracts::{IBeacon, IERC20, Perp, SwapResult};
+use crate::convert::pack_balance_delta;
 use crate::errors::{ContractError, PerpCityError, ValidationError};
 use crate::events::MarketEvent;
 
@@ -604,14 +605,6 @@ fn mined_event_log<E: SolEvent>(
         log_index: Some(index),
         removed: false,
     }
-}
-
-/// Pack two int128 amounts into a Uniswap V4 `BalanceDelta` (`int256`).
-fn pack_balance_delta(amount0: i128, amount1: i128) -> alloy::primitives::I256 {
-    let mut bytes = [0u8; 32];
-    bytes[0..16].copy_from_slice(&amount0.to_be_bytes());
-    bytes[16..32].copy_from_slice(&amount1.to_be_bytes());
-    alloy::primitives::I256::from_be_bytes(bytes)
 }
 
 fn taker_opened(pos_id: u64) -> Perp::TakerOpened {

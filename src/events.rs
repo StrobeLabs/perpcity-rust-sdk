@@ -577,6 +577,25 @@ fn u256_usdc(v: U256) -> Option<f64> {
     Some(scale_from_6dec(i128::try_from(v).ok()?))
 }
 
+/// An RPC log carrying `event`, emitted by `address`, as a receipt returns
+/// it: the shape the decoders take, for tests.
+#[cfg(test)]
+pub(crate) fn rpc_log<E: SolEvent>(event: &E, address: Address) -> Log {
+    Log {
+        inner: alloy::primitives::Log {
+            address,
+            data: event.encode_log_data(),
+        },
+        block_hash: None,
+        block_number: None,
+        block_timestamp: None,
+        transaction_hash: None,
+        transaction_index: None,
+        log_index: None,
+        removed: false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -584,32 +603,7 @@ mod tests {
     use alloy::rpc::types::Log as RpcLog;
 
     use crate::constants::{Q96, Q96_PRECISION};
-
-    /// Build a synthetic RPC Log from an event that implements SolEvent.
-    fn make_log<E: SolEvent>(event: &E, address: Address) -> RpcLog {
-        let log_data = event.encode_log_data();
-        RpcLog {
-            inner: alloy::primitives::Log {
-                address,
-                data: log_data,
-            },
-            block_hash: None,
-            block_number: None,
-            block_timestamp: None,
-            transaction_hash: None,
-            transaction_index: None,
-            log_index: None,
-            removed: false,
-        }
-    }
-
-    /// Pack two int128 amounts into a Uniswap V4 `BalanceDelta` (`int256`).
-    fn pack_balance_delta(amount0: i128, amount1: i128) -> I256 {
-        let mut bytes = [0u8; 32];
-        bytes[0..16].copy_from_slice(&amount0.to_be_bytes());
-        bytes[16..32].copy_from_slice(&amount1.to_be_bytes());
-        I256::from_be_bytes(bytes)
-    }
+    use crate::convert::pack_balance_delta;
 
     #[test]
     fn balance_delta_roundtrips() {
@@ -634,7 +628,7 @@ mod tests {
             },
         };
 
-        let log = make_log(&event, Address::ZERO);
+        let log = rpc_log(&event, Address::ZERO);
         match decode_log(&log).expect("should decode TakerOpened") {
             MarketEvent::TakerOpened { pos_id, swap } => {
                 assert_eq!(pos_id, U256::from(42u64));
@@ -655,7 +649,7 @@ mod tests {
             liqFee: U256::from(1_000_000u64),
         };
 
-        let log = make_log(&event, Address::ZERO);
+        let log = rpc_log(&event, Address::ZERO);
         match decode_log(&log).expect("should decode TakerLiquidated") {
             MarketEvent::TakerLiquidated {
                 pos_id,
@@ -675,7 +669,7 @@ mod tests {
         let event = Perp::MakerOpened {
             posId: U256::from(3u64),
         };
-        let log = make_log(&event, Address::ZERO);
+        let log = rpc_log(&event, Address::ZERO);
         match decode_log(&log).expect("should decode MakerOpened") {
             MarketEvent::MakerOpened { pos_id } => assert_eq!(pos_id, U256::from(3u64)),
             _ => panic!("expected MakerOpened"),
@@ -690,7 +684,7 @@ mod tests {
                 short: 1_000_000u128,
             },
         };
-        let log = make_log(&event, Address::ZERO);
+        let log = rpc_log(&event, Address::ZERO);
         match decode_log(&log).expect("should decode OpenInterestUpdated") {
             MarketEvent::OpenInterestUpdated { long_oi, short_oi } => {
                 assert!((long_oi - 2.0).abs() < 1e-9);
@@ -706,7 +700,7 @@ mod tests {
             index: Q96 * U256::from(100u64), // index = 100.0
         };
 
-        let log = make_log(&event, Address::ZERO);
+        let log = rpc_log(&event, Address::ZERO);
         match decode_log(&log).expect("should decode IndexUpdated") {
             MarketEvent::IndexUpdated { index } => {
                 assert!((index - 100.0).abs() < Q96_PRECISION);
@@ -726,7 +720,7 @@ mod tests {
             liqFee: U256::from(750_000u64),
             isLiquidation: true,
         };
-        let log = make_log(&event, Address::ZERO);
+        let log = rpc_log(&event, Address::ZERO);
         match decode_log(&log).expect("should decode deployed-era MakerClosed") {
             MarketEvent::MakerClosed {
                 pos_id,
@@ -756,7 +750,7 @@ mod tests {
             shortUtilFees: U256::ZERO,
             lpFees: U256::ZERO,
         };
-        let log = make_log(&event, Address::ZERO);
+        let log = rpc_log(&event, Address::ZERO);
         match decode_log(&log).expect("should decode MakerClosed") {
             MarketEvent::MakerClosed {
                 liq_fee,
@@ -788,7 +782,7 @@ mod tests {
             liqFee: U256::from(1_250_000u64),
             isLiquidation: true,
         };
-        let log = make_log(&event, Address::ZERO);
+        let log = rpc_log(&event, Address::ZERO);
         match decode_log(&log).expect("should decode TakerClosed") {
             MarketEvent::TakerClosed {
                 pos_id,
@@ -872,7 +866,7 @@ mod tests {
             liquidityDelta: I256::try_from(-570_282_387i64).unwrap(),
             salt: B256::from(U256::from(54u64)),
         };
-        let log = make_log(&event, Address::repeat_byte(0x36));
+        let log = rpc_log(&event, Address::repeat_byte(0x36));
         match decode_log(&log).expect("should decode ModifyLiquidity") {
             MarketEvent::ModifyLiquidity {
                 pool_id: id,
@@ -905,7 +899,7 @@ mod tests {
             liquidityDelta: I256::MAX,
             salt: B256::ZERO,
         };
-        assert!(decode_log(&make_log(&event, Address::ZERO)).is_none());
+        assert!(decode_log(&rpc_log(&event, Address::ZERO)).is_none());
     }
 
     #[test]
@@ -916,7 +910,7 @@ mod tests {
             to: holder,
             tokenId: U256::from(77u64),
         };
-        let log = make_log(&event, Address::ZERO);
+        let log = rpc_log(&event, Address::ZERO);
         match decode_log(&log).expect("should decode Transfer") {
             MarketEvent::PositionTransferred { from, to, pos_id } => {
                 assert_eq!(from, Address::ZERO);
@@ -936,7 +930,7 @@ mod tests {
             to: Address::repeat_byte(0x22),
             value: U256::from(1_000_000u64),
         };
-        let log = make_log(&event, Address::ZERO);
+        let log = rpc_log(&event, Address::ZERO);
         assert_eq!(log.topic0(), Some(&Perp::Transfer::SIGNATURE_HASH));
         assert!(decode_log(&log).is_none());
     }

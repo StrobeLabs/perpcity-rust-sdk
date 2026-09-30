@@ -92,10 +92,8 @@ let open = client.open_taker(&OpenTakerParams {
     amt1_limit: 0,
 }, Urgency::Normal).await?;
 
-// Close it
-let result = client
-    .close_taker(open.pos_id, open.perp_delta, Urgency::Normal)
-    .await?;
+// Close it: the SDK reads the exact delta on-chain and reverses it
+let result = client.close_taker(open.pos_id, Urgency::Normal).await?;
 ```
 
 Every write method takes an `Urgency` level that scales the EIP-1559 priority fee:
