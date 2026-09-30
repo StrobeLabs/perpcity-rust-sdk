@@ -20,13 +20,11 @@ use alloy::eips::BlockId;
 use alloy::primitives::{Address, B256, U256};
 use alloy::providers::MulticallError;
 
-use crate::contracts::{IBeacon, IFees, IMarginRatios, Perp, Position};
+use crate::contracts::{IFees, IMarginRatios, Perp, Position};
 use crate::convert::{margin_ratio_to_leverage, price_x96_to_f64, scale_from_6dec};
 use crate::errors::{ContractError, PerpCityError, Result, ValidationError};
 use crate::hft::state_cache::{CachedBounds, CachedFees};
-use crate::math::BlockContext;
-use crate::math::ema::{PricePair, calculate_emas};
-use crate::math::pricing::{FairPrice, fair_price_x96};
+use crate::math::pricing::FairPrice;
 use crate::types::{Bounds, Fees, OpenInterest, PerpData, PerpSnapshot};
 
 use super::market::MarketReader;
@@ -66,31 +64,6 @@ pub(super) fn multicall_error(e: MulticallError) -> PerpCityError {
     }
 }
 
-/// The contract's `EMA_WINDOW` (seconds) narrowed to the width
-/// `calculate_emas` takes.
-pub(super) fn ema_window_secs(ema_window: U256) -> Result<u64> {
-    u64::try_from(ema_window).map_err(|_| {
-        ValidationError::Overflow {
-            context: "EMA window".into(),
-        }
-        .into()
-    })
-}
-
-/// The Perp views the contract's mark depends on, read at one block.
-pub(super) struct MarkViews {
-    /// `modules().beacon`.
-    pub(super) beacon: Address,
-    /// `poolState().ammPrice`.
-    pub(super) amm_price_x96: U256,
-    /// `emas()`: the stored pair as of `last_touch`.
-    pub(super) stored_emas: PricePair,
-    /// `rates().lastTouch`.
-    pub(super) last_touch: u64,
-    /// `EMA_WINDOW()`.
-    pub(super) ema_window: U256,
-}
-
 /// Perp/pool values fixed at deployment, cached after the first taker book
 /// load. All are Solidity `immutable`s (or built from them), so no block
 /// pinning is needed and they can never go stale.
@@ -100,8 +73,6 @@ pub(super) struct BookImmutables {
     pub(super) pool_id: B256,
     /// Pool tick spacing (validated positive at load).
     pub(super) tick_spacing: i32,
-    /// Contract `EMA_WINDOW` decay constant, in seconds.
-    pub(super) ema_window: u64,
 }
 
 /// Convert an `int88` per-day funding rate (scaled by 1e18) to a human-readable
@@ -119,7 +90,7 @@ impl MarketReader {
     }
 
     /// The deployment-fixed values the taker book loader needs, from the
-    /// chain reader's per-market cache, or three RPC reads the first time
+    /// chain reader's per-market cache, or two RPC reads the first time
     /// any reader of this market asks. Not a block's to give, so it lives
     /// here rather than on the handle.
     pub(super) async fn book_immutables(&self) -> Result<BookImmutables> {
@@ -133,12 +104,7 @@ impl MarketReader {
         let perp = Perp::new(self.perp, self.chain.provider());
         let pool_id_call = perp.POOL_ID();
         let pool_key_call = perp.poolKey();
-        let ema_window_call = perp.EMA_WINDOW();
-        let (pool_id, pool_key, ema_window) = tokio::try_join!(
-            pool_id_call.call(),
-            pool_key_call.call(),
-            ema_window_call.call(),
-        )?;
+        let (pool_id, pool_key) = tokio::try_join!(pool_id_call.call(), pool_key_call.call())?;
         let tick_spacing = i24_to_i32(pool_key.tickSpacing);
         if tick_spacing <= 0 {
             return Err(ValidationError::InvalidConfig {
@@ -149,7 +115,6 @@ impl MarketReader {
         let immutables = BookImmutables {
             pool_id,
             tick_spacing,
-            ema_window: ema_window_secs(ema_window)?,
         };
 
         self.chain
@@ -160,44 +125,9 @@ impl MarketReader {
         Ok(immutables)
     }
 
-    /// The contract's mark at `block`, as `PerpLogic.accrue` sets it: the
-    /// deployed fair price of the pool price and the beacon index, with the
-    /// stored EMAs advanced to the block timestamp.
-    ///
-    /// `index()` mutates on chain; an `eth_call` pinned to the block reads
-    /// it without sending. The beacon guard names the missing interface on
-    /// a perp with no beacon, where the bare call returns an opaque
-    /// ABI-decode error.
-    pub(super) async fn contract_mark_x96(
-        &self,
-        block: &BlockContext,
-        views: MarkViews,
-    ) -> Result<U256> {
-        let beacon = registered_module(views.beacon, "IBeacon")?;
-        let index = IBeacon::new(beacon, self.chain.provider())
-            .index()
-            .block(BlockId::hash(block.hash))
-            .call()
-            .await?;
-        let emas = calculate_emas(
-            views.stored_emas,
-            PricePair::try_from_x96(views.amm_price_x96, index)?,
-            views.last_touch,
-            block.timestamp,
-            ema_window_secs(views.ema_window)?,
-        )?;
-        Ok(fair_price_x96(
-            views.amm_price_x96,
-            index,
-            U256::from(emas.amm),
-            U256::from(emas.index),
-        ))
-    }
-
-    /// Read the contract's mark: the deployed fair price
-    /// ([`fair_price_x96`]) of the pool price, the beacon index and the
-    /// EMAs advanced to the block, pinned to one lagged block (see
-    /// [`SNAPSHOT_BLOCK_LAG`](crate::constants::SNAPSHOT_BLOCK_LAG)).
+    /// The contract's mark at the lagged snapshot block: the fair price of
+    /// the block's [`Mark`](crate::Mark), read by
+    /// [`StateAt::mark`](super::StateAt::mark).
     ///
     /// This is the price every health check, `valPnl` and utilization
     /// accrual uses, and the mark [`Self::get_maker_equities`] prices at.
@@ -209,31 +139,11 @@ impl MarketReader {
     /// [`ContractError::BlockUnavailable`] when the pinned header is missing
     /// from the serving replica.
     pub async fn get_fair_price(&self) -> Result<FairPrice> {
-        let (block, block_id) = self.chain.lagged_snapshot_block().await?;
-        let perp = Perp::new(self.perp, self.chain.provider());
-        let (modules, pool_state, stored_emas, rates, ema_window) = self
-            .chain
-            .multicall_at(block_id)
-            .add(perp.modules())
-            .add(perp.poolState())
-            .add(perp.emas())
-            .add(perp.rates())
-            .add(perp.EMA_WINDOW())
-            .aggregate()
-            .await
-            .map_err(multicall_error)?;
-        let views = MarkViews {
-            beacon: modules.beacon,
-            amm_price_x96: pool_state.ammPrice,
-            stored_emas: PricePair {
-                amm: stored_emas.ammPrice,
-                index: stored_emas.index,
-            },
-            last_touch: rates.lastTouch.to::<u64>(),
-            ema_window,
-        };
-        let price_x96 = self.contract_mark_x96(&block, views).await?;
-        Ok(FairPrice { block, price_x96 })
+        let mark = self.state().await?.mark().await?;
+        Ok(FairPrice {
+            block: mark.block,
+            price_x96: mark.fair_price_x96(),
+        })
     }
 
     /// Get the full perp configuration, fees, and bounds for the market.
@@ -587,8 +497,9 @@ mod tests {
     use super::*;
     use crate::client::mock::{self, BEACON, Rpc, e6, failed_row, ok_row, returns, x96};
     use crate::constants::SNAPSHOT_BLOCK_LAG;
-    use crate::contracts::{IERC20, IMulticall3, Modules, Rates};
+    use crate::contracts::{IBeacon, IERC20, IMulticall3, Modules, Rates};
     use crate::errors::PerpCityError;
+    use crate::math::BlockContext;
 
     /// The market's tick spacing in these tests.
     const SPACING: i32 = 30;

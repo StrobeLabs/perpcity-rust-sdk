@@ -441,6 +441,32 @@ impl TakerMarketSnapshot {
     }
 }
 
+/// The active liquidity a tick map implies at `tick`: the net of every
+/// initialized tick at or below it. A map read from a pool must reproduce
+/// the liquidity the pool reports, or it is not that pool's.
+///
+/// # Errors
+///
+/// [`ValidationError::Overflow`] when the running sum leaves `u128`, which
+/// a consistent map cannot do.
+pub(crate) fn active_liquidity(
+    ticks: &BTreeMap<i32, TickLiquidity>,
+    tick: i32,
+) -> Result<u128, ValidationError> {
+    ticks
+        .range(..=tick)
+        .try_fold(0u128, |active, (_, info)| {
+            if info.net >= 0 {
+                active.checked_add(info.net as u128)
+            } else {
+                active.checked_sub(info.net.unsigned_abs())
+            }
+        })
+        .ok_or_else(|| ValidationError::Overflow {
+            context: "reconstructing active liquidity".into(),
+        })
+}
+
 fn apply_tick_delta(
     ticks: &mut BTreeMap<i32, TickLiquidity>,
     tick: i32,
@@ -567,6 +593,32 @@ fn u256_to_i128(value: U256) -> Result<i128, ValidationError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Only ticks at or below the current one count, each by its net.
+    #[test]
+    fn active_liquidity_is_the_net_at_or_below_the_tick() {
+        let ticks = BTreeMap::from([
+            (-60, TickLiquidity { gross: 5, net: 5 }),
+            (0, TickLiquidity { gross: 3, net: -2 }),
+            (60, TickLiquidity { gross: 7, net: 7 }),
+        ]);
+        assert_eq!(active_liquidity(&ticks, -61).unwrap(), 0);
+        assert_eq!(active_liquidity(&ticks, -60).unwrap(), 5);
+        assert_eq!(active_liquidity(&ticks, 0).unwrap(), 3);
+        assert_eq!(active_liquidity(&ticks, 59).unwrap(), 3);
+        assert_eq!(active_liquidity(&ticks, 60).unwrap(), 10);
+    }
+
+    /// More liquidity leaving than ever entered is a map that cannot be a
+    /// pool's, not a wrapped sum.
+    #[test]
+    fn a_net_below_zero_is_an_overflow() {
+        let ticks = BTreeMap::from([(0, TickLiquidity { gross: 1, net: -1 })]);
+        assert!(matches!(
+            active_liquidity(&ticks, 0),
+            Err(ValidationError::Overflow { .. })
+        ));
+    }
 
     fn book() -> TakerMarketSnapshot {
         let mut market = TakerMarketSnapshot {

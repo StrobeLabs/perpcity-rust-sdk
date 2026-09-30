@@ -9,22 +9,23 @@
 use std::collections::BTreeMap;
 
 use alloy::eips::BlockId;
-use alloy::primitives::{B256, U256};
-use alloy::providers::{MulticallError, Provider};
+use alloy::primitives::{Address, B256, U256};
+use alloy::providers::MulticallError;
 use alloy::transports::RpcError;
 
 use crate::constants::{MAX_SWAP_SQRT_PRICE_X96, MAX_TICK, MIN_SWAP_SQRT_PRICE_X96, MIN_TICK};
 use crate::contracts::{
-    IBeacon, IERC20, IMarginRatios, IPoolManagerState, IPriceImpact, Perp, Position,
+    IBeacon, IERC20, IMarginRatios, IPoolManagerState, IPriceImpact, Modules, Perp, Position,
 };
 use crate::convert::usdc_from_atoms;
 use crate::errors::{ContractError, PerpCityError, Result, ValidationError};
 use crate::math::BlockContext;
 use crate::math::capacity::MarketCapacity;
-use crate::math::ema::{PricePair, calculate_emas};
+use crate::math::ema::PricePair;
+use crate::math::pricing::Mark;
 use crate::math::range::{MakerBand, TickRange};
-use crate::math::swap::{TakerMarketSnapshot, TickLiquidity};
-use crate::storage::{perp_emas_slot, v4_tick_bitmap_slot, v4_tick_slot};
+use crate::math::swap::{TakerMarketSnapshot, TickLiquidity, active_liquidity};
+use crate::storage::{v4_tick_bitmap_slot, v4_tick_slot};
 use crate::types::{MarginRatioTriple, MarginRatios, SolvencyState};
 
 use super::market::MarketReader;
@@ -324,172 +325,190 @@ impl StateAt {
         })
     }
 
-    /// The taker book: an exact concentrated-liquidity snapshot of the
-    /// deployed Perp (`perpcity-contracts@4bbe554f`) at this block.
+    /// What the contract marks from at this block: the pool price, the
+    /// beacon index, and the stored EMAs advanced to the block timestamp.
+    /// One multicall for the `Perp` views, then the beacon's `index()`,
+    /// both pinned here.
     ///
-    /// Reads the stored EMA pair from its storage slot, advances it with
-    /// the contract's exact arithmetic, evaluates the configured
-    /// price-impact module, and rebuilds the tick map from the
-    /// PoolManager's bitmap. Every contract and PoolManager read is pinned
-    /// to this block's hash.
+    /// # Errors
+    ///
+    /// [`ContractError::ModuleNotRegistered`] when the perp has no beacon.
+    pub async fn mark(&self) -> Result<Mark> {
+        let views = self.perp_views().await?;
+        self.mark_from(&views).await
+    }
+
+    /// The taker book: an exact concentrated-liquidity snapshot of the
+    /// deployed Perp (`perpcity-contracts@4bbe554f`) at this block — the
+    /// pool's price and active liquidity, its initialized ticks from the
+    /// PoolManager's bitmap, and the swap bounds the price-impact module
+    /// sets at this block's [`Mark`].
     ///
     /// # Errors
     ///
     /// [`ContractError::ModuleNotRegistered`] when the perp has no beacon
-    /// or no price-impact module.
+    /// or no price-impact module; [`ContractError::StorageReadFailed`]
+    /// when the tick map does not reproduce the pool's active liquidity.
     pub async fn taker_book(&self) -> Result<TakerMarketSnapshot> {
         let immutables = self.market.book_immutables().await?;
-        let provider = self.market.chain.provider();
-        let perp = Perp::new(self.market.perp, provider);
-        let stored_emas = provider
-            .get_storage_at(self.market.perp, perp_emas_slot())
-            .block_id(self.id())
+        let views = self.perp_views().await?;
+        let mark = self.mark_from(&views).await?;
+        let bounds = self.impact_bounds(views.modules.priceImpact, &mark).await?;
+        let ticks = self.tick_map(&immutables).await?;
+
+        let pool = &views.pool_state;
+        let tick = i24_to_i32(pool.tick);
+        let reconstructed = active_liquidity(&ticks, tick)?;
+        if reconstructed != pool.liquidity {
+            return Err(ContractError::StorageReadFailed {
+                context: format!(
+                    "tick map liquidity mismatch: reconstructed {reconstructed}, pool {}",
+                    pool.liquidity
+                ),
+                source: None,
+            }
+            .into());
+        }
+        Ok(TakerMarketSnapshot {
+            block: self.block,
+            sqrt_price_x96: pool.sqrtPrice.to::<U256>(),
+            tick,
+            liquidity: pool.liquidity,
+            ticks,
+            protocol_sqrt_min_x96: MIN_SWAP_SQRT_PRICE_X96,
+            protocol_sqrt_max_x96: MAX_SWAP_SQRT_PRICE_X96,
+            impact_sqrt_min_x96: bounds.sqrtMin,
+            impact_sqrt_max_x96: bounds.sqrtMax,
+        })
+    }
+
+    /// The `Perp` views a mark and the pool are built from, in one
+    /// multicall at this block.
+    async fn perp_views(&self) -> Result<PerpViews> {
+        let perp = Perp::new(self.market.perp, self.market.chain.provider());
+        let (modules, pool_state, emas, rates, ema_window) = self
+            .market
+            .chain
+            .multicall_at(self.id())
+            .add(perp.modules())
+            .add(perp.poolState())
+            .add(perp.emas())
+            .add(perp.rates())
+            .add(perp.EMA_WINDOW())
+            .aggregate()
             .await
-            .map_err(|e| self.read_error(e.into()))?;
-        let pool_state_call = perp.poolState().block(self.id());
-        let modules_call = perp.modules().block(self.id());
-        let rates_call = perp.rates().block(self.id());
-        let (state, modules, rates) = tokio::try_join!(
-            pool_state_call.call(),
-            modules_call.call(),
-            rates_call.call(),
-        )
-        .map_err(|e| self.read_error(e))?;
-        let beacon = registered_module(modules.beacon, "IBeacon")?;
-        let index = IBeacon::new(beacon, provider)
+            .map_err(|e| self.multicall_read_error(e))?;
+        Ok(PerpViews {
+            modules,
+            pool_state,
+            stored_emas: PricePair {
+                amm: emas.ammPrice,
+                index: emas.index,
+            },
+            last_touch: rates.lastTouch.to::<u64>(),
+            ema_window: ema_window_secs(ema_window)?,
+        })
+    }
+
+    /// The mark from the views: the beacon's `index()` at this block, then
+    /// the stored EMAs advanced to it.
+    async fn mark_from(&self, views: &PerpViews) -> Result<Mark> {
+        let beacon = registered_module(views.modules.beacon, "IBeacon")?;
+        let index = IBeacon::new(beacon, self.market.chain.provider())
             .index()
             .block(self.id())
             .call()
             .await
             .map_err(|e| self.read_error(e))?;
-        let stored = PricePair {
-            amm: (stored_emas & U256::from(u128::MAX)).to::<u128>(),
-            index: (stored_emas >> 128usize).to::<u128>(),
-        };
-        let spot = PricePair::try_from_x96(state.ammPrice, index)?;
-        let emas = calculate_emas(
-            stored,
-            spot,
-            rates.lastTouch.to::<u64>(),
-            self.block.timestamp,
-            immutables.ema_window,
-        )?;
-        let price_impact = registered_module(modules.priceImpact, "IPriceImpact")?;
-        let bounds = IPriceImpact::new(price_impact, provider)
+        Ok(Mark::advanced(
+            self.block,
+            views.pool_state.ammPrice,
+            index,
+            views.stored_emas,
+            views.last_touch,
+            views.ema_window,
+        )?)
+    }
+
+    /// The price-impact module's swap bounds at this mark.
+    async fn impact_bounds(
+        &self,
+        price_impact: Address,
+        mark: &Mark,
+    ) -> Result<IPriceImpact::sqrtPriceBoundsReturn> {
+        let module = registered_module(price_impact, "IPriceImpact")?;
+        IPriceImpact::new(module, self.market.chain.provider())
             .sqrtPriceBounds(
-                state.ammPrice,
-                index,
-                U256::from(emas.amm),
-                U256::from(emas.index),
+                mark.amm_price_x96,
+                mark.index_x96,
+                U256::from(mark.emas.amm),
+                U256::from(mark.emas.index),
             )
             .block(self.id())
             .call()
             .await
-            .map_err(|e| self.read_error(e))?;
-        let header = TakerMarketSnapshot {
-            block: self.block,
-            sqrt_price_x96: state.sqrtPrice.to::<U256>(),
-            tick: i24_to_i32(state.tick),
-            liquidity: state.liquidity,
-            ticks: BTreeMap::new(),
-            protocol_sqrt_min_x96: MIN_SWAP_SQRT_PRICE_X96,
-            protocol_sqrt_max_x96: MAX_SWAP_SQRT_PRICE_X96,
-            impact_sqrt_min_x96: bounds.sqrtMin,
-            impact_sqrt_max_x96: bounds.sqrtMax,
-        };
-        self.fill_book(header, immutables).await
+            .map_err(|e| self.read_error(e))
     }
 
-    /// Populate `snapshot.ticks` from the PoolManager's tick bitmap at this
-    /// block, then verify the reconstruction against the pool's reported
-    /// active liquidity before returning it.
-    async fn fill_book(
-        &self,
-        mut snapshot: TakerMarketSnapshot,
-        immutables: BookImmutables,
-    ) -> Result<TakerMarketSnapshot> {
+    /// The pool's initialized ticks at this block: the PoolManager's tick
+    /// bitmap over the whole tick range, then the tick word of every set
+    /// bit, both by pinned `extsload`.
+    async fn tick_map(&self, immutables: &BookImmutables) -> Result<BTreeMap<i32, TickLiquidity>> {
         let BookImmutables {
             pool_id,
             tick_spacing: spacing,
-            ..
-        } = immutables;
+        } = *immutables;
         let chain = &self.market.chain;
+        let manager = IPoolManagerState::new(chain.deployments().pool_manager, chain.provider());
 
         let min_word = MIN_TICK.div_euclid(spacing).div_euclid(256);
         let max_word = MAX_TICK.div_euclid(spacing).div_euclid(256);
         let bitmap_slots: Vec<B256> = (min_word..=max_word)
             .map(|word| B256::from(v4_tick_bitmap_slot(pool_id, word)))
             .collect();
-        let manager = IPoolManagerState::new(chain.deployments().pool_manager, chain.provider());
         let bitmaps = manager
             .extsload_1(bitmap_slots)
             .block(self.id())
             .call()
             .await
             .map_err(|e| self.read_error(e))?;
-
-        let mut initialized = Vec::new();
-        for (offset, bitmap) in bitmaps.into_iter().enumerate() {
-            let word = min_word + offset as i32;
-            let bits = U256::from_be_bytes(bitmap.0);
-            for bit in 0..256i32 {
-                if bits.bit(bit as usize) {
-                    let compressed = word * 256 + bit;
-                    let initialized_tick = compressed * spacing;
-                    if (MIN_TICK..=MAX_TICK).contains(&initialized_tick) {
-                        initialized.push(initialized_tick);
-                    }
-                }
-            }
+        let initialized: Vec<i32> = bitmaps
+            .into_iter()
+            .enumerate()
+            .flat_map(|(offset, bitmap)| {
+                let word = min_word + offset as i32;
+                let bits = U256::from_be_bytes(bitmap.0);
+                (0..256i32)
+                    .filter(move |&bit| bits.bit(bit as usize))
+                    .map(move |bit| (word * 256 + bit) * spacing)
+            })
+            .filter(|tick| (MIN_TICK..=MAX_TICK).contains(tick))
+            .collect();
+        if initialized.is_empty() {
+            return Ok(BTreeMap::new());
         }
 
         let tick_slots: Vec<B256> = initialized
             .iter()
-            .map(|&initialized_tick| B256::from(v4_tick_slot(pool_id, initialized_tick)))
+            .map(|&tick| B256::from(v4_tick_slot(pool_id, tick)))
             .collect();
-        let tick_words = if tick_slots.is_empty() {
-            Vec::new()
-        } else {
-            manager
-                .extsload_1(tick_slots)
-                .block(self.id())
-                .call()
-                .await
-                .map_err(|e| self.read_error(e))?
-        };
-        let mut ticks = BTreeMap::new();
-        for (initialized_tick, word) in initialized.into_iter().zip(tick_words) {
-            let raw = U256::from_be_bytes(word.0);
-            let gross = (raw & U256::from(u128::MAX)).to::<u128>();
-            let net_raw = (raw >> 128usize).to::<u128>();
-            let net = net_raw as i128;
-            ticks.insert(initialized_tick, TickLiquidity { gross, net });
-        }
-
-        let reconstructed = ticks
-            .range(..=snapshot.tick)
-            .try_fold(0u128, |active, (_, info)| {
-                if info.net >= 0 {
-                    active.checked_add(info.net as u128)
-                } else {
-                    active.checked_sub(info.net.unsigned_abs())
-                }
+        let words = manager
+            .extsload_1(tick_slots)
+            .block(self.id())
+            .call()
+            .await
+            .map_err(|e| self.read_error(e))?;
+        Ok(initialized
+            .into_iter()
+            .zip(words)
+            .map(|(tick, word)| {
+                // `liquidityNet` in the high half, `liquidityGross` in the low.
+                let raw = U256::from_be_bytes(word.0);
+                let gross = (raw & U256::from(u128::MAX)).to::<u128>();
+                let net = (raw >> 128usize).to::<u128>() as i128;
+                (tick, TickLiquidity { gross, net })
             })
-            .ok_or_else(|| ValidationError::Overflow {
-                context: "reconstructing active liquidity".into(),
-            })?;
-        if reconstructed != snapshot.liquidity {
-            return Err(ContractError::MulticallFailed {
-                reason: format!(
-                    "tick snapshot liquidity mismatch: reconstructed {reconstructed}, pool {}",
-                    snapshot.liquidity
-                ),
-            }
-            .into());
-        }
-
-        snapshot.ticks = ticks;
-        Ok(snapshot)
+            .collect())
     }
 
     /// A multicall's failure, with the node's "state pruned" answer typed
@@ -508,6 +527,32 @@ impl StateAt {
             other => multicall_error(other),
         }
     }
+}
+
+/// The `Perp` views a mark and the pool are built from, read together at
+/// one block.
+struct PerpViews {
+    /// `modules()`.
+    modules: Modules,
+    /// `poolState()`.
+    pool_state: Perp::poolStateReturn,
+    /// `emas()`: the stored pair as of `last_touch`.
+    stored_emas: PricePair,
+    /// `rates().lastTouch`.
+    last_touch: u64,
+    /// `EMA_WINDOW()`, in seconds.
+    ema_window: u64,
+}
+
+/// The contract's `EMA_WINDOW` (seconds) narrowed to the width
+/// [`Mark::advanced`] takes.
+pub(super) fn ema_window_secs(ema_window: U256) -> Result<u64> {
+    u64::try_from(ema_window).map_err(|_| {
+        ValidationError::Overflow {
+            context: "EMA window".into(),
+        }
+        .into()
+    })
 }
 
 /// Whether a node's error message is its refusal to serve pruned state:
@@ -758,6 +803,30 @@ mod tests {
         );
     }
 
+    /// The mark is the views multicall and the beacon's index, both at the
+    /// handle's block; with nothing to advance, the EMAs are the stored
+    /// pair and the fair price of equal inputs is that price.
+    #[tokio::test]
+    async fn the_mark_is_one_multicall_and_the_index_at_the_handles_block() {
+        let one = x96(1, 0);
+        let (state, rpc) = state().await;
+        perp_views_answers(&rpc, 92, 0);
+        rpc.call::<IBeacon::indexCall>(&one);
+
+        let mark = state.mark().await.unwrap();
+        assert_eq!(mark.block, state.block());
+        assert_eq!((mark.amm_price_x96, mark.index_x96), (one, one));
+        assert_eq!(
+            mark.emas,
+            PricePair {
+                amm: one.to::<u128>(),
+                index: one.to::<u128>()
+            }
+        );
+        assert_eq!(mark.fair_price_x96(), one);
+        assert!(rpc.is_drained(), "one multicall, one index call");
+    }
+
     /// A pruned block fails a multicall read the same way it fails a
     /// single call: typed, and not transient.
     #[tokio::test]
@@ -902,17 +971,38 @@ mod tests {
     /// `4606.div_euclid(256) = 17` — 36 words, word `w` at offset `w + 18`.
     const BITMAP_WORDS: usize = 36;
 
-    /// The three immutables the first snapshot reads, in `try_join!` order.
+    /// The two immutables the first snapshot reads, in `try_join!` order.
     fn immutables_answers(rpc: &Rpc) {
         rpc.call::<Perp::POOL_IDCall>(&POOL_ID);
         rpc.call::<Perp::poolKeyCall>(&mock::pool_key(SPACING));
-        rpc.call::<Perp::EMA_WINDOWCall>(&U256::from(3_600u32));
     }
 
-    /// Everything after the immutables: the lagged block, the stored
-    /// EMAs, the three pinned `Perp` views, the beacon, the impact bounds,
-    /// then the bitmap and — if any tick is set — the tick words. Pool,
-    /// index and EMAs are all 1.0; returns the pinned block's hash.
+    /// The `Perp` views behind a mark, in one multicall at `block`: pool,
+    /// index and EMAs all 1.0, last touched at [`TOUCHED_AT`].
+    fn perp_views_answers(rpc: &Rpc, block: u64, liquidity: u128) {
+        let one = x96(1, 0);
+        rpc.aggregate(
+            block,
+            [
+                returns::<Perp::modulesCall>(&mock::modules()),
+                returns::<Perp::poolStateCall>(&Perp::poolStateReturn {
+                    sqrtPrice: Uint::from(1u8) << 96,
+                    liquidity,
+                    ..mock::pool_state(one)
+                }),
+                returns::<Perp::emasCall>(&mock::emas(one.to::<u128>(), one.to::<u128>())),
+                returns::<Perp::ratesCall>(&Rates {
+                    lastTouch: Uint::from(TOUCHED_AT),
+                    ..mock::rates(0)
+                }),
+                returns::<Perp::EMA_WINDOWCall>(&U256::from(3_600u32)),
+            ],
+        );
+    }
+
+    /// Everything after the immutables: the lagged block, the views
+    /// multicall, the beacon, the impact bounds, then the bitmap and — if
+    /// any tick is set — the tick words. Returns the pinned block's hash.
     fn snapshot_answers(
         rpc: &Rpc,
         liquidity: u128,
@@ -922,17 +1012,7 @@ mod tests {
         let one = x96(1, 0);
         rpc.quantity(100);
         let hash = rpc.block(100 - SNAPSHOT_BLOCK_LAG, TOUCHED_AT);
-        rpc.storage((one << 128) | one);
-        rpc.call::<Perp::poolStateCall>(&Perp::poolStateReturn {
-            sqrtPrice: Uint::from(1u8) << 96,
-            liquidity,
-            ..mock::pool_state(one)
-        });
-        rpc.call::<Perp::modulesCall>(&mock::modules());
-        rpc.call::<Perp::ratesCall>(&Rates {
-            lastTouch: Uint::from(TOUCHED_AT),
-            ..mock::rates(0)
-        });
+        perp_views_answers(rpc, 100 - SNAPSHOT_BLOCK_LAG, liquidity);
         rpc.call::<IBeacon::indexCall>(&one);
         rpc.call::<IPriceImpact::sqrtPriceBoundsCall>(&IPriceImpact::sqrtPriceBoundsReturn {
             sqrtMin: one >> 1,
@@ -991,7 +1071,7 @@ mod tests {
             client.market().load_taker_market_snapshot().await.unwrap(),
             expected_snapshot(hash, 0)
         );
-        assert!(rpc.is_drained(), "twelve answers, none left over");
+        assert!(rpc.is_drained(), "eight answers, none left over");
     }
 
     /// Set bits become ticks at `compressed * spacing`, their words are
@@ -1034,7 +1114,7 @@ mod tests {
                 ..expected_snapshot(hash, L)
             }
         );
-        assert!(rpc.is_drained(), "thirteen answers");
+        assert!(rpc.is_drained(), "nine answers");
     }
 
     /// A book whose ticks do not add up to the pool's active liquidity is
@@ -1059,10 +1139,14 @@ mod tests {
         assert!(
             matches!(
                 err,
-                PerpCityError::Contract(ContractError::MulticallFailed { ref reason })
-                    if reason.contains("liquidity mismatch")
+                PerpCityError::Contract(ContractError::StorageReadFailed { ref context, source: None })
+                    if context.contains("liquidity mismatch")
             ),
             "{err}"
+        );
+        assert!(
+            !err.is_transient(),
+            "at a pinned hash a mismatch is the layout, not the replica"
         );
     }
 
@@ -1080,7 +1164,7 @@ mod tests {
             client.market().load_taker_market_snapshot().await.unwrap(),
             expected_snapshot(hash, 0)
         );
-        assert!(rpc.is_drained(), "nine answers: no immutables");
+        assert!(rpc.is_drained(), "six answers: no immutables");
     }
 
     /// The immutables belong to the market, not the reader: a second
@@ -1113,7 +1197,6 @@ mod tests {
         for spacing in [0, -30] {
             rpc.call::<Perp::POOL_IDCall>(&POOL_ID);
             rpc.call::<Perp::poolKeyCall>(&mock::pool_key(spacing));
-            rpc.call::<Perp::EMA_WINDOWCall>(&U256::from(3_600u32));
 
             let err = client
                 .market()
@@ -1127,7 +1210,7 @@ mod tests {
                 ),
                 "{err}"
             );
-            assert!(rpc.is_drained(), "three answers each time");
+            assert!(rpc.is_drained(), "two answers each time");
         }
     }
 }
