@@ -11,19 +11,14 @@
 //!   tick bitmap and the fee-growth accounting (read via `extsload`).
 //!
 //! The offsets encode the deployed contract layouts and are locked by
-//! chain-backed tests at the call sites (the taker book loader verifies its
-//! reconstruction against the pool's reported liquidity, and the maker
+//! chain-backed tests at the call sites (the pool snapshot verifies its
+//! tick map against the pool's reported liquidity, and the maker
 //! equity math reproduces a real on-chain settle).
 
 use alloy::primitives::{Address, B256, I256, U256, keccak256};
 
 /// `PerpStorage.ticks` mapping slot: storage struct base 3 + field index 3.
 const PERP_TICKS_SLOT: u64 = 6;
-
-/// `PerpStorage.emas` slot: storage struct base 3 + field index 8 in the
-/// deployed layout. `PricePair` packs `ammPrice` in the low 128 bits and
-/// `index` in the high 128 bits.
-const PERP_EMAS_SLOT: u64 = 11;
 
 /// Offset of `cumlFundingDivSqrtPOppX96` — the second word of the Perp's
 /// two-word `TickInfo` struct — from the struct's base slot.
@@ -71,11 +66,6 @@ pub(crate) fn mapping_slot_signed(key: i32, base: U256) -> U256 {
 pub(crate) fn perp_tick_funding_slots(tick: i32) -> [U256; 2] {
     let base = mapping_slot_signed(tick, U256::from(PERP_TICKS_SLOT));
     [base, base + U256::from(TICK_FUNDING_DIV_SQRT_P_OPP_OFFSET)]
-}
-
-/// Slot of the Perp's stored EMA `PricePair` (`s.emas`).
-pub(crate) fn perp_emas_slot() -> U256 {
-    U256::from(PERP_EMAS_SLOT)
 }
 
 /// Base slot of a pool's `Pool.State` inside the V4 PoolManager.

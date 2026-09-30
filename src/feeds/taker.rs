@@ -10,13 +10,13 @@ use alloy::primitives::B256;
 use tokio::sync::watch;
 
 use crate::MarketReader;
-use crate::math::swap::TakerMarketSnapshot;
+use crate::math::swap::PoolSnapshot;
 use crate::transport::ws::WsManager;
 
 /// Shared, read-optimized view of a Perp market's taker liquidity.
 #[derive(Debug, Clone)]
 pub struct LiveTakerMarket {
-    latest: watch::Receiver<Arc<TakerMarketSnapshot>>,
+    latest: watch::Receiver<Arc<PoolSnapshot>>,
 }
 
 impl LiveTakerMarket {
@@ -24,7 +24,7 @@ impl LiveTakerMarket {
     ///
     /// This is useful for tests, historical simulation, and externally
     /// maintained snapshots.
-    pub fn from_snapshot(snapshot: TakerMarketSnapshot) -> (Self, LiveTakerMarketPublisher) {
+    pub fn from_snapshot(snapshot: PoolSnapshot) -> (Self, LiveTakerMarketPublisher) {
         let (tx, latest) = watch::channel(Arc::new(snapshot));
         (Self { latest }, LiveTakerMarketPublisher { tx })
     }
@@ -35,7 +35,7 @@ impl LiveTakerMarket {
     /// Takes the market reader by value: the refresh task owns it, and a
     /// feed needs no signer.
     pub async fn subscribe(reader: MarketReader, ws: &WsManager) -> crate::Result<Self> {
-        let initial = reader.load_taker_market_snapshot().await?;
+        let initial = reader.get_pool_snapshot().await?;
         let (market, publisher) = Self::from_snapshot(initial);
         let mut blocks = ws.subscribe_blocks().await?;
         tokio::spawn(async move {
@@ -53,7 +53,7 @@ impl LiveTakerMarket {
                         // head) regardless, so a backlog is purely
                         // redundant RPC work.
                         while blocks.try_recv().is_ok() {}
-                        match reader.load_taker_market_snapshot().await {
+                        match reader.get_pool_snapshot().await {
                             Ok(snapshot) => publisher.publish(snapshot),
                             Err(error) => {
                                 tracing::warn!(%error, "taker snapshot refresh failed");
@@ -67,12 +67,12 @@ impl LiveTakerMarket {
     }
 
     /// Latest complete snapshot. Cloning is an atomic reference-count bump.
-    pub fn latest(&self) -> Arc<TakerMarketSnapshot> {
+    pub fn latest(&self) -> Arc<PoolSnapshot> {
         self.latest.borrow().clone()
     }
 
     /// Subscribe to snapshot changes.
-    pub fn changes(&self) -> watch::Receiver<Arc<TakerMarketSnapshot>> {
+    pub fn changes(&self) -> watch::Receiver<Arc<PoolSnapshot>> {
         self.latest.clone()
     }
 
@@ -88,12 +88,12 @@ impl LiveTakerMarket {
 /// Producer handle for externally maintained market snapshots.
 #[derive(Debug, Clone)]
 pub struct LiveTakerMarketPublisher {
-    tx: watch::Sender<Arc<TakerMarketSnapshot>>,
+    tx: watch::Sender<Arc<PoolSnapshot>>,
 }
 
 impl LiveTakerMarketPublisher {
     /// Atomically replace the visible snapshot.
-    pub fn publish(&self, snapshot: TakerMarketSnapshot) {
+    pub fn publish(&self, snapshot: PoolSnapshot) {
         self.tx.send_replace(Arc::new(snapshot));
     }
 }
@@ -104,9 +104,9 @@ mod tests {
 
     #[test]
     fn publishes_complete_snapshots() {
-        let first = TakerMarketSnapshot::default();
+        let first = PoolSnapshot::default();
         let (market, publisher) = LiveTakerMarket::from_snapshot(first);
-        let second = TakerMarketSnapshot {
+        let second = PoolSnapshot {
             block: crate::math::BlockContext {
                 number: 2,
                 hash: B256::with_last_byte(2),

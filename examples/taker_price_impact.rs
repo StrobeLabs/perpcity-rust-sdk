@@ -1,4 +1,4 @@
-//! Quote taker price impact locally from an exact, block-pinned liquidity book.
+//! Quote taker price impact locally from an exact, block-pinned pool snapshot.
 //!
 //! ```bash
 //! export RPC_URL="https://sepolia-rollup.arbitrum.io/rpc"
@@ -37,7 +37,7 @@ async fn main() -> perpcity_sdk::Result<()> {
 
     // Every field—including ticks and module bounds—comes from this block hash.
     // Once loaded, all calls below are synchronous and make no RPC requests.
-    let market = client.market().load_taker_market_snapshot().await?;
+    let market = client.market().get_pool_snapshot().await?;
     println!(
         "snapshot block {} ({})",
         market.block.number, market.block.hash

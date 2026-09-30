@@ -5,7 +5,7 @@
 //! 2. Initialize PerpClient with signer and deployments
 //! 3. Sync nonce + refresh gas (required before first transaction)
 //! 4. Ensure USDC approval
-//! 5. Query market data (mark price, funding, OI)
+//! 5. Query market data (pool price, funding, OI)
 //! 6. Open a long taker position
 //! 7. Read the position state
 //! 8. Close the position by reversing the taker delta
@@ -104,7 +104,7 @@ async fn main() -> perpcity_sdk::Result<()> {
     // ── 5. Query market data ────────────────────────────────────────
     let perp_data = client.market().get_perp_config().await?;
     println!("\n=== Market: {perp} ===");
-    println!("  Mark price:      {:.6}", perp_data.mark);
+    println!("  Pool price:      {:.6}", perp_data.pool_price);
     println!("  Tick spacing:    {}", perp_data.tick_spacing);
     println!(
         "  Max leverage:    {:.0}x",

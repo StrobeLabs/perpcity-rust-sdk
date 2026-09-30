@@ -11,8 +11,14 @@ The changes below break the public API, so the next release is 0.5.0 (a minor bu
 
 ### Breaking
 
+- **A read's block policy is the type it hangs off.** `MarketReader` reads the market as it is now: served from the cache within its TTL, or from the head at the moment of the call, each read on its own. `StateAt` reads it at one block: the handle resolves the header once, every read on it is by that hash, and two values read through one handle agree by construction. The three reads that pinned their own lagged block — capacity, margin ratios, and the pool — are now `StateAt::capacity()`, `StateAt::margin_ratios()` and `StateAt::pool()`; `get_capacity()`, `get_margin_ratios()` and `get_pool_snapshot()` remain as the single-read conveniences, each `state().await?.<read>()`. A caller that reads twice and needs the values to agree takes `state()` once. `get_pool_snapshot` is the renamed `load_taker_market_snapshot`.
+- **The pool price is the pool's, the mark is the contract's.** Every read of `poolState().ammPrice` was named for the mark, which the contract computes as a different price (the fair price of the pool price, the index and the EMAs). `get_mark_price` is `get_pool_price`, `PerpSnapshot.mark_price` and `PerpData.mark` are `pool_price`, and the `StateCache` fast layer speaks of `pool_prices` (`get_pool_price`, `put_pool_price`). The contract's mark is `get_mark` (see *Added*).
+- **The pool is a pool, not a book.** `TakerMarketSnapshot` is `PoolSnapshot`: the V4 pool at one block — its price, active liquidity, initialized ticks, and the bounds a taker swap runs within. Nothing else about the type changed.
+- **`PerpSnapshot` carries `block: u64`**, the head block every field was read at (see *Changed*). Struct literals must name it.
+- **`math::ema` is gone; `PricePair` and `calculate_emas` live in `math::pricing`** beside `Mark` and the fair price, and are re-exported at the crate root. The pricing module states the model once: the pool price, the index, their contract-exact EMAs, and the mark as the fair price of all four. `exp_wad` is fixed-point arithmetic and is crate-private.
+- **A pool whose tick map does not reproduce its active liquidity fails as `ContractError::StorageReadFailed`** (no source, not transient) rather than `MulticallFailed`. It was never a multicall failure, and at a pinned hash the mismatch is deterministic.
 - **A maker's geometry is two types, and the maker math takes them.** `TickRange::new(lower, upper)?` is a tick interval valid by construction (`lower < upper`, both in the V4 domain; private fields, checked on deserialise), and `MakerBand { range, liquidity }` is a range holding liquidity — the shape `makerDetails` stores. `estimate_liquidity(&range, usd)`, `liquidity_for_target_ratio(margin, &range, sqrt_price, ratio)` and `liquidity_for_capacity(sqrt_price, &range, side, target)` take a `TickRange` instead of two loose ticks and no longer return `InvalidTickRange` — it can only come from `TickRange::new`; `band_capacity(sqrt_price, &band)` takes a `MakerBand`. `band_amounts(sqrt_price, &band)` is the typed form of `amounts_for_liquidity`. Callers build the range once at the boundary the ticks entered and pass it down.
-- **`PriceImpactPoint` is removed.** Nothing in the SDK produced or consumed it; the local swap simulation (`TakerMarketSnapshot::quote_to_price`) is the price-impact query.
+- **`PriceImpactPoint` is removed.** Nothing in the SDK produced or consumed it; the local swap simulation (`PoolSnapshot::quote_to_price`) is the price-impact query.
 - **`TransactionError::ReceiptTimeout` carries `tx_hash: FixedBytes<32>`.** The hash was only in `reason`, and a timeout whose last poll hit an RPC error left it out of the string too, so a caller could not look up the receipt. `reason` stays and now says only why polling stopped; `Display` reads `receipt timeout for 0x…: <reason>`. Patterns that use `..` are unaffected; exhaustive patterns and constructions must name the new field. `is_transient()` is unchanged (true), and the send path still never reuses the timed-out transaction's nonce.
 - **A failed broadcast returns `TransactionError::BroadcastFailed { tx_hash, source }` instead of `PerpCityError::Rpc`.** The node can accept a transaction and still fail the request, so the outcome is unknown; the hash of the signed transaction lets the caller look it up. `source` is the same `TransportError` that `Rpc` carried. `is_transient()` is true for both, so retry loops are unchanged; code that matched `PerpCityError::Rpc` to detect a failed broadcast must match the new variant.
 - **`TransactionError::Reverted` carries `tx_hash: FixedBytes<32>`**, which was only in `reason`. Patterns that use `..` are unaffected; exhaustive patterns and constructions must name the new field. With `OutOfGas`, `ReceiptTimeout` and `BroadcastFailed`, every `TxBuilder::send` error that follows the broadcast now carries a typed hash.
@@ -39,6 +45,23 @@ The changes below break the public API, so the next release is 0.5.0 (a minor bu
 
 ### Changed
 
+- **`get_perp_snapshot` is one block.** The batch and the beacon read were
+  two calls at the head, so a trade between them could put the index one
+  block after the pool state. The batch now runs as `blockAndAggregate`,
+  the index is read at the block hash it reports, and the snapshot
+  carries that block by number. A perp with no beacon is
+  `ModuleNotRegistered` rather than a decode error from the zero address,
+  and an index read that lands on a replica behind the one that ran the
+  batch is `ContractError::BlockUnavailable` — transient, so a retry loop
+  retries — rather than an opaque transport error. Every `StateAt` read
+  types that answer the same way.
+- **The pool snapshot is one multicall plus three pinned calls**, down
+  from five separate calls and a raw storage read. The stored EMAs come
+  from the `emas()` view rather than a hand-derived slot (verified equal
+  on HORMUZ-TRAFFIC at block 510200629), the mark's inputs are the same
+  `Mark` read the fair price and maker equity use, and the tick map's
+  reconciliation is a pure function with its own tests. The deployment
+  immutables are two reads on first load rather than three.
 - **The event vocabulary moved to `events`, out from under `feeds`.**
   `MarketEvent`, `SwapInfo`, `MakerSettle`, `CumulativesInfo`,
   `decode_log` and `decode_raw` now live at `perpcity_sdk::events`:
@@ -62,6 +85,11 @@ The changes below break the public API, so the next release is 0.5.0 (a minor bu
   prunes the state, so it hands out the handle and each read then fails
   with the new `ContractError::StateUnavailable`, which `is_transient()`
   refuses: an archive endpoint is the fix, not a retry.
+- **`StateAt::capacity()`, `margin_ratios()`, `pool()` and `mark()`** —
+  the market's taker capacity with the open interest drawing on it, the
+  `IMarginRatios` thresholds, the pool a taker swap is quoted against, and
+  what the contract marks from, each at the handle's block (see
+  *Breaking*).
 - **`SolvencyState { bad_debt, total_margin }`**, the contract's own
   struct in USDC, and **`convert::usdc_from_atoms`**, the one checked
   widening from a `uint128` or `uint256` into the `i128` that
@@ -143,8 +171,8 @@ The changes below break the public API, so the next release is 0.5.0 (a minor bu
 - **`ContractError::LogsRejected { from_block, to_block, source }`** (new variant on the `#[non_exhaustive]` enum) — the server refused an `eth_getLogs` request that no narrower range fixes. Not `is_transient()`, so a retry loop keyed on it stops; rate limits and unanswered requests stay transient `PerpCityError::Rpc`.
 - **`ValidationError::InvalidBlockRange { from_block, to_block }`** (new variant on the `#[non_exhaustive]` enum) — a range whose start is after its end. Not `is_transient()`.
 - **`math::capacity`** — the taker capacity a maker band adds, exact to the deployed `PerpLogic.calcCapacity`, so strategy code does not port contract math. `band_capacity(sqrt_price_x96, tick_lower, tick_upper, liquidity)` returns a `Capacity { long_atoms, short_atoms }` (`atoms(side)` for one side; 6-decimal perp atoms; the band above the price backs longs, the band below backs shorts). `liquidity_for_capacity(sqrt_price_x96, tick_lower, tick_upper, side, target_atoms)` is the exact inverse: the least liquidity that reaches the target on one side. Both are re-exported at the crate root and in the prelude. Golden vectors: three HORMUZ-TRAFFIC maker opens on Arbitrum One (two bands across the price, one band below it) reproduce the stored `makerDetails(id).capacity` and the `capacity()` step across each open to the atom.
-- **`PerpClient::get_capacity`** → `MarketCapacity { block, capacity, long_open_interest_atoms, short_open_interest_atoms }`: `capacity()` and `openInterest()` in one multicall, pinned to the lagged snapshot block. `headroom_atoms(side)` is the open interest a side can still add before `Long/ShortUtilizationExceeded`; `utilization_e6(side)` is the value the Perp passes to the fees module (`oi · 1e6 / capacity`, floored), or `None` for a side with no capacity, where the contract passes `type(uint24).max`. Closes the "no way to get utilization" gap (#4).
-- **`PerpClient::get_fair_price`** → `FairPrice { block, price_x96 }`: the contract's mark (the deployed `fairPrice` of the pool price, beacon index and EMAs advanced to the block), pinned to the lagged snapshot block. It is the same value `get_maker_equities` prices at; `get_mark_price` keeps returning the pool price. `FairPrice` and `MarketCapacity` are re-exported at the crate root and in the prelude.
+- **`MarketReader::get_capacity`** → `MarketCapacity { block, capacity, long_open_interest_atoms, short_open_interest_atoms }`: `capacity()` and `openInterest()` in one multicall, pinned to the lagged snapshot block (`StateAt::capacity()` for a block of the caller's choosing). `headroom_atoms(side)` is the open interest a side can still add before `Long/ShortUtilizationExceeded`; `utilization_e6(side)` is the value the Perp passes to the fees module (`oi · 1e6 / capacity`, floored), or `None` for a side with no capacity, where the contract passes `type(uint24).max`. Closes the "no way to get utilization" gap (#4).
+- **`MarketReader::get_mark`** → **`Mark`**: what the contract marks from at the lagged snapshot block — `amm_price_x96`, `index_x96`, and the EMAs advanced to its timestamp — with `fair_price_x96()` the price it marks at (the deployed `fairPrice`). `StateAt::mark()` is the same read at a block of the caller's choosing; `get_maker_equities` prices at it, and `get_pool_price` keeps returning the pool price. `Mark::advanced` reproduces a live HORMUZ-TRAFFIC accrue to the digit (block 510213600, 300 s after the last touch). `Mark` and `MarketCapacity` are re-exported at the crate root and in the prelude.
 - **`types::Side`** (`Long` / `Short`), re-exported at the crate root and in the prelude.
 - **`ValidationError::NoBandCapacity { lower, upper, side }`** (new variant on the `#[non_exhaustive]` enum): a capacity target on a side the band cannot back at the price. Not `is_transient()`.
 - **`math::liquidity::amounts_for_liquidity`** is public and re-exported at the crate root and in the prelude: Uniswap `LiquidityAmounts.getAmountsForLiquidity`, the `(perp atoms, USDC atoms)` a band's liquidity holds at a price, rounded down. It was the crate-internal helper behind the maker-equity valuation; it now also rejects a zero sqrt price or bound with `ValidationError::InvalidPrice`.

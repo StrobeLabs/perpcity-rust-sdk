@@ -63,9 +63,11 @@ impl Default for QuoteConstraints {
     }
 }
 
-/// Immutable, block-referenced concentrated-liquidity market snapshot.
+/// The pool at one block: its price, its active liquidity, its initialized
+/// ticks, and the bounds a taker swap runs within. Read by
+/// [`StateAt::pool`](crate::StateAt::pool).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TakerMarketSnapshot {
+pub struct PoolSnapshot {
     /// Block containing all state in this snapshot.
     pub block: BlockContext,
     /// Current Q64.96 square-root price.
@@ -86,10 +88,10 @@ pub struct TakerMarketSnapshot {
     pub impact_sqrt_max_x96: U256,
 }
 
-impl Default for TakerMarketSnapshot {
+impl Default for PoolSnapshot {
     /// Test and scaffolding convenience: the block fields and price are
-    /// placeholders, not a valid market. Real snapshots come from
-    /// `MarketReader::load_taker_market_snapshot`.
+    /// placeholders, not a valid pool. Real snapshots come from
+    /// [`StateAt::pool`](crate::StateAt::pool).
     fn default() -> Self {
         Self {
             block: BlockContext::default(),
@@ -183,7 +185,7 @@ struct Simulation {
     hit_limit: bool,
 }
 
-impl TakerMarketSnapshot {
+impl PoolSnapshot {
     /// Quote an exact signed perp delta using the snapshot's protocol price
     /// limits, then evaluate the resulting price against the module bounds.
     ///
@@ -419,7 +421,7 @@ impl TakerMarketSnapshot {
             }
             // A zero-amount step that crossed a tick is progress (the price
             // sat exactly on an initialized boundary); only a step that moved
-            // nothing AND crossed nothing means the book is exhausted.
+            // nothing AND crossed nothing means the liquidity is exhausted.
             if used.is_zero() && other.is_zero() && sqrt == start && !crossed_this_step {
                 break;
             }
@@ -439,6 +441,32 @@ impl TakerMarketSnapshot {
             hit_limit: sqrt == sqrt_limit,
         })
     }
+}
+
+/// The active liquidity a tick map implies at `tick`: the net of every
+/// initialized tick at or below it. A map read from a pool must reproduce
+/// the liquidity the pool reports, or it is not that pool's.
+///
+/// # Errors
+///
+/// [`ValidationError::Overflow`] when the running sum leaves `u128`, which
+/// a consistent map cannot do.
+pub(crate) fn active_liquidity(
+    ticks: &BTreeMap<i32, TickLiquidity>,
+    tick: i32,
+) -> Result<u128, ValidationError> {
+    ticks
+        .range(..=tick)
+        .try_fold(0u128, |active, (_, info)| {
+            if info.net >= 0 {
+                active.checked_add(info.net as u128)
+            } else {
+                active.checked_sub(info.net.unsigned_abs())
+            }
+        })
+        .ok_or_else(|| ValidationError::Overflow {
+            context: "reconstructing active liquidity".into(),
+        })
 }
 
 fn apply_tick_delta(
@@ -568,8 +596,34 @@ fn u256_to_i128(value: U256) -> Result<i128, ValidationError> {
 mod tests {
     use super::*;
 
-    fn book() -> TakerMarketSnapshot {
-        let mut market = TakerMarketSnapshot {
+    /// Only ticks at or below the current one count, each by its net.
+    #[test]
+    fn active_liquidity_is_the_net_at_or_below_the_tick() {
+        let ticks = BTreeMap::from([
+            (-60, TickLiquidity { gross: 5, net: 5 }),
+            (0, TickLiquidity { gross: 3, net: -2 }),
+            (60, TickLiquidity { gross: 7, net: 7 }),
+        ]);
+        assert_eq!(active_liquidity(&ticks, -61).unwrap(), 0);
+        assert_eq!(active_liquidity(&ticks, -60).unwrap(), 5);
+        assert_eq!(active_liquidity(&ticks, 0).unwrap(), 3);
+        assert_eq!(active_liquidity(&ticks, 59).unwrap(), 3);
+        assert_eq!(active_liquidity(&ticks, 60).unwrap(), 10);
+    }
+
+    /// More liquidity leaving than ever entered is a map that cannot be a
+    /// pool's, not a wrapped sum.
+    #[test]
+    fn a_net_below_zero_is_an_overflow() {
+        let ticks = BTreeMap::from([(0, TickLiquidity { gross: 1, net: -1 })]);
+        assert!(matches!(
+            active_liquidity(&ticks, 0),
+            Err(ValidationError::Overflow { .. })
+        ));
+    }
+
+    fn pool() -> PoolSnapshot {
+        let mut market = PoolSnapshot {
             liquidity: 1_000_000_000_000,
             ..Default::default()
         };
@@ -592,7 +646,7 @@ mod tests {
 
     #[test]
     fn buy_and_sell_move_price_in_expected_direction() {
-        let market = book();
+        let market = pool();
         let buy = market.quote_perp(1_000_000).unwrap();
         let sell = market.quote_perp(-1_000_000).unwrap();
         assert!(buy.fully_filled && sell.fully_filled);
@@ -603,21 +657,21 @@ mod tests {
 
     #[test]
     fn directional_amount_limits_round_safely() {
-        let market = book();
+        let market = pool();
         let buy = market.quote_perp(1_000_000).unwrap();
         let sell = market.quote_perp(-1_000_000).unwrap();
         assert!(buy.amt1_limit(25) >= buy.usd_delta.unsigned_abs());
         assert!(sell.amt1_limit(25) <= sell.usd_delta.unsigned_abs());
     }
 
-    /// A book whose current price sits exactly on the initialized tick at 0:
+    /// A pool whose current price sits exactly on the initialized tick at 0:
     /// −600 (+L), 0 (+M), 600 (−(L+M)).
-    fn boundary_book(tick: i32) -> TakerMarketSnapshot {
+    fn pool_at_boundary(tick: i32) -> PoolSnapshot {
         let l: u128 = 1_000_000_000_000;
         let m: u128 = 500_000_000_000;
         // Active liquidity is the sum of net for initialized ticks <= tick.
         let liquidity = if tick >= 0 { l + m } else { l };
-        let mut market = TakerMarketSnapshot {
+        let mut market = PoolSnapshot {
             sqrt_price_x96: get_sqrt_ratio_at_tick(0).unwrap(),
             tick,
             liquidity,
@@ -651,8 +705,8 @@ mod tests {
     fn a_sell_from_a_price_exactly_on_a_tick_boundary_keeps_filling() {
         // tick == 0 and sqrt == ratio(0): the first step crosses tick 0 with
         // zero amounts. The swap must continue into the liquidity below
-        // instead of reporting the book exhausted.
-        let market = boundary_book(0);
+        // instead of reporting the liquidity exhausted.
+        let market = pool_at_boundary(0);
         let sell = market.quote_perp(-1_000_000).unwrap();
         assert!(sell.fully_filled, "limit={:?}", sell.limit);
         assert_eq!(sell.limit, QuoteLimit::Filled);
@@ -667,7 +721,7 @@ mod tests {
         // tick == −1 with sqrt == ratio(0): the state a sell leaves behind
         // when it stops exactly on the boundary. A buy's first step crosses
         // tick 0 upward with zero amounts and must keep going.
-        let market = boundary_book(-1);
+        let market = pool_at_boundary(-1);
         let buy = market.quote_perp(1_000_000).unwrap();
         assert!(buy.fully_filled, "limit={:?}", buy.limit);
         assert_eq!(buy.limit, QuoteLimit::Filled);
@@ -679,7 +733,7 @@ mod tests {
 
     #[test]
     fn a_binding_max_perp_cap_is_reported_as_max_perp() {
-        let market = book();
+        let market = pool();
         let uncapped = market
             .quote_to_price(
                 get_sqrt_ratio_at_tick(100).unwrap(),
@@ -708,7 +762,7 @@ mod tests {
 
     #[test]
     fn target_quote_respects_impact_bound() {
-        let mut market = book();
+        let mut market = pool();
         market.impact_sqrt_max_x96 = get_sqrt_ratio_at_tick(10).unwrap();
         let quote = market
             .quote_to_price(

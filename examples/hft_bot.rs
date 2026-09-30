@@ -13,7 +13,7 @@
 //! The main loop runs on every new block (~250ms on Arbitrum):
 //! - Refresh gas cache from block header
 //! - Invalidate fast-cache entries
-//! - Fetch mark price for all tracked perps
+//! - Fetch the pool price for all tracked perps
 //! - Evaluate position triggers (SL/TP/trailing)
 //! - Execute triggered closes
 //! - Open new positions when the strategy signals
@@ -199,9 +199,9 @@ async fn main() -> perpcity_sdk::Result<()> {
         // 4b. Invalidate fast cache (prices, funding, balance)
         client.chain().invalidate_fast_cache();
 
-        // 4c. Fetch mark price
+        // 4c. Fetch the pool price
         let price_start = Instant::now();
-        let mark = match client.market().get_mark_price().await {
+        let price = match client.market().get_pool_price().await {
             Ok(p) => p,
             Err(e) => {
                 eprintln!("  [block {block}] price fetch failed: {e}");
@@ -212,11 +212,11 @@ async fn main() -> perpcity_sdk::Result<()> {
         let price_latency = price_start.elapsed();
         latency_tracker.record(price_latency.as_nanos() as u64);
 
-        price_history.push(mark);
+        price_history.push(price);
 
         // 4d. Evaluate position triggers
         let mut prices_map: HashMap<[u8; 32], f64> = HashMap::new();
-        prices_map.insert(perp_key, mark);
+        prices_map.insert(perp_key, price);
 
         trigger_buf.clear();
         pos_manager.check_triggers_into(&prices_map, &mut trigger_buf);
@@ -247,13 +247,19 @@ async fn main() -> perpcity_sdk::Result<()> {
 
             // Calculate stop-loss and take-profit levels
             let (stop_loss, take_profit) = if is_long {
-                (mark * (1.0 - STOP_LOSS_PCT), mark * (1.0 + TAKE_PROFIT_PCT))
+                (
+                    price * (1.0 - STOP_LOSS_PCT),
+                    price * (1.0 + TAKE_PROFIT_PCT),
+                )
             } else {
-                (mark * (1.0 + STOP_LOSS_PCT), mark * (1.0 - TAKE_PROFIT_PCT))
+                (
+                    price * (1.0 + STOP_LOSS_PCT),
+                    price * (1.0 - TAKE_PROFIT_PCT),
+                )
             };
 
             println!(
-                "  [block {block}] Signal: {direction} at {mark:.6} | SL={stop_loss:.6} TP={take_profit:.6}"
+                "  [block {block}] Signal: {direction} at {price:.6} | SL={stop_loss:.6} TP={take_profit:.6}"
             );
 
             // Open position on-chain. perp_delta > 0 = long, < 0 = short.
@@ -293,7 +299,7 @@ async fn main() -> perpcity_sdk::Result<()> {
                         perp_id: perp_key,
                         position_id: pos_id_u64,
                         is_long,
-                        entry_price: mark,
+                        entry_price: price,
                         margin: TRADE_MARGIN,
                         stop_loss: Some(stop_loss),
                         take_profit: Some(take_profit),
@@ -310,7 +316,7 @@ async fn main() -> perpcity_sdk::Result<()> {
         // 4g. Print block summary
         let loop_time = loop_start.elapsed();
         println!(
-            "  [block {block}] mark={mark:.6}  positions={} in_flight={} loop={loop_time:.0?}",
+            "  [block {block}] price={price:.6}  positions={} in_flight={} loop={loop_time:.0?}",
             pos_manager.count(),
             client.in_flight_count(),
         );

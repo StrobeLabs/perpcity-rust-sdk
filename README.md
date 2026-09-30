@@ -53,7 +53,7 @@ All examples load configuration from `.env` automatically via `dotenvy`.
 | **open_position** | `cargo run --example open_position` | Full taker lifecycle: market data, open, monitor PnL/funding/liquidation, close. |
 | **market_maker** | `cargo run --example market_maker` | LP position: calculate tick range around mark, estimate liquidity, open maker position. *Note: makers are currently subject to a 7-day lockup, so this example shouldn't run.* |
 | **hft_bot** | `cargo run --example hft_bot` | Full trading loop: multi-endpoint transport, momentum strategy, position manager with SL/TP/trailing stop, latency stats. |
-| **taker_price_impact** | `cargo run --example taker_price_impact` | Local, exact taker quoting over a block-pinned liquidity book: price impact, target-price sizing, hypothetical liquidity. |
+| **taker_price_impact** | `cargo run --example taker_price_impact` | Local, exact taker quoting over a block-pinned pool snapshot: price impact, target-price sizing, hypothetical liquidity. |
 | **maker_equity** | `cargo run --example maker_equity` | Batched maker settle previews (`get_maker_equities`) plus a liquidation gated on the contract's own health check. |
 
 ## API Overview
@@ -110,16 +110,16 @@ Every write method takes an `Urgency` level that scales the EIP-1559 priority fe
 ### Market Data
 
 ```rust
-// Snapshot — config + live data in 2 multicalls (2 CUs instead of 5+)
+// Snapshot — config + live data, one block, in one multicall plus the index
 let (config, snapshot) = client.market().get_perp_snapshot().await?;
 
 // Or individually
-let mark     = client.market().get_mark_price().await?;        // f64 price
+let price    = client.market().get_pool_price().await?;        // the pool's spot price, f64
 let funding  = client.market().get_funding_rate().await?;      // daily rate
 let oi       = client.market().get_open_interest().await?;      // long/short OI
 let cap      = client.market().get_capacity().await?;           // capacity + OI at one block
 let headroom = cap.headroom_atoms(Side::Short);        // short OI still openable, perp atoms
-let fair     = client.market().get_fair_price().await?;         // the contract's mark (X96)
+let mark     = client.market().get_mark().await?;               // what the contract marks from; .fair_price_x96()
 let position = client.market().get_position(open.pos_id).await?; // raw on-chain Position
 
 // Storage at one block: the handle is the block, so nothing read through

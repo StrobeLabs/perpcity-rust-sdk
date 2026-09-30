@@ -93,7 +93,7 @@ pub use types::{
 pub use math::BlockContext;
 
 #[doc(inline)]
-pub use math::pricing::{FairPrice, fair_price, fair_price_x96};
+pub use math::pricing::{Mark, PricePair, calculate_emas, fair_price, fair_price_x96};
 
 #[doc(inline)]
 pub use math::maker_equity::{
@@ -108,9 +108,7 @@ pub use math::tick::{
 };
 
 #[doc(inline)]
-pub use math::swap::{
-    QuoteConstraints, QuoteLimit, TakerMarketSnapshot, TakerQuote, TickLiquidity,
-};
+pub use math::swap::{PoolSnapshot, QuoteConstraints, QuoteLimit, TakerQuote, TickLiquidity};
 
 #[doc(inline)]
 pub use math::capacity::{Capacity, MarketCapacity, band_capacity, liquidity_for_capacity};

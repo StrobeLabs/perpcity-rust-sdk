@@ -10,9 +10,8 @@
 //! | [`range`] | A maker's geometry: the validated tick range, and the band of liquidity in it, that the maker math is over |
 //! | [`liquidity`] | Liquidity sizing and band token amounts for maker positions |
 //! | [`position`] | Entry price, size, value, leverage, liquidation price |
-//! | [`ema`] | Contract-exact EMA advancement (Solady `expWad` port) |
-//! | [`pricing`] | The deployed pricing module's fair price (the contract's mark) |
-//! | [`swap`] | Local V4 taker swap simulation over a block-pinned book |
+//! | [`pricing`] | The pool price, the index, their contract-exact EMAs, and the mark: the deployed fair price |
+//! | [`swap`] | Local V4 taker swap simulation over a block-pinned pool |
 //! | [`maker_equity`] | Contract-exact maker settle preview over a block-pinned snapshot |
 //!
 //! Storage-slot derivation for the deployed contract layouts is not math
@@ -22,7 +21,6 @@ use alloy::primitives::B256;
 use serde::{Deserialize, Serialize};
 
 pub mod capacity;
-pub mod ema;
 pub(crate) mod fixed_point;
 pub mod liquidity;
 pub mod maker_equity;
@@ -34,7 +32,7 @@ pub mod tick;
 
 /// The block a market snapshot's state was read at.
 ///
-/// Shared by [`swap::TakerMarketSnapshot`] and
+/// Shared by [`swap::PoolSnapshot`] and
 /// [`maker_equity::MakerMarketSnapshot`]: every field in a snapshot comes
 /// from this one block, and chain reads derived from the snapshot pin to
 /// [`Self::hash`].

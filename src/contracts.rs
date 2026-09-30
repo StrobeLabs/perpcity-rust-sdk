@@ -420,7 +420,7 @@ sol! {
         function cumulatives() external view returns (Cumulatives memory);
 
         /// The stored EMA pair as of `rates().lastTouch`. Advance it to a
-        /// block with `math::ema::calculate_emas` before pricing with it.
+        /// block with `math::pricing::calculate_emas` before pricing with it.
         function emas() external view returns (PricePair memory);
 
         // ── ERC721 ─────────────────────────────────────────────────

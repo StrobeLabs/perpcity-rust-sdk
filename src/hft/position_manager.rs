@@ -1,7 +1,8 @@
 //! Position tracking with automated trigger evaluation.
 //!
 //! The [`PositionManager`] tracks open positions and evaluates stop-loss,
-//! take-profit, and trailing-stop triggers against the current mark price.
+//! take-profit, and trailing-stop triggers against the price the caller
+//! supplies each block.
 //!
 //! # Trigger precedence
 //!
@@ -229,7 +230,7 @@ impl PositionManager {
         self.positions.get_mut(&position_id)
     }
 
-    /// Evaluate all positions against per-perp mark prices.
+    /// Evaluate all positions against per-perp prices.
     ///
     /// Each position is only evaluated against the price for its own `perp_id`.
     /// Positions whose `perp_id` is not in the prices map are skipped.

@@ -20,14 +20,14 @@ use alloy::transports::{TransportError, TransportErrorKind};
 use futures_util::stream::{self, StreamExt};
 
 use crate::constants::MULTICALL3;
-use crate::contracts::{IMulticall3, IPoolManagerState, Maker, Perp, Position};
+use crate::contracts::{IBeacon, IMulticall3, IPoolManagerState, Maker, Perp, Position};
 use crate::convert::unpack_balance_delta;
 use crate::errors::{ContractError, PerpCityError, Result, ValidationError};
-use crate::math::ema::PricePair;
 use crate::math::maker_equity::{
     AccrualInputs, AccruedMakerSnapshot, MakerEquityBreakdown, MakerMarketSnapshot, MakerState,
     TickFunding, fee_growth_inside1,
 };
+use crate::math::pricing::{Mark, PricePair};
 use crate::math::tick::get_sqrt_ratio_at_tick;
 use crate::storage::{
     perp_tick_funding_slots, v4_fee_growth_global1_slot, v4_position_fee_growth_inside1_slot,
@@ -35,7 +35,8 @@ use crate::storage::{
 };
 
 use super::market::MarketReader;
-use super::queries::{MarkViews, multicall_error};
+use super::queries::{multicall_error, registered_module};
+use super::state::ema_window_secs;
 use super::{i24_to_i32, u24_to_u32};
 
 /// Concurrency bound for the `eth_getStorageAt` fallback when the endpoint
@@ -360,7 +361,7 @@ impl MarketReader {
     /// every chunk pinned to the same block.
     ///
     /// The mark that prices `valPnl` and the accrual replay is the
-    /// contract's own, the value [`Self::get_fair_price`] reads: the
+    /// contract's own, the value [`Self::get_mark`] reads: the
     /// deployed fair price ([`crate::math::pricing::fair_price_x96`]) of the
     /// pinned block's `poolState().ammPrice`, beacon index, and EMAs
     /// advanced to the block timestamp — exactly what `PerpLogic.accrue`
@@ -580,21 +581,23 @@ impl MarketReader {
                 .await
                 .map_err(multicall_error)?;
 
-        let mark_price_x96 = self
-            .contract_mark_x96(
-                &block,
-                MarkViews {
-                    beacon: modules.beacon,
-                    amm_price_x96: pool_state.ammPrice,
-                    stored_emas: PricePair {
-                        amm: stored_emas.ammPrice,
-                        index: stored_emas.index,
-                    },
-                    last_touch: rates.lastTouch.to::<u64>(),
-                    ema_window,
-                },
-            )
+        let beacon = registered_module(modules.beacon, "IBeacon")?;
+        let index = IBeacon::new(beacon, self.chain.provider())
+            .index()
+            .block(block_id)
+            .call()
             .await?;
+        let mark = Mark::advanced(
+            block,
+            pool_state.ammPrice,
+            index,
+            PricePair {
+                amm: stored_emas.ammPrice,
+                index: stored_emas.index,
+            },
+            rates.lastTouch.to::<u64>(),
+            ema_window_secs(ema_window)?,
+        )?;
 
         let market = MakerMarketSnapshot {
             block,
@@ -604,7 +607,7 @@ impl MarketReader {
             short_util_earnings_x96: cumls.shortUtilEarningsX96,
             tick: i24_to_i32(pool_state.tick),
             sqrt_price_x96: pool_state.sqrtPrice.to::<U256>(),
-            mark_price_x96,
+            mark_price_x96: mark.fair_price_x96(),
         }
         .accrued(&AccrualInputs {
             funding_per_day_wad: i128::try_from(rates.fundingPerDay)

@@ -278,9 +278,9 @@ async fn open_and_close_taker_on_fork() {
     println!("USDC approved");
 
     // 7. Read market data
-    let mark = client.market().get_mark_price().await.unwrap();
-    println!("Mark price: {mark}");
-    assert!(mark > 0.0, "mark price should be positive");
+    let pool_price = client.market().get_pool_price().await.unwrap();
+    println!("Pool price: {pool_price}");
+    assert!(pool_price > 0.0, "pool price should be positive");
 
     let funding = client.market().get_funding_rate().await.unwrap();
     println!("Daily funding rate: {funding}");
@@ -519,13 +519,13 @@ async fn perp_snapshot_via_multicall() {
     println!("PerpData:");
     println!("  perp: {}", perp_data.perp);
     println!("  tick_spacing: {}", perp_data.tick_spacing);
-    println!("  mark: {}", perp_data.mark);
+    println!("  pool_price: {}", perp_data.pool_price);
     println!("  beacon: {:?}", perp_data.beacon);
     println!("  bounds: {:?}", perp_data.bounds);
     println!("  fees: {:?}", perp_data.fees);
 
     println!("PerpSnapshot:");
-    println!("  mark_price: {}", snapshot.mark_price);
+    println!("  pool_price: {}", snapshot.pool_price);
     println!("  index_price: {}", snapshot.index_price);
     println!("  funding_rate_daily: {}", snapshot.funding_rate_daily);
     println!(
@@ -539,13 +539,13 @@ async fn perp_snapshot_via_multicall() {
         perp_data.tick_spacing > 0,
         "tick_spacing should be positive"
     );
-    assert!(perp_data.mark > 0.0, "mark price should be positive");
+    assert!(perp_data.pool_price > 0.0, "pool price should be positive");
     assert_ne!(perp_data.beacon, Address::ZERO, "beacon should not be zero");
 
     // 6. Verify PerpSnapshot
     assert!(
-        snapshot.mark_price > 0.0,
-        "snapshot mark price should be positive"
+        snapshot.pool_price > 0.0,
+        "snapshot pool price should be positive"
     );
     assert!(snapshot.index_price > 0.0, "index price should be positive");
     // Funding rate can be positive or negative, just check it's finite
@@ -554,21 +554,21 @@ async fn perp_snapshot_via_multicall() {
         "funding rate should be finite"
     );
 
-    // 7. Cross-check: mark price from snapshot should match PerpData
+    // 7. Cross-check: the pool price from the snapshot should match PerpData
     assert!(
-        (snapshot.mark_price - perp_data.mark).abs() < 0.0001,
-        "snapshot mark ({}) should match perp_data mark ({})",
-        snapshot.mark_price,
-        perp_data.mark,
+        (snapshot.pool_price - perp_data.pool_price).abs() < 0.0001,
+        "snapshot pool price ({}) should match perp_data pool price ({})",
+        snapshot.pool_price,
+        perp_data.pool_price,
     );
 
     // 8. Cross-check: individual methods should match multicall results
-    let mark_individual = client.market().get_mark_price().await.unwrap();
+    let pool_price_individual = client.market().get_pool_price().await.unwrap();
     assert!(
-        (snapshot.mark_price - mark_individual).abs() < 0.01,
-        "multicall mark ({}) should match individual ({})",
-        snapshot.mark_price,
-        mark_individual,
+        (snapshot.pool_price - pool_price_individual).abs() < 0.01,
+        "multicall pool price ({}) should match individual ({})",
+        snapshot.pool_price,
+        pool_price_individual,
     );
 
     let funding_individual = client.market().get_funding_rate().await.unwrap();

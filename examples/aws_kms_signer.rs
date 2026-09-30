@@ -66,7 +66,7 @@ async fn main() -> Result<()> {
 
     // -- Read market state, then open/close a tiny position via KMS signing --
     let config = client.market().get_perp_config().await?;
-    println!("mark price: {:.2}", config.mark);
+    println!("pool price: {:.2}", config.pool_price);
 
     let open = client
         .open_taker(
