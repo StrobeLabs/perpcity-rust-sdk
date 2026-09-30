@@ -16,7 +16,6 @@
 //! surface will return in a later stage (off-chain math or `eth_call`
 //! simulation).
 
-use alloy::eips::BlockId;
 use alloy::primitives::{Address, B256, U256};
 use alloy::providers::MulticallError;
 
@@ -328,34 +327,39 @@ impl MarketReader {
     /// Get perp config and live market data at the head, in one multicall
     /// plus the beacon index read.
     ///
-    /// Batches `modules` + `poolKey` + `poolState` + `rates` + `openInterest`
-    /// against the `Perp` contract at the latest block, then reads `index()`
-    /// on the beacon the batch named, pinned to the block the batch ran in:
-    /// every field of the snapshot is from that one block, which it
-    /// carries by number. Unlike a [`StateAt`](super::StateAt) read, the
-    /// block is the head at the moment of the call rather than one the
-    /// caller chose.
+    /// Resolves the lagged snapshot block (see
+    /// [`SNAPSHOT_BLOCK_LAG`](crate::constants::SNAPSHOT_BLOCK_LAG)) from the
+    /// node's header, batches `modules` + `poolKey` + `poolState` + `rates` +
+    /// `openInterest` against the `Perp` contract at it, then reads `index()`
+    /// on the beacon the batch named at the same block: every field of the
+    /// snapshot is from that one block, which it carries by number.
+    ///
+    /// The block comes from the header, not from Multicall3's
+    /// `blockAndAggregate`: on Arbitrum `block.number` inside the EVM is the
+    /// L1 block number and `blockhash` of it is zero, so it names no block
+    /// on the chain being read.
     ///
     /// Returns `(PerpData, PerpSnapshot)` — static config and live market data.
     ///
     /// # Errors
     ///
     /// [`ContractError::ModuleNotRegistered`] when the perp has no beacon;
-    /// [`ContractError::BlockUnavailable`] (transient) when the index read
-    /// lands on a replica that does not yet have the batch's block.
+    /// [`ContractError::BlockUnavailable`] (transient) when a read lands on
+    /// a replica that does not have the snapshot block.
     pub async fn get_perp_snapshot(&self) -> Result<(PerpData, PerpSnapshot)> {
         let perp = Perp::new(self.perp, self.chain.provider());
-        let (block, hash, (modules, pool_key, pool_state, rates, oi)) = self
+        let (block, id) = self.chain.lagged_snapshot_block().await?;
+        let (modules, pool_key, pool_state, rates, oi) = self
             .chain
-            .multicall_at(BlockId::latest())
+            .multicall_at(id)
             .add(perp.modules())
             .add(perp.poolKey())
             .add(perp.poolState())
             .add(perp.rates())
             .add(perp.openInterest())
-            .block_and_aggregate()
+            .aggregate()
             .await
-            .map_err(multicall_error)?;
+            .map_err(|e| pinned_read_error(multicall_error(e), block.number))?;
 
         let pool_price = price_x96_to_f64(pool_state.ammPrice)?;
         let funding_rate_daily = funding_per_day_to_f64(rates.fundingPerDay);
@@ -367,9 +371,9 @@ impl MarketReader {
         let beacon = registered_module(modules.beacon, "IBeacon")?;
         let index_price = self
             .chain
-            .index_price_at(beacon, BlockId::hash(hash))
+            .index_price_at(beacon, id)
             .await
-            .map_err(|e| pinned_read_error(e, block))?;
+            .map_err(|e| pinned_read_error(e, block.number))?;
 
         // Fees/bounds (from cache or chain).
         let fees = self.get_or_fetch_fees(modules.fees).await?;
@@ -385,7 +389,7 @@ impl MarketReader {
         };
 
         let snapshot = PerpSnapshot {
-            block,
+            block: block.number,
             pool_price,
             index_price,
             funding_rate_daily,
@@ -1029,13 +1033,21 @@ mod tests {
         ]
     }
 
-    /// The snapshot is one multicall for the `Perp`'s five views, the
-    /// beacon at the block the multicall ran in, and the slow layer —
+    /// Answer the head and the lagged header the snapshot pins to, so the
+    /// snapshot's block is `number`.
+    fn snapshot_block(rpc: &Rpc, number: u64) {
+        rpc.quantity(number + SNAPSHOT_BLOCK_LAG);
+        rpc.block(number, 1_700_000_000);
+    }
+
+    /// The snapshot is the lagged block, one multicall for the `Perp`'s
+    /// five views and the beacon at that block, and the slow layer —
     /// which a second snapshot skips. It carries that block.
     #[tokio::test]
     async fn perp_snapshot_is_one_block_plus_the_slow_layer() {
         let (client, rpc) = mock::client();
-        rpc.block_and_aggregate(100, B256::repeat_byte(0xa1), snapshot_views());
+        snapshot_block(&rpc, 100);
+        rpc.aggregate(100, snapshot_views());
         rpc.call::<IBeacon::indexCall>(&x96(5, 2));
         fees_answers(&rpc);
         bounds_answers(&rpc);
@@ -1065,9 +1077,13 @@ mod tests {
                 },
             }
         );
-        assert!(rpc.is_drained(), "multicall, index, fees, liqFee, ratios");
+        assert!(
+            rpc.is_drained(),
+            "blockNumber, header, multicall, index, fees, liqFee, ratios"
+        );
 
-        rpc.block_and_aggregate(101, B256::repeat_byte(0xa2), snapshot_views());
+        snapshot_block(&rpc, 101);
+        rpc.aggregate(101, snapshot_views());
         rpc.call::<IBeacon::indexCall>(&x96(5, 2));
         assert_eq!(
             client.market().get_perp_snapshot().await.unwrap(),
@@ -1082,13 +1098,32 @@ mod tests {
         assert!(rpc.is_drained(), "fees and bounds came from the slow layer");
     }
 
-    /// The index read is pinned to the batch's block, so a replica behind
-    /// the one that ran the batch refuses it: a transient failure naming
+    /// The block is the node's header, never Multicall3's own
+    /// `block.number`: on Arbitrum that is the L1 block number, and a read
+    /// pinned to it names no block on the chain.
+    #[tokio::test]
+    async fn perp_snapshot_block_is_the_header_not_the_evm_block_number() {
+        const L1_BLOCK: u64 = 26_090_712;
+        let (client, rpc) = mock::client();
+        snapshot_block(&rpc, 510_368_453);
+        rpc.aggregate(L1_BLOCK, snapshot_views());
+        rpc.call::<IBeacon::indexCall>(&x96(5, 2));
+        fees_answers(&rpc);
+        bounds_answers(&rpc);
+
+        let (_, snapshot) = client.market().get_perp_snapshot().await.unwrap();
+        assert_eq!(snapshot.block, 510_368_453);
+        assert!(rpc.is_drained());
+    }
+
+    /// Every read is pinned to the snapshot block, so a replica behind the
+    /// one that served the header refuses it: a transient failure naming
     /// the block, not an opaque one a retry loop would give up on.
     #[tokio::test]
     async fn perp_snapshot_on_a_lagging_replica_is_block_unavailable() {
         let (client, rpc) = mock::client();
-        rpc.block_and_aggregate(100, B256::repeat_byte(0xa1), snapshot_views());
+        snapshot_block(&rpc, 100);
+        rpc.aggregate(100, snapshot_views());
         rpc.fails("header not found");
 
         let err = client.market().get_perp_snapshot().await.unwrap_err();
@@ -1113,11 +1148,8 @@ mod tests {
             beacon: Address::ZERO,
             ..mock::modules()
         });
-        rpc.block_and_aggregate(
-            100,
-            B256::repeat_byte(0xa1),
-            [modules, pool_key, pool_state, rates, oi],
-        );
+        snapshot_block(&rpc, 100);
+        rpc.aggregate(100, [modules, pool_key, pool_state, rates, oi]);
 
         let err = client.market().get_perp_snapshot().await.unwrap_err();
         assert!(
