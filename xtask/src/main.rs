@@ -1,20 +1,10 @@
-//! Repo tooling. `cargo xtask design` reads the design nodes' type tables,
-//! resolves every name against rustdoc's JSON, verifies what the tables
-//! claim against the real signatures, checks the graph-level invariants,
-//! and draws the type graph as an interactive page.
-
-mod design;
-mod index;
-mod invariants;
-mod nodes;
-mod page;
-mod report;
-mod rustdoc;
+//! The `cargo xtask` entry point; the work is in the library.
 
 use std::env;
 use std::process::ExitCode;
 
 use anyhow::{Result, bail};
+use xtask::design;
 
 const HELP: &str = "\
 cargo xtask design [--check] [--fmt] [--report] [--open]

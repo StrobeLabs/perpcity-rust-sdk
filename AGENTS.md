@@ -64,6 +64,7 @@ cargo clippy --all-targets            # zero warnings
 cargo test
 RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features
 cargo xtask design --check            # needs the nightly named in xtask/src/rustdoc.rs
+cargo test -p xtask                   # when xtask changed: every invariant fires on its plant
 ```
 
 The design check resolves every name in every `DESIGN.md` against

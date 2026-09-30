@@ -250,6 +250,12 @@ Two more are reported, not enforced, until #124's unit conversions land:
 no `f64` in a function or field whose name carries a wire suffix, and a
 suffixed field has the primitive its suffix names.
 
+Each enforced invariant is proven able to fail. `xtask/tests/fixture/lib.rs`
+is a crate shaped like this one with one planted violation per invariant
+and, beside each, a neighbour that must not fire; the test documents it
+with the same rustdoc and asserts that every plant, and nothing else, is
+reported. A new invariant is not enforced until it has its plant.
+
 ## Efficiency
 
 Efficiency here is not speed. It is three currencies, and a component

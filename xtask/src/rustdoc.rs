@@ -21,9 +21,10 @@ pub fn target_dir(root: &Path) -> std::path::PathBuf {
     root.join("target/design")
 }
 
-/// Run rustdoc with JSON output and load the crate.
-pub fn load(root: &Path) -> Result<Crate> {
-    let toolchain = match env::var("DESIGN_TOOLCHAIN") {
+/// The toolchain to document with: `DESIGN_TOOLCHAIN`, else the pinned
+/// nightly when installed, else plain `nightly`.
+pub fn toolchain() -> String {
+    match env::var("DESIGN_TOOLCHAIN") {
         Ok(t) => t,
         Err(_) if installed(TOOLCHAIN) => TOOLCHAIN.to_string(),
         Err(_) => {
@@ -32,7 +33,32 @@ pub fn load(root: &Path) -> Result<Crate> {
             );
             "nightly".to_string()
         }
-    };
+    }
+}
+
+/// The flags that make rustdoc emit the JSON the tool reads: private items
+/// too, since a private field or helper is evidence that a type is built
+/// from another, and the surface is filtered by the index.
+pub const FLAGS: &str = "-Z unstable-options --output-format json --document-private-items";
+
+/// Parse a JSON file rustdoc wrote, refusing a format the crate does not
+/// speak.
+pub fn parse(path: &Path, toolchain: &str) -> Result<Crate> {
+    let text = fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    let krate: Crate = serde_json::from_str(&text).context("parsing rustdoc JSON")?;
+    if krate.format_version != FORMAT_VERSION {
+        bail!(
+            "rustdoc JSON format {} from toolchain {toolchain}, but rustdoc-types expects {}; use {TOOLCHAIN} (DESIGN_TOOLCHAIN) or bump the two together",
+            krate.format_version,
+            FORMAT_VERSION
+        );
+    }
+    Ok(krate)
+}
+
+/// Run rustdoc with JSON output and load the crate.
+pub fn load(root: &Path) -> Result<Crate> {
+    let toolchain = toolchain();
     let target = target_dir(root);
     let status = Command::new("rustup")
         .args([
@@ -47,29 +73,14 @@ pub fn load(root: &Path) -> Result<Crate> {
             "--target-dir",
         ])
         .arg(&target)
-        // Private items too: a private field or helper is evidence that a
-        // type is built from another, and the surface is filtered here.
-        .env(
-            "RUSTDOCFLAGS",
-            "-Z unstable-options --output-format json --document-private-items",
-        )
+        .env("RUSTDOCFLAGS", FLAGS)
         .current_dir(root)
         .status()
         .context("running rustdoc; is rustup installed?")?;
     if !status.success() {
         bail!("rustdoc failed under toolchain {toolchain}");
     }
-    let path = target.join("doc/perpcity_sdk.json");
-    let text = fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
-    let krate: Crate = serde_json::from_str(&text).context("parsing rustdoc JSON")?;
-    if krate.format_version != FORMAT_VERSION {
-        bail!(
-            "rustdoc JSON format {} from toolchain {toolchain}, but rustdoc-types expects {}; use {TOOLCHAIN} (DESIGN_TOOLCHAIN) or bump the two together",
-            krate.format_version,
-            FORMAT_VERSION
-        );
-    }
-    Ok(krate)
+    parse(&target.join("doc/perpcity_sdk.json"), &toolchain)
 }
 
 /// Whether rustup has the toolchain.

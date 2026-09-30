@@ -88,3 +88,8 @@ jobs:
       - run: cargo xtask design --check
         env:
           DESIGN_TOOLCHAIN: nightly-2026-04-23
+      # The invariants are proven able to fail: a fixture crate with one
+      # planted violation each, documented by the same rustdoc.
+      - run: cargo test --locked -p xtask
+        env:
+          DESIGN_TOOLCHAIN: nightly-2026-04-23
