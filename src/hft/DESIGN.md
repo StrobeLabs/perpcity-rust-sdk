@@ -32,7 +32,8 @@ or a receipt never comes, the nonce's fate is unknowable locally: the
 transaction may have landed. The wrong answers are to reuse the nonce
 (collides if it landed) or to rewind (spins forever if it landed). The
 pipeline instead marks the sequence desynced, refuses new sends until
-nothing is in flight, then resyncs from the chain, the only authority.
+nothing is in flight or being prepared, then resyncs from the chain, the
+only authority.
 `NonceDesynced` is transient by design: it clears itself.
 
 **Time is a parameter.** Every cache and tracker takes an explicit

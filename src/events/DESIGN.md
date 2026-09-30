@@ -44,8 +44,9 @@ they are, and converted downstream only by code that knows why.
 **Unknown is `None`, never a guess.** A log the decoder does not
 recognise, an admin event, an ERC-20 transfer sharing the ERC-721
 `Transfer` topic, returns `None` and the caller skips it. A log the
-decoder does recognise but cannot decode is an error, because a gap in
-a tape is worse than a failure.
+decoder does recognise but cannot decode should be an error, because a
+gap in a tape is worse than a failure; today it is also `None`, which is
+the first debt below.
 
 ## The mental model
 
@@ -90,7 +91,7 @@ already knows which subscription delivered it.
                           ┌───────────────────┐
                           │    decode_log     │   one function
                           │  every era's ABI  │   unknown → None
-                          └─────────┬─────────┘   malformed → error
+                          └─────────┬─────────┘   malformed → None today; should be an error
                                     ▼
                           ┌───────────────────┐
                           │    MarketEvent    │   human units; raw where exact
@@ -120,7 +121,7 @@ transport, only against the vocabulary.
 
 | Type | Invariant | Produced by | Consumed by |
 |---|---|---|---|
-| [`MarketEvent`] | one event, either tense: the same value from the same log, however delivered; human units; unknown shapes are `None`, malformed known shapes an error | [`decode_log`], the one decoder, which knows every era's shape; delivered live by [`MarketFeed::next`](crate::feeds::MarketFeed::next) | [`TapeEvent`](crate::history::TapeEvent), which stamps it with its chain point; the trades on [`PerpClient`](crate::client::PerpClient), which read a swap's deltas from the receipt's events rather than the request. The strategy layer's live cache and research folds match on it, and the ownership fold in `history` is the model: one `match`, either tense. |
+| [`MarketEvent`] | one event, either tense: the same value from the same log, however delivered; human units; unknown shapes are `None`; a malformed known shape should be an error and is `None` today | [`decode_log`], the one decoder, which knows every era's shape; delivered live by [`MarketFeed::next`](crate::feeds::MarketFeed::next) | [`TapeEvent`](crate::history::TapeEvent), which stamps it with its chain point; the trades on [`PerpClient`](crate::client::PerpClient), which read a swap's deltas from the receipt's events rather than the request. The strategy layer's live cache and research folds match on it, and the ownership fold in `history` is the model: one `match`, either tense. |
 | [`SwapInfo`] | a taker swap's outcome: the four fee legs sum to the total; deltas are the swap's, signed as V4 signs them | the decoder, inside `TakerOpened`, `TakerAdjusted` and `TakerClosed` | the taker trades' results, which report the realised deltas; the strategy layer's economics, which attribute each fee leg exactly rather than by a ratio on an aggregate. |
 | [`MakerSettle`] | what a touch credited a maker: the settle the chain performed, not a preview | the decoder, inside the maker events | nothing in the crate. The strategy layer's maker income folds; the settle preview in `math` is checked against these. |
 | [`CumulativesInfo`] | the accounting trackers at an accrual: raw X96 and X128, verbatim; conversion is the consumer's | the decoder, inside `CumulativesAccrued` | nothing in the crate. The strategy layer's reconciliation of accruals against settles. |
@@ -164,9 +165,14 @@ one kind may.
 
 ## Debts
 
+- **A malformed known log vanishes.** `decode_log` returns `Option`, and
+  a recognised topic whose data fails to decode is `None`, the same as an
+  unknown log, so a scan skips it and the tape has a silent gap. The
+  design wants a typed error there, propagated through the feed and the
+  scans; the change is a signature change for every caller.
 - **Maker events carry no price.** A maker's inventory PnL is therefore
   not on the tape; only its income is. The next contract era's events
-  are the fix, and the research crate's reconciliation names the gap
+  are the fix, and the strategy layer's reconciliation names the gap
   until then.
 - **`ModifyLiquidity` and `IndexUpdated` are in the vocabulary but not on
   a market's tape**, because they are emitted by other addresses. A tape

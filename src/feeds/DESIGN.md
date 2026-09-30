@@ -40,7 +40,7 @@ one block hash. A consumer never sees a snapshot whose fields came from
 different blocks, and a failed refresh leaves the last good snapshot in
 place with its age visible.
 
-**Costs are per subscription, not per read.** A header subscription
+**A subscription's cost is per event held open, not per read.** A header subscription
 bills every block on some providers; on a chain producing four blocks a
 second that burned a monthly allotment once. The strategy layer replaced
 it with a base-fee poller for that reason. A feed that is cheap to read is not
@@ -81,8 +81,9 @@ The connection under all three is the WebSocket manager, which is
 
 ## Efficiency
 
-A feed's currency is subscriptions, and its cost is per event held
-open, not per read.
+A subscription-backed feed's currency is subscriptions, and its cost is
+per event held open, not per read; the taker feed is read-backed and
+pays per refresh instead.
 
 - **`MarketFeed`** is one subscription: one log filter over two
   addresses, the market and its beacon. Reading it costs nothing; every

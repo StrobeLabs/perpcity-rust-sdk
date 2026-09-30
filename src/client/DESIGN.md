@@ -89,8 +89,11 @@ header once; every read on it is pinned to the hash, and the results
 carry the block. Its reads have no prefix: `capacity`, `pool`, `mark`,
 `solvency`, `position`, `maker_band`. The three reads that once pinned
 their own block each (capacity, margin ratios, the pool) live here, and
-`MarketReader` keeps a one-line `get_*` convenience over a fresh handle
-for callers that want one value and do not care about agreement.
+`MarketReader` keeps four one-line conveniences over a fresh lagged
+handle for callers that want one value and do not care about agreement:
+`get_capacity`, `get_margin_ratios`, `get_pool_snapshot` and `get_mark`.
+Those four are the `get_*` reads whose block is the lagged snapshot
+block rather than the head; their results carry it.
 
 `PerpClient` is a signer on a market: a `MarketReader` plus the wallet
 and the transaction pipeline. Every write goes through it, and it is
@@ -240,6 +243,7 @@ views it batches.
 | `get_perp_snapshot` | 1 multicall + 1 pinned index, plus the slow layer on a miss | one block, the head | slow layer for fees and bounds |
 | `state()` | 2 (block number, header) | lagged | no |
 | `state_at(n)` | 1 (header) | named | no |
+| `get_capacity`, `get_margin_ratios`, `get_pool_snapshot`, `get_mark` | `state()` plus the pinned read below | lagged | as the pinned read |
 | `StateAt::solvency`, `next_pos_id`, `position`, `maker_band`, `pool_tick`, `collateral` | 1 each | pinned | no |
 | `StateAt::capacity` | 1 multicall | pinned | no |
 | `StateAt::margin_ratios` | 3 | pinned | no |

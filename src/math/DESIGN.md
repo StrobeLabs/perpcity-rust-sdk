@@ -83,11 +83,12 @@ token amounts a band holds at a price.
 Three coordinate systems for one axis, and the geometry lives in the
 third. A tick is an integer on a grid of spacing 30; its price is
 `1.0001^tick`; the pool stores the square root of that price times
-`2^96`, and every amount formula is linear in the square root. That is
-why liquidity `L` is the pool's own unit rather than a token amount: for
-a fixed `L`, the USD a band holds below the price and the perp it holds
-above are both differences of square roots, so moving the price just
-slides the boundary between the two legs. The lower leg is USD waiting
+`2^96`, and every amount formula is linear in that square root or in
+its reciprocal. That is why liquidity `L` is the pool's own unit rather
+than a token amount: for a fixed `L`, the USD a band holds below the
+price is a difference of square roots and the perp it holds above is a
+difference of their reciprocals, so moving the price just slides the
+boundary between the two legs. The lower leg is USD waiting
 to buy, so it backs shorts; the upper leg is perp waiting to be sold, so
 it backs longs. A `MakerBand` is the range and the `L`, and every sizing
 and capacity function is one of these two formulas or its inverse.

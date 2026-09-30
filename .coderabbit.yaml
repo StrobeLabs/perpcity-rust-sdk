@@ -34,7 +34,8 @@ reviews:
       instructions: |
         Read src/events/DESIGN.md. One decoder, every era's shape, human
         units except the raw accounting trackers; unknown logs are None,
-        malformed known logs are errors.
+        a malformed known log is a recorded debt (it is None today and
+        should be a typed error).
     - path: "src/errors/**"
       instructions: |
         Read src/errors/DESIGN.md. A variant exists because a caller branches

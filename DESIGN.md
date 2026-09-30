@@ -68,7 +68,7 @@ that can be one request is one request.
 
 **A market is one contract.** A `Perp` is a market: its own Uniswap V4
 pool (token 0 the perp, token 1 the collateral, USDC), its own positions
-numbered as NFTs, its own funding, fees and solvency, and five modules
+numbered as NFTs, its own funding, fees and solvency, and six modules
 governance can swap: the beacon it takes its index from, and the fees,
 funding, margin-ratio, price-impact and pricing rules it delegates to.
 There is no market id. The contract's address is the market, and every
@@ -145,7 +145,7 @@ is human. Conversion happens at the crate's surface, once, in `convert`,
 and never in the middle of math.
 
 **Sending is a pipeline with an execution model.** Prepare with no RPC
-(nonce from the manager, gas from the cache, sign locally), broadcast,
+(nonce from the manager, gas from the cache), sign locally, broadcast,
 then poll for the receipt. Each stage has its own failure variants, and
 the nonce manager's job is to make the account's next nonce a fact the
 pipeline owns rather than a race with the node.
