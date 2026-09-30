@@ -1,12 +1,13 @@
 //! Write operations: open, close, adjust positions, transfers, approvals.
 
 use alloy::primitives::{Address, B256, Bytes, I256, U256};
+use alloy::rpc::types::{Log as RpcLog, TransactionReceipt};
 use alloy::sol_types::SolEvent;
 
 use crate::constants::{MAX_TICK, MIN_OPENING_MARGIN, MIN_TICK, TICK_SPACING};
-use crate::contracts::{IERC20, Perp};
-use crate::convert::{scale_from_6dec, scale_to_6dec};
-use crate::errors::{ContractError, Result, ValidationError};
+use crate::contracts::{IERC20, Perp, Position};
+use crate::convert::{scale_from_6dec, scale_to_6dec, unpack_balance_delta};
+use crate::errors::{ContractError, Result, TransactionError, ValidationError};
 use crate::feeds::{MarketEvent, decode_log};
 use crate::hft::gas::{GasLimits, Urgency};
 use crate::math::tick::{align_tick_down, align_tick_up, price_to_tick};
@@ -22,9 +23,7 @@ use super::{MAX_APPROVAL, PerpClient, i32_to_i24};
 ///
 /// The Perp contract inherits ERC721 and mints a position NFT on open.
 /// The standard Transfer event carries the token ID.
-fn parse_minted_token_id(
-    receipt: &alloy::rpc::types::TransactionReceipt,
-) -> std::result::Result<U256, ContractError> {
+fn parse_minted_token_id(receipt: &TransactionReceipt) -> std::result::Result<U256, ContractError> {
     // ERC721 Transfer event: Transfer(address indexed from, address indexed to, uint256 indexed tokenId)
     // topic0 = keccak256("Transfer(address,address,uint256)")
     let transfer_topic = IERC20::Transfer::SIGNATURE_HASH;
@@ -52,7 +51,7 @@ fn parse_minted_token_id(
 /// `TakerAdjusted` with a zero-delta swap — so on the taker paths `None` means
 /// a decode/ABI failure, which the caller surfaces as an error rather than a
 /// zero fill. (Maker opens emit no taker swap, but they don't call this.)
-fn parse_taker_swap(receipt: &alloy::rpc::types::TransactionReceipt) -> Option<(f64, f64)> {
+fn parse_taker_swap(receipt: &TransactionReceipt) -> Option<(f64, f64)> {
     for log in receipt.inner.logs() {
         if let Some(
             MarketEvent::TakerOpened { swap, .. }
@@ -64,6 +63,43 @@ fn parse_taker_swap(receipt: &alloy::rpc::types::TransactionReceipt) -> Option<(
         }
     }
     None
+}
+
+/// Read the realized swap from a taker adjust or close receipt.
+///
+/// Every taker adjust emits a decodable event — `TakerAdjusted` (a
+/// margin-only adjust carries a zero-delta swap) or `TakerClosed` on a full
+/// close. A missing one signals an ABI/decode problem, so fail loudly rather
+/// than recording a bogus zero fill.
+fn adjust_taker_result(receipt: &TransactionReceipt) -> Result<AdjustTakerResult> {
+    let (perp_delta, usd_delta) =
+        parse_taker_swap(receipt).ok_or(ContractError::EventNotFound {
+            event_name: "TakerAdjusted/TakerClosed".into(),
+        })?;
+    Ok(AdjustTakerResult {
+        tx_hash: receipt.transaction_hash,
+        perp_delta,
+        usd_delta,
+    })
+}
+
+/// The perp delta that closes a position: its on-chain perp amount, reversed.
+fn closing_perp_delta(position: &Position) -> i128 {
+    let (perp_atoms, _usd_atoms) = unpack_balance_delta(position.delta);
+    -perp_atoms
+}
+
+/// Whether these logs carry the `TakerClosed` event for `pos_id`.
+///
+/// A close whose swap leaves any perp delta mines as `TakerAdjusted`
+/// instead, with the position still open.
+fn closes_taker(logs: &[RpcLog], pos_id: U256) -> bool {
+    logs.iter().any(|log| {
+        matches!(
+            decode_log(log),
+            Some(MarketEvent::TakerClosed { pos_id: closed, .. }) if closed == pos_id
+        )
+    })
 }
 
 /// Scale and validate position margin against the protocol's opening minimum.
@@ -245,6 +281,16 @@ impl PerpClient {
         params: &ExactAdjustTakerParams,
         urgency: Urgency,
     ) -> Result<AdjustTakerResult> {
+        let receipt = self.send_adjust_taker(params, urgency).await?;
+        adjust_taker_result(&receipt)
+    }
+
+    /// Broadcast `adjustTaker` and wait for its receipt.
+    async fn send_adjust_taker(
+        &self,
+        params: &ExactAdjustTakerParams,
+        urgency: Urgency,
+    ) -> Result<TransactionReceipt> {
         let wire_params = crate::contracts::AdjustTakerParams {
             posId: params.pos_id,
             marginDelta: params.margin_delta,
@@ -271,55 +317,47 @@ impl PerpClient {
             .await?;
 
         tracing::debug!(pos_id = %params.pos_id, "taker position adjusted");
-        // Every taker adjust emits a decodable event — `TakerAdjusted` (a
-        // margin-only adjust carries a zero-delta swap) or `TakerClosed` on a
-        // full close. A missing one signals an ABI/decode problem, so fail
-        // loudly rather than recording a bogus zero fill.
-        let (perp_delta, usd_delta) =
-            parse_taker_swap(&receipt).ok_or(ContractError::EventNotFound {
-                event_name: "TakerAdjusted/TakerClosed".into(),
-            })?;
-        Ok(AdjustTakerResult {
-            tx_hash: receipt.transaction_hash,
-            perp_delta,
-            usd_delta,
-        })
+        Ok(receipt)
     }
 
-    /// Close a taker position by reversing its full perp delta.
+    /// Close a taker position at market.
     ///
-    /// Reversing the entire delta drives the position's notional to exactly
-    /// zero, which the contract settles automatically: it returns the
-    /// position's equity (remaining margin + realized PnL) to the caller and
-    /// burns the position NFT. No separate margin withdrawal is required.
+    /// Reads the position's perp delta on-chain and reverses it exactly. The
+    /// contract closes a taker only when its remaining perp delta is zero,
+    /// to the atom: it then pays the position's equity (margin plus realized
+    /// PnL, less fees and funding) to the caller and burns the NFT. A delta
+    /// that is off by one atom leaves the position open with all its margin,
+    /// which is why the delta comes from the chain and not from the caller.
     ///
-    /// `current_perp_delta` must be the position's **full** signed delta
-    /// (positive = long, negative = short), typically from locally tracked
-    /// state. If it does not match the on-chain delta exactly, the position
-    /// will not fully close (and the contract may revert).
+    /// Fails with [`TransactionError::TakerNotClosed`] when the close mines
+    /// as an adjust instead: the position changed between the read and the
+    /// block the close landed in. The error is transient; a retry reads the
+    /// delta again.
     ///
     /// This is a market close: slippage is unconstrained. The `amt1` limit is
     /// set to the no-op sentinel for the swap direction — selling (reversing a
     /// long) floors the USD received at `0`; buying (reversing a short) caps
     /// the USD paid at `u128::MAX`. For a protected close, call
-    /// [`Self::adjust_taker`] directly with an explicit `amt1_limit`.
-    pub async fn close_taker(
-        &self,
-        pos_id: U256,
-        current_perp_delta: f64,
-        urgency: Urgency,
-    ) -> Result<AdjustTakerResult> {
-        let perp_delta = -current_perp_delta;
-        self.adjust_taker(
-            &AdjustTakerParams {
+    /// [`Self::adjust_taker_exact`] with an explicit `amt1_limit` and the
+    /// position's exact delta.
+    pub async fn close_taker(&self, pos_id: U256, urgency: Urgency) -> Result<AdjustTakerResult> {
+        let position = self.market.get_position(pos_id).await?;
+        let perp_delta = closing_perp_delta(&position);
+        let params = ExactAdjustTakerParams {
+            pos_id,
+            margin_delta: 0,
+            perp_delta,
+            amt1_limit: if perp_delta > 0 { u128::MAX } else { 0 },
+        };
+        let receipt = self.send_adjust_taker(&params, urgency).await?;
+        if !closes_taker(receipt.inner.logs(), pos_id) {
+            return Err(TransactionError::TakerNotClosed {
+                tx_hash: receipt.transaction_hash,
                 pos_id,
-                margin_delta: 0.0,
-                perp_delta,
-                amt1_limit: if perp_delta > 0.0 { u128::MAX } else { 0 },
-            },
-            urgency,
-        )
-        .await
+            }
+            .into());
+        }
+        adjust_taker_result(&receipt)
     }
 
     /// Adjust a maker position (margin, liquidity, or both).
@@ -410,7 +448,7 @@ impl PerpClient {
     /// serial `eth_call` only costs time in the race.
     ///
     /// A contract revert surfaces as
-    /// [`TransactionError::SimulationReverted`](crate::errors::TransactionError::SimulationReverted);
+    /// [`TransactionError::SimulationReverted`];
     /// triage it typed via
     /// [`TransactionError::is_revert`](crate::errors::TransactionError::is_revert):
     ///
@@ -447,7 +485,7 @@ impl PerpClient {
     /// the pinned limit before broadcast, so a position that turns out
     /// healthy (or was already liquidated by a competitor) surfaces as a
     /// decoded
-    /// [`TransactionError::SimulationReverted`](crate::errors::TransactionError::SimulationReverted)
+    /// [`TransactionError::SimulationReverted`]
     /// without burning gas. Reserve the simulate twin for scanning.
     ///
     /// Sends with the fixed [`GasLimits::LIQUIDATE`] bound instead of
@@ -458,7 +496,7 @@ impl PerpClient {
         pos_id: U256,
         fee_recipient: Address,
         urgency: Urgency,
-    ) -> Result<alloy::rpc::types::TransactionReceipt> {
+    ) -> Result<TransactionReceipt> {
         self.send_liquidation(Book::Maker, pos_id, fee_recipient, urgency)
             .await
     }
@@ -490,14 +528,14 @@ impl PerpClient {
     /// Safe to call directly in the race, exactly like
     /// [`Self::liquidate_maker`]: the send preflights at the pinned
     /// [`GasLimits::LIQUIDATE`] bound, so a would-be revert decodes into
-    /// [`TransactionError::SimulationReverted`](crate::errors::TransactionError::SimulationReverted)
+    /// [`TransactionError::SimulationReverted`]
     /// instead of burning gas on-chain.
     pub async fn liquidate_taker(
         &self,
         pos_id: U256,
         fee_recipient: Address,
         urgency: Urgency,
-    ) -> Result<alloy::rpc::types::TransactionReceipt> {
+    ) -> Result<TransactionReceipt> {
         self.send_liquidation(Book::Taker, pos_id, fee_recipient, urgency)
             .await
     }
@@ -511,7 +549,7 @@ impl PerpClient {
         pos_id: U256,
         fee_recipient: Address,
         urgency: Urgency,
-    ) -> Result<alloy::rpc::types::TransactionReceipt> {
+    ) -> Result<TransactionReceipt> {
         validate_fee_recipient(fee_recipient)?;
         let calldata = book.liquidation_calldata(pos_id, fee_recipient);
 
@@ -673,7 +711,86 @@ impl PerpClient {
 
 #[cfg(test)]
 mod tests {
-    use super::scale_opening_margin;
+    use alloy::primitives::{Address, I256, U256, Uint};
+
+    use super::{closes_taker, closing_perp_delta, scale_opening_margin};
+    use crate::constants::Q96;
+    use crate::contracts::{Perp, Position, SwapResult};
+    use crate::convert::pack_balance_delta;
+    use crate::events::rpc_log;
+
+    fn position(perp_atoms: i128, usd_atoms: i128) -> Position {
+        Position {
+            delta: pack_balance_delta(perp_atoms, usd_atoms),
+            margin: 3_936_538_407,
+            liqMarginRatio: Uint::ZERO,
+            backstopMarginRatio: Uint::ZERO,
+            lastCumlFundingX96: I256::ZERO,
+        }
+    }
+
+    fn swap(perp_atoms: i128) -> SwapResult {
+        SwapResult {
+            delta: pack_balance_delta(perp_atoms, -perp_atoms * 46),
+            ammPrice: Q96,
+            totalFeeAmt: I256::ZERO,
+            lpFeeAmt: U256::ZERO,
+            protocolFeeAmt: U256::ZERO,
+            creatorFeeAmt: U256::ZERO,
+            insuranceFeeAmt: U256::ZERO,
+        }
+    }
+
+    fn closed(pos_id: u64) -> Perp::TakerClosed {
+        Perp::TakerClosed {
+            posId: U256::from(pos_id),
+            sr: swap(-85_908_380),
+            funding: I256::ZERO,
+            utilFees: U256::ZERO,
+            liqFee: U256::ZERO,
+            isLiquidation: false,
+        }
+    }
+
+    fn adjusted(pos_id: u64) -> Perp::TakerAdjusted {
+        Perp::TakerAdjusted {
+            posId: U256::from(pos_id),
+            sr: swap(-85_908_381),
+            funding: I256::ZERO,
+            utilFees: U256::ZERO,
+        }
+    }
+
+    /// The close reverses the perp amount exactly, whatever the USD leg.
+    #[test]
+    fn the_closing_delta_reverses_the_perp_amount_to_the_atom() {
+        assert_eq!(
+            closing_perp_delta(&position(85_908_380, -3_998_080_483)),
+            -85_908_380
+        );
+        assert_eq!(
+            closing_perp_delta(&position(-12_020_548, 797_292_655)),
+            12_020_548
+        );
+        // What an f64 close one atom long leaves behind: one atom short.
+        assert_eq!(closing_perp_delta(&position(-1, -1_393_793)), 1);
+    }
+
+    /// A close is only a close when the contract says `TakerClosed` for
+    /// that position; a swap that left any delta mines as `TakerAdjusted`.
+    #[test]
+    fn only_a_taker_closed_event_for_the_position_is_a_close() {
+        let pos_id = U256::from(1837u64);
+        let perp = Address::repeat_byte(0x11);
+
+        assert!(closes_taker(&[rpc_log(&closed(1837), perp)], pos_id));
+        assert!(!closes_taker(&[rpc_log(&adjusted(1837), perp)], pos_id));
+        assert!(
+            !closes_taker(&[rpc_log(&closed(1791), perp)], pos_id),
+            "another position's close does not close this one"
+        );
+        assert!(!closes_taker(&[], pos_id));
+    }
 
     #[test]
     fn opening_margin_enforces_protocol_minimum() {
