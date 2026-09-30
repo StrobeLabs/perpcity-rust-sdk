@@ -17,6 +17,8 @@
 //! [`Deserialize`] for logging, dashboards, persistence,
 //! and inter-process communication.
 
+#![doc = include_str!("types/DESIGN.md")]
+
 use std::fmt;
 
 use alloy::primitives::{Address, B256, U256};

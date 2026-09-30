@@ -129,28 +129,28 @@ that carries it, the invariant it holds, and the node that owns it.
 
 | Concept | Type | Invariant | Home |
 |---|---|---|---|
-| A chain | `ChainReader` | one transport, one deployment set, shared caches | `client` |
-| A market, now | `MarketReader` | one `Perp` over a `ChainReader`; every read is current | `client` |
-| A market, at a block | `StateAt` | the handle is the block; every read pinned to its hash | `client` |
-| A market with a signer | `PerpClient` | a `MarketReader` plus the send pipeline | `client` |
-| A send | `TxBuilder` | one transaction, one nonce, one outcome | `client` |
-| A tick interval | `TickRange` | `lower < upper`, both in the V4 domain, checked at construction | `math::range` |
-| A maker's geometry | `MakerBand` | a `TickRange` with liquidity | `math::range` |
-| The mark's inputs | `Mark` | pool price, index and EMAs from one block, advanced to it | `math::pricing` |
-| A price pair | `PricePair` | the contract's `uint128` pair, spot or EMA | `math::pricing` |
-| Capacity and its draw | `MarketCapacity` | capacity and open interest from one block | `math::capacity` |
-| The pool at a block | `PoolSnapshot` | price, liquidity and a tick map that reconciles with it | `math::swap` |
-| A settle previewed | `MakerEquityBreakdown` | exact atoms, the contract's arithmetic | `math::maker_equity` |
-| A block | `BlockContext` | number, hash, timestamp of one header | `math` |
-| An event | `MarketEvent` | the market's vocabulary, human units, either tense | `events` |
-| An event in chain order | `TapeEvent`, `ChainPoint` | block and log index | `history` |
-| Custody over time | `OwnershipLog` | a fold of transfers; owner at a chain point | `history` |
-| A print | `IndexPrint` | the index at a chain point and time | `history` |
-| A failure | `PerpCityError` | typed, with a stated transience | `errors` |
-| A transport | `HftTransport` | many endpoints, one provider, reads and writes classified | `transport` |
-| The send path | `TxPipeline`, `NonceManager` | zero RPC to prepare; the next nonce is owned | `hft` |
-| The chain's shapes | `contracts`, `storage` | bindings match deployed bytecode; slots match the deployed layout | `contracts` |
-| The human surface | `types`, `convert` | inert data in human units; conversion once, at the edge | `types` |
+| A chain | [`ChainReader`] | one transport, one deployment set, shared caches | [`client`] |
+| A market, now | [`MarketReader`] | one `Perp` over a `ChainReader`; every read is current | [`client`] |
+| A market, at a block | [`StateAt`] | the handle is the block; every read pinned to its hash | [`client`] |
+| A market with a signer | [`PerpClient`] | a `MarketReader` plus the send pipeline | [`client`] |
+| A send | [`TxBuilder`] | one transaction, one nonce, one outcome | [`client`] |
+| A tick interval | [`TickRange`] | `lower < upper`, both in the V4 domain, checked at construction | [`math::range`] |
+| A maker's geometry | [`MakerBand`] | a `TickRange` with liquidity | [`math::range`] |
+| The mark's inputs | [`Mark`] | pool price, index and EMAs from one block, advanced to it | [`math::pricing`] |
+| A price pair | [`PricePair`] | the contract's `uint128` pair, spot or EMA | [`math::pricing`] |
+| Capacity and its draw | [`MarketCapacity`] | capacity and open interest from one block | [`math::capacity`] |
+| The pool at a block | [`PoolSnapshot`] | price, liquidity and a tick map that reconciles with it | [`math::swap`] |
+| A settle previewed | [`MakerEquityBreakdown`] | exact atoms, the contract's arithmetic | [`math::maker_equity`] |
+| A block | [`BlockContext`] | number, hash, timestamp of one header | [`math`] |
+| An event | [`MarketEvent`] | the market's vocabulary, human units, either tense | [`events`] |
+| An event in chain order | [`TapeEvent`](history::TapeEvent), [`ChainPoint`](history::ChainPoint) | block and log index | [`history`] |
+| Custody over time | [`OwnershipLog`](history::OwnershipLog) | a fold of transfers; owner at a chain point | [`history`] |
+| A print | [`IndexPrint`](history::IndexPrint) | the index at a chain point and time | [`history`] |
+| A failure | [`PerpCityError`] | typed, with a stated transience | [`errors`] |
+| A transport | [`HftTransport`] | many endpoints, one provider, reads and writes classified | [`transport`] |
+| The send path | [`TxPipeline`](hft::pipeline::TxPipeline), [`NonceManager`](hft::nonce::NonceManager) | zero RPC to prepare; the next nonce is owned | [`hft`] |
+| The chain's shapes | [`contracts`], `storage` | bindings match deployed bytecode; slots match the deployed layout | [`contracts`] |
+| The human surface | [`types`], [`convert`] | inert data in human units; conversion once, at the edge | [`types`] |
 
 Three shapes recur and are worth naming, because a new type should be one
 of them or have a reason not to be.

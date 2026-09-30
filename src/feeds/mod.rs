@@ -9,6 +9,8 @@
 //! vocabulary, which lives in [`crate::events`] — the same
 //! [`MarketEvent`] values [`crate::history`] replays from the past.
 
+#![doc = include_str!("DESIGN.md")]
+
 pub mod block;
 pub mod market;
 pub mod taker;

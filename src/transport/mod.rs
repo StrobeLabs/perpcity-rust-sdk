@@ -35,6 +35,8 @@
 //! └─────┘      └─────┘      └─────┘
 //! ```
 
+#![doc = include_str!("DESIGN.md")]
+
 pub mod config;
 pub(crate) mod fault;
 pub mod health;

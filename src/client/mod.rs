@@ -34,6 +34,8 @@
 //! # }
 //! ```
 
+#![doc = include_str!("DESIGN.md")]
+
 mod chain;
 mod maker_equity;
 mod market;
