@@ -409,8 +409,13 @@ impl ChainReader {
     /// Note: `index()` is a state-mutating function on-chain; this performs an
     /// `eth_call` (simulation) and does not send a transaction.
     pub async fn get_index_price(&self, beacon: Address) -> Result<f64> {
+        self.index_price_at(beacon, BlockId::latest()).await
+    }
+
+    /// [`Self::get_index_price`] at `block`.
+    pub(super) async fn index_price_at(&self, beacon: Address, block: BlockId) -> Result<f64> {
         let contract = IBeacon::new(beacon, &self.inner.provider);
-        let index_x96: U256 = contract.index().call().await?;
+        let index_x96: U256 = contract.index().block(block).call().await?;
 
         if index_x96.is_zero() {
             return Err(ValidationError::InvalidPrice {

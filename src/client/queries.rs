@@ -329,23 +329,25 @@ impl MarketReader {
         Ok(daily_rate)
     }
 
-    /// Get perp config and live market data in a single multicall (plus the
-    /// beacon index read).
+    /// Get perp config and live market data at the head, in one multicall
+    /// plus the beacon index read.
     ///
     /// Batches `modules` + `poolKey` + `poolState` + `rates` + `openInterest`
-    /// against the `Perp` contract (5 reads → 1 CU), then calls `index()` on the
-    /// beacon returned by the batch (1 CU). Replaces a startup sequence of
-    /// several individual RPCs.
+    /// against the `Perp` contract at the latest block, then reads `index()`
+    /// on the beacon the batch named, pinned to the block the batch ran in:
+    /// every field of the snapshot is from that one block, which it
+    /// carries by number. Unlike a [`StateAt`](super::StateAt) read, the
+    /// block is the head at the moment of the call rather than one the
+    /// caller chose.
     ///
     /// Returns `(PerpData, PerpSnapshot)` — static config and live market data.
     ///
-    /// Unlike the pinned reads ([`Self::get_capacity`],
-    /// [`Self::get_fair_price`]), this reads the latest block, and the
-    /// multicall and the beacon read are separate calls, so a trade between
-    /// them can put the index one block after the pool state.
+    /// # Errors
+    ///
+    /// [`ContractError::ModuleNotRegistered`] when the perp has no beacon.
     pub async fn get_perp_snapshot(&self) -> Result<(PerpData, PerpSnapshot)> {
         let perp = Perp::new(self.perp, self.chain.provider());
-        let (modules, pool_key, pool_state, rates, oi) = self
+        let (block, hash, (modules, pool_key, pool_state, rates, oi)) = self
             .chain
             .multicall_at(BlockId::latest())
             .add(perp.modules())
@@ -353,7 +355,7 @@ impl MarketReader {
             .add(perp.poolState())
             .add(perp.rates())
             .add(perp.openInterest())
-            .aggregate()
+            .block_and_aggregate()
             .await
             .map_err(multicall_error)?;
 
@@ -364,8 +366,11 @@ impl MarketReader {
             short_oi: oi.short as f64 / SCALE_F64,
         };
 
-        // Index price from the beacon (1 CU).
-        let index_price = self.chain.get_index_price(modules.beacon).await?;
+        let beacon = registered_module(modules.beacon, "IBeacon")?;
+        let index_price = self
+            .chain
+            .index_price_at(beacon, BlockId::hash(hash))
+            .await?;
 
         // Fees/bounds (from cache or chain).
         let fees = self.get_or_fetch_fees(modules.fees).await?;
@@ -381,6 +386,7 @@ impl MarketReader {
         };
 
         let snapshot = PerpSnapshot {
+            block,
             mark_price: mark,
             index_price,
             funding_rate_daily,
@@ -1008,21 +1014,24 @@ mod tests {
         assert!(rpc.is_drained());
     }
 
-    /// The snapshot is one multicall for the `Perp`'s five views, one
-    /// beacon read, and the slow layer — which a second snapshot skips.
+    /// The five `Perp` views the snapshot batches.
+    fn snapshot_views() -> [Vec<u8>; 5] {
+        [
+            returns::<Perp::modulesCall>(&mock::modules()),
+            returns::<Perp::poolKeyCall>(&mock::pool_key(SPACING)),
+            returns::<Perp::poolStateCall>(&mock::pool_state(x96(3, 1))),
+            returns::<Perp::ratesCall>(&mock::rates(-5_000_000_000_000_000)),
+            returns::<Perp::openInterestCall>(&mock::open_interest(1_500_000, 250_000)),
+        ]
+    }
+
+    /// The snapshot is one multicall for the `Perp`'s five views, the
+    /// beacon at the block the multicall ran in, and the slow layer —
+    /// which a second snapshot skips. It carries that block.
     #[tokio::test]
-    async fn perp_snapshot_is_one_multicall_plus_the_beacon_and_the_slow_layer() {
-        let perp_views = || {
-            [
-                returns::<Perp::modulesCall>(&mock::modules()),
-                returns::<Perp::poolKeyCall>(&mock::pool_key(SPACING)),
-                returns::<Perp::poolStateCall>(&mock::pool_state(x96(3, 1))),
-                returns::<Perp::ratesCall>(&mock::rates(-5_000_000_000_000_000)),
-                returns::<Perp::openInterestCall>(&mock::open_interest(1_500_000, 250_000)),
-            ]
-        };
+    async fn perp_snapshot_is_one_block_plus_the_slow_layer() {
         let (client, rpc) = mock::client();
-        rpc.aggregate(100, perp_views());
+        rpc.block_and_aggregate(100, B256::repeat_byte(0xa1), snapshot_views());
         rpc.call::<IBeacon::indexCall>(&x96(5, 2));
         fees_answers(&rpc);
         bounds_answers(&rpc);
@@ -1042,6 +1051,7 @@ mod tests {
         assert_eq!(
             snapshot,
             PerpSnapshot {
+                block: 100,
                 mark_price: 1.5,
                 index_price: 1.25,
                 funding_rate_daily: -0.005,
@@ -1053,13 +1063,47 @@ mod tests {
         );
         assert!(rpc.is_drained(), "multicall, index, fees, liqFee, ratios");
 
-        rpc.aggregate(101, perp_views());
+        rpc.block_and_aggregate(101, B256::repeat_byte(0xa2), snapshot_views());
         rpc.call::<IBeacon::indexCall>(&x96(5, 2));
         assert_eq!(
             client.market().get_perp_snapshot().await.unwrap(),
-            (data, snapshot)
+            (
+                data,
+                PerpSnapshot {
+                    block: 101,
+                    ..snapshot
+                }
+            )
         );
         assert!(rpc.is_drained(), "fees and bounds came from the slow layer");
+    }
+
+    /// A perp with no beacon fails by name after the batch, before the
+    /// index read that would decode nothing from the zero address.
+    #[tokio::test]
+    async fn perp_snapshot_without_a_beacon_names_the_missing_interface() {
+        let (client, rpc) = mock::client();
+        let [_, pool_key, pool_state, rates, oi] = snapshot_views();
+        let modules = returns::<Perp::modulesCall>(&Modules {
+            beacon: Address::ZERO,
+            ..mock::modules()
+        });
+        rpc.block_and_aggregate(
+            100,
+            B256::repeat_byte(0xa1),
+            [modules, pool_key, pool_state, rates, oi],
+        );
+
+        let err = client.market().get_perp_snapshot().await.unwrap_err();
+        assert!(
+            matches!(
+                err,
+                PerpCityError::Contract(ContractError::ModuleNotRegistered { ref module })
+                    if module == "IBeacon"
+            ),
+            "{err}"
+        );
+        assert!(rpc.is_drained());
     }
 
     /// With pool, index and EMAs all equal and no time since the last

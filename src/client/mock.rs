@@ -120,6 +120,27 @@ impl Rpc {
         });
     }
 
+    /// The next Multicall3 `blockAndAggregate` returns these encoded
+    /// results, in call order, stamped with `block` and its hash.
+    pub(super) fn block_and_aggregate(
+        &self,
+        block: u64,
+        hash: B256,
+        results: impl IntoIterator<Item = Vec<u8>>,
+    ) {
+        self.call::<Multicall::blockAndAggregateCall>(&Multicall::blockAndAggregateReturn {
+            blockNumber: U256::from(block),
+            blockHash: hash,
+            returnData: results
+                .into_iter()
+                .map(|data| Multicall::Result {
+                    success: true,
+                    returnData: data.into(),
+                })
+                .collect(),
+        });
+    }
+
     /// The next Multicall3 `aggregate3` returns these rows.
     pub(super) fn aggregate3(&self, rows: Vec<IMulticall3::Result>) {
         self.call::<IMulticall3::aggregate3Call>(&rows);

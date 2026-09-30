@@ -196,6 +196,9 @@ pub struct SolvencyState {
 /// from [`MarketReader::get_perp_snapshot`](crate::MarketReader::get_perp_snapshot).
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct PerpSnapshot {
+    /// The block every field was read at: the head when the read ran. By
+    /// number only, since a read at the head has no header to carry.
+    pub block: u64,
     /// Pool (AMM spot) price in human-readable units — not a TWAP, and not
     /// the contract's mark, which is the fair price
     /// ([`crate::math::pricing`]).
