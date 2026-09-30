@@ -28,6 +28,7 @@ use crate::math::pricing::Mark;
 use crate::types::{Bounds, Fees, OpenInterest, PerpData, PerpSnapshot};
 
 use super::market::MarketReader;
+use super::state::pinned_read_error;
 use super::{PerpClient, SCALE_F64, i24_to_i32, now_secs, u24_to_u32};
 
 /// Funding/utilization rates are scaled by 1e18 per day on-chain.
@@ -339,7 +340,9 @@ impl MarketReader {
     ///
     /// # Errors
     ///
-    /// [`ContractError::ModuleNotRegistered`] when the perp has no beacon.
+    /// [`ContractError::ModuleNotRegistered`] when the perp has no beacon;
+    /// [`ContractError::BlockUnavailable`] (transient) when the index read
+    /// lands on a replica that does not yet have the batch's block.
     pub async fn get_perp_snapshot(&self) -> Result<(PerpData, PerpSnapshot)> {
         let perp = Perp::new(self.perp, self.chain.provider());
         let (block, hash, (modules, pool_key, pool_state, rates, oi)) = self
@@ -365,7 +368,8 @@ impl MarketReader {
         let index_price = self
             .chain
             .index_price_at(beacon, BlockId::hash(hash))
-            .await?;
+            .await
+            .map_err(|e| pinned_read_error(e, block))?;
 
         // Fees/bounds (from cache or chain).
         let fees = self.get_or_fetch_fees(modules.fees).await?;
@@ -1076,6 +1080,27 @@ mod tests {
             )
         );
         assert!(rpc.is_drained(), "fees and bounds came from the slow layer");
+    }
+
+    /// The index read is pinned to the batch's block, so a replica behind
+    /// the one that ran the batch refuses it: a transient failure naming
+    /// the block, not an opaque one a retry loop would give up on.
+    #[tokio::test]
+    async fn perp_snapshot_on_a_lagging_replica_is_block_unavailable() {
+        let (client, rpc) = mock::client();
+        rpc.block_and_aggregate(100, B256::repeat_byte(0xa1), snapshot_views());
+        rpc.fails("header not found");
+
+        let err = client.market().get_perp_snapshot().await.unwrap_err();
+        assert!(
+            matches!(
+                err,
+                PerpCityError::Contract(ContractError::BlockUnavailable { number: 100 })
+            ),
+            "{err}"
+        );
+        assert!(err.is_transient());
+        assert!(rpc.is_drained());
     }
 
     /// A perp with no beacon fails by name after the batch, before the

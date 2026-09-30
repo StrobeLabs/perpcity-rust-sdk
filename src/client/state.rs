@@ -127,20 +127,10 @@ impl StateAt {
         BlockId::hash(self.block.hash)
     }
 
-    /// A read's failure, with the node's "state pruned" answer typed as
-    /// [`ContractError::StateUnavailable`] for this handle's block.
+    /// A read's failure, typed for this handle's block by
+    /// [`pinned_read_error`].
     fn read_error(&self, error: alloy::contract::Error) -> PerpCityError {
-        match &error {
-            alloy::contract::Error::TransportError(RpcError::ErrorResp(payload))
-                if state_pruned(&payload.message) =>
-            {
-                ContractError::StateUnavailable {
-                    number: self.block.number,
-                }
-                .into()
-            }
-            _ => error.into(),
-        }
+        pinned_read_error(error.into(), self.block.number)
     }
 
     /// The market's solvency books.
@@ -513,21 +503,33 @@ impl StateAt {
             .collect())
     }
 
-    /// A multicall's failure, with the node's "state pruned" answer typed
-    /// as [`ContractError::StateUnavailable`] for this handle's block; every
-    /// other failure classified as [`multicall_error`] does.
+    /// A multicall's failure, classified as [`multicall_error`] does and
+    /// then typed for this handle's block by [`pinned_read_error`].
     fn multicall_read_error(&self, error: MulticallError) -> PerpCityError {
-        match error {
-            MulticallError::TransportError(RpcError::ErrorResp(payload))
-                if state_pruned(&payload.message) =>
-            {
-                ContractError::StateUnavailable {
-                    number: self.block.number,
-                }
-                .into()
-            }
-            other => multicall_error(other),
-        }
+        pinned_read_error(multicall_error(error), self.block.number)
+    }
+}
+
+/// A pinned read's failure, with the two answers a node gives about the
+/// block itself typed for block `number`: its refusal to serve pruned
+/// state is [`ContractError::StateUnavailable`], which is not transient,
+/// and its not having the block at all is
+/// [`ContractError::BlockUnavailable`], which is — a replica behind the
+/// one that named the block will catch up. Every other failure passes
+/// through.
+pub(super) fn pinned_read_error(error: PerpCityError, number: u64) -> PerpCityError {
+    let PerpCityError::Abi(alloy::contract::Error::TransportError(RpcError::ErrorResp(payload))) =
+        &error
+    else {
+        return error;
+    };
+    let message = payload.message.to_ascii_lowercase();
+    if state_pruned(&message) {
+        ContractError::StateUnavailable { number }.into()
+    } else if block_missing(&message) {
+        ContractError::BlockUnavailable { number }.into()
+    } else {
+        error
     }
 }
 
@@ -557,12 +559,21 @@ pub(super) fn ema_window_secs(ema_window: U256) -> Result<u64> {
     })
 }
 
-/// Whether a node's error message is its refusal to serve pruned state:
-/// Nitro's "historical state … is not available", geth's "missing trie
-/// node". The message is the only place a node says so.
+/// Whether a node's (lower-cased) error message is its refusal to serve
+/// pruned state: Nitro's "historical state … is not available", geth's
+/// "missing trie node". The message is the only place a node says so.
 fn state_pruned(message: &str) -> bool {
-    let message = message.to_ascii_lowercase();
     message.contains("historical state") || message.contains("missing trie node")
+}
+
+/// Whether a node's (lower-cased) error message says it does not have the
+/// block a call was pinned to: geth's "header not found" for a hash or
+/// number it has not seen, and the "unknown block" / "block not found"
+/// wordings of other clients and gateways.
+fn block_missing(message: &str) -> bool {
+    message.contains("header not found")
+        || message.contains("unknown block")
+        || message.contains("block not found")
 }
 
 #[cfg(test)]
@@ -827,6 +838,25 @@ mod tests {
         );
         assert_eq!(mark.fair_price_x96(), one);
         assert!(rpc.is_drained(), "one multicall, one index call");
+    }
+
+    /// A replica that has the header but not the block a read is pinned
+    /// to — the one that named the block is ahead of it — is a transient
+    /// failure that names the block, the same as a missing header at
+    /// construction.
+    #[tokio::test]
+    async fn a_replica_without_the_block_is_block_unavailable_and_transient() {
+        let (state, rpc) = state().await;
+        rpc.fails("header not found");
+
+        let error = state.solvency().await.unwrap_err();
+        let PerpCityError::Contract(ContractError::BlockUnavailable { number }) = error else {
+            panic!(
+                "a pinned read at a block the replica lacks must type as BlockUnavailable, got {error}"
+            );
+        };
+        assert_eq!(number, 92);
+        assert!(error.is_transient());
     }
 
     /// A pruned block fails a multicall read the same way it fails a
