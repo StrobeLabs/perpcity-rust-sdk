@@ -11,7 +11,7 @@ use thiserror::Error;
 pub enum TransactionError {
     /// Pre-flight simulation (`eth_estimateGas` or `eth_call`) detected a
     /// contract revert. The transaction was **not** broadcast — no gas was
-    /// burned.
+    /// burned. Not transient: it is the contract's answer to this call.
     #[error("simulation reverted: {error_name} ({selector})")]
     SimulationReverted {
         /// Human-readable error name decoded from the 4-byte selector
@@ -26,7 +26,7 @@ pub enum TransactionError {
     },
 
     /// Transaction was broadcast and mined but reverted on-chain.
-    /// Gas was burned.
+    /// Gas was burned. Not transient.
     #[error("transaction reverted: {reason}")]
     Reverted {
         /// Hash of the mined transaction.
@@ -81,7 +81,7 @@ pub enum TransactionError {
     /// never reuses its nonce; the next send resyncs it from chain. Look up
     /// `tx_hash` later (for example with
     /// [`PerpClient::poll_receipt`](crate::PerpClient::poll_receipt)) to
-    /// learn the outcome.
+    /// learn the outcome. Transient: the transaction may still land.
     #[error("receipt timeout for {tx_hash}: {reason}")]
     ReceiptTimeout {
         /// Hash of the broadcast transaction.
@@ -113,7 +113,7 @@ pub enum TransactionError {
         source: TransportError,
     },
 
-    /// Transaction signing failed.
+    /// Transaction signing failed. Not transient; nothing left the process.
     #[error("signing failed: {reason}")]
     SigningFailed {
         /// The underlying signing error.
@@ -144,7 +144,10 @@ pub enum TransactionError {
         reason: String,
     },
 
-    /// Too many unconfirmed transactions in the pipeline.
+    /// Too many unconfirmed transactions in the pipeline. Not transient by
+    /// [`PerpCityError::is_transient`](crate::PerpCityError::is_transient)
+    /// today, though the condition clears as transactions resolve; the
+    /// errors design node records the debt.
     #[error("too many in-flight: {count} (max {max})")]
     TooManyInFlight {
         /// Current number of in-flight transactions.

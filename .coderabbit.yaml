@@ -47,5 +47,8 @@ reviews:
         it maps to the model, edges, terminology, debts. Flag recapitulation
         of the rustdoc, a type in the table with no invariant stated, a type
         row whose Produced by or Consumed by cell does not link the functions
-        that make or take it, an edge that restates another node's content
-        instead of pointing at it, and a term defined in two nodes.
+        that make or take it (cargo xtask design --check verifies each link
+        against the signature), an edge that restates another node's content
+        instead of pointing at it, and a term defined in two nodes. A change
+        to a public type's signature that does not update its row is
+        incomplete.

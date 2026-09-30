@@ -43,7 +43,11 @@ graph of nodes, and it is part of what a change must keep true.
   before it lands.
 - A new or changed type gets a row in the node's type table, and its
   *Produced by* and *Consumed by* cells link the functions that make it
-  and take it, with the reason it is shaped for them.
+  and take it, with the reason it is shaped for them. Every such link is
+  checked against the real signature: write the name, run
+  `cargo xtask design --fmt` to canonicalise the link targets, and
+  `cargo xtask design --check` to verify the claims and the invariants
+  listed in the root node. `cargo xtask design --open` draws the graph.
 - A behaviour that a caller can observe gets a changelog entry under
   `[Unreleased]`, breaking changes first.
 - Imports at the top of the file, grouped std / external / crate, never
@@ -59,7 +63,10 @@ cargo fmt --all --check
 cargo clippy --all-targets            # zero warnings
 cargo test
 RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features
+cargo xtask design --check            # needs the nightly named in xtask/src/rustdoc.rs
 ```
 
-The doc gate includes every `DESIGN.md`, so a type renamed without its
-node updated fails here.
+The design check resolves every name in every `DESIGN.md` against
+rustdoc's JSON, so a type renamed without its node updated fails here,
+as does a producer or consumer a table names that the signature does
+not back, and any invariant in the root node's list.

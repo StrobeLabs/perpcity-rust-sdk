@@ -69,24 +69,26 @@ sets of base slots, one mapping rule.
 
 | Type | Invariant | Produced by | Consumed by |
 |---|---|---|---|
-| [`Perp`], [`PerpDeployedEvents`] | the market's binding: matches the deployed commit; every selector, struct and event locked; the deployed era's event shapes decodable alongside | the ABI, through `sol!` | [`StateAt`](crate::client::StateAt), [`MarketReader`](crate::client::MarketReader) and [`PerpClient`](crate::client::PerpClient), for every call and every batch; [`decode_log`](crate::events::decode_log), for every event of both eras; the gas floor in `hft`, by selector. Nothing above the client calls it. |
-| [`IBeacon`] | the index module's binding: `index` and `IndexUpdated` | the ABI | the index reads on [`ChainReader`](crate::client::ChainReader) and [`StateAt`](crate::client::StateAt); [`History::beacon_prints`](crate::history::History::beacon_prints), for the print series; [`decode_log`](crate::events::decode_log). |
-| [`IFees`], [`IMarginRatios`], [`IPriceImpact`] | the rule modules' views the SDK reads, no more | the ABI | the configuration reads on [`MarketReader`](crate::client::MarketReader) and [`StateAt`](crate::client::StateAt): fees and bounds into the slow cache, margin ratios, the impact bounds the pool read needs. |
-| [`IFunding`], [`IPricing`] | the two rule modules the SDK never calls: their computations are ported in `math` | the ABI | nothing. They are bound so a live probe can confirm the deployed selectors, and so a port has the interface it transcribes beside it. |
-| [`IERC20`] | the collateral token, and the position NFT's `Transfer` | the ABI | the balance reads on [`ChainReader`](crate::client::ChainReader) and [`StateAt`](crate::client::StateAt); approvals and transfers on [`PerpClient`](crate::client::PerpClient); [`History::token_transfers`](crate::history::History::token_transfers). |
-| [`IPoolManagerState`] | `extsload`, the pool's storage read raw | the ABI | the tick map in [`StateAt::pool`](crate::client::StateAt::pool) and the fee-growth reads in the maker-equity batch on [`MarketReader`](crate::client::MarketReader), at slots `storage` derives. |
-| [`IMulticall3`] | the batching primitive, `aggregate3` | the ABI | [`ChainReader::get_balances_batch`](crate::client::ChainReader::get_balances_batch) and the maker-equity batch on [`MarketReader`](crate::client::MarketReader); the pinned reads batch through alloy's builder instead. |
-| [`PerpFactory`] | the factory's binding, for its error selectors | the ABI | [`try_extract_revert`](crate::errors::decode::try_extract_revert), which names a factory revert; the dormant `PerpCreated` shape is SDK #110. |
-| [`Capacity`] | `calcCapacity`'s pair, raw perp atoms | `capacity` and `makerDetails` | [`Capacity`](crate::math::capacity::Capacity) in `math`, by `From`; the accrual inputs and the `CapacityUpdated` event narrow it field by field. |
-| [`OpenInterest`] | the two sides' draw, raw | `openInterest` | [`OpenInterest`](crate::types::OpenInterest) at the surface; [`MarketCapacity`](crate::math::capacity::MarketCapacity) as its draw leg. |
-| [`PricePair`] | the `(ammPrice, index)` word, `uint128` each | `emas` and `RatesAndEmasRefreshed` | [`PricePair`](crate::math::pricing::PricePair), the same pair typed for the EMA arithmetic. |
-| [`Rates`] | funding and utilization rates with the last touch | `rates` | [`Mark`](crate::math::pricing::Mark), for the last touch it advances from; [`AccrualInputs`](crate::math::maker_equity::AccrualInputs); the funding reads at the surface. |
-| [`Cumulatives`] | the accounting trackers | `cumulatives` and `CumulativesAccrued` | [`MakerMarketSnapshot`](crate::math::maker_equity::MakerMarketSnapshot); [`CumulativesInfo`](crate::events::CumulativesInfo), verbatim. |
-| [`SolvencyState`] | the market's solvency words, raw | `solvencyState` | [`SolvencyState`](crate::types::SolvencyState) at the surface, in USDC. |
-| [`Position`], [`Maker`], [`MakerFunding`], [`TickInfo`] | a position's storage: the shared row, the maker's band and capacity, its funding trackers, the per-tick funding words | `positions`, `makerDetails`, and the slots `storage` derives | [`MakerBand`](crate::math::range::MakerBand), the band narrowed to a validated value; [`MakerState`](crate::math::maker_equity::MakerState) and [`TickFunding`](crate::math::maker_equity::TickFunding), the settle's per-position inputs. `Position` is also what the position reads on `StateAt` return raw; see the debts. |
-| [`SwapResult`] | a swap's outcome with its four fee legs | the taker events | [`SwapInfo`](crate::events::SwapInfo), in human units. |
-| [`Modules`], [`PoolKey`] | the five rule modules' addresses; the pool's key and tick spacing | `modules` and `poolKey` | the reads, which resolve a module's address before calling it, and the immutables cache. Never a caller's. |
-| [`Taker`], [`FeeFund`] | bound, unread | the ABI | nothing. They are locked so a struct change on the deployed contract fails a test here. |
+| [`Perp`](../contracts.rs#L36), [`PerpDeployedEvents`](../contracts.rs#L36) | the market's binding: matches the deployed commit; every selector, struct and event locked; the deployed era's event shapes decodable alongside | the ABI, through `sol!` | [`StateAt`](../client/DESIGN.md), [`MarketReader`](../client/DESIGN.md) and [`PerpClient`](../client/DESIGN.md), for every call and every batch; [`decode_log`](../events/DESIGN.md), for every event of both eras; the gas floor in `hft`, by selector. Nothing above the client calls it. |
+| [`IBeacon`](../contracts.rs#L36) | the index module's binding: `index` and `IndexUpdated` | the ABI | the index reads on [`ChainReader`](../client/DESIGN.md) and [`StateAt`](../client/DESIGN.md); [`beacon_prints`](../history/DESIGN.md), for the print series; [`decode_log`](../events/DESIGN.md). |
+| [`IFees`](../contracts.rs#L36) | the fee module's views: the fee split and the liquidation fee | the ABI | the fee reads on [`MarketReader`](../client/DESIGN.md), into the slow cache. |
+| [`IMarginRatios`](../contracts.rs#L36) | the margin module's views: the maker's and the taker's triple | the ABI | the margin-ratio reads on [`StateAt`](../client/DESIGN.md) and the bounds read on [`MarketReader`](../client/DESIGN.md). |
+| [`IPriceImpact`](../contracts.rs#L36) | the impact module's view: the sqrt-price bounds a swap may reach | the ABI | the pool read on [`StateAt`](../client/DESIGN.md), which needs the bounds to quote. |
+| [`IFunding`](../contracts.rs#L36), [`IPricing`](../contracts.rs#L36) | the two rule modules the SDK never calls: their computations are ported in `math` | the ABI | nothing. They are bound so a live probe can confirm the deployed selectors, and so a port has the interface it transcribes beside it. |
+| [`IERC20`](../contracts.rs#L36) | the collateral token, and the position NFT's `Transfer` | the ABI | the balance reads on [`ChainReader`](../client/DESIGN.md) and [`StateAt`](../client/DESIGN.md); approvals and transfers on [`PerpClient`](../client/DESIGN.md); [`token_transfers`](../history/DESIGN.md). |
+| [`IPoolManagerState`](../contracts.rs#L36) | `extsload`, the pool's storage read raw | the ABI | the tick map in [`StateAt::pool`](../client/DESIGN.md) and the fee-growth reads in the maker-equity batch on [`MarketReader`](../client/DESIGN.md), at slots `storage` derives. |
+| [`IMulticall3`](../contracts.rs#L36) | the batching primitive, `aggregate3` | the ABI | [`ChainReader::get_balances_batch`](../client/DESIGN.md) and the maker-equity batch on [`MarketReader`](../client/DESIGN.md); the pinned reads batch through alloy's builder instead. |
+| [`PerpFactory`](../contracts.rs#L36) | the factory's binding, for its error selectors | the ABI | [`try_extract_revert`](../errors/DESIGN.md), which names a factory revert; the dormant `PerpCreated` shape is SDK #110. |
+| [`Capacity`](../contracts.rs#L36) | `calcCapacity`'s pair, raw perp atoms | `capacity` and `makerDetails` | [`Capacity`](../math/DESIGN.md) in `math`, by `From`; the accrual inputs and the `CapacityUpdated` event narrow it field by field. |
+| [`OpenInterest`](../contracts.rs#L36) | the two sides' draw, raw | `openInterest` | the surface's `OpenInterest` and the draw leg of `MarketCapacity`, each filled field by field inside a read; see the debts. |
+| [`PricePair`](../contracts.rs#L36) | the `(ammPrice, index)` word, `uint128` each | `emas` and `RatesAndEmasRefreshed` | the pinned reads, which copy it field by field into `math`'s `PricePair`; see the debts. |
+| [`Rates`](../contracts.rs#L36) | funding and utilization rates with the last touch | `rates` | the pinned reads and the maker-equity batch, which take the last touch and the rates out of it field by field; see the debts. |
+| [`Cumulatives`](../contracts.rs#L36) | the accounting trackers | `cumulatives` and `CumulativesAccrued` | the maker-equity batch and the decoder, field by field; see the debts. |
+| [`SolvencyState`](../contracts.rs#L36) | the market's solvency words, raw | `solvencyState` | the solvency read, which scales it into the surface's `SolvencyState`; see the debts. |
+| [`Position`](../contracts.rs#L36), [`Maker`](../contracts.rs#L36), [`MakerFunding`](../contracts.rs#L36), [`TickInfo`](../contracts.rs#L36) | a position's storage: the shared row, the maker's band and capacity, its funding trackers, the per-tick funding words | `positions`, `makerDetails`, and the slots `storage` derives | the band and position reads, which narrow them field by field into a `MakerBand`, a `MakerState` and its `TickFunding`; see the debts. `Position` is also what the position reads on `StateAt` return raw. |
+| [`SwapResult`](../contracts.rs#L36) | a swap's outcome with its four fee legs | the taker events | [`SwapInfo`](../events/DESIGN.md), in human units. |
+| [`Modules`](../contracts.rs#L36), [`PoolKey`](../contracts.rs#L36) | the five rule modules' addresses; the pool's key and tick spacing | `modules` and `poolKey` | the reads, which resolve a module's address before calling it, and the immutables cache. Never a caller's. |
+| [`Taker`](../contracts.rs#L36), [`FeeFund`](../contracts.rs#L36) | bound, unread | the ABI | nothing. They are locked so a struct change on the deployed contract fails a test here. |
 | `abi_lock` (tests) | selectors, struct shapes and event topics as deployed, with evidence | the on-chain evidence beside each | CI. |
 | `storage::*_slot` (crate-private) | slot derivation: the Solidity mapping rule over transcribed base slots; locked by the reads' golden outcomes | the deployed layouts | the tick map in the pool read and the fee-growth and tick-funding reads in the maker-equity batch. |
 
@@ -123,6 +125,13 @@ the chain does not. That list is the cutover's checklist.
 
 ## Debts
 
+- **Narrowing is field by field, and invisible to the type graph.** Only
+  `Capacity` and `SwapResult` cross into the crate's types through a
+  conversion a signature shows; the open interest, price pair, rates,
+  cumulatives, solvency and position structs are copied field by field
+  inside the reads that use them. As `From` and `TryFrom` impls those
+  edges would be typed, checked and drawn, and the unit checks of #124
+  would have one place to live.
 - **The `Perp` interface follows main for events and the chain for
   calls.** That is the era rule working, but it means the interface is
   not one era's shape, and a reader has to know which events are live.

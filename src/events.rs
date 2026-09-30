@@ -50,7 +50,7 @@
 //! # }
 //! ```
 
-#![doc = include_str!("events/DESIGN.md")]
+#![doc = "\n\nThe design of this module: [`src/events/DESIGN.md`](https://github.com/StrobeLabs/perpcity-rust-sdk/blob/main/src/events/DESIGN.md)."]
 
 use alloy::primitives::{Address, B256, I256, U256};
 use alloy::rpc::types::Log;

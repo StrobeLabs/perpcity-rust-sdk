@@ -9,7 +9,7 @@
 //! vocabulary, which lives in [`crate::events`] — the same
 //! [`MarketEvent`] values [`crate::history`] replays from the past.
 
-#![doc = include_str!("DESIGN.md")]
+#![doc = "\n\nThe design of this module: [`src/feeds/DESIGN.md`](https://github.com/StrobeLabs/perpcity-rust-sdk/blob/main/src/feeds/DESIGN.md)."]
 
 pub mod block;
 pub mod market;

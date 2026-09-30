@@ -34,7 +34,7 @@
 //! # }
 //! ```
 
-#![doc = include_str!("DESIGN.md")]
+#![doc = "\n\nThe design of this module: [`src/client/DESIGN.md`](https://github.com/StrobeLabs/perpcity-rust-sdk/blob/main/src/client/DESIGN.md)."]
 
 mod chain;
 mod maker_equity;

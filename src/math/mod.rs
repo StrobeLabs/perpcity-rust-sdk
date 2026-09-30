@@ -17,7 +17,7 @@
 //! Storage-slot derivation for the deployed contract layouts is not math
 //! and lives in the crate-internal `storage` module beside `contracts`.
 
-#![doc = include_str!("DESIGN.md")]
+#![doc = "\n\nThe design of this module: [`src/math/DESIGN.md`](https://github.com/StrobeLabs/perpcity-rust-sdk/blob/main/src/math/DESIGN.md)."]
 
 use alloy::primitives::B256;
 use serde::{Deserialize, Serialize};

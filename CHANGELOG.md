@@ -47,6 +47,7 @@ The changes below break the public API, so the next release is 0.5.0 (a minor bu
 
 ### Changed
 
+- **The design nodes are read from the repository, not from rustdoc.** Each module's doc links to its `DESIGN.md` on GitHub instead of inlining it, so the nodes' links point at files and design nodes rather than rustdoc paths. `cargo xtask design --check` resolves every name in every node against rustdoc's JSON, verifies each producer and consumer a type table claims against the real signature, and enforces the root node's invariants; `--open` draws the type graph the signatures give.
 - **`get_perp_snapshot` is one block.** The batch and the beacon read were
   two calls at the head, so a trade between them could put the index one
   block after the pool state. The batch now runs as `blockAndAggregate`,

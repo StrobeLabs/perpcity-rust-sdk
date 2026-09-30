@@ -35,7 +35,7 @@
 
 #![deny(unreachable_pub)]
 #![warn(missing_debug_implementations, missing_docs, rust_2018_idioms)]
-#![doc = include_str!("../DESIGN.md")]
+#![doc = "\n\nThe crate's design lives beside its code as a graph of nodes, one per component, rooted at [`DESIGN.md`](https://github.com/StrobeLabs/perpcity-rust-sdk/blob/main/DESIGN.md); `cargo xtask design --open` draws its type graph."]
 
 pub mod client;
 pub mod constants;

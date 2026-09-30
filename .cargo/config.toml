@@ -1,0 +1,3 @@
+[alias]
+# Repo tooling: `cargo xtask design --check | --open | --report`.
+xtask = "run --quiet --package xtask --"

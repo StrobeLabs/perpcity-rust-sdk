@@ -35,7 +35,7 @@
 //! └─────┘      └─────┘      └─────┘
 //! ```
 
-#![doc = include_str!("DESIGN.md")]
+#![doc = "\n\nThe design of this module: [`src/transport/DESIGN.md`](https://github.com/StrobeLabs/perpcity-rust-sdk/blob/main/src/transport/DESIGN.md)."]
 
 pub mod config;
 pub(crate) mod fault;

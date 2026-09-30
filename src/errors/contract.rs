@@ -7,7 +7,7 @@ use thiserror::Error;
 #[derive(Error, Debug)]
 #[non_exhaustive]
 pub enum ContractError {
-    /// The position does not exist on-chain.
+    /// The position does not exist on-chain. Not transient.
     #[error("position not found: id={pos_id}")]
     PositionNotFound {
         /// The position ID that was not found.
@@ -18,7 +18,7 @@ pub enum ContractError {
     ///
     /// Raised by writes that must own the position (transfer). The
     /// contract would revert `TransferFromIncorrectOwner`; checking first
-    /// turns a wasted broadcast into a typed error.
+    /// turns a wasted broadcast into a typed error. Not transient.
     #[error("position {pos_id} is owned by {owner}, not {caller}")]
     PositionNotOwned {
         /// The position ID.
@@ -29,14 +29,16 @@ pub enum ContractError {
         caller: Address,
     },
 
-    /// A required module is not registered.
+    /// A required module is not registered. Not transient: only
+    /// governance registers one.
     #[error("module not registered: {module}")]
     ModuleNotRegistered {
         /// Name of the missing module.
         module: String,
     },
 
-    /// An expected event was not found in the transaction receipt.
+    /// An expected event was not found in the transaction receipt. Not
+    /// transient: the receipt is final.
     #[error("event not found: {event_name}")]
     EventNotFound {
         /// Name of the missing event.
@@ -44,6 +46,7 @@ pub enum ContractError {
     },
 
     /// A multicall returned unexpected results (wrong count or subcall failure).
+    /// Not transient: the batch's shape or a subcall, not the transport.
     #[error("multicall failed: {reason}")]
     MulticallFailed {
         /// What went wrong.
@@ -51,7 +54,8 @@ pub enum ContractError {
     },
 
     /// A block header the read needed to pin to was not available from the
-    /// RPC endpoint (e.g. a lagging load-balanced replica).
+    /// RPC endpoint (e.g. a lagging load-balanced replica). Transient: the
+    /// replica catches up.
     #[error("block {number} header unavailable from RPC")]
     BlockUnavailable {
         /// The block number whose header was requested.
@@ -60,7 +64,8 @@ pub enum ContractError {
 
     /// The endpoint serves block `number`'s header but has pruned the
     /// state behind it: a full node asked for a block outside its window.
-    /// Retrying gets the same answer; an archive endpoint is the fix.
+    /// Retrying gets the same answer; an archive endpoint is the fix. Not
+    /// transient.
     #[error("block {number} state unavailable from RPC (pruned; needs an archive endpoint)")]
     StateUnavailable {
         /// The pinned block whose state the endpoint no longer holds.
@@ -69,7 +74,8 @@ pub enum ContractError {
 
     /// The RPC endpoint refused an `eth_getLogs` request that no narrower
     /// range fixes: a single block it still rejects, or a method, parse or
-    /// auth error. Retrying the same request gets the same answer.
+    /// auth error. Retrying the same request gets the same answer. Not
+    /// transient.
     #[error("eth_getLogs rejected for blocks {from_block}..={to_block}")]
     LogsRejected {
         /// First block of the refused request.
@@ -86,7 +92,8 @@ pub enum ContractError {
     ///
     /// The transport error, when one exists, is preserved as the source
     /// (behind an `Arc` so a single failed read shared by several positions
-    /// keeps its cause on every affected result).
+    /// keeps its cause on every affected result). Transient when a
+    /// transport source is present, not otherwise.
     #[error("storage read failed: {context}")]
     StorageReadFailed {
         /// What was being read.
