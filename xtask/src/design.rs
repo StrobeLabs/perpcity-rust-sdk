@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result};
 use rustdoc_types::{Id, Type};
@@ -219,7 +219,14 @@ pub fn run(opts: Options) -> Result<bool> {
 fn at_ref(root: &Path, git_ref: &str) -> Result<Summary> {
     // Outside the repository, or cargo would find this workspace above it.
     let dir = env::temp_dir().join(format!("perpcity-design-base-{}", std::process::id()));
-    let git = |args: &[&str]| Command::new("git").args(args).current_dir(root).status();
+    // Quiet: the diff's stdout is markdown a job posts verbatim.
+    let git = |args: &[&str]| {
+        Command::new("git")
+            .args(args)
+            .current_dir(root)
+            .stdout(Stdio::null())
+            .status()
+    };
     if dir.exists() {
         let _ = git(&["worktree", "remove", "--force", &dir.to_string_lossy()]);
         let _ = fs::remove_dir_all(&dir);

@@ -231,8 +231,10 @@ invariant is the smell this shape exists to remove.
 
 The claims about the type system that the gate enforces, over the graph
 the signatures give. Each is one sentence here and one predicate in
-`xtask`, and the sentence is the error. A change that breaks one either
-restores it or changes this list, in the same PR, with the reason.
+`xtask`, and the sentence is the error. The two are tied: the check fails
+when a predicate runs that no bullet below opens with, or a bullet below
+has no predicate behind it. A change that breaks one either restores it
+or changes this list, in the same PR, with the reason.
 
 - No read on a handle takes a block argument: the block is the handle's,
   and `state_at` is the one door to a named one.
@@ -257,8 +259,10 @@ questions, an island, a dead end, a two-cycle, a flow between documented
 types that no node names, may exist, but a new one arrives acknowledged.
 The pull request either removes it, names it in a type table, or names
 it in a node's debts, and the design job fails until one of those is
-true. What we accept is written down; what we did not notice cannot
-land.
+true. The same ratchet holds a type to its row: when a type's own methods
+or fields change and its row does not, the row is stale by construction,
+and the job says so. What we accept is written down; what we did not
+notice cannot land.
 
 Each enforced invariant is proven able to fail. `xtask/tests/fixture/lib.rs`
 is a crate shaped like this one with one planted violation per invariant

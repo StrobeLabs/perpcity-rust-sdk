@@ -6,13 +6,21 @@ reviews:
         root and the DESIGN.md of the module changed, not only against the
         code. Flag a change that contradicts a node's mental model or a rule
         in AGENTS.md, a type that carries an invariant as loose fields, a
-        ported computation with no golden vector from real chain state, a
-        read that takes a block argument instead of hanging off StateAt, a
-        failure variant with no stated transience, and a public type or
-        method whose name is not the word the owning node's terminology
-        section uses for the concept.
-        A change to a module that does not update that module's DESIGN.md
-        table, edges or debts is incomplete.
+        ported computation with no golden vector from real chain state, and
+        a public type or method whose name is not the word the owning node's
+        terminology section uses for the concept.
+        The mechanical checks are not yours to repeat. The `design` CI job
+        resolves every name in every node against rustdoc, verifies each
+        producer and consumer a type table claims against the signature,
+        enforces the invariants listed in the root node, and posts a comment
+        on the PR (marked `<!-- design-diff -->`) with what the change did to
+        the type graph. Read that comment. A section headed "Needs a
+        decision" is the ratchet: a new island, dead end, two-cycle or
+        unnamed flow, or a type whose methods changed while its row did not.
+        The right fix is in the code or in the node's table or debts, never
+        in the check; if the PR changes xtask/src/invariants.rs or the root
+        node's Invariants list to make the job pass, ask for the reason.
+        When the job fails, the PR is not complete.
     - path: "src/client/**"
       instructions: |
         Read src/client/DESIGN.md. Reads are now on MarketReader (get_*) or at
@@ -46,9 +54,10 @@ reviews:
         is: purpose, what matters, the mental model, the type system and how
         it maps to the model, edges, terminology, debts. Flag recapitulation
         of the rustdoc, a type in the table with no invariant stated, a type
-        row whose Produced by or Consumed by cell does not link the functions
-        that make or take it (cargo xtask design --check verifies each link
-        against the signature), an edge that restates another node's content
-        instead of pointing at it, and a term defined in two nodes. A change
-        to a public type's signature that does not update its row is
-        incomplete.
+        row whose Produced by or Consumed by cell says nothing about why the
+        type is shaped for its consumers, an edge that restates another
+        node's content instead of pointing at it, and a term defined in two
+        nodes. Whether the links resolve and the claims match signatures is
+        the design job's; whether the prose is the argument for the design
+        is yours. A debts entry added only to satisfy the ratchet, with no
+        reason and no path out, is worth a question.

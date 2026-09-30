@@ -14,6 +14,20 @@ use crate::summary::Summary;
 
 const WIRE_SUFFIXES: [&str; 5] = ["_x96", "_x128", "_atoms", "_e6", "_wad"];
 
+/// The enforced invariants, each as the opening of its sentence in the
+/// root node's Invariants section. The list and the predicates are tied:
+/// a predicate without its sentence, or a sentence without its predicate,
+/// is a problem.
+pub const ENFORCED: &[&str] = &[
+    "No read on a handle takes a block argument",
+    "Every snapshot in `math` carries a `BlockContext`",
+    "A validated value",
+    "Nothing in `math` takes or returns a provider",
+    "Every fallible public function returns one of the crate's errors",
+    "Every variant of `ContractError` and `TransactionError` says",
+    "Every public type is in exactly one node's table",
+];
+
 /// Run every enforced invariant, appending a sentence per violation.
 pub fn enforced(index: &Index, graph: &Graph, nodes: &[Node], problems: &mut Vec<String>) {
     no_read_takes_a_block(index, problems);
@@ -23,6 +37,52 @@ pub fn enforced(index: &Index, graph: &Graph, nodes: &[Node], problems: &mut Vec
     results_are_the_crates(index, problems);
     error_variants_state_transience(index, problems);
     surface_is_in_one_table(index, graph, nodes, problems);
+    listed_in_the_root(nodes, problems);
+}
+
+/// The root node's Invariants section lists exactly the predicates that
+/// run: every entry of [`ENFORCED`] opens a bullet there, and every bullet
+/// there opens with one.
+fn listed_in_the_root(nodes: &[Node], problems: &mut Vec<String>) {
+    let Some(root) = nodes.iter().find(|n| n.is_root()) else {
+        return;
+    };
+    let section = section_of(&root.text, "## Invariants");
+    let bullets: Vec<&str> = section
+        .lines()
+        .filter(|l| l.starts_with("- "))
+        .map(|l| l.trim_start_matches("- "))
+        .collect();
+    for opening in ENFORCED {
+        if !bullets.iter().any(|b| b.starts_with(opening)) {
+            problems.push(format!(
+                "invariant list: the root node's Invariants section has no bullet opening with \"{opening}\", but the predicate runs"
+            ));
+        }
+    }
+    for b in bullets {
+        if !ENFORCED.iter().any(|o| b.starts_with(o)) {
+            problems.push(format!(
+                "invariant list: the root node lists \"{}\" as enforced, but no predicate runs for it",
+                b.chars().take(60).collect::<String>()
+            ));
+        }
+    }
+}
+
+/// The text of a node's section with the given heading, to the next
+/// heading of the same level.
+fn section_of(text: &str, heading: &str) -> String {
+    let needle = format!("\n{heading}");
+    let Some(start) = text.find(&needle) else {
+        return String::new();
+    };
+    let rest = &text[start + 1..];
+    let body = &rest[rest.find('\n').map(|i| i + 1).unwrap_or(rest.len())..];
+    match body.find("\n## ") {
+        Some(end) => body[..end].to_string(),
+        None => body.to_string(),
+    }
 }
 
 /// The ratchet: a structure the report questions may exist, but a new one
@@ -68,19 +128,23 @@ pub fn ratchet(base: &Summary, head: &Summary, nodes: &[Node], problems: &mut Ve
             ));
         }
     }
+    // A type whose own methods or fields changed is a type whose row must
+    // change: the row is the design's claim about it, and a claim that did
+    // not move when the type did is stale by construction.
+    for (t, shape) in &head.shapes {
+        let changed = base.shapes.get(t).is_some_and(|b| b != shape);
+        let row_same = matches!((base.rows.get(t), head.rows.get(t)), (Some(b), Some(h)) if b == h);
+        if changed && row_same {
+            problems.push(format!(
+                "ratchet: {t}'s own methods or fields changed and its row in the design node did not; say what changed in its Invariant, Produced by or Consumed by"
+            ));
+        }
+    }
 }
 
 /// The text of a node's `## Debts` section.
 fn debts_section(text: &str) -> String {
-    let Some(start) = text.find("\n## Debts") else {
-        return String::new();
-    };
-    let rest = &text[start + 1..];
-    let body = &rest[rest.find('\n').map(|i| i + 1).unwrap_or(rest.len())..];
-    match body.find("\n## ") {
-        Some(end) => body[..end].to_string(),
-        None => body.to_string(),
-    }
+    section_of(text, "## Debts")
 }
 
 /// `text` contains `word` as a whole identifier.
@@ -159,8 +223,9 @@ pub fn reported(index: &Index) {
     println!("  {n} finding(s)");
 }
 
-/// A type as a reader would name it, for messages and suffix checks.
-fn type_name(ty: &Type) -> String {
+/// A type as a reader would name it, for messages, suffix checks and the
+/// summary's shapes.
+pub fn type_name(ty: &Type) -> String {
     match ty {
         Type::ResolvedPath(p) => p.path.rsplit("::").next().unwrap_or(&p.path).to_string(),
         Type::Primitive(p) => p.clone(),

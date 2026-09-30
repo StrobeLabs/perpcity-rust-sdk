@@ -7,6 +7,7 @@ use rustdoc_types::Id;
 
 use crate::design::{EdgeKind, Graph};
 use crate::index::Index;
+use crate::invariants::type_name;
 
 /// A pair of type paths, source then destination.
 pub type Pair = (String, String);
@@ -38,6 +39,12 @@ pub struct Summary {
     pub documented: BTreeSet<String>,
     /// Flow edges between components, with counts.
     pub coupling: BTreeMap<Pair, usize>,
+    /// Each drawn type's own shape: its public methods' signatures and its
+    /// fields, rendered, so a change to the type itself is visible.
+    pub shapes: BTreeMap<String, BTreeSet<String>>,
+    /// Each documented type's row, as written: invariant, produced by and
+    /// consumed by.
+    pub rows: BTreeMap<String, String>,
 }
 
 impl Summary {
@@ -136,6 +143,32 @@ impl Summary {
             if a < b && pairs.contains(&(*b, *a)) {
                 s.two_cycles.insert((path(*a), path(*b)));
             }
+        }
+        for id in &types {
+            let mut shape = BTreeSet::new();
+            for m in index.methods.get(id).into_iter().flatten() {
+                if let Some(sig) = index.sigs.get(m) {
+                    let inputs: Vec<String> = sig.input_types.iter().map(type_name).collect();
+                    let output = sig.output.as_ref().map(type_name).unwrap_or_default();
+                    shape.insert(format!(
+                        "{}({}) -> {output}",
+                        index.name_of(*m),
+                        inputs.join(", ")
+                    ));
+                }
+            }
+            for (name, _, ty, public) in index.fields.get(id).into_iter().flatten() {
+                if *public {
+                    shape.insert(format!("{name}: {}", type_name(ty)));
+                }
+            }
+            s.shapes.insert(path(*id), shape);
+        }
+        for r in &graph.rows {
+            s.rows.insert(
+                path(r.subject),
+                format!("{}|{}|{}", r.invariant, r.produced, r.consumed),
+            );
         }
         s
     }
@@ -247,6 +280,28 @@ pub fn diff(base: &Summary, head: &Summary, base_name: &str) -> String {
         a,
         r,
     ));
+    let reshaped: Vec<String> = head
+        .shapes
+        .iter()
+        .filter(|(t, shape)| base.shapes.get(*t).is_some_and(|b| b != *shape))
+        .map(|(t, _)| {
+            let row = match (base.rows.get(t), head.rows.get(t)) {
+                (Some(b), Some(h)) if b == h => "row unchanged",
+                (Some(_), Some(_)) => "row updated",
+                _ => "no row",
+            };
+            format!("{} ({row})", short(t))
+        })
+        .collect();
+    if !reshaped.is_empty() {
+        out.push_str(&format!(
+            "\n**Types whose own methods or fields changed**: {}\n",
+            reshaped.len()
+        ));
+        for t in reshaped {
+            out.push_str(&format!("- {t}\n"));
+        }
+    }
 
     let mut moved: Vec<String> = Vec::new();
     for (t, (hi, ho)) in &head.degree {

@@ -3,7 +3,10 @@
 ## Design
 
 <!-- Which DESIGN.md nodes this touches, and what changed in them (type
-table, edges, terminology, debts). If a node got harder to write, say so. -->
+table, edges, terminology, debts). If a node got harder to write, say so.
+The design job comments on the PR with what the change did to the type
+graph; if it lists something under "Needs a decision", say here what you
+decided and why. -->
 
 ## Evidence
 
