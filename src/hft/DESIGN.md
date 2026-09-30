@@ -112,6 +112,29 @@ above can be measured rather than asserted.
 | [`LatencyTracker`](latency::LatencyTracker), [`LatencyStats`](latency::LatencyStats) | the measurement | fixed ring; percentiles over the window |
 | [`PositionManager`](position_manager::PositionManager), [`ManagedPosition`](position_manager::ManagedPosition), [`TriggerType`](position_manager::TriggerType), [`TriggerAction`](position_manager::TriggerAction) | trigger evaluation | one trigger per position per check, in a fixed precedence; the price is the caller's |
 
+## Efficiency
+
+This module's specification is a number: zero requests on the hot path.
+
+- **`prepare` makes no request.** The nonce is an atomic increment on
+  the manager; the fees come from the fee cache within its TTL, scaled by
+  urgency; a cached gas limit comes from the limit cache by selector.
+  Anything not in a cache is an error at prepare time, never a request.
+- **What fills the caches, and how often.** The base fee arrives from a
+  header feed or a poller, once per block or per interval, not per send.
+  A gas limit is estimated once per selector and reused until an
+  `OutOfGas` evicts it. The state cache holds fees and bounds for 60 s and
+  prices, funding and balances for 2 s, and a new block invalidates the
+  fast layer whole.
+- **Synchronisation costs one request**, `eth_getTransactionCount`, at
+  startup and after a desync, never per send.
+- **Stuck detection and bumping are local**: the pipeline compares
+  submission times against its timeout and prepares the replacement
+  without a request.
+- **Measured.** The latency tracker records samples in a fixed ring and
+  reports percentiles; it is how "zero on the hot path" is checked rather
+  than believed.
+
 ## Edges
 
 - From the [root](../../DESIGN.md): every order matters; latency is a

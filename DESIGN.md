@@ -204,6 +204,43 @@ boundary the value entered, a chain read, a config, an event, and the
 math downstream trusts it. A loose pair of fields that together carry an
 invariant is the smell this shape exists to remove.
 
+## Efficiency
+
+Efficiency here is not speed. It is three currencies, and a component
+says which it spends and where.
+
+**Requests**, in the provider's units: calls, compute units, bytes
+returned, subscriptions held. This is the currency that gets a market
+maker rate-limited or billed out of a monthly allotment. A component's
+cost model states what one operation costs in requests, what is
+amortised (immutables read once per market, a scan width learned once
+per handle, a cache within its TTL), and what is per block rather than
+per call.
+
+**Latency on the hot path**: the code between a decision to trade and a
+broadcast. The standard is not fast but zero: preparing a transaction
+makes no request, and a design that would add one is rejected on that
+ground alone. Every other operation says whether it is on the hot path
+or off it.
+
+**Gas**, which is money. A limit too low burns it; an estimate too high
+wastes a cushion; a probe at the wrong cap answers the wrong question.
+
+Three rules follow. Throughput work and the trading path never share a
+budget: a scan has its own transport and timeout, and its declines stay
+off the health record. Every read that can be one request at one block
+is one request at one block, and a read that is several says why. And
+efficiency is measured, not asserted: `ScanStats` and the latency
+tracker exist so that a node's claims can be checked.
+
+The nodes that spend a currency carry an efficiency section stating
+their costs as numbers: requests per operation, blocks, bytes, seconds.
+Those numbers are specifications. The benchmarking suite and the
+regression gates on the roadmap are built around them: a benchmark
+asserts what a node states, and a change that moves a number updates
+the section and, once the suite exists, the gate. A cost stated as an
+adjective cannot be asserted and does not belong in a node.
+
 ## Edges
 
 The component nodes, what each provides to the rest, and what it takes.

@@ -96,6 +96,39 @@ sequential on every path, because a request sent below the stopping
 point is waste, and parallelism there would be a bug dressed as a
 feature.
 
+## Efficiency
+
+A scan is throughput work and its currency is requests, spent
+deliberately off the trading path.
+
+- **Width.** The first request asks for 100,000 blocks; the span doubles
+  on acceptance up to 10,000,000, halves on rejection, and narrows in on
+  the provider's limit. A provider with a fixed cap costs a few rejected
+  requests at the start and a logarithmic number after; a cap on results
+  or bytes, which moves with density, costs a re-learn when a dense
+  stretch is hit. The learned width lives on the `History` handle, so a
+  process that scans repeatedly pays the search once; the free functions
+  pay it every call.
+- **Concurrency.** A handle keeps 4 windows in flight by default,
+  results delivered in range order regardless. The free functions are
+  sequential. Newest-first reads are sequential on every path, because
+  they exist to stop early and a request sent below the stopping point
+  is waste.
+- **Timestamps.** When a provider omits `blockTimestamp` from logs, one
+  header read per distinct block, with bounded concurrency. This is the
+  cost that dominates a sparse scan and is the reason for SDK #100.
+- **Rejections are free of health.** A narrowing rejection goes back
+  to the scan without touching the endpoint's record and without a
+  retry, so the search costs exactly the rejected requests and nothing
+  in breaker state.
+- **Measured.** `ScanStats` on the handle counts requests, rejections
+  and narrowings across every scan it has run. It is the number the
+  regression harness (SDK #99) will assert.
+
+A research process builds its own transport for scans so that a slow
+or refused log request cannot open the circuit breaker a trading loop
+depends on. That separation is a cost rule, not a convenience.
+
 ## Edges
 
 - From the [root](../../DESIGN.md): the two tenses of events; chain order;

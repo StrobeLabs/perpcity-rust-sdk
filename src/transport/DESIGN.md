@@ -136,6 +136,31 @@ callers re-subscribe.
 | [`Reserved`](health::Reserved) | an endpoint held for a purpose | a scan's endpoint is not the trading loop's |
 | [`WsManager`](ws::WsManager), [`ReconnectConfig`](ws::ReconnectConfig) | the subscription side | one socket; reconnect with capped backoff; re-subscription is the caller's |
 
+## Efficiency
+
+The transport trades requests for latency and reliability, and every
+trade is a setting a caller chose.
+
+- **A hedged read costs N requests for one answer**, one per endpoint
+  fanned out to, with the losers cancelled the moment the first answer
+  lands so their cost stops at the request already sent. It buys the
+  fastest endpoint's latency at N times the request cost; it is a
+  `Strategy` the caller selects, not a default.
+- **A read retries up to 2 more times**, with backoff, and only when the
+  endpoint failed to answer. A decline costs the one request and no
+  retry.
+- **A write retries up to 3 times**, only on a pre-mempool rejection or
+  no answer, always as the same signed bytes, so a retry can never cost
+  a second transaction's gas.
+- **Selection is lock-free in the steady state.** Health is read from
+  atomic mirrors, so choosing an endpoint costs no contention when every
+  endpoint is healthy.
+- **A breaker saves requests.** An endpoint that has failed past the
+  threshold receives one probe per cooldown, not the trading loop's
+  traffic.
+- **One socket serves every subscription** on the WebSocket side;
+  reconnection costs one handshake plus the re-subscriptions.
+
 ## Edges
 
 - From the [root](../../DESIGN.md): failure is classified; latency is a

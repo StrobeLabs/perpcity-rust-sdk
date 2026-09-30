@@ -195,6 +195,31 @@ contract function it transcribes in its doc, with the commit it was
 transcribed from, so that a contract change is a search rather than a
 hunt.
 
+## Efficiency
+
+This module spends no requests; its currency is time on the caller's
+thread, and everything here is integer arithmetic in `U256` and `I256`.
+
+- **A swap quote walks the tick map.** Cost is linear in the initialized
+  ticks the trade crosses, each step a few 512-bit multiply-divides. The
+  map itself is fixed by the tick spacing: at spacing 30 the whole
+  domain is 36 bitmap words, so a `PoolSnapshot` is small and a quote
+  over it is microseconds, which is what lets a taker quote in memory on
+  every event.
+- **The mark is one exponential.** Advancing the EMAs is a Solady
+  `expWad` and two weighted sums; the fair price is an average. Cheap
+  enough to compute at every read rather than cache.
+- **A settle preview is constant per position** over its chunk's rows:
+  a fixed number of checkpoint differences and one valuation at the
+  mark. The batch's cost is in the reads that fill the snapshot, not in
+  the arithmetic.
+- **Geometry is closed-form.** Capacity, band amounts and liquidity
+  sizing are single formulas in square-root prices; the inverse for a
+  capacity target is a division, not a search.
+
+Nothing here allocates on the hot path beyond the tick map a snapshot
+already owns, and nothing reads a clock.
+
 ## Edges
 
 - From the [root](../../DESIGN.md): exactness, the unit boundary, the

@@ -219,6 +219,42 @@ read knows the block it asked about and the caller's retry loop needs to
 know which it was. A now-read at the head has no block to name and
 passes the transport's error through.
 
+## Efficiency
+
+Every read's cost, in requests, at which block, and what is cached. A
+request is one JSON-RPC call; a multicall is one request however many
+views it batches.
+
+| Read | Requests | Block | Cached |
+|---|---|---|---|
+| `get_pool_price`, `get_funding_rate` | 1 | head | fast layer, 2 s |
+| `get_open_interest` | 1 | head | no |
+| `get_perp_config` | 3, plus 3 for fees and bounds on a slow-layer miss | head | slow layer, 60 s |
+| `get_perp_data` | 3 | head | no |
+| `get_perp_snapshot` | 1 multicall + 1 pinned index, plus the slow layer on a miss | one block, the head | slow layer for fees and bounds |
+| `state()` | 2 (block number, header) | lagged | no |
+| `state_at(n)` | 1 (header) | named | no |
+| `StateAt::solvency`, `next_pos_id`, `position`, `maker_band`, `pool_tick`, `collateral` | 1 each | pinned | no |
+| `StateAt::capacity` | 1 multicall | pinned | no |
+| `StateAt::margin_ratios` | 3 | pinned | no |
+| `StateAt::mark` | 1 multicall + 1 pinned index | pinned | no |
+| `StateAt::pool` | 1 multicall + index + bounds + bitmap, + tick words when any tick is set: 4 or 5; plus 2 for the immutables once per market per process | pinned | immutables, forever |
+| `get_maker_equities` | market-wide multicall + index once; per chunk of at most 500 ids: 1 row multicall + 1 `extsload` + 1 `eth_getProof` (or up to 16 concurrent `eth_getStorageAt` where proofs are not served); 4 chunks in flight | one lagged block for the whole batch | no |
+| `get_positions_by_owner` | 1 + one `ownerOf` per id ever minted | head | no |
+| `get_balances_batch` | 1 multicall | head | fast layer |
+| liquidation probes | 1 `eth_call` at the liquidation gas cap | head | no |
+
+A send costs one simulation (`eth_estimateGas`, or one `eth_call`
+preflight when the limit is cached or explicit), zero requests to
+prepare, one broadcast, and receipt polls every 2 s after a 2 s initial
+delay for up to 30 s. A resync, when the sequence was in doubt, is one
+`eth_getTransactionCount` before the next send. Nothing on the hot path
+between deciding and broadcasting makes a request.
+
+Two costs in this table are not what they should be and are debts:
+`margin_ratios` is three requests where one multicall would do, and
+`get_positions_by_owner` is linear in every position ever minted.
+
 ## Edges
 
 - From the [root](../../DESIGN.md): the two tenses, the handle and

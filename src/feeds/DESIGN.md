@@ -77,6 +77,30 @@ leaving re-subscription to its callers.
 | [`LiveTakerMarket`], [`LiveTakerMarketPublisher`] | a shared pool snapshot | published only when every read succeeded at one block hash; consumers see the latest and its currency |
 | [`WsManager`](crate::transport::ws::WsManager), [`ReconnectConfig`](crate::transport::ws::ReconnectConfig) | the connection | one socket, many subscriptions; reconnects with backoff; re-subscription is the caller's |
 
+## Efficiency
+
+A feed's currency is subscriptions, and its cost is per event held
+open, not per read.
+
+- **`MarketFeed`** is one subscription: one log filter over two
+  addresses, the market and its beacon. Reading it costs nothing; every
+  event the market emits arrives whether or not anyone asked. The
+  consumer's per-read cost is zero, which is the point.
+- **`BlockHeaderFeed`** is one subscription billed per header on some
+  providers. On a chain producing about four blocks a second that is on
+  the order of 350,000 headers a day, and it once exhausted a monthly
+  allotment. The base-fee poller that replaced it downstream costs one
+  request per interval instead. The cost of holding a feed is decided
+  with the bill in view, and this is the feed where it matters.
+- **`LiveTakerMarket`** costs a pool read per refresh (4 or 5 pinned
+  requests, see `client`) and nothing per quote: consumers hold the
+  latest snapshot and quote in memory. A refresh that fails costs its
+  requests and publishes nothing; the last good snapshot stays with its
+  age visible.
+- **Reconnection** costs the socket and the re-subscriptions, with
+  backoff capped by `ReconnectConfig`, and it never backfills: events
+  during a gap are not re-read here.
+
 ## Edges
 
 - From the [root](../../DESIGN.md): the two tenses of events; latency as a
