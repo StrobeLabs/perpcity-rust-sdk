@@ -4,8 +4,8 @@
 //! because makers are subject to a 7-day lockup.
 //!
 //! Demonstrates the maker flow:
-//! 1. Query the current mark price and market config
-//! 2. Calculate a price range centered around the current mark
+//! 1. Query the current pool price and market config
+//! 2. Calculate a price range centered around it
 //! 3. Estimate liquidity for the desired margin and range
 //! 4. Open a maker position
 //! 5. Read the raw position state
@@ -104,24 +104,22 @@ async fn main() -> perpcity_sdk::Result<()> {
     client.ensure_approval(U256::from(200_000_000u64)).await?;
 
     // ── Query market state ──────────────────────────────────────────
-    let mark = client.market().get_mark_price().await?;
+    let pool_price = client.market().get_pool_price().await?;
     let perp_config = client.market().get_perp_config().await?;
     let balance = client.get_usdc_balance().await?;
 
     println!("\n=== Market State ===");
-    println!("  Mark price:   {mark:.6}");
+    println!("  Pool price:   {pool_price:.6}");
     println!("  Tick spacing: {tick_spacing}");
     println!("  LP fee:       {:.4}%", perp_config.fees.lp_fee * 100.0);
     println!("  Wallet USDC:  {balance:.2}");
 
     // ── Calculate tick range ────────────────────────────────────────
     //
-    // Center a range around the current mark price.
-    // price_lower = mark * (1 - RANGE_WIDTH_PCT)
-    // price_upper = mark * (1 + RANGE_WIDTH_PCT)
-    // Then align ticks to the pool's tick spacing.
-    let price_lower = mark * (1.0 - RANGE_WIDTH_PCT);
-    let price_upper = mark * (1.0 + RANGE_WIDTH_PCT);
+    // Center a range around the current pool price, then align its ticks
+    // to the pool's tick spacing.
+    let price_lower = pool_price * (1.0 - RANGE_WIDTH_PCT);
+    let price_upper = pool_price * (1.0 + RANGE_WIDTH_PCT);
 
     let raw_tick_lower = price_to_tick(price_lower)?;
     let raw_tick_upper = price_to_tick(price_upper)?;
@@ -181,14 +179,14 @@ async fn main() -> perpcity_sdk::Result<()> {
     // ── Simulated monitoring loop ───────────────────────────────────
     //
     // In production, you'd subscribe to new blocks via WebSocket and
-    // refresh state on each block. Here we just poll the mark a few times.
+    // refresh state on each block. Here we just poll the pool price a few times.
     println!("\nMonitoring for 5 seconds...");
     for i in 1..=5 {
         tokio::time::sleep(Duration::from_secs(1)).await;
         // Invalidate fast cache to get fresh prices
         client.chain().invalidate_fast_cache();
-        let mark = client.market().get_mark_price().await?;
-        println!("  [{i}/5] mark={mark:.6}");
+        let pool_price = client.market().get_pool_price().await?;
+        println!("  [{i}/5] pool price={pool_price:.6}");
     }
 
     println!(

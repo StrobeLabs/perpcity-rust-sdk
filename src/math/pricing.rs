@@ -36,7 +36,7 @@ const WAD_U256: U256 = uint!(1_000_000_000_000_000_000_U256);
 
 /// An `(amm, index)` price pair, mirroring the contract's `PricePair` struct
 /// (both prices scaled by 2^96).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PricePair {
     /// AMM (pool) price observation or EMA.
     pub amm: u128,
@@ -104,21 +104,12 @@ pub fn calculate_emas(
     })
 }
 
-/// The contract's mark at one block, read by
-/// [`MarketReader::get_fair_price`](crate::MarketReader::get_fair_price).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct FairPrice {
-    /// The block the price inputs were read at.
-    pub block: BlockContext,
-    /// [`fair_price_x96`] of the block's pool price, beacon index and EMAs.
-    pub price_x96: U256,
-}
-
 /// What the contract marks from at one block: the pool price, the beacon
 /// index, and the stored EMAs advanced to the block timestamp, as
 /// `PerpLogic.accrue` sees them. Read by
-/// [`StateAt::mark`](crate::StateAt::mark).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// [`StateAt::mark`](crate::StateAt::mark) and, at the lagged snapshot
+/// block, [`MarketReader::get_mark`](crate::MarketReader::get_mark).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Mark {
     /// The block the inputs were read at.
     pub block: BlockContext,

@@ -93,7 +93,7 @@ pub use types::{
 pub use math::BlockContext;
 
 #[doc(inline)]
-pub use math::pricing::{FairPrice, Mark, PricePair, calculate_emas, fair_price, fair_price_x96};
+pub use math::pricing::{Mark, PricePair, calculate_emas, fair_price, fair_price_x96};
 
 #[doc(inline)]
 pub use math::maker_equity::{

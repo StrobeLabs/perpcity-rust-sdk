@@ -24,7 +24,7 @@ use crate::contracts::{IFees, IMarginRatios, Perp, Position};
 use crate::convert::{margin_ratio_to_leverage, price_x96_to_f64, scale_from_6dec};
 use crate::errors::{ContractError, PerpCityError, Result, ValidationError};
 use crate::hft::state_cache::{CachedBounds, CachedFees};
-use crate::math::pricing::FairPrice;
+use crate::math::pricing::Mark;
 use crate::types::{Bounds, Fees, OpenInterest, PerpData, PerpSnapshot};
 
 use super::market::MarketReader;
@@ -125,25 +125,21 @@ impl MarketReader {
         Ok(immutables)
     }
 
-    /// The contract's mark at the lagged snapshot block: the fair price of
-    /// the block's [`Mark`](crate::Mark), read by
-    /// [`StateAt::mark`](super::StateAt::mark).
+    /// [`StateAt::mark`](super::StateAt::mark) at the lagged snapshot
+    /// block: what the contract marks from, and through
+    /// [`Mark::fair_price_x96`] the price it marks at.
     ///
-    /// This is the price every health check, `valPnl` and utilization
+    /// That is the price every health check, `valPnl` and utilization
     /// accrual uses, and the mark [`Self::get_maker_equities`] prices at.
-    /// [`Self::get_mark_price`] returns the pool price instead.
+    /// [`Self::get_pool_price`] is the pool's spot price instead.
     ///
     /// # Errors
     ///
     /// [`ContractError::ModuleNotRegistered`] when the perp has no beacon;
     /// [`ContractError::BlockUnavailable`] when the pinned header is missing
     /// from the serving replica.
-    pub async fn get_fair_price(&self) -> Result<FairPrice> {
-        let mark = self.state().await?.mark().await?;
-        Ok(FairPrice {
-            block: mark.block,
-            price_x96: mark.fair_price_x96(),
-        })
+    pub async fn get_mark(&self) -> Result<Mark> {
+        self.state().await?.mark().await
     }
 
     /// Get the full perp configuration, fees, and bounds for the market.
@@ -155,7 +151,7 @@ impl MarketReader {
         let modules = perp.modules().call().await?;
         let pool_key = perp.poolKey().call().await?;
         let pool_state = perp.poolState().call().await?;
-        let mark = price_x96_to_f64(pool_state.ammPrice)?;
+        let pool_price = price_x96_to_f64(pool_state.ammPrice)?;
 
         let fees = self.get_or_fetch_fees(modules.fees).await?;
         let bounds = self.get_or_fetch_bounds(modules.marginRatios).await?;
@@ -163,14 +159,14 @@ impl MarketReader {
         Ok(PerpData {
             perp: self.perp,
             tick_spacing: i24_to_i32(pool_key.tickSpacing),
-            mark,
+            pool_price,
             beacon: modules.beacon,
             bounds,
             fees,
         })
     }
 
-    /// Get perp data: beacon, tick spacing, and current mark price.
+    /// Get perp data: beacon, tick spacing, and current pool price.
     ///
     /// Lighter-weight than [`Self::get_perp_config`] — skips fees/bounds lookups.
     pub async fn get_perp_data(&self) -> Result<(Address, i32, f64)> {
@@ -178,9 +174,9 @@ impl MarketReader {
         let modules = perp.modules().call().await?;
         let pool_key = perp.poolKey().call().await?;
         let pool_state = perp.poolState().call().await?;
-        let mark = price_x96_to_f64(pool_state.ammPrice)?;
+        let pool_price = price_x96_to_f64(pool_state.ammPrice)?;
 
-        Ok((modules.beacon, i24_to_i32(pool_key.tickSpacing), mark))
+        Ok((modules.beacon, i24_to_i32(pool_key.tickSpacing), pool_price))
     }
 
     /// Get an on-chain position by its NFT token ID.
@@ -245,22 +241,21 @@ impl MarketReader {
         Ok(owned)
     }
 
-    /// Get the pool (AMM spot) price via `poolState`. Uses the fast cache
-    /// layer (2s TTL).
+    /// The pool's spot price, `poolState().ammPrice`, from the fast cache
+    /// layer (2s TTL) or the head.
     ///
-    /// Despite the name, this is not the price the contract marks at: every
-    /// health check and `valPnl` prices at `fairPrice(ammPrice, index,
-    /// emas…)` — see [`crate::math::pricing`]. Use this for the pool's spot
-    /// state; use the maker/taker snapshots for contract-consistent marks.
-    pub async fn get_mark_price(&self) -> Result<f64> {
+    /// Not the price the contract marks at: every health check and
+    /// `valPnl` prices at the fair price of the pool price, the index and
+    /// the EMAs ([`crate::math::pricing`]), which [`Self::get_mark`] reads.
+    pub async fn get_pool_price(&self) -> Result<f64> {
         let now_ts = now_secs();
         let key = self.market_key();
 
         // Check cache
         {
             let cache = self.chain.state_cache().lock().unwrap();
-            if let Some(price) = cache.get_mark_price(&key, now_ts) {
-                tracing::trace!(price, "mark price cache hit");
+            if let Some(price) = cache.get_pool_price(&key, now_ts) {
+                tracing::trace!(price, "pool price cache hit");
                 return Ok(price);
             }
         }
@@ -270,12 +265,12 @@ impl MarketReader {
         let pool_state = perp.poolState().call().await?;
         let price = price_x96_to_f64(pool_state.ammPrice)?;
 
-        tracing::debug!(price, "mark price fetched");
+        tracing::debug!(price, "pool price fetched");
 
         // Update cache
         {
             let mut cache = self.chain.state_cache().lock().unwrap();
-            cache.put_mark_price(key, price, now_ts);
+            cache.put_pool_price(key, price, now_ts);
         }
 
         Ok(price)
@@ -359,7 +354,7 @@ impl MarketReader {
             .await
             .map_err(multicall_error)?;
 
-        let mark = price_x96_to_f64(pool_state.ammPrice)?;
+        let pool_price = price_x96_to_f64(pool_state.ammPrice)?;
         let funding_rate_daily = funding_per_day_to_f64(rates.fundingPerDay);
         let open_interest = OpenInterest {
             long_oi: oi.long as f64 / SCALE_F64,
@@ -379,7 +374,7 @@ impl MarketReader {
         let perp_data = PerpData {
             perp: self.perp,
             tick_spacing: i24_to_i32(pool_key.tickSpacing),
-            mark,
+            pool_price,
             beacon: modules.beacon,
             bounds,
             fees,
@@ -387,7 +382,7 @@ impl MarketReader {
 
         let snapshot = PerpSnapshot {
             block,
-            mark_price: mark,
+            pool_price,
             index_price,
             funding_rate_daily,
             open_interest,
@@ -506,6 +501,7 @@ mod tests {
     use crate::contracts::{IBeacon, IERC20, IMulticall3, Modules, Rates};
     use crate::errors::PerpCityError;
     use crate::math::BlockContext;
+    use crate::math::pricing::PricePair;
 
     /// The market's tick spacing in these tests.
     const SPACING: i32 = 30;
@@ -559,8 +555,8 @@ mod tests {
 
     /// What a downstream read helper looks like once it says it only
     /// reads: bounded on the market reader, not the client.
-    async fn mark_of(market: impl AsRef<MarketReader>) -> Result<f64> {
-        market.as_ref().get_mark_price().await
+    async fn pool_price_of(market: impl AsRef<MarketReader>) -> Result<f64> {
+        market.as_ref().get_pool_price().await
     }
 
     /// A helper narrowed to `impl AsRef<MarketReader>` still takes the
@@ -571,40 +567,44 @@ mod tests {
         let (client, rpc) = mock::client();
         rpc.call::<Perp::poolStateCall>(&mock::pool_state(x96(3, 1)));
 
-        assert_eq!(mark_of(&client).await.unwrap(), 1.5);
-        assert_eq!(mark_of(client.market()).await.unwrap(), 1.5, "cache hit");
+        assert_eq!(pool_price_of(&client).await.unwrap(), 1.5);
+        assert_eq!(
+            pool_price_of(client.market()).await.unwrap(),
+            1.5,
+            "cache hit"
+        );
         assert!(rpc.is_drained());
     }
 
-    // ── Fast layer: mark, funding, balance ────────────────────────────
+    // ── Fast layer: pool price, funding, balance ──────────────────────
 
     /// `poolState().ammPrice` is Q96; the read hands back the plain price.
     #[tokio::test]
-    async fn mark_price_is_the_pool_price_scaled_from_x96() {
+    async fn pool_price_is_pool_state_scaled_from_x96() {
         let (client, rpc) = mock::client();
         rpc.call::<Perp::poolStateCall>(&mock::pool_state(x96(3, 1)));
 
-        assert_eq!(client.market().get_mark_price().await.unwrap(), 1.5);
+        assert_eq!(client.market().get_pool_price().await.unwrap(), 1.5);
         assert!(rpc.is_drained(), "one eth_call");
     }
 
     /// The fast layer answers a second read without an RPC — the queue is
     /// empty, so an RPC would fail — until the caller invalidates it.
     #[tokio::test]
-    async fn mark_price_is_served_from_the_fast_layer_until_invalidated() {
+    async fn pool_price_is_served_from_the_fast_layer_until_invalidated() {
         let (client, rpc) = mock::client();
         rpc.call::<Perp::poolStateCall>(&mock::pool_state(x96(3, 1)));
-        assert_eq!(client.market().get_mark_price().await.unwrap(), 1.5);
+        assert_eq!(client.market().get_pool_price().await.unwrap(), 1.5);
 
         assert_eq!(
-            client.market().get_mark_price().await.unwrap(),
+            client.market().get_pool_price().await.unwrap(),
             1.5,
             "cache hit"
         );
 
         client.chain().invalidate_fast_cache();
         rpc.call::<Perp::poolStateCall>(&mock::pool_state(x96(1, 0)));
-        assert_eq!(client.market().get_mark_price().await.unwrap(), 1.0);
+        assert_eq!(client.market().get_pool_price().await.unwrap(), 1.0);
         assert!(rpc.is_drained());
     }
 
@@ -675,7 +675,7 @@ mod tests {
         let (client, rpc) = mock::client();
         rpc.fails("connection reset");
 
-        let err = client.market().get_mark_price().await.unwrap_err();
+        let err = client.market().get_pool_price().await.unwrap_err();
         assert!(
             matches!(
                 err,
@@ -859,7 +859,7 @@ mod tests {
             PerpData {
                 perp: mock::PERP,
                 tick_spacing: SPACING,
-                mark: 1.5,
+                pool_price: 1.5,
                 beacon: BEACON,
                 bounds: expected_bounds(),
                 fees: expected_fees(),
@@ -1042,7 +1042,7 @@ mod tests {
             PerpData {
                 perp: mock::PERP,
                 tick_spacing: SPACING,
-                mark: 1.5,
+                pool_price: 1.5,
                 beacon: BEACON,
                 bounds: expected_bounds(),
                 fees: expected_fees(),
@@ -1052,7 +1052,7 @@ mod tests {
             snapshot,
             PerpSnapshot {
                 block: 100,
-                mark_price: 1.5,
+                pool_price: 1.5,
                 index_price: 1.25,
                 funding_rate_daily: -0.005,
                 open_interest: OpenInterest {
@@ -1107,10 +1107,10 @@ mod tests {
     }
 
     /// With pool, index and EMAs all equal and no time since the last
-    /// touch, the fair price is that price: the plumbing is pinned without
-    /// re-deriving the EMA math, which has its own tests.
+    /// touch, the mark is those inputs and prices at them: the plumbing is
+    /// pinned without re-deriving the EMA math, which has its own tests.
     #[tokio::test]
-    async fn fair_price_reads_the_mark_inputs_at_the_lagged_block() {
+    async fn the_mark_is_read_at_the_lagged_block() {
         const TOUCHED_AT: u64 = 1_700_000_000;
         let one = x96(1, 0);
         let (client, rpc) = mock::client();
@@ -1131,17 +1131,24 @@ mod tests {
         );
         rpc.call::<IBeacon::indexCall>(&one);
 
+        let mark = client.market().get_mark().await.unwrap();
         assert_eq!(
-            client.market().get_fair_price().await.unwrap(),
-            FairPrice {
+            mark,
+            Mark {
                 block: BlockContext {
                     number: 100 - SNAPSHOT_BLOCK_LAG,
                     hash,
                     timestamp: TOUCHED_AT,
                 },
-                price_x96: one,
+                amm_price_x96: one,
+                index_x96: one,
+                emas: PricePair {
+                    amm: one.to::<u128>(),
+                    index: one.to::<u128>(),
+                },
             }
         );
+        assert_eq!(mark.fair_price_x96(), one);
         assert!(rpc.is_drained(), "blockNumber, block, multicall, index");
     }
 
@@ -1149,7 +1156,7 @@ mod tests {
     /// index read that would otherwise decode nothing from the zero
     /// address.
     #[tokio::test]
-    async fn fair_price_without_a_beacon_names_the_missing_interface() {
+    async fn a_mark_without_a_beacon_names_the_missing_interface() {
         let one = x96(1, 0);
         let (client, rpc) = mock::client();
         rpc.quantity(100);
@@ -1168,7 +1175,7 @@ mod tests {
             ],
         );
 
-        let err = client.market().get_fair_price().await.unwrap_err();
+        let err = client.market().get_mark().await.unwrap_err();
         assert!(
             matches!(
                 err,

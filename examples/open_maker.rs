@@ -1,8 +1,8 @@
 //! Open a maker (LP) position on PerpCity.
 //!
 //! Demonstrates the maker flow:
-//! 1. Query the current mark price
-//! 2. Calculate a ±5% price range centered around mark
+//! 1. Query the current pool price
+//! 2. Calculate a ±5% price range centered around it
 //! 3. Estimate liquidity for the desired margin
 //! 4. Open the maker position
 //!
@@ -76,13 +76,13 @@ async fn main() -> Result<()> {
     client.ensure_approval(U256::MAX).await?;
 
     // -- Read market state --
-    let mark = client.market().get_mark_price().await?;
-    println!("mark price: {mark:.2}");
+    let pool_price = client.market().get_pool_price().await?;
+    println!("pool price: {pool_price:.2}");
 
-    // -- Calculate tick range (±5% around mark) --
+    // -- Calculate tick range (±5% around the pool price) --
     let tick_spacing = constants::TICK_SPACING;
-    let price_lower = mark * 0.95;
-    let price_upper = mark * 1.05;
+    let price_lower = pool_price * 0.95;
+    let price_upper = pool_price * 1.05;
 
     let tick_lower = align_tick_down(price_to_tick(price_lower)?, tick_spacing);
     let tick_upper = align_tick_up(price_to_tick(price_upper)?, tick_spacing);

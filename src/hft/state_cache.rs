@@ -5,7 +5,7 @@
 //! | Layer | TTL | Data | Why |
 //! |---|---|---|---|
 //! | **Slow** | 60 s | Fees, bounds | Change only via governance |
-//! | **Fast** | 2 s (1 block) | Mark prices, funding rates, USDC balances | Change every block |
+//! | **Fast** | 2 s (1 block) | Pool prices, funding rates, USDC balances | Change every block |
 //!
 //! All methods take an explicit `now_ts` (Unix seconds) for deterministic
 //! testing — no hidden clock dependencies.
@@ -113,7 +113,7 @@ pub struct StateCache {
     bounds: HashMap<[u8; 20], CachedValue<CachedBounds>>,
 
     // Fast layer (2s TTL): changes every block
-    mark_prices: HashMap<[u8; 32], CachedValue<f64>>,
+    pool_prices: HashMap<[u8; 32], CachedValue<f64>>,
     funding_rates: HashMap<[u8; 32], CachedValue<f64>>,
     balances: HashMap<BalanceKey, CachedValue<f64>>,
 
@@ -127,7 +127,7 @@ impl StateCache {
         Self {
             fees: HashMap::new(),
             bounds: HashMap::new(),
-            mark_prices: HashMap::new(),
+            pool_prices: HashMap::new(),
             funding_rates: HashMap::new(),
             balances: HashMap::new(),
             slow_ttl: config.slow_ttl,
@@ -179,20 +179,20 @@ impl StateCache {
         );
     }
 
-    // ── Fast layer: mark prices ────────────────────────────────────
+    // ── Fast layer: pool prices ────────────────────────────────────
 
-    /// Get cached mark price for a perp, or `None` if stale/absent.
+    /// Get cached pool price for a perp, or `None` if stale/absent.
     #[inline]
-    pub fn get_mark_price(&self, perp_id: &[u8; 32], now_ts: u64) -> Option<f64> {
-        self.mark_prices
+    pub fn get_pool_price(&self, perp_id: &[u8; 32], now_ts: u64) -> Option<f64> {
+        self.pool_prices
             .get(perp_id)
             .filter(|cv| cv.is_valid(now_ts))
             .map(|cv| cv.value)
     }
 
-    /// Cache a mark price for a perp.
-    pub fn put_mark_price(&mut self, perp_id: [u8; 32], price: f64, now_ts: u64) {
-        self.mark_prices.insert(
+    /// Cache a pool price for a perp.
+    pub fn put_pool_price(&mut self, perp_id: [u8; 32], price: f64, now_ts: u64) {
+        self.pool_prices.insert(
             perp_id,
             CachedValue {
                 value: price,
@@ -251,7 +251,7 @@ impl StateCache {
     ///
     /// Call on new-block events. The slow layer (fees, bounds) is preserved.
     pub fn invalidate_fast_layer(&mut self) {
-        self.mark_prices.clear();
+        self.pool_prices.clear();
         self.funding_rates.clear();
         self.balances.clear();
     }
@@ -298,7 +298,7 @@ mod tests {
         let c = StateCache::new(StateCacheConfig::default());
         assert!(c.get_fees(&[0; 20], 0).is_none());
         assert!(c.get_bounds(&[0; 20], 0).is_none());
-        assert!(c.get_mark_price(&[0; 32], 0).is_none());
+        assert!(c.get_pool_price(&[0; 32], 0).is_none());
         assert!(c.get_funding_rate(&[0; 32], 0).is_none());
         assert!(c.get_balance(&sample_balance_key(), 0).is_none());
     }
@@ -320,9 +320,9 @@ mod tests {
         let mut c = StateCache::new(StateCacheConfig::default()); // fast_ttl = 2
         let perp = [0xBB; 32];
 
-        c.put_mark_price(perp, 42000.0, 1000);
-        assert_eq!(c.get_mark_price(&perp, 1001), Some(42000.0));
-        assert!(c.get_mark_price(&perp, 1002).is_none());
+        c.put_pool_price(perp, 42000.0, 1000);
+        assert_eq!(c.get_pool_price(&perp, 1001), Some(42000.0));
+        assert!(c.get_pool_price(&perp, 1002).is_none());
     }
 
     #[test]
@@ -385,7 +385,7 @@ mod tests {
 
         c.put_fees(addr, sample_fees(), 0);
         c.put_bounds(addr, sample_bounds(), 0);
-        c.put_mark_price(perp, 42000.0, 0);
+        c.put_pool_price(perp, 42000.0, 0);
         c.put_funding_rate(perp, 0.0001, 0);
         c.put_balance(sample_balance_key(), 1000.0, 0);
 
@@ -396,7 +396,7 @@ mod tests {
         assert!(c.get_bounds(&addr, 0).is_some());
 
         // Fast layer cleared
-        assert!(c.get_mark_price(&perp, 0).is_none());
+        assert!(c.get_pool_price(&perp, 0).is_none());
         assert!(c.get_funding_rate(&perp, 0).is_none());
         assert!(c.get_balance(&sample_balance_key(), 0).is_none());
     }
@@ -408,12 +408,12 @@ mod tests {
         let perp = [0xBB; 32];
 
         c.put_fees(addr, sample_fees(), 0);
-        c.put_mark_price(perp, 42000.0, 0);
+        c.put_pool_price(perp, 42000.0, 0);
 
         c.invalidate_all();
 
         assert!(c.get_fees(&addr, 0).is_none());
-        assert!(c.get_mark_price(&perp, 0).is_none());
+        assert!(c.get_pool_price(&perp, 0).is_none());
     }
 
     #[test]
@@ -421,12 +421,12 @@ mod tests {
         let mut c = StateCache::new(StateCacheConfig::default());
         let perp = [0xBB; 32];
 
-        c.put_mark_price(perp, 42000.0, 100);
-        c.put_mark_price(perp, 43000.0, 200);
+        c.put_pool_price(perp, 42000.0, 100);
+        c.put_pool_price(perp, 43000.0, 200);
 
         // Old value gone (would have expired at 102), new value valid
-        assert_eq!(c.get_mark_price(&perp, 201), Some(43000.0));
-        assert!(c.get_mark_price(&perp, 202).is_none());
+        assert_eq!(c.get_pool_price(&perp, 201), Some(43000.0));
+        assert!(c.get_pool_price(&perp, 202).is_none());
     }
 
     #[test]
@@ -440,15 +440,15 @@ mod tests {
         let perp = [0xBB; 32];
 
         c.put_fees(addr, sample_fees(), 0);
-        c.put_mark_price(perp, 100.0, 0);
+        c.put_pool_price(perp, 100.0, 0);
 
         // Custom slow TTL: 10s
         assert!(c.get_fees(&addr, 9).is_some());
         assert!(c.get_fees(&addr, 10).is_none());
 
         // Custom fast TTL: 1s
-        assert!(c.get_mark_price(&perp, 0).is_some());
-        assert!(c.get_mark_price(&perp, 1).is_none());
+        assert!(c.get_pool_price(&perp, 0).is_some());
+        assert!(c.get_pool_price(&perp, 1).is_none());
     }
 
     #[test]
@@ -457,11 +457,11 @@ mod tests {
         let perp_a = [0xAA; 32];
         let perp_b = [0xBB; 32];
 
-        c.put_mark_price(perp_a, 100.0, 0);
-        c.put_mark_price(perp_b, 200.0, 0);
+        c.put_pool_price(perp_a, 100.0, 0);
+        c.put_pool_price(perp_b, 200.0, 0);
 
-        assert_eq!(c.get_mark_price(&perp_a, 0), Some(100.0));
-        assert_eq!(c.get_mark_price(&perp_b, 0), Some(200.0));
+        assert_eq!(c.get_pool_price(&perp_a, 0), Some(100.0));
+        assert_eq!(c.get_pool_price(&perp_b, 0), Some(200.0));
     }
 
     #[test]

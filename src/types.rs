@@ -42,7 +42,7 @@ pub struct PerpData {
     /// Pool (AMM spot) price in human-readable units (e.g. `1.05`) — not
     /// the contract's mark, which is the fair price
     /// ([`crate::math::pricing`]).
-    pub mark: f64,
+    pub pool_price: f64,
     /// Beacon contract address.
     pub beacon: Address,
     /// Leverage and margin constraints.
@@ -202,7 +202,7 @@ pub struct PerpSnapshot {
     /// Pool (AMM spot) price in human-readable units — not a TWAP, and not
     /// the contract's mark, which is the fair price
     /// ([`crate::math::pricing`]).
-    pub mark_price: f64,
+    pub pool_price: f64,
     /// Oracle index price from the beacon contract.
     pub index_price: f64,
     /// Daily funding rate (positive = longs pay shorts).

@@ -121,27 +121,27 @@ fn bench_gas(c: &mut Criterion) {
 fn bench_state_cache(c: &mut Criterion) {
     let mut group = c.benchmark_group("state_cache");
 
-    // Hot path: mark price read (HashMap lookup + TTL check)
-    group.bench_function("get_mark_price/hit", |b| {
+    // Hot path: pool price read (HashMap lookup + TTL check)
+    group.bench_function("get_pool_price/hit", |b| {
         let mut cache = StateCache::new(StateCacheConfig::default());
         let perp = [0xAA; 32];
-        cache.put_mark_price(perp, 42000.0, 1000);
-        b.iter(|| cache.get_mark_price(black_box(&perp), black_box(1001)))
+        cache.put_pool_price(perp, 42000.0, 1000);
+        b.iter(|| cache.get_pool_price(black_box(&perp), black_box(1001)))
     });
 
-    // Mark price read — miss (key not present)
-    group.bench_function("get_mark_price/miss", |b| {
+    // Pool price read — miss (key not present)
+    group.bench_function("get_pool_price/miss", |b| {
         let cache = StateCache::new(StateCacheConfig::default());
         let perp = [0xBB; 32];
-        b.iter(|| cache.get_mark_price(black_box(&perp), black_box(1001)))
+        b.iter(|| cache.get_pool_price(black_box(&perp), black_box(1001)))
     });
 
-    // Mark price read — expired
-    group.bench_function("get_mark_price/expired", |b| {
+    // Pool price read — expired
+    group.bench_function("get_pool_price/expired", |b| {
         let mut cache = StateCache::new(StateCacheConfig::default());
         let perp = [0xAA; 32];
-        cache.put_mark_price(perp, 42000.0, 1000);
-        b.iter(|| cache.get_mark_price(black_box(&perp), black_box(1003))) // fast_ttl = 2s
+        cache.put_pool_price(perp, 42000.0, 1000);
+        b.iter(|| cache.get_pool_price(black_box(&perp), black_box(1003))) // fast_ttl = 2s
     });
 
     // Funding rate read
@@ -180,28 +180,28 @@ fn bench_state_cache(c: &mut Criterion) {
         b.iter(|| cache.get_balance(black_box(&key), black_box(1001)))
     });
 
-    // Cold path: put_mark_price
-    group.bench_function("put_mark_price", |b| {
+    // Cold path: put_pool_price
+    group.bench_function("put_pool_price", |b| {
         let mut cache = StateCache::new(StateCacheConfig::default());
         let perp = [0xAA; 32];
-        b.iter(|| cache.put_mark_price(black_box(perp), black_box(42000.0), black_box(1000)))
+        b.iter(|| cache.put_pool_price(black_box(perp), black_box(42000.0), black_box(1000)))
     });
 
     // State cache with many entries (realistic warm cache)
-    group.bench_function("get_mark_price/warm_cache_10", |b| {
+    group.bench_function("get_pool_price/warm_cache_10", |b| {
         let mut cache = StateCache::new(StateCacheConfig::default());
         // Populate 10 perps
         for i in 0u8..10 {
             let mut perp = [0u8; 32];
             perp[0] = i;
-            cache.put_mark_price(perp, 42000.0 + i as f64, 1000);
+            cache.put_pool_price(perp, 42000.0 + i as f64, 1000);
         }
         let target = {
             let mut p = [0u8; 32];
             p[0] = 5;
             p
         };
-        b.iter(|| cache.get_mark_price(black_box(&target), black_box(1001)))
+        b.iter(|| cache.get_pool_price(black_box(&target), black_box(1001)))
     });
 
     group.finish();
@@ -442,13 +442,13 @@ fn bench_trading_tick(c: &mut Criterion) {
         gc.update(50_000_000, 0);
         let mut state = StateCache::new(StateCacheConfig::default());
         let perp = [0xAA; 32];
-        state.put_mark_price(perp, 42000.0, 0);
+        state.put_pool_price(perp, 42000.0, 0);
         let mut lat = LatencyTracker::new();
         let calldata = vec![0x01, 0x02, 0x03, 0x04];
 
         b.iter(|| {
-            // 1. Read mark price from cache
-            let _price = state.get_mark_price(black_box(&perp), black_box(1));
+            // 1. Read the pool price from cache
+            let _price = state.get_pool_price(black_box(&perp), black_box(1));
             // 2. Prepare transaction (nonce + gas)
             let _prepared = pipe.prepare(
                 TxRequest {

@@ -110,16 +110,16 @@ Every write method takes an `Urgency` level that scales the EIP-1559 priority fe
 ### Market Data
 
 ```rust
-// Snapshot — config + live data in 2 multicalls (2 CUs instead of 5+)
+// Snapshot — config + live data, one block, in one multicall plus the index
 let (config, snapshot) = client.market().get_perp_snapshot().await?;
 
 // Or individually
-let mark     = client.market().get_mark_price().await?;        // f64 price
+let price    = client.market().get_pool_price().await?;        // the pool's spot price, f64
 let funding  = client.market().get_funding_rate().await?;      // daily rate
 let oi       = client.market().get_open_interest().await?;      // long/short OI
 let cap      = client.market().get_capacity().await?;           // capacity + OI at one block
 let headroom = cap.headroom_atoms(Side::Short);        // short OI still openable, perp atoms
-let fair     = client.market().get_fair_price().await?;         // the contract's mark (X96)
+let mark     = client.market().get_mark().await?;               // what the contract marks from; .fair_price_x96()
 let position = client.market().get_position(open.pos_id).await?; // raw on-chain Position
 
 // Storage at one block: the handle is the block, so nothing read through

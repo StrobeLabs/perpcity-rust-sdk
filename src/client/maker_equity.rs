@@ -361,7 +361,7 @@ impl MarketReader {
     /// every chunk pinned to the same block.
     ///
     /// The mark that prices `valPnl` and the accrual replay is the
-    /// contract's own, the value [`Self::get_fair_price`] reads: the
+    /// contract's own, the value [`Self::get_mark`] reads: the
     /// deployed fair price ([`crate::math::pricing::fair_price_x96`]) of the
     /// pinned block's `poolState().ammPrice`, beacon index, and EMAs
     /// advanced to the block timestamp — exactly what `PerpLogic.accrue`
