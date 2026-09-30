@@ -332,6 +332,11 @@ impl StateAt {
     /// price-impact module, and rebuilds the tick map from the
     /// PoolManager's bitmap. Every contract and PoolManager read is pinned
     /// to this block's hash.
+    ///
+    /// # Errors
+    ///
+    /// [`ContractError::ModuleNotRegistered`] when the perp has no beacon
+    /// or no price-impact module.
     pub async fn taker_book(&self) -> Result<TakerMarketSnapshot> {
         let immutables = self.market.book_immutables().await?;
         let provider = self.market.chain.provider();
@@ -350,7 +355,8 @@ impl StateAt {
             rates_call.call(),
         )
         .map_err(|e| self.read_error(e))?;
-        let index = IBeacon::new(modules.beacon, provider)
+        let beacon = registered_module(modules.beacon, "IBeacon")?;
+        let index = IBeacon::new(beacon, provider)
             .index()
             .block(self.id())
             .call()
@@ -368,7 +374,8 @@ impl StateAt {
             self.block.timestamp,
             immutables.ema_window,
         )?;
-        let bounds = IPriceImpact::new(modules.priceImpact, provider)
+        let price_impact = registered_module(modules.priceImpact, "IPriceImpact")?;
+        let bounds = IPriceImpact::new(price_impact, provider)
             .sqrtPriceBounds(
                 state.ammPrice,
                 index,
