@@ -7,12 +7,12 @@
 //! range fails at the boundary it entered — a chain read, a config, an
 //! event — never somewhere inside the arithmetic.
 
-use alloy::primitives::U256;
 use serde::{Deserialize, Serialize};
 
 use crate::constants::{MAX_TICK, MIN_TICK};
 use crate::errors::ValidationError;
 use crate::math::tick::get_sqrt_ratio_at_tick;
+use crate::units::SqrtPrice;
 
 /// A tick interval `[lower, upper)`, valid by construction: `lower <
 /// upper`, both within the V4 domain `[MIN_TICK, MAX_TICK]`.
@@ -71,8 +71,8 @@ impl TickRange {
         self.upper - self.lower
     }
 
-    /// The sqrt prices at the bounds, Q96 — what the V4 math works in.
-    pub fn sqrt_bounds(&self) -> (U256, U256) {
+    /// The sqrt prices at the bounds — what the V4 math works in.
+    pub fn sqrt_bounds(&self) -> (SqrtPrice, SqrtPrice) {
         let at =
             |tick| get_sqrt_ratio_at_tick(tick).expect("a TickRange's ticks are in the V4 domain");
         (at(self.lower), at(self.upper))

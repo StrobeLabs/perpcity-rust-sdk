@@ -25,6 +25,7 @@ use crate::errors::{ContractError, PerpCityError, Result, ValidationError};
 use crate::hft::state_cache::{CachedBounds, CachedFees};
 use crate::math::pricing::{Emas, Mark, PricePair};
 use crate::types::{Bounds, Fees, MarketConfig, MarketSnapshot, OpenInterest};
+use crate::units::Price;
 
 use super::market::MarketReader;
 use super::state::{ema_window_secs, pinned_read_error};
@@ -127,7 +128,7 @@ impl MarketReader {
 
     /// [`StateAt::mark`](super::StateAt::mark) at the lagged snapshot
     /// block: what the contract marks from, and through
-    /// [`Mark::fair_price_x96`] the price it marks at.
+    /// [`Mark::fair_price`] the price it marks at.
     ///
     /// That is the price every health check, `valPnl` and utilization
     /// accrual uses, and the mark [`Self::get_maker_equities`] prices at.
@@ -380,13 +381,13 @@ impl MarketReader {
         };
         let mark = Mark::advanced(
             block,
-            pool_state.ammPrice,
-            index_x96,
+            Price::from_x96(pool_state.ammPrice),
+            Price::from_x96(index_x96),
             stored_emas,
             last_touch,
             ema_window,
         )?;
-        let mark = price_x96_to_f64(mark.fair_price_x96())?;
+        let mark = mark.fair_price().to_f64()?;
         let emas = Emas {
             amm_price: price_x96_to_f64(U256::from(stored_emas.amm))?,
             index: price_x96_to_f64(U256::from(stored_emas.index))?,
@@ -1245,15 +1246,15 @@ mod tests {
                     hash,
                     timestamp: TOUCHED_AT,
                 },
-                amm_price_x96: one,
-                index_x96: one,
+                pool_price: Price::from_x96(one),
+                index: Price::from_x96(one),
                 emas: PricePair {
                     amm: one.to::<u128>(),
                     index: one.to::<u128>(),
                 },
             }
         );
-        assert_eq!(mark.fair_price_x96(), one);
+        assert_eq!(mark.fair_price(), Price::from_x96(one));
         assert!(rpc.is_drained(), "blockNumber, block, multicall, index");
     }
 

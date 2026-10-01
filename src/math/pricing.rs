@@ -29,8 +29,9 @@ use alloy::primitives::{I256, U256, uint};
 use serde::{Deserialize, Serialize};
 
 use crate::errors::ValidationError;
+use crate::fixed_point::exp_wad;
 use crate::math::BlockContext;
-use crate::math::fixed_point::exp_wad;
+use crate::units::Price;
 
 const WAD_U256: U256 = uint!(1_000_000_000_000_000_000_U256);
 
@@ -114,9 +115,9 @@ pub struct Mark {
     /// The block the inputs were read at.
     pub block: BlockContext,
     /// `poolState().ammPrice`.
-    pub amm_price_x96: U256,
+    pub pool_price: Price,
     /// The beacon's `index()`.
-    pub index_x96: U256,
+    pub index: Price,
     /// The EMAs as of the block timestamp.
     pub emas: PricePair,
 }
@@ -132,29 +133,29 @@ impl Mark {
     /// advance across.
     pub fn advanced(
         block: BlockContext,
-        amm_price_x96: U256,
-        index_x96: U256,
+        pool_price: Price,
+        index: Price,
         stored_emas: PricePair,
         last_touch: u64,
         ema_window: u64,
     ) -> Result<Self, ValidationError> {
-        let spot = PricePair::try_from_x96(amm_price_x96, index_x96)?;
+        let spot = PricePair::try_from_x96(pool_price.x96(), index.x96())?;
         let emas = calculate_emas(stored_emas, spot, last_touch, block.timestamp, ema_window)?;
         Ok(Self {
             block,
-            amm_price_x96,
-            index_x96,
+            pool_price,
+            index,
             emas,
         })
     }
 
-    /// [`fair_price_x96`] of these inputs: the price the contract marks at.
-    pub fn fair_price_x96(&self) -> U256 {
-        fair_price_x96(
-            self.amm_price_x96,
-            self.index_x96,
-            U256::from(self.emas.amm),
-            U256::from(self.emas.index),
+    /// [`fair_price`] of these inputs: the price the contract marks at.
+    pub fn fair_price(&self) -> Price {
+        fair_price(
+            self.pool_price,
+            self.index,
+            Price::from_x96(U256::from(self.emas.amm)),
+            Price::from_x96(U256::from(self.emas.index)),
         )
     }
 }
@@ -195,11 +196,11 @@ impl Emas {
         }
     }
 
-    /// The contract's mark at `timestamp`: [`fair_price`] of the spot
+    /// The contract's mark at `timestamp`: [`fair_price_f64`] of the spot
     /// prices and this pair advanced to it.
     pub fn mark(self, pool_price: f64, index: f64, timestamp: u64, ema_window: u64) -> f64 {
         let emas = self.advanced(pool_price, index, timestamp, ema_window);
-        fair_price(pool_price, index, emas.amm_price, emas.index)
+        fair_price_f64(pool_price, index, emas.amm_price, emas.index)
     }
 }
 
@@ -209,27 +210,29 @@ fn avg(a: U256, b: U256) -> U256 {
     (a & b) + ((a ^ b) >> 1)
 }
 
-/// The deployed `fairPrice`, exact in X96 (see the module docs).
+/// The deployed `fairPrice`, exact (see the module docs).
 ///
 /// `index + emaAmmPrice` cannot overflow for chain-sourced inputs (both are
 /// `uint128` on chain); the port saturates instead of panicking on
 /// out-of-domain callers, where the contract would revert.
-pub fn fair_price_x96(
-    amm_price_x96: U256,
-    index_x96: U256,
-    ema_amm_price_x96: U256,
-    ema_index_x96: U256,
-) -> U256 {
-    let adjusted_index = index_x96.saturating_add(ema_amm_price_x96);
-    let delta = adjusted_index.saturating_sub(ema_index_x96);
-    avg(amm_price_x96, delta)
+pub fn fair_price(
+    pool_price: Price,
+    index: Price,
+    ema_pool_price: Price,
+    ema_index: Price,
+) -> Price {
+    let adjusted_index = index.x96().saturating_add(ema_pool_price.x96());
+    let delta = adjusted_index.saturating_sub(ema_index.x96());
+    Price::from_x96(avg(pool_price.x96(), delta))
 }
 
-/// [`fair_price_x96`] in human units, for f64 simulators:
-/// `(amm + max(index + ema_amm − ema_index, 0)) / 2`.
-pub fn fair_price(amm_price: f64, index: f64, ema_amm_price: f64, ema_index: f64) -> f64 {
-    let delta = (index + ema_amm_price - ema_index).max(0.0);
-    (amm_price + delta) / 2.0
+/// [`fair_price`] in human units, for f64 simulators:
+/// `(pool + max(index + ema_pool − ema_index, 0)) / 2`.
+///
+/// The `_f64` names the lossy twin, since the exact one is the default.
+pub fn fair_price_f64(pool_price: f64, index: f64, ema_pool_price: f64, ema_index: f64) -> f64 {
+    let delta = (index + ema_pool_price - ema_index).max(0.0);
+    (pool_price + delta) / 2.0
 }
 
 #[cfg(test)]
@@ -238,7 +241,16 @@ mod tests {
 
     use super::*;
     use crate::constants::{Q96, Q96_PRECISION};
-    use crate::convert::price_x96_to_f64;
+
+    /// A price from its Q96 word.
+    fn p(x96: U256) -> Price {
+        Price::from_x96(x96)
+    }
+
+    /// The same, as the `f64` a person reads.
+    fn f(x96: U256) -> f64 {
+        p(x96).to_f64().unwrap()
+    }
 
     /// A live accrue, reproduced to the digit: HORMUZ-TRAFFIC's
     /// `RatesAndEmasRefreshed` at Arbitrum One block 510213600 (tx
@@ -261,8 +273,8 @@ mod tests {
         };
         let mark = Mark::advanced(
             block,
-            uint!(3333452930552967749837079299470_U256),
-            uint!(3248354663084837841335301963776_U256),
+            p(uint!(3333452930552967749837079299470_U256)),
+            p(uint!(3248354663084837841335301963776_U256)),
             stored,
             1790734324,
             3600,
@@ -276,18 +288,17 @@ mod tests {
             }
         );
         assert_eq!(
-            mark.fair_price_x96(),
-            uint!(3402826316343078585786028642276_U256)
+            mark.fair_price(),
+            p(uint!(3402826316343078585786028642276_U256))
         );
     }
 
     /// The f64 advance reproduces the exact one on the same live accrue
-    /// to the six decimals `price_x96_to_f64` keeps (prices near 42, so
+    /// to the six decimals [`Price::to_f64`] keeps (prices near 42, so
     /// within a few millionths), and the mark it gives is the fair price
     /// of the exact result to the same precision.
     #[test]
     fn the_f64_advance_agrees_with_the_exact_one() {
-        let f = |x96: U256| price_x96_to_f64(x96).unwrap();
         let (amm_x96, index_x96) = (
             uint!(3333452930552967749837079299470_U256),
             uint!(3248354663084837841335301963776_U256),
@@ -332,7 +343,7 @@ mod tests {
         assert_eq!(stored.advanced(1.5, 1.25, 10, 3_600), stored);
         assert_eq!(
             stored.mark(1.5, 1.25, 10, 3_600),
-            fair_price(1.5, 1.25, 1.0, 1.0)
+            fair_price_f64(1.5, 1.25, 1.0, 1.0)
         );
     }
 
@@ -362,9 +373,9 @@ mod tests {
             amm: one,
             index: one,
         };
-        let mark = Mark::advanced(block, Q96, Q96, stored, block.timestamp, 3_600).unwrap();
+        let mark = Mark::advanced(block, p(Q96), p(Q96), stored, block.timestamp, 3_600).unwrap();
         assert_eq!(mark.emas, stored);
-        assert_eq!(mark.fair_price_x96(), Q96);
+        assert_eq!(mark.fair_price(), p(Q96));
     }
 
     /// Time to advance across with no window to advance by is the
@@ -381,7 +392,7 @@ mod tests {
             index: one,
         };
         assert!(matches!(
-            Mark::advanced(block, Q96, Q96, stored, block.timestamp - 1, 0),
+            Mark::advanced(block, p(Q96), p(Q96), stored, block.timestamp - 1, 0),
             Err(ValidationError::InvalidConfig { .. })
         ));
     }
@@ -393,68 +404,65 @@ mod tests {
     #[test]
     fn matches_deployed_fair_price() {
         assert_eq!(
-            fair_price_x96(
-                uint!(0x2e8d7e0b44090ee63765fb855f_U256),
-                uint!(0x280000000000000000000000000_U256),
-                uint!(0x2e4e1d5d09c24b2a50779abaf3_U256),
-                uint!(0x2dc0f47dc4c7764d34d2f6a88f_U256),
+            fair_price(
+                p(uint!(0x2e8d7e0b44090ee63765fb855f_U256)),
+                p(uint!(0x280000000000000000000000000_U256)),
+                p(uint!(0x2e4e1d5d09c24b2a50779abaf3_U256)),
+                p(uint!(0x2dc0f47dc4c7764d34d2f6a88f_U256)),
             ),
-            uint!(0x1578d53754481f1e1a9854fcbe1_U256)
+            p(uint!(0x1578d53754481f1e1a9854fcbe1_U256))
         );
         // The clamp: index + emaAmm < emaIndex gives delta 0.
         assert_eq!(
-            fair_price_x96(
-                U256::from(1001u32),
-                U256::ONE,
-                U256::ONE,
-                U256::from(1_000_000u32)
+            fair_price(
+                p(U256::from(1001u32)),
+                p(U256::ONE),
+                p(U256::ONE),
+                p(U256::from(1_000_000u32))
             ),
-            U256::from(500u32)
+            p(U256::from(500u32))
         );
         // Floor of an odd sum.
         assert_eq!(
-            fair_price_x96(
-                U256::from(7u8),
-                U256::from(3u8),
-                U256::from(4u8),
-                U256::from(2u8)
+            fair_price(
+                p(U256::from(7u8)),
+                p(U256::from(3u8)),
+                p(U256::from(4u8)),
+                p(U256::from(2u8))
             ),
-            U256::from(6u8)
+            p(U256::from(6u8))
         );
     }
 
     #[test]
     fn saturates_instead_of_panicking() {
         assert_eq!(
-            fair_price_x96(U256::MAX, U256::MAX, U256::MAX, U256::ZERO),
-            U256::MAX
+            fair_price(p(U256::MAX), p(U256::MAX), p(U256::MAX), p(U256::ZERO)),
+            p(U256::MAX)
         );
         assert_eq!(
-            fair_price_x96(U256::ZERO, U256::ZERO, U256::ZERO, U256::MAX),
-            U256::ZERO
+            fair_price(p(U256::ZERO), p(U256::ZERO), p(U256::ZERO), p(U256::MAX)),
+            p(U256::ZERO)
         );
     }
 
     #[test]
-    fn f64_helper_agrees_with_x96() {
+    fn the_f64_twin_agrees_with_the_exact_one() {
         let amm = uint!(0x2e8d7e0b44090ee63765fb855f_U256);
         let index = uint!(0x280000000000000000000000000_U256);
         let ema_amm = uint!(0x2e4e1d5d09c24b2a50779abaf3_U256);
         let ema_index = uint!(0x2dc0f47dc4c7764d34d2f6a88f_U256);
-        let exact = price_x96_to_f64(fair_price_x96(amm, index, ema_amm, ema_index)).unwrap();
-        let approx = fair_price(
-            price_x96_to_f64(amm).unwrap(),
-            price_x96_to_f64(index).unwrap(),
-            price_x96_to_f64(ema_amm).unwrap(),
-            price_x96_to_f64(ema_index).unwrap(),
-        );
-        // `price_x96_to_f64` rounds to Q96_PRECISION, so agree to that.
+        let exact = fair_price(p(amm), p(index), p(ema_amm), p(ema_index))
+            .to_f64()
+            .unwrap();
+        let approx = fair_price_f64(f(amm), f(index), f(ema_amm), f(ema_index));
+        // The f64 view rounds to Q96_PRECISION, so agree to that.
         assert!(
             (exact - approx).abs() < Q96_PRECISION,
             "{exact} vs {approx}"
         );
 
-        assert_eq!(fair_price(1001.0, 1.0, 1.0, 1_000_000.0), 500.5);
-        assert_eq!(fair_price(7.0, 3.0, 4.0, 2.0), 6.0);
+        assert_eq!(fair_price_f64(1001.0, 1.0, 1.0, 1_000_000.0), 500.5);
+        assert_eq!(fair_price_f64(7.0, 3.0, 4.0, 2.0), 6.0);
     }
 }

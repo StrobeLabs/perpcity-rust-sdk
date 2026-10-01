@@ -13,7 +13,8 @@ use alloy::primitives::{Address, U256};
 use alloy::signers::local::PrivateKeySigner;
 use perpcity_sdk::constants::TICK_SPACING;
 use perpcity_sdk::{
-    ChainReader, HftTransport, PerpClient, QuoteConstraints, TransportConfig, align_tick_down,
+    ChainReader, HftTransport, PerpClient, PerpDelta, QuoteConstraints, SqrtPrice, TransportConfig,
+    align_tick_down,
 };
 
 #[tokio::main]
@@ -45,26 +46,27 @@ async fn main() -> perpcity_sdk::Result<()> {
 
     // Positive perp is an exact-output buy; negative perp is an exact-input sell.
     // Perp and USDC both use six decimals in this deployment.
-    let buy = market.quote_perp(1_000_000)?;
+    let buy = market.quote_perp(PerpDelta::new(1_000_000))?;
     println!(
         "buy 1 perp: usd_delta={} end_sqrt={} allowed={} limit={:?} amt1Limit@25bps={}",
-        buy.usd_delta,
-        buy.sqrt_price_after_x96,
+        buy.usd_delta.usdc(),
+        buy.sqrt_price_after.x96(),
         buy.price_impact_allowed,
         buy.limit,
-        buy.amt1_limit(25),
+        buy.amt1_limit(25).usdc(),
     );
 
     // Size the largest trade toward a target without crossing the module bound.
     // Multiplying sqrt price by 1.0005 targets roughly a 10bp higher price.
-    let target = market.sqrt_price_x96 * U256::from(10_005) / U256::from(10_000);
+    let target =
+        SqrtPrice::from_x96(market.sqrt_price.x96() * U256::from(10_005) / U256::from(10_000));
     let toward_target = market.quote_to_price(target, QuoteConstraints::default())?;
     println!(
         "toward target: perp_delta={} usd_delta={} stop={:?} end_sqrt={}",
-        toward_target.perp_delta,
-        toward_target.usd_delta,
+        toward_target.perp_delta.perp(),
+        toward_target.usd_delta.usdc(),
         toward_target.limit,
-        toward_target.sqrt_price_after_x96,
+        toward_target.sqrt_price_after.x96(),
     );
 
     // Liquidity-seeding tools can quote against a hypothetical range without
@@ -72,10 +74,11 @@ async fn main() -> perpcity_sdk::Result<()> {
     let lower = align_tick_down(market.tick - 10 * TICK_SPACING, TICK_SPACING);
     let upper = align_tick_down(market.tick + 10 * TICK_SPACING, TICK_SPACING);
     let seeded = market.with_liquidity_delta(lower, upper, 1_000_000_000)?;
-    let seeded_buy = seeded.quote_perp(1_000_000)?;
+    let seeded_buy = seeded.quote_perp(PerpDelta::new(1_000_000))?;
     println!(
         "same buy after hypothetical liquidity: usd_delta={} end_sqrt={}",
-        seeded_buy.usd_delta, seeded_buy.sqrt_price_after_x96,
+        seeded_buy.usd_delta.usdc(),
+        seeded_buy.sqrt_price_after.x96(),
     );
 
     Ok(())

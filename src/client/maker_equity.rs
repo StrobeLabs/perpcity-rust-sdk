@@ -33,6 +33,7 @@ use crate::storage::{
     perp_tick_funding_slots, v4_fee_growth_global1_slot, v4_position_fee_growth_inside1_slot,
     v4_tick_fee_growth_outside1_slot,
 };
+use crate::units::{PerpAtoms, PerpDelta, Price, SqrtPrice, UsdcAtoms, UsdcDelta};
 
 use super::market::MarketReader;
 use super::state::{
@@ -264,14 +265,14 @@ impl MarketReader {
     pub async fn get_maker_equities_at_mark(
         &self,
         pos_ids: &[U256],
-        mark_price_x96: U256,
+        mark: Price,
     ) -> Result<Vec<MakerEquityOutcome>> {
         if pos_ids.is_empty() {
             return Ok(Vec::new());
         }
         self.state()
             .await?
-            .maker_equities_at_mark(pos_ids, mark_price_x96)
+            .maker_equities_at_mark(pos_ids, mark)
             .await
     }
 }
@@ -307,7 +308,7 @@ impl StateAt {
     ///
     /// The mark that prices `valPnl` and the accrual replay is the
     /// contract's own, the value [`Self::mark`] reads: the deployed fair
-    /// price ([`crate::math::pricing::fair_price_x96`]) of this block's
+    /// price ([`crate::math::pricing::fair_price`]) of this block's
     /// `poolState().ammPrice`, beacon index, and EMAs advanced to the block
     /// timestamp — exactly what `PerpLogic.accrue` sets as `markPrice`
     /// when it touches the market, so
@@ -318,35 +319,34 @@ impl StateAt {
         self.maker_equities_inner(pos_ids, None).await
     }
 
-    /// [`Self::maker_equities`] priced at a caller-supplied mark (exact
-    /// X96) instead of this block's fair price — what-if pricing for
-    /// stress marks or off-snapshot scenarios. All chain state is still
-    /// read at this block; only the pricing input changes.
+    /// [`Self::maker_equities`] priced at a caller-supplied mark instead of
+    /// this block's fair price — what-if pricing for stress marks or
+    /// off-snapshot scenarios. All chain state is still read at this block;
+    /// only the pricing input changes.
     pub async fn maker_equities_at_mark(
         &self,
         pos_ids: &[U256],
-        mark_price_x96: U256,
+        mark: Price,
     ) -> Result<Vec<MakerEquityOutcome>> {
-        if mark_price_x96.is_zero() {
+        if mark.is_zero() {
             return Err(ValidationError::InvalidPrice {
-                reason: "mark_price_x96 must be non-zero".into(),
+                reason: "the what-if mark must be non-zero".into(),
             }
             .into());
         }
-        self.maker_equities_inner(pos_ids, Some(mark_price_x96))
-            .await
+        self.maker_equities_inner(pos_ids, Some(mark)).await
     }
 
     async fn maker_equities_inner(
         &self,
         pos_ids: &[U256],
-        mark_override_x96: Option<U256>,
+        mark_override: Option<Price>,
     ) -> Result<Vec<MakerEquityOutcome>> {
         if pos_ids.is_empty() {
             return Ok(Vec::new());
         }
         let pool_id = self.market().immutables().await?.pool_id;
-        let market = self.maker_market(mark_override_x96).await?;
+        let market = self.maker_market(mark_override).await?;
 
         // Chunks are disjoint id ranges at the one block, so they read
         // concurrently (bounded); `buffered` yields them in input order,
@@ -407,10 +407,10 @@ impl StateAt {
     /// The accrual replay always runs at the contract's mark for the block
     /// — `fairPrice(ammPrice, index, emas)` with the stored EMAs advanced to
     /// the block timestamp, as `PerpLogic.accrue` computes it;
-    /// `mark_override_x96` then reprices the accrued snapshot for what-if
+    /// `mark_override` then reprices the accrued snapshot for what-if
     /// pricing. A failed beacon read fails the whole call, like any other
     /// market-wide read.
-    async fn maker_market(&self, mark_override_x96: Option<U256>) -> Result<AccruedMakerSnapshot> {
+    async fn maker_market(&self, mark_override: Option<Price>) -> Result<AccruedMakerSnapshot> {
         let chain = self.market().chain();
         let perp = Perp::new(self.market().perp(), chain.provider());
         let (modules, pool_state, emas, rates, ema_window, cumls, capacity, oi) = chain
@@ -446,8 +446,8 @@ impl StateAt {
             long_util_earnings_x96: cumls.longUtilEarningsX96,
             short_util_earnings_x96: cumls.shortUtilEarningsX96,
             tick: i24_to_i32(views.pool_state.tick),
-            sqrt_price_x96: views.pool_state.sqrtPrice.to::<U256>(),
-            mark_price_x96: mark.fair_price_x96(),
+            sqrt_price: SqrtPrice::from_x96(views.pool_state.sqrtPrice.to::<U256>()),
+            mark: mark.fair_price(),
         }
         .accrued(&AccrualInputs {
             funding_per_day_wad: i128::try_from(rates.fundingPerDay)
@@ -456,16 +456,16 @@ impl StateAt {
             short_util_fee_per_day_wad: rates.shortUtilFeePerDay,
             last_touch: views.last_touch,
             accrue_to: block.timestamp,
-            oi_long_atoms: oi.long,
-            oi_short_atoms: oi.short,
-            cap_long_atoms: capacity.long,
-            cap_short_atoms: capacity.short,
+            oi_long: PerpAtoms::new(oi.long),
+            oi_short: PerpAtoms::new(oi.short),
+            cap_long: PerpAtoms::new(capacity.long),
+            cap_short: PerpAtoms::new(capacity.short),
         })?;
         // The what-if mark is applied AFTER the replay: the elapsed accrual
         // happened at the chain's mark, and only the pricing legs are the
         // caller's to override.
-        Ok(match mark_override_x96 {
-            Some(mark_price_x96) => market.with_mark(mark_price_x96),
+        Ok(match mark_override {
+            Some(mark) => market.with_mark(mark),
             None => market,
         })
     }
@@ -580,20 +580,20 @@ impl StateAt {
                 let tick_upper_funding = tick_funding_for(&tick_funding, maker.tick_upper)?;
                 let fg1_out_lower = fee_growth.outside(maker.tick_lower)?;
                 let fg1_out_upper = fee_growth.outside(maker.tick_upper)?;
-                let (delta_amount0, delta_amount1) = unpack_balance_delta(maker.position.delta);
+                let (delta_perp, delta_usd) = unpack_balance_delta(maker.position.delta);
                 let state = MakerState {
-                    margin_atoms: maker.position.margin,
+                    margin: UsdcAtoms::new(maker.position.margin),
                     liq_margin_ratio_e6: u24_to_u32(maker.position.liqMarginRatio),
-                    delta_amount0,
-                    delta_amount1,
+                    delta_perp: PerpDelta::new(delta_perp),
+                    delta_usd: UsdcDelta::new(delta_usd),
                     last_cuml_funding_x96: maker.position.lastCumlFundingX96,
                     tick_lower: maker.tick_lower,
                     tick_upper: maker.tick_upper,
                     liquidity: maker.details.liquidity,
                     last_long_util_earnings_x96: maker.details.lastLongUtilEarningsX96,
                     last_short_util_earnings_x96: maker.details.lastShortUtilEarningsX96,
-                    cap_long_atoms: maker.details.capacity.long,
-                    cap_short_atoms: maker.details.capacity.short,
+                    cap_long: PerpAtoms::new(maker.details.capacity.long),
+                    cap_short: PerpAtoms::new(maker.details.capacity.short),
                     last_below_x96: maker.details.lastCumlFunding.belowX96,
                     last_within_x96: maker.details.lastCumlFunding.withinX96,
                     last_div_sqrt_within_x96: maker.details.lastCumlFunding.divSqrtPriceWithinX96,
@@ -1124,7 +1124,7 @@ mod tests {
         let MakerEquityKind::Computed(breakdown) = &outcomes[0].kind else {
             panic!("pos 11 is an open maker: {:?}", outcomes[0].kind);
         };
-        assert_eq!(breakdown.margin_atoms(), 1_000_000);
+        assert_eq!(breakdown.margin(), UsdcDelta::new(1_000_000));
         let MakerEquityKind::Failed(err) = &outcomes[1].kind else {
             panic!("pos 22's row reverted: {:?}", outcomes[1].kind);
         };
@@ -1176,7 +1176,7 @@ mod tests {
     async fn a_zero_what_if_mark_is_refused_before_any_read() {
         let (state, rpc) = state().await;
         let err = state
-            .maker_equities_at_mark(&[U256::ONE], U256::ZERO)
+            .maker_equities_at_mark(&[U256::ONE], Price::from_x96(U256::ZERO))
             .await
             .unwrap_err();
         assert!(matches!(

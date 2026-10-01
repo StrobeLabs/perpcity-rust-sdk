@@ -14,8 +14,12 @@
 //! | [`swap`] | Local V4 taker swap simulation over a block-pinned pool |
 //! | [`maker_equity`] | Contract-exact maker settle preview over a block-pinned snapshot |
 //!
-//! Storage-slot derivation for the deployed contract layouts is not math
-//! and lives in the crate-internal `storage` module beside `contracts`.
+//! Two things that look like they belong here do not. Storage-slot
+//! derivation for the deployed contract layouts lives in the crate-internal
+//! `storage` module beside `contracts`. And the Solidity-compatible integer
+//! primitives every port is built on live in the crate-internal
+//! `fixed_point` module at the root, below [`crate::units`], which needs
+//! them too.
 
 #![doc = "\n\nThe design of this module: [`src/math/DESIGN.md`](https://github.com/StrobeLabs/perpcity-rust-sdk/blob/main/src/math/DESIGN.md)."]
 
@@ -23,7 +27,6 @@ use alloy::primitives::B256;
 use serde::{Deserialize, Serialize};
 
 pub mod capacity;
-pub(crate) mod fixed_point;
 pub mod liquidity;
 pub mod maker_equity;
 pub mod position;

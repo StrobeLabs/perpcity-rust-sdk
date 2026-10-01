@@ -71,13 +71,13 @@ async fn main() -> perpcity_sdk::Result<()> {
                     "pos {pos_id}: equity={:+.6} settled_margin={:+.6} \
                      funding={:+.6} util={:+.6} lp_fees={:+.6} pnl={:+.6} \
                      value={:.6} ratio={:.4} (liq at {:.4})",
-                    b.equity(),
-                    b.settled_margin(),
-                    b.funding_owed_usd(),
-                    b.long_util_earnings_usd() + b.short_util_earnings_usd(),
-                    b.lp_fees_usd(),
-                    b.unrealized_pnl_usd(),
-                    b.position_value_usd(),
+                    b.equity().usdc(),
+                    b.settled_margin().usdc(),
+                    b.funding_owed().usdc(),
+                    b.long_util_earnings().usdc() + b.short_util_earnings().usdc(),
+                    b.lp_fees().usdc(),
+                    b.unrealized_pnl().usdc(),
+                    b.position_value().usdc(),
                     b.margin_ratio(),
                     b.liq_margin_ratio(),
                 );
