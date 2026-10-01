@@ -47,7 +47,10 @@ graph of nodes, and it is part of what a change must keep true.
   checked against the real signature: write the name, run
   `cargo xtask design --fmt` to canonicalise the link targets, and
   `cargo xtask design --check` to verify the claims and the invariants
-  listed in the root node. `cargo xtask design --open` draws the graph.
+  listed in the root node. `cargo xtask design --open` draws the graph,
+  and `--diff origin/main` says what your change did to it, which the
+  design job also posts on the pull request: a new island, dead end or
+  unnamed flow there is a question the PR should answer.
 - A behaviour that a caller can observe gets a changelog entry under
   `[Unreleased]`, breaking changes first.
 - Imports at the top of the file, grouped std / external / crate, never
@@ -64,6 +67,7 @@ cargo clippy --all-targets            # zero warnings
 cargo test
 RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features
 cargo xtask design --check            # needs the nightly named in xtask/src/rustdoc.rs
+cargo test -p xtask                   # when xtask changed: every invariant fires on its plant
 ```
 
 The design check resolves every name in every `DESIGN.md` against

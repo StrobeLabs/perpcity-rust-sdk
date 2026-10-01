@@ -202,8 +202,9 @@ curated layer over it: every producer and consumer a row names is
 checked against a real signature, and the flows a row names are the
 designed edges, drawn solid on the page beside the ones no node explains.
 `--check` is the gate, `--fmt` rewrites the tables' links to their
-canonical files, `--report` prints the graph's numbers, and `--open`
-draws it: types as nodes clustered by component, edges labelled with the
+canonical files, `--report` prints the graph's numbers, `--diff` builds
+the graph at another commit and says what changed, which the design job
+posts on every pull request, and `--open` draws it: types as nodes clustered by component, edges labelled with the
 function that carries one type into another, each type's row and source
 a click away.
 
@@ -230,8 +231,10 @@ invariant is the smell this shape exists to remove.
 
 The claims about the type system that the gate enforces, over the graph
 the signatures give. Each is one sentence here and one predicate in
-`xtask`, and the sentence is the error. A change that breaks one either
-restores it or changes this list, in the same PR, with the reason.
+`xtask`, and the sentence is the error. The two are tied: the check fails
+when a predicate runs that no bullet below opens with, or a bullet below
+has no predicate behind it. A change that breaks one either restores it
+or changes this list, in the same PR, with the reason.
 
 - No read on a handle takes a block argument: the block is the handle's,
   and `state_at` is the one door to a named one.
@@ -249,6 +252,23 @@ restores it or changes this list, in the same PR, with the reason.
 Two more are reported, not enforced, until #124's unit conversions land:
 no `f64` in a function or field whose name carries a wire suffix, and a
 suffixed field has the primitive its suffix names.
+
+One more is a ratchet rather than a rule, and runs where there is a base
+to compare with, on every pull request: a structure the report
+questions, an island, a dead end, a two-cycle, a flow between documented
+types that no node names, may exist, but a new one arrives acknowledged.
+The pull request either removes it, names it in a type table, or names
+it in a node's debts, and the design job fails until one of those is
+true. The same ratchet holds a type to its row: when a type's own methods
+or fields change and its row does not, the row is stale by construction,
+and the job says so. What we accept is written down; what we did not
+notice cannot land.
+
+Each enforced invariant is proven able to fail. `xtask/tests/fixture/lib.rs`
+is a crate shaped like this one with one planted violation per invariant
+and, beside each, a neighbour that must not fire; the test documents it
+with the same rustdoc and asserts that every plant, and nothing else, is
+reported. A new invariant is not enforced until it has its plant.
 
 ## Efficiency
 

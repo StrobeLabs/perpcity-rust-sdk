@@ -6,21 +6,24 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result};
 use rustdoc_types::{Id, Type};
 
 use crate::index::{Index, Kind, Signature};
 use crate::nodes::{self, Link, Node};
+use crate::summary::{self, Summary};
 use crate::{invariants, page, report, rustdoc};
 
-#[derive(Debug, Default, Clone, Copy)]
+#[derive(Debug, Default, Clone)]
 pub struct Options {
     pub check: bool,
     pub fmt: bool,
     pub report: bool,
     pub open: bool,
+    /// A git ref to build the graph at and diff against, `origin/main` say.
+    pub diff: Option<String>,
 }
 
 /// What a link names: an item, and a member of it when the link is
@@ -152,6 +155,21 @@ pub fn run(opts: Options) -> Result<bool> {
         report::print(&index, &graph, &nodes);
         invariants::reported(&index);
     }
+    if let Some(base_ref) = &opts.diff {
+        let base = at_ref(&root, base_ref)?;
+        let head = Summary::of(&index, &graph);
+        let mut out = summary::diff(&base, &head, base_ref);
+        let mut ratchet = Vec::new();
+        invariants::ratchet(&base, &head, &nodes, &mut ratchet);
+        if !ratchet.is_empty() {
+            out.push_str("\n**Needs a decision**: a structure the design questions is new here and no node acknowledges it.\n");
+            for r in &ratchet {
+                out.push_str(&format!("- {r}\n"));
+            }
+        }
+        print!("{out}");
+        problems.extend(ratchet);
+    }
     if opts.open {
         let out = page::write(&root, &index, &graph, &nodes)?;
         println!("wrote {}", out.display());
@@ -193,6 +211,56 @@ pub fn run(opts: Options) -> Result<bool> {
     }
     eprintln!("{} problem(s)", problems.len());
     Ok(false)
+}
+
+/// The graph at another commit: `git_ref`'s tree extracted under our
+/// target directory, documented with the same toolchain into a target
+/// directory of its own, read by the same code. Plain files, so nothing
+/// is registered with git and nothing is left to prune; the root manifest
+/// excludes the path from the workspace so cargo treats the extracted
+/// package as its own root. Its nodes' problems are its own and are not
+/// reported.
+fn at_ref(root: &Path, git_ref: &str) -> Result<Summary> {
+    let dir = rustdoc::target_dir(root).join("base");
+    let target = rustdoc::target_dir(root).join("base-target");
+    if dir.exists() {
+        fs::remove_dir_all(&dir).with_context(|| format!("clearing {}", dir.display()))?;
+    }
+    fs::create_dir_all(&dir)?;
+    let mut archive = Command::new("git")
+        .args(["archive", "--format=tar", git_ref])
+        .current_dir(root)
+        .stdout(Stdio::piped())
+        .spawn()
+        .context("running git archive")?;
+    let tar_status = Command::new("tar")
+        .args(["-x", "-C"])
+        .arg(&dir)
+        .stdin(archive.stdout.take().context("git archive's output")?)
+        .status()
+        .context("running tar")?;
+    let archive_status = archive.wait()?;
+    if !archive_status.success() || !tar_status.success() {
+        anyhow::bail!("git could not archive `{git_ref}`");
+    }
+    let result = (|| -> Result<Summary> {
+        let krate = rustdoc::load_into(&dir, &target)?;
+        let index = Index::build(krate);
+        let mut graph = mechanical(&index, &dir);
+        // A base without nodes, or with nodes the tool cannot read, still
+        // has a mechanical graph to diff against.
+        if let Ok(nodes) = nodes::discover(&dir) {
+            let mut ignored = Vec::new();
+            if let Err(e) = annotate(&mut graph, &nodes, &index, &dir, &mut ignored) {
+                eprintln!("note: the base's nodes were not read: {e:#}");
+            }
+        }
+        Ok(Summary::of(&index, &graph))
+    })();
+    // The extracted tree goes; the base's target directory stays as the
+    // cache for the next diff.
+    let _ = fs::remove_dir_all(&dir);
+    result
 }
 
 /// The repository: the nearest ancestor holding the root node and a manifest.
