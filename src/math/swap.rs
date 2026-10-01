@@ -13,11 +13,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::constants::{MAX_SWAP_SQRT_PRICE_X96, MIN_SWAP_SQRT_PRICE_X96, Q96};
 use crate::errors::ValidationError;
-use crate::fixed_point::{Rounding, mul_div, u512_to_u256};
 use crate::math::BlockContext;
 use crate::math::tick::{
     UNISWAP_MAX_TICK, UNISWAP_MIN_TICK, get_sqrt_ratio_at_tick, get_tick_at_sqrt_ratio,
 };
+use crate::units::fixed_point::{Rounding, mul_div, u512_to_u256};
 use crate::units::{PerpAtoms, PerpDelta, SqrtPrice, UsdcAtoms, UsdcDelta};
 
 /// Liquidity stored at an initialized tick.

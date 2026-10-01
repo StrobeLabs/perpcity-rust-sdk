@@ -3,7 +3,8 @@
 Up: the [root](../../DESIGN.md). Everything else depends on this module and
 it depends on nothing above `errors` and `constants`, which is what lets
 [`math`](../math/DESIGN.md), [`client`](../client/DESIGN.md) and
-[`types`](../types/DESIGN.md) all speak these types.
+[`types`](../types/DESIGN.md) all speak these types. It also owns the
+fixed-point arithmetic, since that is arithmetic over its own encodings.
 
 ## Purpose
 
@@ -129,9 +130,14 @@ path the chain checks.
 
 - From the [root](../../DESIGN.md): the exactness principle, and the
   two-surface split these types replace the spelling convention for.
-- Down to `errors` and `constants` only, plus the crate-internal
-  `fixed_point` for the two crossings. Nothing else, which is the
+- Down to `errors` and `constants` only. Nothing else, which is the
   invariant that lets every other module depend on this one.
+- Inward to the crate-internal `fixed_point` submodule, which is the
+  arithmetic these encodings need and which `math` reaches into for its
+  ports: the mul-divs are an encoding's multiplication, the WAD exponential
+  is a rate's own function, and the checked add and subtract helpers are
+  the pre-type form of operators the accumulator types will carry, so the
+  submodule shrinks as those land.
 - To [`math`](../math/DESIGN.md): every snapshot field, port parameter and
   port return is one of these types, and each port unwraps to primitives
   in its opening lines so the transcription stays readable beside the

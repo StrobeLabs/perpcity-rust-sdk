@@ -16,10 +16,11 @@
 //!
 //! Two things that look like they belong here do not. Storage-slot
 //! derivation for the deployed contract layouts lives in the crate-internal
-//! `storage` module beside `contracts`. And the Solidity-compatible integer
-//! primitives every port is built on live in the crate-internal
-//! `fixed_point` module at the root, below [`crate::units`], which needs
-//! them too.
+//! `storage` module beside `contracts`. And the Solidity-compatible
+//! fixed-point arithmetic every port is built on belongs to the units it
+//! operates on, so it lives in [`crate::units`]: a mul-div by a scale is
+//! what an encoding's multiplication *is*, and the checked add and subtract
+//! helpers are what a unit's own operators will replace.
 
 #![doc = "\n\nThe design of this module: [`src/math/DESIGN.md`](https://github.com/StrobeLabs/perpcity-rust-sdk/blob/main/src/math/DESIGN.md)."]
 

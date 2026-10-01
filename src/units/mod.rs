@@ -33,18 +33,26 @@
 //! to primitives inside, so every port stays a line-by-line transcription
 //! of the Solidity it is checked against.
 //!
+//! The fixed-point arithmetic lives here too, in the crate-internal
+//! `fixed_point` submodule, because it is arithmetic over these encodings
+//! rather than a neighbour of them: a mul-div by a scale is what an
+//! encoding's multiplication is, the WAD exponential is a rate's own
+//! function, and the checked add and subtract helpers are the pre-type form
+//! of operators the accumulator types will carry. `math` reaches into it
+//! for the ports.
+//!
 //! What is deliberately elsewhere: a tick is a coordinate on a grid rather
 //! than a unit, so the conversions between a tick and a [`SqrtPrice`] live
 //! in [`crate::math::tick`]. That module may depend on this one; this one
-//! depends on nothing above [`crate::errors`], [`crate::constants`] and the
-//! integer primitives, which is what lets every other module take these
-//! types.
+//! depends on nothing above [`crate::errors`] and [`crate::constants`],
+//! which is what lets every other module take these types.
 
 #![doc = "\n\nThe design of this module: [`src/units/DESIGN.md`](https://github.com/StrobeLabs/perpcity-rust-sdk/blob/main/src/units/DESIGN.md)."]
 
 use alloy::primitives::U256;
 
 mod amount;
+pub(crate) mod fixed_point;
 mod price;
 
 pub use amount::{PerpAtoms, PerpDelta, UsdcAtoms, UsdcDelta};

@@ -37,11 +37,11 @@ use serde::{Deserialize, Serialize};
 use crate::constants::{Q96, SCALE_1E6};
 use crate::contracts;
 use crate::errors::ValidationError;
-use crate::fixed_point::{Rounding, mul_div};
 use crate::math::BlockContext;
 use crate::math::range::{MakerBand, TickRange};
 use crate::math::swap::amount0_delta;
 use crate::types::Side;
+use crate::units::fixed_point::{Rounding, mul_div};
 use crate::units::{PerpAtoms, SqrtPrice};
 
 /// Taker capacity per side: the contract's `Capacity` struct.
