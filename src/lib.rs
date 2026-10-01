@@ -56,8 +56,8 @@ pub mod types;
 pub use client::{
     ARBITRUM_CHAIN_ID, ARBITRUM_POOL_MANAGER, ARBITRUM_SEPOLIA_CHAIN_ID,
     ARBITRUM_SEPOLIA_PERP_FACTORY, ARBITRUM_SEPOLIA_POOL_MANAGER, ARBITRUM_SEPOLIA_USDC,
-    ARBITRUM_USDC, ChainReader, MAX_MAKER_EQUITY_BATCH, MakerEquityKind, MakerEquityOutcome,
-    MarketReader, PerpClient, StateAt, TxBuilder,
+    ARBITRUM_USDC, ChainReader, MAX_ROW_BATCH, MakerEquityKind, MakerEquityOutcome, MarketReader,
+    PerpClient, RowOutcome, StateAt, TxBuilder,
 };
 
 #[doc(inline)]

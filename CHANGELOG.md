@@ -23,6 +23,7 @@ The changes below break the public API, so the next release is 0.5.0 (a minor bu
 - **A failed broadcast returns `TransactionError::BroadcastFailed { tx_hash, source }` instead of `PerpCityError::Rpc`.** The node can accept a transaction and still fail the request, so the outcome is unknown; the hash of the signed transaction lets the caller look it up. `source` is the same `TransportError` that `Rpc` carried. `is_transient()` is true for both, so retry loops are unchanged; code that matched `PerpCityError::Rpc` to detect a failed broadcast must match the new variant.
 - **`close_taker(pos_id, urgency)` reads the delta it closes.** It took the caller's `f64` delta and scaled it to atoms, but the contract closes a taker only when the remaining perp delta is exactly zero: a delta tracked as `85.90838000000001` rounded one atom past the position, the close mined as `TakerAdjusted`, and the position stayed open with all its margin while the caller counted it closed. The `current_perp_delta` argument is gone; the call reads `positions(pos_id)` and reverses the perp amount to the atom. A close that still mines as an adjust (the position changed between the read and the block) fails with the new `TransactionError::TakerNotClosed { tx_hash, pos_id }`, which is transient and carries its hash.
 - **`TransactionError::Reverted` carries `tx_hash: FixedBytes<32>`**, which was only in `reason`. Patterns that use `..` are unaffected; exhaustive patterns and constructions must name the new field. With `OutOfGas`, `ReceiptTimeout` and `BroadcastFailed`, every `TxBuilder::send` error that follows the broadcast now carries a typed hash.
+- **`MAX_MAKER_EQUITY_BATCH` is `MAX_ROW_BATCH`.** The chunk size belongs to every batched row read on `StateAt`, not to the maker-equity batch alone. Same value, 500.
 
 ### Fixed
 
@@ -47,6 +48,7 @@ The changes below break the public API, so the next release is 0.5.0 (a minor bu
 
 ### Changed
 
+- **The maker-equity batch reads through `StateAt`.** It resolved its own lagged block and built its own mark from a nine-view multicall; it now takes the handle's block, the handle's mark, and the pool id from the market's immutables (two reads once per market per process, as `StateAt::pool` does). Same reads otherwise, same chunking, same golden vectors. Its market-wide and chunk failures are typed for the block like every other pinned read, so a replica behind the one that named the block fails as `BlockUnavailable` and a retry loop retries. One scoping is more precise than before: a chunk's fee-growth `extsload` failing now fails the chunk's open makers, not the ids its row multicall had already answered as not makers.
 - **The design nodes are read from the repository, not from rustdoc.** Each module's doc links to its `DESIGN.md` on GitHub instead of inlining it, so the nodes' links point at files and design nodes rather than rustdoc paths. `cargo xtask design --check` resolves every name in every node against rustdoc's JSON, verifies each producer and consumer a type table claims against the real signature, and enforces the root node's invariants; `--open` draws the type graph the signatures give.
 - **`get_perp_snapshot` is one block.** The batch and the beacon read were
   two calls at the head, so a trade between them could put the index one
@@ -75,6 +77,8 @@ The changes below break the public API, so the next release is 0.5.0 (a minor bu
 
 ### Added
 
+- **`StateAt::positions(&[U256])`**: the raw contract state of many positions, one row multicall per chunk of `MAX_ROW_BATCH` ids, all at the handle's block. Every id comes back as a `RowOutcome<Position>` in input order: the row, `None` for an id the contract holds no row for (as `StateAt::position` reads it), or that id's own error. A row that reverts fails alone; a chunk whose multicall fails marks its ids with the shared cause, typed for the block (`BlockUnavailable` stays transient, `StateUnavailable` stays not) and the other chunks stand. Nothing fails the batch, so a sweep over `1..next_pos_id()` gets an answer for every id.
+- **`StateAt::maker_equities(&[U256])` and `StateAt::maker_equities_at_mark`**: the maker-equity batch at the handle's block, so a caller can preview settles at a block it names. `get_maker_equities` and `get_maker_equities_at_mark` remain as the conveniences, each `state().await?.<read>()`, with the same signature and the same `MakerEquityOutcome` shape.
 - **`StateAt`: a market's storage, every read pinned to one block.**
   `MarketReader::state()` pins the lagged snapshot block and
   `state_at(number)` a block the caller names; both resolve the header

@@ -7,15 +7,21 @@
 //! through one handle, and agree by construction.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use alloy::eips::BlockId;
 use alloy::primitives::{Address, B256, U256};
 use alloy::providers::MulticallError;
-use alloy::transports::RpcError;
+use alloy::sol_types::SolCall;
+use alloy::transports::{RpcError, TransportError};
+use futures_util::stream::{self, StreamExt};
 
-use crate::constants::{MAX_SWAP_SQRT_PRICE_X96, MAX_TICK, MIN_SWAP_SQRT_PRICE_X96, MIN_TICK};
+use crate::constants::{
+    MAX_SWAP_SQRT_PRICE_X96, MAX_TICK, MIN_SWAP_SQRT_PRICE_X96, MIN_TICK, MULTICALL3,
+};
 use crate::contracts::{
-    IBeacon, IERC20, IMarginRatios, IPoolManagerState, IPriceImpact, Modules, Perp, Position,
+    IBeacon, IERC20, IMarginRatios, IMulticall3, IPoolManagerState, IPriceImpact, Modules, Perp,
+    Position,
 };
 use crate::convert::usdc_from_atoms;
 use crate::errors::{ContractError, PerpCityError, Result, ValidationError};
@@ -30,6 +36,20 @@ use crate::types::{MarginRatioTriple, MarginRatios, SolvencyState};
 use super::market::MarketReader;
 use super::queries::{MarketImmutables, multicall_error, registered_module};
 use super::{i24_to_i32, u24_to_u32};
+
+/// Maximum position ids per multicall inside a batched row read.
+///
+/// [`StateAt::positions`] and the maker-equity batch chunk larger inputs
+/// internally at this size (every chunk still pins to the handle's block),
+/// keeping each row multicall and slot read inside RPC response-size and
+/// calldata limits. Exposed so callers sizing their own sweeps can align
+/// with it.
+pub const MAX_ROW_BATCH: usize = 500;
+
+/// Concurrency bound for the chunks of a batch larger than
+/// [`MAX_ROW_BATCH`]: each chunk is at least one multicall, so a few in
+/// flight saturate a shared endpoint's fair share without flooding it.
+pub(super) const CHUNK_READ_CONCURRENCY: usize = 4;
 
 /// One market's storage, every read pinned to one block.
 ///
@@ -47,6 +67,78 @@ use super::{i24_to_i32, u24_to_u32};
 pub struct StateAt {
     market: MarketReader,
     block: BlockContext,
+}
+
+/// One id's row in a batched read: every id passed to [`StateAt::positions`]
+/// comes back as exactly one of these, in input order.
+#[derive(Debug)]
+pub struct RowOutcome<T> {
+    /// The requested position id.
+    pub pos_id: U256,
+    /// What the read produced for it: `Ok(Some)` the row, `Ok(None)` an id
+    /// the contract holds no row for, `Err` when that id's read or decode
+    /// failed. The rest of the batch is unaffected by an `Err`; retry it
+    /// exactly when [`PerpCityError::is_transient`] says so.
+    pub row: Result<Option<T>>,
+}
+
+/// A failure of one chunk's shared read (its row multicall, or a storage
+/// batch over its rows), reshaped so every id in the chunk can carry it as
+/// its own error. A transport cause is kept behind an `Arc` so the shared
+/// error stays retryable ([`PerpCityError::is_transient`]) on every
+/// affected id; the two answers a node gives about the block itself keep
+/// their typed, block-naming variants.
+pub(super) enum ChunkReadFailure {
+    Storage {
+        context: String,
+        source: Option<Arc<TransportError>>,
+    },
+    BlockUnavailable {
+        number: u64,
+    },
+    StateUnavailable {
+        number: u64,
+    },
+}
+
+impl ChunkReadFailure {
+    /// `error`, as `what` failing, ready to fan out.
+    pub(super) fn new(what: &str, error: PerpCityError) -> Self {
+        let storage = |context, source| Self::Storage { context, source };
+        match error {
+            PerpCityError::Rpc(e)
+            | PerpCityError::Abi(alloy::contract::Error::TransportError(e)) => {
+                storage(what.to_string(), Some(Arc::new(e)))
+            }
+            PerpCityError::Contract(ContractError::StorageReadFailed { context, source }) => {
+                storage(context, source)
+            }
+            PerpCityError::Contract(ContractError::BlockUnavailable { number }) => {
+                Self::BlockUnavailable { number }
+            }
+            PerpCityError::Contract(ContractError::StateUnavailable { number }) => {
+                Self::StateUnavailable { number }
+            }
+            other => storage(format!("{what}: {other}"), None),
+        }
+    }
+
+    /// One id's copy of the failure.
+    pub(super) fn error(&self) -> PerpCityError {
+        match self {
+            Self::Storage { context, source } => ContractError::StorageReadFailed {
+                context: context.clone(),
+                source: source.clone(),
+            },
+            Self::BlockUnavailable { number } => {
+                ContractError::BlockUnavailable { number: *number }
+            }
+            Self::StateUnavailable { number } => {
+                ContractError::StateUnavailable { number: *number }
+            }
+        }
+        .into()
+    }
 }
 
 impl MarketReader {
@@ -123,13 +215,13 @@ impl StateAt {
         &self.market
     }
 
-    fn id(&self) -> BlockId {
+    pub(super) fn id(&self) -> BlockId {
         BlockId::hash(self.block.hash)
     }
 
     /// A read's failure, typed for this handle's block by
     /// [`pinned_read_error`].
-    fn read_error(&self, error: alloy::contract::Error) -> PerpCityError {
+    pub(super) fn read_error(&self, error: alloy::contract::Error) -> PerpCityError {
         pinned_read_error(error.into(), self.block.number)
     }
 
@@ -193,6 +285,111 @@ impl StateAt {
             .await
             .map_err(|e| self.read_error(e))?;
         Ok((position.margin != 0 || !position.delta.is_zero()).then_some(position))
+    }
+
+    /// The raw contract state of many positions, in one row multicall per
+    /// [`MAX_ROW_BATCH`] ids, all at this block.
+    ///
+    /// Exactly one [`RowOutcome`] per input id, in input order, with
+    /// [`Self::position`]'s reading of each row: `None` for an id that was
+    /// never minted or has been closed. A row that reverts or does not
+    /// decode fails alone; a chunk whose multicall fails marks every id of
+    /// that chunk failed with the shared cause, and the other chunks stand.
+    /// Nothing fails the batch, so a sweep over `1..next_pos_id()` always
+    /// gets an answer for every id.
+    pub async fn positions(&self, pos_ids: &[U256]) -> Vec<RowOutcome<Position>> {
+        self.rows(
+            pos_ids,
+            |pos_id| [Perp::positionsCall { posId: pos_id }.abi_encode()],
+            |pos_id, [row]| {
+                let position = decode_row::<Perp::positionsCall>(pos_id, row, "position")?;
+                Ok((position.margin != 0 || !position.delta.is_zero()).then_some(position))
+            },
+        )
+        .await
+    }
+
+    /// A batched row read: `pos_ids` in chunks of [`MAX_ROW_BATCH`], each
+    /// chunk one `aggregate3` at this block with `CALLS` views per id, each
+    /// row allowed to fail on its own, and `decode` turning one id's rows
+    /// into its value. Chunks read concurrently, bounded, and come back in
+    /// input order.
+    pub(super) async fn rows<T, const CALLS: usize>(
+        &self,
+        pos_ids: &[U256],
+        encode: impl Fn(U256) -> [Vec<u8>; CALLS] + Sync,
+        decode: impl Fn(U256, &[IMulticall3::Result; CALLS]) -> Result<Option<T>> + Sync,
+    ) -> Vec<RowOutcome<T>> {
+        // Collected into a Vec first so the returned future's Send bound is
+        // provable from the concrete future type, not the borrowing
+        // iterator adapter.
+        let (encode, decode) = (&encode, &decode);
+        let chunk_reads: Vec<_> = pos_ids
+            .chunks(MAX_ROW_BATCH)
+            .map(|chunk| async move {
+                match self.chunk_rows(chunk, encode).await {
+                    Ok(rows) => chunk
+                        .iter()
+                        .zip(rows.as_chunks::<CALLS>().0)
+                        .map(|(&pos_id, rows)| RowOutcome {
+                            pos_id,
+                            row: decode(pos_id, rows).inspect_err(|e| {
+                                tracing::debug!(%pos_id, error = %e, "position row failed");
+                            }),
+                        })
+                        .collect::<Vec<_>>(),
+                    Err(e) => {
+                        tracing::debug!(ids = chunk.len(), error = %e, "row multicall failed");
+                        let failure = ChunkReadFailure::new("row multicall", e);
+                        chunk
+                            .iter()
+                            .map(|&pos_id| RowOutcome {
+                                pos_id,
+                                row: Err(failure.error()),
+                            })
+                            .collect()
+                    }
+                }
+            })
+            .collect();
+        stream::iter(chunk_reads)
+            .buffered(CHUNK_READ_CONCURRENCY)
+            .concat()
+            .await
+    }
+
+    /// One chunk's rows: `CALLS` per id, in one `aggregate3` pinned here.
+    async fn chunk_rows<const CALLS: usize>(
+        &self,
+        pos_ids: &[U256],
+        encode: impl Fn(U256) -> [Vec<u8>; CALLS],
+    ) -> Result<Vec<IMulticall3::Result>> {
+        let calls = pos_ids
+            .iter()
+            .flat_map(|&pos_id| encode(pos_id))
+            .map(|calldata| IMulticall3::Call3 {
+                target: self.market.perp,
+                allowFailure: true,
+                callData: calldata.into(),
+            })
+            .collect();
+        let rows = IMulticall3::new(MULTICALL3, self.market.chain.provider())
+            .aggregate3(calls)
+            .block(self.id())
+            .call()
+            .await
+            .map_err(|e| self.read_error(e))?;
+        if rows.len() != CALLS * pos_ids.len() {
+            return Err(ContractError::MulticallFailed {
+                reason: format!(
+                    "row multicall returned {} results, expected {}",
+                    rows.len(),
+                    CALLS * pos_ids.len()
+                ),
+            }
+            .into());
+        }
+        Ok(rows)
     }
 
     /// One position's band, or `None` if it holds no liquidity there: a
@@ -401,7 +598,7 @@ impl StateAt {
 
     /// The mark from the views: the beacon's `index()` at this block, then
     /// the stored EMAs advanced to it.
-    async fn mark_from(&self, views: &PerpViews) -> Result<Mark> {
+    pub(super) async fn mark_from(&self, views: &PerpViews) -> Result<Mark> {
         let beacon = registered_module(views.modules.beacon, "IBeacon")?;
         let index = IBeacon::new(beacon, self.market.chain.provider())
             .index()
@@ -505,9 +702,31 @@ impl StateAt {
 
     /// A multicall's failure, classified as [`multicall_error`] does and
     /// then typed for this handle's block by [`pinned_read_error`].
-    fn multicall_read_error(&self, error: MulticallError) -> PerpCityError {
+    pub(super) fn multicall_read_error(&self, error: MulticallError) -> PerpCityError {
         pinned_read_error(multicall_error(error), self.block.number)
     }
+}
+
+/// One `aggregate3` row decoded as `C`'s return, or why not: a reverted
+/// row is [`ContractError::MulticallFailed`], one that does not decode is
+/// [`ValidationError::DecodeFailed`]; neither is transient.
+pub(super) fn decode_row<C: SolCall>(
+    pos_id: U256,
+    row: &IMulticall3::Result,
+    what: &str,
+) -> Result<C::Return> {
+    if !row.success {
+        return Err(ContractError::MulticallFailed {
+            reason: format!("{what} {pos_id} row read reverted"),
+        }
+        .into());
+    }
+    C::abi_decode_returns(&row.returnData).map_err(|e| {
+        ValidationError::DecodeFailed {
+            context: format!("{what} {pos_id}: {e}"),
+        }
+        .into()
+    })
 }
 
 /// A pinned read's failure, with the two answers a node gives about the
@@ -533,19 +752,19 @@ pub(super) fn pinned_read_error(error: PerpCityError, number: u64) -> PerpCityEr
     }
 }
 
-/// The `Perp` views a mark and the pool are built from, read together at
-/// one block.
-struct PerpViews {
+/// The `Perp` views a mark, the pool and the maker-equity batch are built
+/// from, read together at one block.
+pub(super) struct PerpViews {
     /// `modules()`.
-    modules: Modules,
+    pub(super) modules: Modules,
     /// `poolState()`.
-    pool_state: Perp::poolStateReturn,
+    pub(super) pool_state: Perp::poolStateReturn,
     /// `emas()`: the stored pair as of `last_touch`.
-    stored_emas: PricePair,
+    pub(super) stored_emas: PricePair,
     /// `rates().lastTouch`.
-    last_touch: u64,
+    pub(super) last_touch: u64,
     /// `EMA_WINDOW()`, in seconds.
-    ema_window: u64,
+    pub(super) ema_window: u64,
 }
 
 /// The contract's `EMA_WINDOW` (seconds) narrowed to the width
@@ -579,6 +798,7 @@ fn block_missing(message: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use alloy::primitives::{Address, I256, Uint};
+    use alloy::transports::TransportErrorKind;
 
     use super::*;
     use crate::client::mock::{self, PERP, Rpc, e6, returns, x96};
@@ -872,6 +1092,147 @@ mod tests {
         };
         assert_eq!(number, 92);
         assert!(!error.is_transient());
+    }
+
+    // ── The batched row read ──────────────────────────────────────────
+
+    /// Every id gets its row from one multicall, in input order: a present
+    /// position, an empty row, and a reverted row that fails alone and
+    /// deterministically.
+    #[tokio::test]
+    async fn positions_read_every_row_in_one_multicall() {
+        let (state, rpc) = state().await;
+        let pos_ids = [U256::from(11u8), U256::from(22u8), U256::from(33u8)];
+        rpc.aggregate3(vec![
+            mock::ok_row(returns::<Perp::positionsCall>(&mock::position(5_000_000))),
+            mock::ok_row(returns::<Perp::positionsCall>(&mock::position(0))),
+            mock::failed_row(),
+        ]);
+
+        let rows = state.positions(&pos_ids).await;
+        assert_eq!(rows.iter().map(|r| r.pos_id).collect::<Vec<_>>(), pos_ids);
+        assert_eq!(
+            rows[0].row.as_ref().unwrap().as_ref().unwrap().margin,
+            5_000_000
+        );
+        assert!(rows[1].row.as_ref().unwrap().is_none());
+        let Err(err) = &rows[2].row else {
+            panic!("pos 33's row reverted");
+        };
+        assert!(
+            matches!(
+                err,
+                PerpCityError::Contract(ContractError::MulticallFailed { .. })
+            ),
+            "{err}"
+        );
+        assert!(!err.is_transient(), "a reverted row reverts again");
+        assert!(rpc.is_drained(), "one multicall");
+    }
+
+    /// A multicall the replica cannot serve fails every id of the chunk
+    /// with the typed, transient answer; no id is dropped.
+    #[tokio::test]
+    async fn a_failed_row_multicall_fails_every_id_of_the_chunk_naming_the_block() {
+        let (state, rpc) = state().await;
+        rpc.fails("header not found");
+
+        let rows = state.positions(&[U256::ONE, U256::from(2u8)]).await;
+        assert_eq!(rows.len(), 2);
+        for row in &rows {
+            let Err(err) = &row.row else {
+                panic!("every id of the chunk fails");
+            };
+            assert!(
+                matches!(
+                    err,
+                    PerpCityError::Contract(ContractError::BlockUnavailable { number: 92 })
+                ),
+                "{err}"
+            );
+            assert!(err.is_transient());
+        }
+        assert!(rpc.is_drained());
+    }
+
+    /// A multicall answering the wrong number of rows fails the chunk
+    /// rather than misaligning ids and rows.
+    #[tokio::test]
+    async fn a_short_multicall_answer_fails_the_chunk() {
+        let (state, rpc) = state().await;
+        rpc.aggregate3(vec![mock::ok_row(returns::<Perp::positionsCall>(
+            &mock::position(1),
+        ))]);
+
+        let rows = state.positions(&[U256::ONE, U256::from(2u8)]).await;
+        for row in &rows {
+            let Err(err) = &row.row else {
+                panic!("a short answer fails the chunk");
+            };
+            assert!(
+                matches!(
+                    err,
+                    PerpCityError::Contract(ContractError::StorageReadFailed { source: None, .. })
+                ),
+                "{err}"
+            );
+            assert!(!err.is_transient());
+        }
+    }
+
+    #[tokio::test]
+    async fn no_ids_is_no_request() {
+        let (state, rpc) = state().await;
+        assert!(state.positions(&[]).await.is_empty());
+        assert!(rpc.is_drained());
+    }
+
+    /// A chunk-wide failure fans out to every id keeping what a retry loop
+    /// needs: a transport cause stays transient, a block the replica lacks
+    /// stays `BlockUnavailable`, pruned state stays `StateUnavailable`, and
+    /// a deterministic failure stays non-transient.
+    #[test]
+    fn a_chunk_failure_keeps_its_classification_on_every_id() {
+        let transport = ChunkReadFailure::new(
+            "row multicall",
+            PerpCityError::Abi(alloy::contract::Error::TransportError(
+                TransportErrorKind::custom_str("replica timed out"),
+            )),
+        );
+        let (first, second) = (transport.error(), transport.error());
+        assert!(first.is_transient() && second.is_transient(), "{first}");
+        assert!(first.to_string().contains("row multicall"));
+
+        let behind = ChunkReadFailure::new(
+            "row multicall",
+            ContractError::BlockUnavailable { number: 92 }.into(),
+        );
+        assert!(matches!(
+            behind.error(),
+            PerpCityError::Contract(ContractError::BlockUnavailable { number: 92 })
+        ));
+        assert!(behind.error().is_transient());
+
+        let pruned = ChunkReadFailure::new(
+            "row multicall",
+            ContractError::StateUnavailable { number: 92 }.into(),
+        );
+        assert!(matches!(
+            pruned.error(),
+            PerpCityError::Contract(ContractError::StateUnavailable { number: 92 })
+        ));
+        assert!(!pruned.error().is_transient());
+
+        let deterministic = ChunkReadFailure::new(
+            "row multicall",
+            ContractError::MulticallFailed {
+                reason: "3 results, expected 4".into(),
+            }
+            .into(),
+        );
+        let err = deterministic.error();
+        assert!(!err.is_transient(), "{err}");
+        assert!(err.to_string().contains("3 results, expected 4"));
     }
 
     // ── The single-read conveniences: a fresh lagged handle each ──────
