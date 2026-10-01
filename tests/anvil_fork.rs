@@ -620,14 +620,17 @@ async fn maker_equities_via_batched_reads() {
             MakerEquityKind::Computed(b) => {
                 println!(
                     "pos {pos_id}: margin={:.6} funding={:+.6} lp={:+.6} pnl={:+.6} equity={:+.6}",
-                    b.margin_usd(),
-                    b.funding_owed_usd(),
-                    b.lp_fees_usd(),
-                    b.unrealized_pnl_usd(),
-                    b.equity(),
+                    b.margin().usdc(),
+                    b.funding_owed().usdc(),
+                    b.lp_fees().usdc(),
+                    b.unrealized_pnl().usdc(),
+                    b.equity().usdc(),
                 );
-                assert!(b.margin_atoms() >= 0, "settled margin is stored unsigned");
-                assert!(b.equity().is_finite());
+                assert!(
+                    !b.margin().is_negative(),
+                    "settled margin is stored unsigned"
+                );
+                assert!(b.equity().usdc().is_finite());
             }
             MakerEquityKind::NotAMaker => {}
             MakerEquityKind::Failed(e) => panic!("pos {pos_id} degraded: {e}"),
