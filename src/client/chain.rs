@@ -412,8 +412,9 @@ impl ChainReader {
         self.index_price_at(beacon, BlockId::latest()).await
     }
 
-    /// [`Self::get_index_price`] at `block`.
-    pub(super) async fn index_price_at(&self, beacon: Address, block: BlockId) -> Result<f64> {
+    /// The beacon's `index()` at `block`, exact in X96; a zero index is a
+    /// broken beacon, not a price.
+    pub(super) async fn index_x96_at(&self, beacon: Address, block: BlockId) -> Result<U256> {
         let contract = IBeacon::new(beacon, &self.inner.provider);
         let index_x96: U256 = contract.index().block(block).call().await?;
 
@@ -423,7 +424,12 @@ impl ChainReader {
             }
             .into());
         }
+        Ok(index_x96)
+    }
 
+    /// [`Self::get_index_price`] at `block`.
+    pub(super) async fn index_price_at(&self, beacon: Address, block: BlockId) -> Result<f64> {
+        let index_x96 = self.index_x96_at(beacon, block).await?;
         let index = price_x96_to_f64(index_x96)?;
         Ok(index)
     }

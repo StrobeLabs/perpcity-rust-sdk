@@ -23,11 +23,11 @@ use crate::contracts::{IFees, IMarginRatios, Perp, Position};
 use crate::convert::{margin_ratio_to_leverage, price_x96_to_f64, scale_from_6dec};
 use crate::errors::{ContractError, PerpCityError, Result, ValidationError};
 use crate::hft::state_cache::{CachedBounds, CachedFees};
-use crate::math::pricing::Mark;
+use crate::math::pricing::{Emas, Mark, PricePair};
 use crate::types::{Bounds, Fees, OpenInterest, PerpData, PerpSnapshot};
 
 use super::market::MarketReader;
-use super::state::pinned_read_error;
+use super::state::{ema_window_secs, pinned_read_error};
 use super::{PerpClient, SCALE_F64, i24_to_i32, now_secs, u24_to_u32};
 
 /// Funding/utilization rates are scaled by 1e18 per day on-chain.
@@ -151,6 +151,7 @@ impl MarketReader {
         let modules = perp.modules().call().await?;
         let pool_key = perp.poolKey().call().await?;
         let pool_state = perp.poolState().call().await?;
+        let ema_window = ema_window_secs(perp.EMA_WINDOW().call().await?)?;
         let pool_price = price_x96_to_f64(pool_state.ammPrice)?;
 
         let fees = self.get_or_fetch_fees(modules.fees).await?;
@@ -159,6 +160,7 @@ impl MarketReader {
         Ok(PerpData {
             perp: self.perp,
             tick_spacing: i24_to_i32(pool_key.tickSpacing),
+            ema_window,
             pool_price,
             beacon: modules.beacon,
             bounds,
@@ -349,7 +351,7 @@ impl MarketReader {
     pub async fn get_perp_snapshot(&self) -> Result<(PerpData, PerpSnapshot)> {
         let perp = Perp::new(self.perp, self.chain.provider());
         let (block, id) = self.chain.lagged_snapshot_block().await?;
-        let (modules, pool_key, pool_state, rates, oi) = self
+        let (modules, pool_key, pool_state, rates, oi, stored_emas, ema_window) = self
             .chain
             .multicall_at(id)
             .add(perp.modules())
@@ -357,6 +359,8 @@ impl MarketReader {
             .add(perp.poolState())
             .add(perp.rates())
             .add(perp.openInterest())
+            .add(perp.emas())
+            .add(perp.EMA_WINDOW())
             .aggregate()
             .await
             .map_err(|e| pinned_read_error(multicall_error(e), block.number))?;
@@ -369,11 +373,36 @@ impl MarketReader {
         };
 
         let beacon = registered_module(modules.beacon, "IBeacon")?;
-        let index_price = self
+        let index_x96 = self
             .chain
-            .index_price_at(beacon, id)
+            .index_x96_at(beacon, id)
             .await
             .map_err(|e| pinned_read_error(e, block.number))?;
+        let index_price = price_x96_to_f64(index_x96)?;
+
+        // The mark exactly as the contract would set it at this block, then
+        // one conversion; the stored pair goes out as it is so a cache can
+        // advance it itself.
+        let last_touch = rates.lastTouch.to::<u64>();
+        let ema_window = ema_window_secs(ema_window)?;
+        let stored_emas = PricePair {
+            amm: stored_emas.ammPrice,
+            index: stored_emas.index,
+        };
+        let mark = Mark::advanced(
+            block,
+            pool_state.ammPrice,
+            index_x96,
+            stored_emas,
+            last_touch,
+            ema_window,
+        )?;
+        let mark = price_x96_to_f64(mark.fair_price_x96())?;
+        let emas = Emas {
+            amm_price: price_x96_to_f64(U256::from(stored_emas.amm))?,
+            index: price_x96_to_f64(U256::from(stored_emas.index))?,
+            last_touch,
+        };
 
         // Fees/bounds (from cache or chain).
         let fees = self.get_or_fetch_fees(modules.fees).await?;
@@ -382,6 +411,7 @@ impl MarketReader {
         let perp_data = PerpData {
             perp: self.perp,
             tick_spacing: i24_to_i32(pool_key.tickSpacing),
+            ema_window,
             pool_price,
             beacon: modules.beacon,
             bounds,
@@ -389,9 +419,11 @@ impl MarketReader {
         };
 
         let snapshot = PerpSnapshot {
-            block: block.number,
+            block,
             pool_price,
             index_price,
+            mark,
+            emas,
             funding_rate_daily,
             open_interest,
         };
@@ -852,12 +884,19 @@ mod tests {
 
     // ── Slow layer: fees and bounds, keyed by module address ──────────
 
+    /// The four `Perp` reads that open `get_perp_config`: the three of
+    /// [`perp_answers`] and the EMA window.
+    fn config_answers(rpc: &Rpc) {
+        perp_answers(rpc);
+        rpc.call::<Perp::EMA_WINDOWCall>(&U256::from(3_600u32));
+    }
+
     /// The config read asks the `Perp` for its modules, then asks the
-    /// modules it named: six RPCs, decoded into fractions.
+    /// modules it named: seven RPCs, decoded into fractions.
     #[tokio::test]
     async fn perp_config_reads_the_perp_then_the_modules_it_names() {
         let (client, rpc) = mock::client();
-        perp_answers(&rpc);
+        config_answers(&rpc);
         fees_answers(&rpc);
         bounds_answers(&rpc);
 
@@ -867,6 +906,7 @@ mod tests {
             PerpData {
                 perp: mock::PERP,
                 tick_spacing: SPACING,
+                ema_window: 3_600,
                 pool_price: 1.5,
                 beacon: BEACON,
                 bounds: expected_bounds(),
@@ -875,7 +915,7 @@ mod tests {
         );
         assert!(
             rpc.is_drained(),
-            "modules, poolKey, poolState, fees, liqFee, takerMarginRatios"
+            "modules, poolKey, poolState, EMA_WINDOW, fees, liqFee, takerMarginRatios"
         );
     }
 
@@ -885,22 +925,22 @@ mod tests {
     #[tokio::test]
     async fn fees_and_bounds_survive_a_fast_invalidation_but_not_a_full_one() {
         let (client, rpc) = mock::client();
-        perp_answers(&rpc);
+        config_answers(&rpc);
         fees_answers(&rpc);
         bounds_answers(&rpc);
         let first = client.market().get_perp_config().await.unwrap();
 
-        perp_answers(&rpc);
+        config_answers(&rpc);
         assert_eq!(client.market().get_perp_config().await.unwrap(), first);
         assert!(rpc.is_drained(), "the modules were not asked again");
 
         client.chain().invalidate_fast_cache();
-        perp_answers(&rpc);
+        config_answers(&rpc);
         assert_eq!(client.market().get_perp_config().await.unwrap(), first);
         assert!(rpc.is_drained(), "the slow layer is untouched");
 
         client.chain().invalidate_all_cache();
-        perp_answers(&rpc);
+        config_answers(&rpc);
         fees_answers(&rpc);
         bounds_answers(&rpc);
         assert_eq!(client.market().get_perp_config().await.unwrap(), first);
@@ -918,6 +958,7 @@ mod tests {
         });
         rpc.call::<Perp::poolKeyCall>(&mock::pool_key(SPACING));
         rpc.call::<Perp::poolStateCall>(&mock::pool_state(x96(3, 1)));
+        rpc.call::<Perp::EMA_WINDOWCall>(&U256::from(3_600u32));
 
         let err = client.market().get_perp_config().await.unwrap_err();
         assert!(
@@ -1022,31 +1063,43 @@ mod tests {
         assert!(rpc.is_drained());
     }
 
-    /// The five `Perp` views the snapshot batches.
-    fn snapshot_views() -> [Vec<u8>; 5] {
+    /// The block time of every snapshot in these tests, and the market's
+    /// last touch, so the stored EMAs need no advancing.
+    const SNAPSHOT_TIME: u64 = 1_700_000_000;
+
+    /// The seven `Perp` views the snapshot batches: pool price 1.5, both
+    /// stored EMAs 1.0 as of the block time.
+    fn snapshot_views() -> [Vec<u8>; 7] {
+        let one = x96(1, 0).to::<u128>();
         [
             returns::<Perp::modulesCall>(&mock::modules()),
             returns::<Perp::poolKeyCall>(&mock::pool_key(SPACING)),
             returns::<Perp::poolStateCall>(&mock::pool_state(x96(3, 1))),
-            returns::<Perp::ratesCall>(&mock::rates(-5_000_000_000_000_000)),
+            returns::<Perp::ratesCall>(&Rates {
+                lastTouch: Uint::from(SNAPSHOT_TIME),
+                ..mock::rates(-5_000_000_000_000_000)
+            }),
             returns::<Perp::openInterestCall>(&mock::open_interest(1_500_000, 250_000)),
+            returns::<Perp::emasCall>(&mock::emas(one, one)),
+            returns::<Perp::EMA_WINDOWCall>(&U256::from(3_600u32)),
         ]
     }
 
     /// Answer the head and the lagged header the snapshot pins to, so the
-    /// snapshot's block is `number`.
-    fn snapshot_block(rpc: &Rpc, number: u64) {
+    /// snapshot's block is `number`; returns the header's hash.
+    fn snapshot_block(rpc: &Rpc, number: u64) -> B256 {
         rpc.quantity(number + SNAPSHOT_BLOCK_LAG);
-        rpc.block(number, 1_700_000_000);
+        rpc.block(number, SNAPSHOT_TIME)
     }
 
     /// The snapshot is the lagged block, one multicall for the `Perp`'s
-    /// five views and the beacon at that block, and the slow layer —
-    /// which a second snapshot skips. It carries that block.
+    /// seven views and the beacon at that block, and the slow layer —
+    /// which a second snapshot skips. It carries that block, the mark
+    /// priced from the stored EMAs, and the stored pair itself.
     #[tokio::test]
     async fn perp_snapshot_is_one_block_plus_the_slow_layer() {
         let (client, rpc) = mock::client();
-        snapshot_block(&rpc, 100);
+        let hash = snapshot_block(&rpc, 100);
         rpc.aggregate(100, snapshot_views());
         rpc.call::<IBeacon::indexCall>(&x96(5, 2));
         fees_answers(&rpc);
@@ -1058,6 +1111,7 @@ mod tests {
             PerpData {
                 perp: mock::PERP,
                 tick_spacing: SPACING,
+                ema_window: 3_600,
                 pool_price: 1.5,
                 beacon: BEACON,
                 bounds: expected_bounds(),
@@ -1067,9 +1121,20 @@ mod tests {
         assert_eq!(
             snapshot,
             PerpSnapshot {
-                block: 100,
+                block: BlockContext {
+                    number: 100,
+                    hash,
+                    timestamp: SNAPSHOT_TIME,
+                },
                 pool_price: 1.5,
                 index_price: 1.25,
+                // fair(1.5, 1.25, 1.0, 1.0) = (1.5 + (1.25 + 1.0 − 1.0)) / 2.
+                mark: 1.375,
+                emas: Emas {
+                    amm_price: 1.0,
+                    index: 1.0,
+                    last_touch: SNAPSHOT_TIME,
+                },
                 funding_rate_daily: -0.005,
                 open_interest: OpenInterest {
                     long_oi: 1.5,
@@ -1082,7 +1147,7 @@ mod tests {
             "blockNumber, header, multicall, index, fees, liqFee, ratios"
         );
 
-        snapshot_block(&rpc, 101);
+        let hash = snapshot_block(&rpc, 101);
         rpc.aggregate(101, snapshot_views());
         rpc.call::<IBeacon::indexCall>(&x96(5, 2));
         assert_eq!(
@@ -1090,7 +1155,11 @@ mod tests {
             (
                 data,
                 PerpSnapshot {
-                    block: 101,
+                    block: BlockContext {
+                        number: 101,
+                        hash,
+                        timestamp: SNAPSHOT_TIME,
+                    },
                     ..snapshot
                 }
             )
@@ -1112,7 +1181,7 @@ mod tests {
         bounds_answers(&rpc);
 
         let (_, snapshot) = client.market().get_perp_snapshot().await.unwrap();
-        assert_eq!(snapshot.block, 510_368_453);
+        assert_eq!(snapshot.block.number, 510_368_453);
         assert!(rpc.is_drained());
     }
 
@@ -1143,13 +1212,16 @@ mod tests {
     #[tokio::test]
     async fn perp_snapshot_without_a_beacon_names_the_missing_interface() {
         let (client, rpc) = mock::client();
-        let [_, pool_key, pool_state, rates, oi] = snapshot_views();
+        let [_, pool_key, pool_state, rates, oi, emas, window] = snapshot_views();
         let modules = returns::<Perp::modulesCall>(&Modules {
             beacon: Address::ZERO,
             ..mock::modules()
         });
         snapshot_block(&rpc, 100);
-        rpc.aggregate(100, [modules, pool_key, pool_state, rates, oi]);
+        rpc.aggregate(
+            100,
+            [modules, pool_key, pool_state, rates, oi, emas, window],
+        );
 
         let err = client.market().get_perp_snapshot().await.unwrap_err();
         assert!(

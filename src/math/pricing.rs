@@ -159,6 +159,50 @@ impl Mark {
     }
 }
 
+/// The stored EMA pair in human units, with the touch it was stored at:
+/// what `emas()` and `rates().lastTouch` hold, and what the
+/// `RatesAndEmasRefreshed` event carries. The f64 twin of a [`PricePair`]
+/// at a `last_touch`, for a live cache that follows the feed and must mark
+/// between touches.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Emas {
+    /// The pool-price EMA.
+    pub amm_price: f64,
+    /// The index EMA.
+    pub index: f64,
+    /// Unix timestamp the pair is current as of: the market's last touch.
+    pub last_touch: u64,
+}
+
+impl Emas {
+    /// The pair advanced to `timestamp` against the spot prices, as the
+    /// contract would advance it on a touch then: each EMA decays toward
+    /// its spot by `exp(−Δt / ema_window)`, and the result is current as of
+    /// `timestamp`. The f64 twin of [`calculate_emas`]. Unchanged when
+    /// `timestamp` is not after `last_touch`; a zero window with time to
+    /// cross, which the contract would revert on, reads as no smoothing.
+    #[must_use]
+    pub fn advanced(self, pool_price: f64, index: f64, timestamp: u64, ema_window: u64) -> Self {
+        if timestamp <= self.last_touch {
+            return self;
+        }
+        let dt = (timestamp - self.last_touch) as f64;
+        let alpha = (-dt / ema_window as f64).exp();
+        Self {
+            amm_price: self.amm_price * alpha + pool_price * (1.0 - alpha),
+            index: self.index * alpha + index * (1.0 - alpha),
+            last_touch: timestamp,
+        }
+    }
+
+    /// The contract's mark at `timestamp`: [`fair_price`] of the spot
+    /// prices and this pair advanced to it.
+    pub fn mark(self, pool_price: f64, index: f64, timestamp: u64, ema_window: u64) -> f64 {
+        let emas = self.advanced(pool_price, index, timestamp, ema_window);
+        fair_price(pool_price, index, emas.amm_price, emas.index)
+    }
+}
+
 /// Solady `FixedPointMathLib.avg`: `floor((a + b) / 2)` without the
 /// intermediate sum, so it cannot overflow.
 fn avg(a: U256, b: U256) -> U256 {
@@ -234,6 +278,61 @@ mod tests {
         assert_eq!(
             mark.fair_price_x96(),
             uint!(3402826316343078585786028642276_U256)
+        );
+    }
+
+    /// The f64 advance reproduces the exact one on the same live accrue
+    /// to the six decimals `price_x96_to_f64` keeps (prices near 42, so
+    /// within a few millionths), and the mark it gives is the fair price
+    /// of the exact result to the same precision.
+    #[test]
+    fn the_f64_advance_agrees_with_the_exact_one() {
+        let f = |x96: U256| price_x96_to_f64(x96).unwrap();
+        let (amm_x96, index_x96) = (
+            uint!(3333452930552967749837079299470_U256),
+            uint!(3248354663084837841335301963776_U256),
+        );
+        let stored = Emas {
+            amm_price: f(uint!(3320491901781519017281026778664_U256)),
+            index: f(uint!(3084589206424849219740478559607_U256)),
+            last_touch: 1790734324,
+        };
+
+        let emas = stored.advanced(f(amm_x96), f(index_x96), 1790734624, 3600);
+        let close = |a: f64, b: f64| (a - b).abs() < 1e-5;
+        assert!(
+            close(
+                emas.amm_price,
+                f(uint!(3321528208423946384037633669774_U256))
+            ),
+            "{}",
+            emas.amm_price
+        );
+        assert!(
+            close(emas.index, f(uint!(3097683169375594803637957648468_U256))),
+            "{}",
+            emas.index
+        );
+        assert_eq!(emas.last_touch, 1790734624);
+        assert!(close(
+            stored.mark(f(amm_x96), f(index_x96), 1790734624, 3600),
+            f(uint!(3402826316343078585786028642276_U256))
+        ));
+    }
+
+    /// With no time since the last touch the stored pair stands, and the
+    /// mark is the fair price of the spots and that pair.
+    #[test]
+    fn an_f64_pair_with_nothing_to_advance_stands() {
+        let stored = Emas {
+            amm_price: 1.0,
+            index: 1.0,
+            last_touch: 10,
+        };
+        assert_eq!(stored.advanced(1.5, 1.25, 10, 3_600), stored);
+        assert_eq!(
+            stored.mark(1.5, 1.25, 10, 3_600),
+            fair_price(1.5, 1.25, 1.0, 1.0)
         );
     }
 
