@@ -421,8 +421,6 @@ these are the ones every node uses.
 
 ## Debts
 
-- `PerpSnapshot` carries its block by number only, since a head read has
-  no header to carry. It is the one snapshot without a hash.
 - `is_transient` classifies some failures by which path wrapped them
   rather than by what they were (SDK #115). The pinned reads classify
   correctly; the bare contract calls do not yet.

@@ -252,7 +252,7 @@ views it batches.
 |---|---|---|---|
 | `get_pool_price`, `get_funding_rate` | 1 | head | fast layer, 2 s |
 | `get_open_interest` | 1 | head | no |
-| `get_perp_config` | 3, plus 3 for fees and bounds on a slow-layer miss | head | slow layer, 60 s |
+| `get_perp_config` | 4, plus 3 for fees and bounds on a slow-layer miss | head | slow layer, 60 s |
 | `get_perp_data` | 3 | head | no |
 | `get_perp_snapshot` | 1 multicall + 1 pinned index, plus the slow layer on a miss | one block, the head | slow layer for fees and bounds |
 | `state()` | 2 (block number, header) | lagged | no |
@@ -339,13 +339,10 @@ Two costs in this table are not what they should be and are debts:
   because the chain offers no owner index. It is correct and slow; the
   ownership fold over the tape (`history`) is the right answer for anything
   above a handful of positions.
-- **`PerpSnapshot` carries its block by number only.** A head read has no
-  header to carry a hash from. It is the one snapshot a caller cannot pin
-  further reads to.
 - **The liquidation twins are keyed by an enum called `Book`.** It names
   which kind of position a liquidation targets, and "book" is retired
   vocabulary; it should be a position kind.
-- **`get_perp_config` is three separate calls** where `get_perp_snapshot`
+- **`get_perp_config` is four separate calls** where `get_perp_snapshot`
   is one batch; the older read predates the batch and has not been folded
   into it.
 - **Transience is by wrapping path for bare calls.** A now-read that

@@ -24,6 +24,9 @@ use std::fmt;
 use alloy::primitives::{Address, B256, U256};
 use serde::{Deserialize, Serialize};
 
+use crate::math::BlockContext;
+use crate::math::pricing::Emas;
+
 /// The addresses every market on a chain shares.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChainDeployments {
@@ -41,6 +44,10 @@ pub struct PerpData {
     pub perp: Address,
     /// Tick spacing for the underlying Uniswap V4 pool.
     pub tick_spacing: i32,
+    /// `EMA_WINDOW()`, in seconds: the time constant the contract smooths
+    /// the pool price and the index with; a deployment immutable, and what
+    /// [`Emas::advanced`] takes.
+    pub ema_window: u64,
     /// Pool (AMM spot) price in human-readable units (e.g. `1.05`) — not
     /// the contract's mark, which is the fair price
     /// ([`crate::math::pricing`]).
@@ -192,21 +199,35 @@ pub struct SolvencyState {
     pub total_margin: f64,
 }
 
-/// Live market data from a multicall snapshot.
+/// The market's live state at the lagged snapshot block, in human units.
 ///
 /// Pure market state — no static config. Returned alongside [`PerpData`]
 /// from [`MarketReader::get_perp_snapshot`](crate::MarketReader::get_perp_snapshot).
+/// What a live cache seeds from before it follows the feed: the prices,
+/// the contract's mark, and the stored EMAs it needs to keep marking
+/// between touches.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct PerpSnapshot {
-    /// The block every field was read at: the head when the read ran. By
-    /// number only, since a read at the head has no header to carry.
-    pub block: u64,
+    /// The block every field was read at: the lagged snapshot block, with
+    /// its hash, so further reads can pin to it.
+    pub block: BlockContext,
     /// Pool (AMM spot) price in human-readable units — not a TWAP, and not
     /// the contract's mark, which is the fair price
     /// ([`crate::math::pricing`]).
     pub pool_price: f64,
     /// Oracle index price from the beacon contract.
     pub index_price: f64,
+    /// The contract's mark at the block: the fair price of the pool price,
+    /// the index and the EMAs advanced to the block's timestamp, exact in
+    /// X96 and converted once. What every health check, `valPnl` and
+    /// liquidation prices at, so the basis the contract sees is this
+    /// against the index, not the pool price against it.
+    pub mark: f64,
+    /// The stored EMAs as of the market's last touch. A cache that follows
+    /// the feed advances them to now against the prices it holds and marks
+    /// with [`Emas::mark`]; `RatesAndEmasRefreshed` replaces them on every
+    /// touch.
+    pub emas: Emas,
     /// Daily funding rate (positive = longs pay shorts).
     pub funding_rate_daily: f64,
     /// Taker open interest.
