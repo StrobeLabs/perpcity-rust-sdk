@@ -68,6 +68,26 @@ jobs:
         env:
           RUSTDOCFLAGS: -Dwarnings
 
+  # The public API against the last release: a breaking change is allowed
+  # only when the version in Cargo.toml says so (a minor bump before 1.0),
+  # so breaking something and bumping the version happen in the same PR.
+  semver:
+    runs-on: ubuntu-latest
+    name: semver
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - id: baseline
+        run: echo "tag=$(git describe --tags --abbrev=0)" >> "$GITHUB_OUTPUT"
+      - uses: obi1kenobi/cargo-semver-checks-action@v2
+        with:
+          package: perpcity-sdk
+          baseline-rev: ${{ steps.baseline.outputs.tag }}
+          feature-group: all-features
+
   # The design graph: every name in every DESIGN.md resolved against
   # rustdoc's JSON, every producer and consumer a table claims verified
   # against a signature, and the root node's invariants. The nightly is
