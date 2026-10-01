@@ -96,10 +96,11 @@ jobs:
       - run: cargo test --locked -p xtask
       # On a pull request, what the change did to the type graph: built at
       # the base too, diffed, and posted to the job summary and as one
-      # comment on the PR that later runs update. The diff carries the
-      # ratchet: a new island, dead end, two-cycle or unnamed flow that no
-      # node acknowledges fails the job, after the comment is posted.
-      - if: github.event_name == 'pull_request'
+      # comment on the PR that later runs update, even when the check or the
+      # tests above failed, so the comment is never stale. The diff carries
+      # the ratchet: a new island, dead end, two-cycle or unnamed flow that
+      # no node acknowledges fails the job, after the comment is posted.
+      - if: github.event_name == 'pull_request' && !cancelled()
         env:
           GH_TOKEN: ${{ github.token }}
           PR: ${{ github.event.pull_request.number }}

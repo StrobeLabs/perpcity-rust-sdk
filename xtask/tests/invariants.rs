@@ -193,6 +193,9 @@ fn the_ratchet_fires_on_new_unacknowledged_structures_only() {
     head.dead_ends.insert("hft::Stub".into());
     head.two_cycles
         .insert(("client::A".into(), "client::B".into()));
+    // A cycle where the debts name one of the pair for another reason.
+    head.two_cycles
+        .insert(("client::C".into(), "client::D".into()));
     head.flows.insert(
         ("math::X".into(), "math::Y".into()),
         ["convert_x".to_string()].into(),
@@ -218,7 +221,7 @@ fn the_ratchet_fires_on_new_unacknowledged_structures_only() {
     let node = Node {
         name: "math".into(),
         path: PathBuf::from("src/math/DESIGN.md"),
-        text: "# math\n\n## Debts\n\n- **`NamedIsland` is an island** on purpose.\n- The pair `A` and `B`.\n\n## Terminology\n\nStub is not a debt here.\n".into(),
+        text: "# math\n\n## Debts\n\n- **`NamedIsland` is an island** on purpose.\n- The pair `A` and `B`.\n- `C` is slow.\n\n## Terminology\n\nStub is not a debt here.\n".into(),
     };
     let mut problems = Vec::new();
     invariants::ratchet(&base, &head, &[node], &mut problems);
@@ -265,8 +268,14 @@ fn the_ratchet_fires_on_new_unacknowledged_structures_only() {
         "the row moved with the type: {problems:?}"
     );
     assert!(
+        problems
+            .iter()
+            .any(|p| p.contains("client::C and client::D now flow both ways")),
+        "one name is not the pair: {problems:?}"
+    );
+    assert!(
         !problems.iter().any(|p| p.contains("math::Same")),
         "unchanged shape: {problems:?}"
     );
-    assert_eq!(problems.len(), 4, "{problems:?}");
+    assert_eq!(problems.len(), 5, "{problems:?}");
 }

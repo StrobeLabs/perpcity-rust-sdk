@@ -165,10 +165,12 @@ impl Summary {
             s.shapes.insert(path(*id), shape);
         }
         for r in &graph.rows {
-            s.rows.insert(
-                path(r.subject),
-                format!("{}|{}|{}", r.invariant, r.produced, r.consumed),
-            );
+            // A companion shares its subject's row, so a change to the
+            // companion's shape is held to the same row.
+            let text = format!("{}|{}|{}", r.invariant, r.produced, r.consumed);
+            for id in std::iter::once(r.subject).chain(r.companions.iter().copied()) {
+                s.rows.insert(path(id), text.clone());
+            }
         }
         s
     }

@@ -109,7 +109,12 @@ pub fn ratchet(base: &Summary, head: &Summary, nodes: &[Node], problems: &mut Ve
         }
     }
     for (a, b) in head.two_cycles.difference(&base.two_cycles) {
-        if !acknowledged(&short(a)) && !acknowledged(&short(b)) {
+        // The pair, in one debts section: naming one of the types for some
+        // other reason does not acknowledge the cycle.
+        let pair_named = debts
+            .iter()
+            .any(|d| names_word(d, &short(a)) && names_word(d, &short(b)));
+        if !pair_named {
             problems.push(format!(
                 "ratchet: {a} and {b} now flow both ways; name the pair in a node's debts or move the conversion to one side"
             ));
