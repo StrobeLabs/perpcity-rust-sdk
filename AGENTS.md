@@ -52,7 +52,10 @@ graph of nodes, and it is part of what a change must keep true.
   design job also posts on the pull request: a new island, dead end or
   unnamed flow there is a question the PR should answer.
 - A behaviour that a caller can observe gets a changelog entry under
-  `[Unreleased]`, breaking changes first.
+  `[Unreleased]`, breaking changes first. A change that breaks the public
+  API also bumps the version in `Cargo.toml` in the same PR (a minor bump
+  before 1.0); CI compares the API against the last release tag with
+  `cargo-semver-checks` and fails a break the version does not announce.
 - Imports at the top of the file, grouped std / external / crate, never
   an inline path. Terse docs: one fact, one home, no history.
 - Commit messages are one to three sentences of prose. No trailers.

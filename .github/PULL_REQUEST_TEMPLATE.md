@@ -21,3 +21,4 @@ verification. For a behaviour change: what was measured. -->
 - [ ] `RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features`
 - [ ] `cargo xtask design --check`, after `--fmt` if a type table changed
 - [ ] `CHANGELOG.md` updated under `[Unreleased]` if a caller can observe the change
+- [ ] Version bumped in `Cargo.toml` if the public API breaks (CI checks it against the last tag)
