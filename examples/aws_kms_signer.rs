@@ -65,7 +65,7 @@ async fn main() -> Result<()> {
     client.ensure_approval(U256::MAX).await?;
 
     // -- Read market state, then open/close a tiny position via KMS signing --
-    let config = client.market().get_perp_config().await?;
+    let config = client.market().get_config().await?;
     println!("pool price: {:.2}", config.pool_price);
 
     let open = client

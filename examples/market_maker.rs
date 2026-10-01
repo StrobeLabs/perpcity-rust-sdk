@@ -105,13 +105,13 @@ async fn main() -> perpcity_sdk::Result<()> {
 
     // ── Query market state ──────────────────────────────────────────
     let pool_price = client.market().get_pool_price().await?;
-    let perp_config = client.market().get_perp_config().await?;
+    let config = client.market().get_config().await?;
     let balance = client.get_usdc_balance().await?;
 
     println!("\n=== Market State ===");
     println!("  Pool price:   {pool_price:.6}");
     println!("  Tick spacing: {tick_spacing}");
-    println!("  LP fee:       {:.4}%", perp_config.fees.lp_fee * 100.0);
+    println!("  LP fee:       {:.4}%", config.fees.lp_fee * 100.0);
     println!("  Wallet USDC:  {balance:.2}");
 
     // ── Calculate tick range ────────────────────────────────────────

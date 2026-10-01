@@ -37,9 +37,10 @@ pub struct ChainDeployments {
     pub pool_manager: Address,
 }
 
-/// Metadata about a perpetual market.
+/// A market's configuration: what deployment fixed and what governance
+/// sets, read once per market.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct PerpData {
+pub struct MarketConfig {
     /// The market's `Perp` contract address (the market identifier).
     pub perp: Address,
     /// Tick spacing for the underlying Uniswap V4 pool.
@@ -201,13 +202,14 @@ pub struct SolvencyState {
 
 /// The market's live state at the lagged snapshot block, in human units.
 ///
-/// Pure market state — no static config. Returned alongside [`PerpData`]
-/// from [`MarketReader::get_perp_snapshot`](crate::MarketReader::get_perp_snapshot).
+/// Pure market state — no configuration. Returned alongside
+/// [`MarketConfig`] from
+/// [`MarketReader::get_snapshot`](crate::MarketReader::get_snapshot).
 /// What a live cache seeds from before it follows the feed: the prices,
 /// the contract's mark, and the stored EMAs it needs to keep marking
 /// between touches.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-pub struct PerpSnapshot {
+pub struct MarketSnapshot {
     /// The block every field was read at: the lagged snapshot block, with
     /// its hash, so further reads can pin to it.
     pub block: BlockContext,

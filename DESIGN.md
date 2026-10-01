@@ -398,7 +398,9 @@ copy was a defect and this crate grew the type.
 The cross-cutting words. A component node owns the words it introduces;
 these are the ones every node uses.
 
-- **Market**: one `Perp` contract, identified by its address.
+- **Market**: one `Perp` contract, identified by its address. `Perp` names
+  the contract and appears in a binding or a client of it; everything a
+  caller reads, holds or configures is named for the market.
 - **Pool price**: the AMM's spot, `ammPrice` on chain. Not the mark.
 - **Index**: the beacon's print.
 - **EMAs**: the contract's smoothed pool price and index, a `PricePair`,

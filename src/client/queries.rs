@@ -24,7 +24,7 @@ use crate::convert::{margin_ratio_to_leverage, price_x96_to_f64, scale_from_6dec
 use crate::errors::{ContractError, PerpCityError, Result, ValidationError};
 use crate::hft::state_cache::{CachedBounds, CachedFees};
 use crate::math::pricing::{Emas, Mark, PricePair};
-use crate::types::{Bounds, Fees, OpenInterest, PerpData, PerpSnapshot};
+use crate::types::{Bounds, Fees, MarketConfig, MarketSnapshot, OpenInterest};
 
 use super::market::MarketReader;
 use super::state::{ema_window_secs, pinned_read_error};
@@ -142,10 +142,12 @@ impl MarketReader {
         self.state().await?.mark().await
     }
 
-    /// Get the full perp configuration, fees, and bounds for the market.
+    /// The market's configuration: its pool's tick spacing, the EMA window,
+    /// the beacon it takes its index from, and the bounds and fees its
+    /// modules set.
     ///
     /// Uses the [`crate::hft::state_cache::StateCache`] for fees and bounds (60s TTL).
-    pub async fn get_perp_config(&self) -> Result<PerpData> {
+    pub async fn get_config(&self) -> Result<MarketConfig> {
         let perp = Perp::new(self.perp, self.chain.provider());
 
         let modules = perp.modules().call().await?;
@@ -157,7 +159,7 @@ impl MarketReader {
         let fees = self.get_or_fetch_fees(modules.fees).await?;
         let bounds = self.get_or_fetch_bounds(modules.marginRatios).await?;
 
-        Ok(PerpData {
+        Ok(MarketConfig {
             perp: self.perp,
             tick_spacing: i24_to_i32(pool_key.tickSpacing),
             ema_window,
@@ -166,19 +168,6 @@ impl MarketReader {
             bounds,
             fees,
         })
-    }
-
-    /// Get perp data: beacon, tick spacing, and current pool price.
-    ///
-    /// Lighter-weight than [`Self::get_perp_config`] — skips fees/bounds lookups.
-    pub async fn get_perp_data(&self) -> Result<(Address, i32, f64)> {
-        let perp = Perp::new(self.perp, self.chain.provider());
-        let modules = perp.modules().call().await?;
-        let pool_key = perp.poolKey().call().await?;
-        let pool_state = perp.poolState().call().await?;
-        let pool_price = price_x96_to_f64(pool_state.ammPrice)?;
-
-        Ok((modules.beacon, i24_to_i32(pool_key.tickSpacing), pool_price))
     }
 
     /// Get an on-chain position by its NFT token ID.
@@ -326,29 +315,29 @@ impl MarketReader {
         Ok(daily_rate)
     }
 
-    /// Get perp config and live market data at the head, in one multicall
-    /// plus the beacon index read.
+    /// The market's configuration and its state, in one multicall plus the
+    /// beacon index read.
     ///
     /// Resolves the lagged snapshot block (see
     /// [`SNAPSHOT_BLOCK_LAG`](crate::constants::SNAPSHOT_BLOCK_LAG)) from the
-    /// node's header, batches `modules` + `poolKey` + `poolState` + `rates` +
-    /// `openInterest` against the `Perp` contract at it, then reads `index()`
+    /// node's header, batches the `Perp`'s views at it, then reads `index()`
     /// on the beacon the batch named at the same block: every field of the
-    /// snapshot is from that one block, which it carries by number.
+    /// snapshot is from that one block, which it carries.
     ///
     /// The block comes from the header, not from Multicall3's
     /// `blockAndAggregate`: on Arbitrum `block.number` inside the EVM is the
     /// L1 block number and `blockhash` of it is zero, so it names no block
     /// on the chain being read.
     ///
-    /// Returns `(PerpData, PerpSnapshot)` — static config and live market data.
+    /// Both come back because one batch answers both; a caller that wants
+    /// only the configuration takes [`Self::get_config`].
     ///
     /// # Errors
     ///
     /// [`ContractError::ModuleNotRegistered`] when the perp has no beacon;
     /// [`ContractError::BlockUnavailable`] (transient) when a read lands on
     /// a replica that does not have the snapshot block.
-    pub async fn get_perp_snapshot(&self) -> Result<(PerpData, PerpSnapshot)> {
+    pub async fn get_snapshot(&self) -> Result<(MarketConfig, MarketSnapshot)> {
         let perp = Perp::new(self.perp, self.chain.provider());
         let (block, id) = self.chain.lagged_snapshot_block().await?;
         let (modules, pool_key, pool_state, rates, oi, stored_emas, ema_window) = self
@@ -408,7 +397,7 @@ impl MarketReader {
         let fees = self.get_or_fetch_fees(modules.fees).await?;
         let bounds = self.get_or_fetch_bounds(modules.marginRatios).await?;
 
-        let perp_data = PerpData {
+        let config = MarketConfig {
             perp: self.perp,
             tick_spacing: i24_to_i32(pool_key.tickSpacing),
             ema_window,
@@ -418,7 +407,7 @@ impl MarketReader {
             fees,
         };
 
-        let snapshot = PerpSnapshot {
+        let snapshot = MarketSnapshot {
             block,
             pool_price,
             index_price,
@@ -428,8 +417,8 @@ impl MarketReader {
             open_interest,
         };
 
-        tracing::debug!("perp snapshot fetched via multicall");
-        Ok((perp_data, snapshot))
+        tracing::debug!("market snapshot fetched via multicall");
+        Ok((config, snapshot))
     }
 
     // ── Cache helpers ───────────────────────────────────────────────
@@ -546,8 +535,8 @@ mod tests {
     /// The market's tick spacing in these tests.
     const SPACING: i32 = 30;
 
-    /// The three `Perp` reads that open `get_perp_config` and
-    /// `get_perp_data`: modules, pool key, pool state.
+    /// The three `Perp` reads that open `get_config`: modules, pool key,
+    /// pool state.
     fn perp_answers(rpc: &Rpc) {
         rpc.call::<Perp::modulesCall>(&mock::modules());
         rpc.call::<Perp::poolKeyCall>(&mock::pool_key(SPACING));
@@ -884,7 +873,7 @@ mod tests {
 
     // ── Slow layer: fees and bounds, keyed by module address ──────────
 
-    /// The four `Perp` reads that open `get_perp_config`: the three of
+    /// The four `Perp` reads that open `get_config`: the three of
     /// [`perp_answers`] and the EMA window.
     fn config_answers(rpc: &Rpc) {
         perp_answers(rpc);
@@ -900,10 +889,10 @@ mod tests {
         fees_answers(&rpc);
         bounds_answers(&rpc);
 
-        let config = client.market().get_perp_config().await.unwrap();
+        let config = client.market().get_config().await.unwrap();
         assert_eq!(
             config,
-            PerpData {
+            MarketConfig {
                 perp: mock::PERP,
                 tick_spacing: SPACING,
                 ema_window: 3_600,
@@ -928,22 +917,22 @@ mod tests {
         config_answers(&rpc);
         fees_answers(&rpc);
         bounds_answers(&rpc);
-        let first = client.market().get_perp_config().await.unwrap();
+        let first = client.market().get_config().await.unwrap();
 
         config_answers(&rpc);
-        assert_eq!(client.market().get_perp_config().await.unwrap(), first);
+        assert_eq!(client.market().get_config().await.unwrap(), first);
         assert!(rpc.is_drained(), "the modules were not asked again");
 
         client.chain().invalidate_fast_cache();
         config_answers(&rpc);
-        assert_eq!(client.market().get_perp_config().await.unwrap(), first);
+        assert_eq!(client.market().get_config().await.unwrap(), first);
         assert!(rpc.is_drained(), "the slow layer is untouched");
 
         client.chain().invalidate_all_cache();
         config_answers(&rpc);
         fees_answers(&rpc);
         bounds_answers(&rpc);
-        assert_eq!(client.market().get_perp_config().await.unwrap(), first);
+        assert_eq!(client.market().get_config().await.unwrap(), first);
         assert!(rpc.is_drained(), "evicted: the modules are asked again");
     }
 
@@ -960,7 +949,7 @@ mod tests {
         rpc.call::<Perp::poolStateCall>(&mock::pool_state(x96(3, 1)));
         rpc.call::<Perp::EMA_WINDOWCall>(&U256::from(3_600u32));
 
-        let err = client.market().get_perp_config().await.unwrap_err();
+        let err = client.market().get_config().await.unwrap_err();
         assert!(
             matches!(
                 err,
@@ -973,19 +962,6 @@ mod tests {
             rpc.is_drained(),
             "the perp was read; the fees module was not"
         );
-    }
-
-    /// The lighter read stops at the `Perp`: beacon, spacing, mark.
-    #[tokio::test]
-    async fn perp_data_stops_at_the_perp() {
-        let (client, rpc) = mock::client();
-        perp_answers(&rpc);
-
-        assert_eq!(
-            client.market().get_perp_data().await.unwrap(),
-            (BEACON, SPACING, 1.5)
-        );
-        assert!(rpc.is_drained());
     }
 
     // ── Multicall reads ───────────────────────────────────────────────
@@ -1105,10 +1081,10 @@ mod tests {
         fees_answers(&rpc);
         bounds_answers(&rpc);
 
-        let (data, snapshot) = client.market().get_perp_snapshot().await.unwrap();
+        let (data, snapshot) = client.market().get_snapshot().await.unwrap();
         assert_eq!(
             data,
-            PerpData {
+            MarketConfig {
                 perp: mock::PERP,
                 tick_spacing: SPACING,
                 ema_window: 3_600,
@@ -1120,7 +1096,7 @@ mod tests {
         );
         assert_eq!(
             snapshot,
-            PerpSnapshot {
+            MarketSnapshot {
                 block: BlockContext {
                     number: 100,
                     hash,
@@ -1151,10 +1127,10 @@ mod tests {
         rpc.aggregate(101, snapshot_views());
         rpc.call::<IBeacon::indexCall>(&x96(5, 2));
         assert_eq!(
-            client.market().get_perp_snapshot().await.unwrap(),
+            client.market().get_snapshot().await.unwrap(),
             (
                 data,
-                PerpSnapshot {
+                MarketSnapshot {
                     block: BlockContext {
                         number: 101,
                         hash,
@@ -1180,7 +1156,7 @@ mod tests {
         fees_answers(&rpc);
         bounds_answers(&rpc);
 
-        let (_, snapshot) = client.market().get_perp_snapshot().await.unwrap();
+        let (_, snapshot) = client.market().get_snapshot().await.unwrap();
         assert_eq!(snapshot.block.number, 510_368_453);
         assert!(rpc.is_drained());
     }
@@ -1195,7 +1171,7 @@ mod tests {
         rpc.aggregate(100, snapshot_views());
         rpc.fails("header not found");
 
-        let err = client.market().get_perp_snapshot().await.unwrap_err();
+        let err = client.market().get_snapshot().await.unwrap_err();
         assert!(
             matches!(
                 err,
@@ -1223,7 +1199,7 @@ mod tests {
             [modules, pool_key, pool_state, rates, oi, emas, window],
         );
 
-        let err = client.market().get_perp_snapshot().await.unwrap_err();
+        let err = client.market().get_snapshot().await.unwrap_err();
         assert!(
             matches!(
                 err,

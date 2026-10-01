@@ -172,14 +172,11 @@ async fn main() -> perpcity_sdk::Result<()> {
     let mut next_position_id_counter: u64 = 0;
 
     // Pre-fetch market config (cached for 60s in the slow layer)
-    let perp_config = client.market().get_perp_config().await?;
+    let config = client.market().get_config().await?;
     println!("\n=== Market Config ===");
-    println!(
-        "  Max leverage: {:.0}x",
-        perp_config.bounds.max_taker_leverage
-    );
-    println!("  Min margin:   {:.2} USDC", perp_config.bounds.min_margin);
-    println!("  LP fee:       {:.4}%", perp_config.fees.lp_fee * 100.0);
+    println!("  Max leverage: {:.0}x", config.bounds.max_taker_leverage);
+    println!("  Min margin:   {:.2} USDC", config.bounds.min_margin);
+    println!("  LP fee:       {:.4}%", config.fees.lp_fee * 100.0);
 
     let balance = client.get_usdc_balance().await?;
     println!("  Wallet USDC:  {balance:.2}");

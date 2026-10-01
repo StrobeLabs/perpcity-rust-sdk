@@ -96,12 +96,7 @@ async fn main() -> perpcity_sdk::Result<()> {
     // position — not the market-wide taker ratio, and not the margin.
     // The contract remains the oracle — the filter only saves eth_calls on
     // obviously healthy positions, so it keeps anything near the line.
-    let liq_fee = client
-        .market()
-        .get_perp_config()
-        .await?
-        .fees
-        .liquidation_fee;
+    let liq_fee = client.market().get_config().await?.fees.liquidation_fee;
     candidates.retain(|(_, b)| {
         b.is_liquidatable(liq_fee) || b.margin_ratio() < b.liq_margin_ratio() * 1.1
     });

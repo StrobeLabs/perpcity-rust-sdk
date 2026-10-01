@@ -79,7 +79,7 @@ async fn main() -> Result<()> {
 
     // ── Phase: read_state ────────────────────────────────────────────
     let t = Instant::now();
-    let _config = client.market().get_perp_config().await?;
+    let _config = client.market().get_config().await?;
     phase_times.push(("read_state", ms(t)));
 
     // ── Trade iterations ─────────────────────────────────────────────

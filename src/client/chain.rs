@@ -403,8 +403,8 @@ impl ChainReader {
 
     /// Get the oracle index price from a beacon contract.
     ///
-    /// The beacon address is available from `PerpData.beacon` (returned by
-    /// [`get_perp_config`](crate::MarketReader::get_perp_config)).
+    /// The beacon address is available from `MarketConfig.beacon` (returned
+    /// by [`get_config`](crate::MarketReader::get_config)).
     ///
     /// Note: `index()` is a state-mutating function on-chain; this performs an
     /// `eth_call` (simulation) and does not send a transaction.

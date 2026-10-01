@@ -64,7 +64,7 @@ async fn main() -> Result<()> {
     client.ensure_approval(U256::MAX).await?;
 
     // -- Read market state --
-    let config = client.market().get_perp_config().await?;
+    let config = client.market().get_config().await?;
     println!("pool price: {:.2}", config.pool_price);
 
     // -- Open a long with 10 USDC margin (perp_delta > 0 = long) --

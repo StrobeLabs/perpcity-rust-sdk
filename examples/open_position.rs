@@ -102,20 +102,17 @@ async fn main() -> perpcity_sdk::Result<()> {
     }
 
     // ── 5. Query market data ────────────────────────────────────────
-    let perp_data = client.market().get_perp_config().await?;
+    let config = client.market().get_config().await?;
     println!("\n=== Market: {perp} ===");
-    println!("  Pool price:      {:.6}", perp_data.pool_price);
-    println!("  Tick spacing:    {}", perp_data.tick_spacing);
+    println!("  Pool price:      {:.6}", config.pool_price);
+    println!("  Tick spacing:    {}", config.tick_spacing);
     println!(
         "  Max leverage:    {:.0}x",
-        perp_data.bounds.max_taker_leverage
+        config.bounds.max_taker_leverage
     );
-    println!("  Min margin:      {:.2} USDC", perp_data.bounds.min_margin);
-    println!(
-        "  Creator fee:     {:.4}%",
-        perp_data.fees.creator_fee * 100.0
-    );
-    println!("  LP fee:          {:.4}%", perp_data.fees.lp_fee * 100.0);
+    println!("  Min margin:      {:.2} USDC", config.bounds.min_margin);
+    println!("  Creator fee:     {:.4}%", config.fees.creator_fee * 100.0);
+    println!("  LP fee:          {:.4}%", config.fees.lp_fee * 100.0);
 
     let funding = client.market().get_funding_rate().await?;
     println!("  Daily funding:   {:.6}%", funding * 100.0);
