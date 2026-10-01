@@ -44,7 +44,6 @@ pub mod convert;
 pub mod errors;
 pub mod events;
 pub mod feeds;
-pub(crate) mod fixed_point;
 pub mod hft;
 pub mod history;
 pub mod math;

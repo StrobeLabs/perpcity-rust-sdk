@@ -347,7 +347,7 @@ The shape first, then the reasons.
   │   ├─────────────────────────────────────────────────────────────┤  │
   │   │ errors      every failure typed, with a stated transience   │  │
   │   ├─────────────────────────────────────────────────────────────┤  │
-  │   │ units       what every number is; fixed_point beneath it    │  │
+  │   │ units       what every number is, and its fixed-point math  │  │
   │   └─────────────────────────────────────────────────────────────┘  │
   └────────────────────────────────────────────────────────────────────┘
 ```
@@ -393,9 +393,10 @@ exist, and it is the one edge that leaves the repository.
 - **`types`** and **`convert`**: the human surface. Consumed by `client` on
   the way out and by callers on the way in.
 - **`units`**: what every number is. Provides one type per unit the market
-  is denominated in, and the one legal crossing between each dangerous
-  pair. Depends on nothing but `errors`, `constants` and the crate-internal
-  `fixed_point`, which is why every other module can take its types.
+  is denominated in, the one legal crossing between each dangerous pair,
+  and the Solidity-compatible fixed-point arithmetic over those encodings,
+  which `math`'s ports are built on. Depends on nothing but `errors` and
+  `constants`, which is why every other module can take its types.
 
 **Downstream** is the edge out of this crate: the strategy layer built on
 it, ours or anyone's. Its vocabulary builds on these types rather than

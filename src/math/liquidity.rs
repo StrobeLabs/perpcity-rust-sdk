@@ -9,9 +9,9 @@ use alloy::primitives::U256;
 
 use crate::constants::Q96;
 use crate::errors::ValidationError;
-use crate::fixed_point::Rounding;
 use crate::math::range::{MakerBand, TickRange};
 use crate::math::swap::{amount0_delta, amount1_delta};
+use crate::units::fixed_point::Rounding;
 use crate::units::{PerpAtoms, SqrtPrice, UsdcAtoms};
 
 /// Estimate the liquidity needed to deploy `usd_amount` of value across

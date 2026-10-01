@@ -29,9 +29,9 @@ use alloy::primitives::{I256, U256, uint};
 use serde::{Deserialize, Serialize};
 
 use crate::errors::ValidationError;
-use crate::fixed_point::exp_wad;
 use crate::math::BlockContext;
 use crate::units::Price;
+use crate::units::fixed_point::exp_wad;
 
 const WAD_U256: U256 = uint!(1_000_000_000_000_000_000_U256);
 

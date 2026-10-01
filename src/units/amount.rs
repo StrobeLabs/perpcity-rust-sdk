@@ -8,9 +8,9 @@
 
 use alloy::primitives::{I256, U256};
 
+use super::fixed_point::{Rounding, mul_div, s_full_mul_div, to_i256};
 use crate::constants::Q96;
 use crate::errors::ValidationError;
-use crate::fixed_point::{Rounding, mul_div, s_full_mul_div, to_i256};
 
 use super::price::Price;
 use super::{F64_1E6, MAX_SAFE_F64_INT, count, delta};

@@ -32,13 +32,13 @@ use serde::{Deserialize, Serialize};
 
 use crate::constants::{ACCOUNTING_TOKEN_SUPPLY, INTERVAL, Q96, WAD};
 use crate::errors::ValidationError;
-use crate::fixed_point::{
-    Rounding, add_i, add_u, mul_div, s_full_mul_div, sub_i, sub_u, to_i256, u512_to_u256,
-};
 use crate::math::BlockContext;
 use crate::math::liquidity::amounts_for_liquidity;
 use crate::math::swap::amount0_delta;
 use crate::math::tick::get_sqrt_ratio_at_tick;
+use crate::units::fixed_point::{
+    Rounding, add_i, add_u, mul_div, s_full_mul_div, sub_i, sub_u, to_i256, u512_to_u256,
+};
 use crate::units::{PerpAtoms, PerpDelta, Price, SqrtPrice, UsdcAtoms, UsdcDelta};
 
 /// One `TickInfo` from the Perp's tick funding mapping (`s.ticks[tick]`),
