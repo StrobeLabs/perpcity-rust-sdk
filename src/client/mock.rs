@@ -14,7 +14,9 @@ use alloy::providers::RootProvider;
 use alloy::providers::bindings::IMulticall3 as Multicall;
 use alloy::rpc::client::RpcClient;
 use alloy::rpc::json_rpc::ErrorPayload;
-use alloy::rpc::types::{Block, BlockTransactions, Header};
+use alloy::rpc::types::{
+    Block, BlockTransactions, EIP1186AccountProofResponse, EIP1186StorageProof, Header,
+};
 use alloy::signers::local::PrivateKeySigner;
 use alloy::sol_types::SolCall;
 use alloy::transports::mock::Asserter;
@@ -152,6 +154,28 @@ impl Rpc {
     /// The next `eth_getStorageAt` returns `word`.
     pub(super) fn storage(&self, word: U256) {
         self.0.push_success(&word);
+    }
+
+    /// The next `eth_getProof` proves these `(slot, value)` pairs of
+    /// `account`'s storage; the proofs themselves are empty, since the
+    /// reads take the values on trust.
+    pub(super) fn proof(&self, account: Address, slots: impl IntoIterator<Item = (U256, U256)>) {
+        self.0.push_success(&EIP1186AccountProofResponse {
+            address: account,
+            balance: U256::ZERO,
+            code_hash: B256::ZERO,
+            nonce: 0,
+            storage_hash: B256::ZERO,
+            account_proof: Vec::new(),
+            storage_proof: slots
+                .into_iter()
+                .map(|(slot, value)| EIP1186StorageProof {
+                    key: B256::from(slot).into(),
+                    value,
+                    proof: Vec::new(),
+                })
+                .collect(),
+        });
     }
 
     /// The next request fails as the node's own error, with no revert

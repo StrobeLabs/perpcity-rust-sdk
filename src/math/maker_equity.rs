@@ -24,8 +24,8 @@
 //! [`swap`](crate::math::swap): a block-pinned [`MakerMarketSnapshot`] plus
 //! per-position [`MakerState`] rows. The chain-read layer that populates
 //! them (including the raw storage-slot reads, see
-//! `crate::storage`) lives in the market reader:
-//! [`MarketReader::get_maker_equities`](crate::MarketReader::get_maker_equities).
+//! `crate::storage`) lives on the state handle:
+//! [`StateAt::maker_equities`](crate::StateAt::maker_equities).
 
 use alloy::primitives::{I256, U256, U512};
 use serde::{Deserialize, Serialize};
