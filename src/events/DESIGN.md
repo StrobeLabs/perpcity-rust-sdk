@@ -41,12 +41,18 @@ cumulatives and tick funding, are X96 and X128 values whose meaning is
 only exact as integers, so they are surfaced verbatim, named for what
 they are, and converted downstream only by code that knows why.
 
-**Unknown is `None`, never a guess.** A log the decoder does not
-recognise, an admin event, an ERC-20 transfer sharing the ERC-721
-`Transfer` topic, returns `None` and the caller skips it. A log the
-decoder does recognise but cannot decode should be an error, because a
-gap in a tape is worse than a failure; today it is also `None`, which is
-the first debt below.
+**Unknown is `None`, never a guess; unreadable is an error.** A log that
+is not this vocabulary's, an admin event, returns `None` and the caller
+skips it. A log that *is* this vocabulary's and will not decode is an
+error naming the field or the signature, because a gap in a tape is
+worse than a failure and the two were one `None` until #146.
+
+The one log that needs both answers is the ERC-721 `Transfer`, whose
+topic0 ERC-20 shares, so the topic alone does not say whose event it is.
+The arity does: two indexed fields and three topics is the ERC-20 shape
+and someone else's token moving, `None`; three indexed fields and four
+is this market's position NFT, and anything else at that topic claims to
+be ours, so a failure to read it is a gap.
 
 ## The mental model
 
@@ -90,8 +96,8 @@ already knows which subscription delivered it.
                                ▼         ▼
                           ┌───────────────────┐
                           │    decode_log     │   one function
-                          │  every era's ABI  │   unknown → None
-                          └─────────┬─────────┘   malformed → None today; should be an error
+                          │  every era's ABI  │   not ours → None
+                          └─────────┬─────────┘   ours, unreadable → error
                                     ▼
                           ┌───────────────────┐
                           │    MarketEvent    │   human units; raw where exact

@@ -33,10 +33,12 @@ repeatedly pays the search once.
 **A gap is worse than a failure.** A tape with a missing window is a
 lie about the market. So a scan returns results in range order, delivers
 a window only when it is complete, and returns a typed rejection for the
-one block a provider will not serve rather than skipping it. A log the
-decoder recognises but cannot decode should be an error, not an
-omission; today the decoder returns `None` for it, a debt recorded in
-[`events`](../events/DESIGN.md).
+one block a provider will not serve rather than skipping it. A log of
+this vocabulary that will not decode is an error in
+[`events`](../events/DESIGN.md) rather than an omission, and a scan
+counts it on `ScanStats::undecodable` and reads on: one unreadable log
+should not cost a scan of millions of blocks, but a tape that is short
+must say so.
 
 **Never on the trading path.** A scan is throughput work: thousands of
 requests, minutes of wall time, its own timeout. It shares the transport's

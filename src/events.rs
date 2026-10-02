@@ -69,6 +69,10 @@ use crate::units::{Earnings, Funding, FundingPerSqrtPrice, LDelta, LUnits};
 /// Funding/utilization rates are scaled by 1e18 per day on-chain.
 const WAD_F64: f64 = 1e18;
 
+/// An ERC-20 `Transfer` indexes two of its three fields, so topic0 plus two.
+/// The ERC-721 shape this module wants indexes all three and has four.
+const ERC20_TRANSFER_TOPICS: usize = 3;
+
 /// Decoded details of a taker swap, in human-readable units.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct SwapInfo {
@@ -544,18 +548,22 @@ pub fn decode_log(log: &Log) -> Result<Option<MarketEvent>, ValidationError> {
             salt: d.salt,
         })
     } else if topic0 == Perp::Transfer::SIGNATURE_HASH {
-        // Same topic0 as ERC20 Transfer, and the ERC721 shape needs three
-        // indexed topics. An ERC20 log therefore fails to decode here, which
-        // is the one place a decode failure is not a gap: the topic is
-        // shared, so it is a log of someone else's event. Hence `ok()`
-        // rather than `?`.
-        decode_raw::<Perp::Transfer>(log)
-            .ok()
-            .map(|d| MarketEvent::PositionTransferred {
+        // ERC20 `Transfer` shares this topic0, so the topic alone does not say
+        // whose event this is; the arity does. At the ERC20 arity it is someone
+        // else's token moving and the failure to decode is not a gap, which is
+        // the one place in this function that is true. At any other arity the
+        // log claims to be the position NFT's, so a failure is a gap and an
+        // error, like every other branch here.
+        if log.topics().len() == ERC20_TRANSFER_TOPICS {
+            None
+        } else {
+            let d = decode_raw::<Perp::Transfer>(log)?;
+            Some(MarketEvent::PositionTransferred {
                 from: d.from,
                 to: d.to,
                 pos_id: d.tokenId,
             })
+        }
     } else {
         None
     };
@@ -1033,6 +1041,34 @@ mod tests {
         // *shared* with ERC20, so this is someone else's event rather than a
         // log of ours we cannot read.
         assert!(decode_log(&log).unwrap().is_none());
+    }
+
+    /// The ERC20 arity is the only one the shared topic excuses. A `Transfer`
+    /// log at any other arity claims to be the position NFT's, so a failure to
+    /// read it is a gap like any other.
+    #[test]
+    fn a_transfer_at_neither_arity_is_an_error() {
+        let log = RpcLog {
+            inner: alloy::primitives::Log {
+                address: Address::ZERO,
+                data: LogData::new_unchecked(
+                    vec![Perp::Transfer::SIGNATURE_HASH, B256::repeat_byte(0x11)],
+                    vec![].into(),
+                ),
+            },
+            block_hash: None,
+            block_number: None,
+            block_timestamp: None,
+            transaction_hash: None,
+            transaction_index: None,
+            log_index: None,
+            removed: false,
+        };
+        let err = decode_log(&log).expect_err("a Transfer we cannot read is a gap");
+        assert!(
+            matches!(&err, ValidationError::DecodeFailed { context } if context.contains("Transfer")),
+            "the error names the signature it tried: {err}"
+        );
     }
 
     #[test]
