@@ -19,8 +19,6 @@
 
 #![doc = "\n\nThe design of this module: [`src/types/DESIGN.md`](https://github.com/StrobeLabs/perpcity-rust-sdk/blob/main/src/types/DESIGN.md)."]
 
-use std::fmt;
-
 use alloy::primitives::{Address, B256, U256};
 use serde::{Deserialize, Serialize};
 
@@ -126,25 +124,6 @@ pub struct Fees {
     pub lp_fee: Ratio,
     /// Share charged on a liquidation, applied to the position's value.
     pub liquidation_fee: Ratio,
-}
-
-/// A taker direction: a long gains when the price rises, a short when it
-/// falls.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum Side {
-    /// Long exposure (positive perp delta).
-    Long,
-    /// Short exposure (negative perp delta).
-    Short,
-}
-
-impl fmt::Display for Side {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
-            Self::Long => "long",
-            Self::Short => "short",
-        })
-    }
 }
 
 /// Taker open interest for a perp market, in perp tokens (multiply by the

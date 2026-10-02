@@ -144,10 +144,10 @@ pub enum TransactionError {
         reason: String,
     },
 
-    /// Too many unconfirmed transactions in the pipeline. Not transient by
-    /// [`PerpCityError::is_transient`](crate::PerpCityError::is_transient)
-    /// today, though the condition clears as transactions resolve; the
-    /// errors design node records the debt.
+    /// Too many unconfirmed transactions in the pipeline. Transient: the
+    /// condition clears as in-flight transactions resolve, so a caller
+    /// should back off until a receipt arrives rather than give up. Nothing
+    /// was signed or sent.
     #[error("too many in-flight: {count} (max {max})")]
     TooManyInFlight {
         /// Current number of in-flight transactions.

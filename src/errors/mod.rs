@@ -89,9 +89,11 @@ impl PerpCityError {
     /// `BroadcastFailed` and `ReceiptTimeout` are transient: the
     /// transaction may still land, and its hash is on the error.
     ///
-    /// `NonceDesynced` is transient by construction: it clears itself once
-    /// in-flight transactions drain and the next send resyncs from chain,
-    /// so callers should back off briefly rather than give up.
+    /// `NonceDesynced` and `TooManyInFlight` are transient by construction:
+    /// both clear themselves as in-flight transactions drain, so callers
+    /// should back off briefly rather than give up. A full pipeline in
+    /// particular is a caller sending faster than the chain confirms, which
+    /// the next receipt fixes.
     ///
     /// `BlockUnavailable` (a lagging replica briefly missing the pinned
     /// header) and `StorageReadFailed` with a transport `source` are
@@ -110,6 +112,7 @@ impl PerpCityError {
                 | Self::Transaction(TransactionError::BroadcastFailed { .. })
                 | Self::Transaction(TransactionError::ReceiptTimeout { .. })
                 | Self::Transaction(TransactionError::NonceDesynced { .. })
+                | Self::Transaction(TransactionError::TooManyInFlight { .. })
                 | Self::Transaction(TransactionError::TakerNotClosed { .. })
                 | Self::Contract(ContractError::BlockUnavailable { .. })
                 | Self::Contract(ContractError::StorageReadFailed {
@@ -143,7 +146,6 @@ mod tests {
     use alloy::transports::TransportErrorKind;
 
     use super::*;
-    use crate::types::Side;
 
     /// Consumers key retry behaviour off this classification (backoff loops
     /// treat transients as "retry politely"), so it is API surface, not an
@@ -154,6 +156,15 @@ mod tests {
         assert!(
             desynced.is_transient(),
             "desync clears itself after drain + resync; callers must retry, not give up"
+        );
+
+        // A full pipeline clears itself the same way, and classifying it the
+        // other way round made a backoff loop give up on the condition that
+        // resolves itself and retry the one that does not.
+        let full: PerpCityError = TransactionError::TooManyInFlight { count: 8, max: 8 }.into();
+        assert!(
+            full.is_transient(),
+            "a full pipeline drains as receipts arrive; nothing was signed or sent"
         );
 
         let revert: PerpCityError = TransactionError::SimulationReverted {
@@ -247,7 +258,6 @@ mod tests {
         let no_capacity: PerpCityError = ValidationError::NoBandCapacity {
             lower: 20_000,
             upper: 30_000,
-            side: Side::Long,
         }
         .into();
         assert!(
