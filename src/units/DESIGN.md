@@ -79,14 +79,26 @@ Fourteen types in four families, and one rule that names them all.
                  │                                           │
       accessor: .atoms(), .units()                  accessor: .x96(), .x128()
 
-   the one crossing between the assets        the one crossing between the prices
+   the crossings, one per pair that looks alike as a primitive
 
       PerpAtoms ──× Price──► UsdcAtoms           SqrtPrice ──squared──► Price
+      Funding ──÷ SqrtPrice──► FundingPerSqrtPrice
 ```
 
-This PR carries the left column's first two rows and the price pair. The
-accumulators, the pool's own unit and the rates follow, and the diagram is
-the plan for them.
+Landed: both asset pairs, the price pair, and the four accumulators. The
+pool's own unit and the rates are the remainder, and the diagram is the
+plan for them.
+
+**An accumulator is read as a difference, never as a level.** The four of
+them are levels the contract only adds to, and what a position owes or has
+earned is the growth since its own checkpoint. The rule for taking that
+difference is not shared: funding and the earnings are ordered, so a
+checkpoint ahead of the market's level is two reads that disagree and must
+fail, while Uniswap's fee growth is modular, wraps by design, and is still
+correct across the wrap. That is why `since` returns a `Result` on three
+of them and a plain value on the fourth. Before this the three rules were
+three different helpers a call site reached for, and the modular one was a
+comment above a `wrapping_sub`.
 
 Three things about the shape. The constructor names the unit it takes
 (`UsdcAtoms::new(atoms)`), so a bare integer cannot enter without saying
@@ -105,12 +117,18 @@ spelling convention to carry it.
 | [`PerpAtoms`](amount.rs#L28) | the market's own token, as a count of atoms; never interchangeable with [`UsdcAtoms`](amount.rs#L18) however alike the two look as integers | [`Capacity::on`](../math/DESIGN.md), what a band or a market backs on one side; [`MarketCapacity::headroom`](../math/DESIGN.md) and [`MarketCapacity::open_interest`](../math/DESIGN.md); [`amounts_for_liquidity`](../math/DESIGN.md), as a band's perp leg; [`PerpDelta::magnitude`](amount.rs#L47), an exposure without its sign | [`liquidity_for_capacity`](../math/DESIGN.md), as the capacity target to invert; [`AccrualInputs`](../math/DESIGN.md) and [`MakerState`](../math/DESIGN.md), as the capacity and open-interest legs of the accrual. |
 | [`PerpDelta`](amount.rs#L47) | a signed exposure: positive long, negative short, as a position's `delta` stores it | nothing outside the module makes one: a caller names an exposure and the types carry it | [`PoolSnapshot::quote_perp`](../math/DESIGN.md), as the exposure to quote; [`TakerQuote`](../math/DESIGN.md), as the exposure a swap filled; [`MakerState`](../math/DESIGN.md), as the position's recorded perp delta. The strategy layer's trade parameters, where the sign is the side and nothing else carries it. |
 | [`Price`](price.rs#L25) | USDC per unit of the market's token, Q96; the representation is the type's own and the accessor names it | [`Mark::fair_price`](../math/DESIGN.md), the price the contract values at; [`fair_price`](../math/DESIGN.md), the deployed port; [`SqrtPrice::squared`](price.rs#L131), the one crossing from a root | [`fair_price`](../math/DESIGN.md), as each of its four inputs; [`Mark::advanced`](../math/DESIGN.md), as the pool price and the index; [`PerpAtoms::value_at`](amount.rs#L119), as what values an amount; [`AccruedMakerSnapshot::with_mark`](../math/DESIGN.md) and [`StateAt::maker_equities_at_mark`](../client/DESIGN.md), as a what-if mark. |
-| [`SqrtPrice`](price.rs#L34) | the square root of a price, Q96: what Uniswap stores and what every liquidity formula is linear in | [`get_sqrt_ratio_at_tick`](../math/DESIGN.md), the exact path from a tick; [`TickRange::sqrt_bounds`](../math/DESIGN.md), a range's two ends | [`get_tick_at_sqrt_ratio`](../math/DESIGN.md); [`band_capacity`](../math/DESIGN.md), [`band_amounts`](../math/DESIGN.md), [`amounts_for_liquidity`](../math/DESIGN.md), [`liquidity_for_capacity`](../math/DESIGN.md) and [`liquidity_for_target_ratio`](../math/DESIGN.md), every one of which is a formula in root prices; [`PoolSnapshot::quote_to_price`](../math/DESIGN.md), as the target to walk to. |
+| [`SqrtPrice`](price.rs#L34) | the square root of a price, Q96: what Uniswap stores and what every liquidity formula is linear in | [`get_sqrt_ratio_at_tick`](../math/DESIGN.md), the exact path from a tick; [`TickRange::sqrt_bounds`](../math/DESIGN.md), a range's two ends | [`get_tick_at_sqrt_ratio`](../math/DESIGN.md); [`band_capacity`](../math/DESIGN.md), [`band_amounts`](../math/DESIGN.md), [`amounts_for_liquidity`](../math/DESIGN.md), [`liquidity_for_capacity`](../math/DESIGN.md) and [`liquidity_for_target_ratio`](../math/DESIGN.md), every one of which is a formula in root prices; [`PoolSnapshot::quote_to_price`](../math/DESIGN.md), as the target to walk to; [`Funding::per_sqrt_price`](accumulators.rs#L104), as what it divides by. |
+| [`Funding`](accumulators.rs#L29) | cumulative funding, USDC per perp token, Q96 signed: a level the contract only adds to, read as the growth since a checkpoint and never as a level | [`Funding::since`](accumulators.rs#L78) and [`Funding::advanced_by`](accumulators.rs#L89), the difference and the accrual replay | [`MakerMarketSnapshot`](../math/DESIGN.md) and [`MakerState`](../math/DESIGN.md), as the market's level and the position's four checkpoints; [`TickFunding`](../math/DESIGN.md), as a tick's opposite-side checkpoint; [`CumulativesInfo`](../events/DESIGN.md) and [`MarketEvent`](../events/DESIGN.md), as the event's own level. |
+| [`FundingPerSqrtPrice`](accumulators.rs#L39) | the same funding per unit of sqrt-price exposure, Q96 signed: the form a maker's within-band leg accumulates in, because a band's exposure is linear in the root | [`Funding::per_sqrt_price`](accumulators.rs#L104), the one crossing from the funding it divides; [`FundingPerSqrtPrice::since`](accumulators.rs#L124) and [`FundingPerSqrtPrice::advanced_by`](accumulators.rs#L133) | one field in each of the four places its undivided twin has one: [`MakerMarketSnapshot`](../math/DESIGN.md), [`MakerState`](../math/DESIGN.md), [`TickFunding`](../math/DESIGN.md) and [`CumulativesInfo`](../events/DESIGN.md). They are the same signed word, subtracted from their own checkpoints a line apart, which is what the two types keep straight. |
+| [`Earnings`](accumulators.rs#L51) | cumulative utilization earnings, USDC per perp token of capacity, Q96 unsigned: the contract only adds, so a checkpoint ahead of it is inconsistent state | [`Earnings::since`](accumulators.rs#L145) and [`Earnings::advanced_by`](accumulators.rs#L154) | [`MakerMarketSnapshot`](../math/DESIGN.md) and [`MakerState`](../math/DESIGN.md), two each for the two sides; [`CumulativesInfo`](../events/DESIGN.md), which carries the paid side under the same shape. |
+| [`FeeGrowth`](accumulators.rs#L60) | Uniswap's fee growth per unit of liquidity, Q128 unsigned and **modular**: the word wraps by design and the difference is still correct across the wrap | nothing public makes one: the maker-equity batch reads the pool's global word and each band tick's outside word, and a crate-private fold turns them into the growth inside a band | [`MakerState`](../math/DESIGN.md), as the band's growth now and at the last checkpoint. |
 
 The two right-hand columns are where a unit travels. A link under
 *Produced by* is the function that makes one; under *Consumed by*, a
 function that takes it. A method on the type itself is neither, which is
-why the constructors and accessors appear in neither column.
+why the constructors and accessors appear in neither column — except on
+the accumulators, where `since` is the only way to read one and is
+therefore where the type's whole claim lives.
 
 ## Efficiency
 
@@ -184,12 +202,18 @@ path the chain checks.
 
 ## Debts
 
-- **The accumulators, the pool's own unit and the rates are still
-  primitives.** `Funding`, `FundingPerSqrtPrice`, `Earnings`, `FeeGrowth`,
-  `LiqUnits`, `LiqDelta`, `Rate` and `Ratio` are named and planned; until
-  they land, the fields behind them are bare `I256`, `U256`, `u128` and
-  `u32` beside typed neighbours, which is where a new bare primitive could
-  now go unnoticed.
+- **The pool's own unit and the rates are still primitives.** `LiqUnits`,
+  `LiqDelta`, `Rate` and `Ratio` are named and planned; until they land,
+  the fields behind them are bare `u128`, `i128`, `u64` and `u32` beside
+  typed neighbours, which is where a new bare primitive could now go
+  unnoticed. Liquidity is the exposed one: it is a `u128` next to two
+  other `u128` counts, and [`amounts_for_liquidity`](../math/DESIGN.md)
+  takes three typed arguments and one bare one.
+- **The two utilization payment words have no reader.** The event carries
+  the paid side of the earnings accumulator beside the earned side, and
+  nothing in the crate uses it; it is typed as [`Earnings`](accumulators.rs#L51)
+  because it is the same quantity from the other direction, which the name
+  does not say.
 - **The two reported invariants are about to become vacuous.** The graph
   still reports on `f64` behind a wire suffix and on a suffix matching its
   primitive. Both are structural once the last suffixed field is typed,

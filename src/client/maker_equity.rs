@@ -33,7 +33,10 @@ use crate::storage::{
     perp_tick_funding_slots, v4_fee_growth_global1_slot, v4_position_fee_growth_inside1_slot,
     v4_tick_fee_growth_outside1_slot,
 };
-use crate::units::{PerpAtoms, PerpDelta, Price, SqrtPrice, UsdcAtoms, UsdcDelta};
+use crate::units::{
+    Earnings, FeeGrowth, Funding, FundingPerSqrtPrice, PerpAtoms, PerpDelta, Price, SqrtPrice,
+    UsdcAtoms, UsdcDelta,
+};
 
 use super::market::MarketReader;
 use super::state::{
@@ -183,24 +186,24 @@ impl FeeGrowthLayout {
 
 /// The V4 fee-growth words of a set of maker positions at one block, read
 /// in one `extsload` laid out by [`FeeGrowthLayout`].
-struct FeeGrowth {
+struct FeeGrowthWords {
     layout: FeeGrowthLayout,
     words: Vec<B256>,
 }
 
-impl FeeGrowth {
+impl FeeGrowthWords {
     /// The pool's `feeGrowthGlobal1X128`: word 0 by construction.
-    fn global(&self) -> U256 {
-        U256::from_be_bytes(self.words[0].0)
+    fn global(&self) -> FeeGrowth {
+        FeeGrowth::from_x128(U256::from_be_bytes(self.words[0].0))
     }
 
     /// `feeGrowthOutside1X128` of `tick`, which must have been a band
     /// boundary of the positions the read was built from.
-    fn outside(&self, tick: i32) -> Result<U256> {
+    fn outside(&self, tick: i32) -> Result<FeeGrowth> {
         self.layout
             .tick_word
             .get(&tick)
-            .map(|&word| U256::from_be_bytes(self.words[word].0))
+            .map(|&word| FeeGrowth::from_x128(U256::from_be_bytes(self.words[word].0)))
             .ok_or_else(|| {
                 ContractError::StorageReadFailed {
                     context: format!("tick {tick} missing from fee-growth layout"),
@@ -211,8 +214,10 @@ impl FeeGrowth {
     }
 
     /// `feeGrowthInside1LastX128` of the `position`-th pending position.
-    fn inside_last(&self, position: usize) -> U256 {
-        U256::from_be_bytes(self.words[self.layout.first_inside_word + position].0)
+    fn inside_last(&self, position: usize) -> FeeGrowth {
+        FeeGrowth::from_x128(U256::from_be_bytes(
+            self.words[self.layout.first_inside_word + position].0,
+        ))
     }
 }
 
@@ -441,10 +446,10 @@ impl StateAt {
 
         let market = MakerMarketSnapshot {
             block,
-            funding_x96: cumls.fundingX96,
-            funding_div_sqrt_p_x96: cumls.fundingDivSqrtPX96,
-            long_util_earnings_x96: cumls.longUtilEarningsX96,
-            short_util_earnings_x96: cumls.shortUtilEarningsX96,
+            funding: Funding::from_x96(cumls.fundingX96),
+            funding_div_sqrt_p: FundingPerSqrtPrice::from_x96(cumls.fundingDivSqrtPX96),
+            long_util_earnings: Earnings::from_x96(cumls.longUtilEarningsX96),
+            short_util_earnings: Earnings::from_x96(cumls.shortUtilEarningsX96),
             tick: i24_to_i32(views.pool_state.tick),
             sqrt_price: SqrtPrice::from_x96(views.pool_state.sqrtPrice.to::<U256>()),
             mark: mark.fair_price(),
@@ -586,20 +591,26 @@ impl StateAt {
                     liq_margin_ratio_e6: u24_to_u32(maker.position.liqMarginRatio),
                     delta_perp: PerpDelta::new(delta_perp),
                     delta_usd: UsdcDelta::new(delta_usd),
-                    last_cuml_funding_x96: maker.position.lastCumlFundingX96,
+                    last_cuml_funding: Funding::from_x96(maker.position.lastCumlFundingX96),
                     tick_lower: maker.tick_lower,
                     tick_upper: maker.tick_upper,
                     liquidity: maker.details.liquidity,
-                    last_long_util_earnings_x96: maker.details.lastLongUtilEarningsX96,
-                    last_short_util_earnings_x96: maker.details.lastShortUtilEarningsX96,
+                    last_long_util_earnings: Earnings::from_x96(
+                        maker.details.lastLongUtilEarningsX96,
+                    ),
+                    last_short_util_earnings: Earnings::from_x96(
+                        maker.details.lastShortUtilEarningsX96,
+                    ),
                     cap_long: PerpAtoms::new(maker.details.capacity.long),
                     cap_short: PerpAtoms::new(maker.details.capacity.short),
-                    last_below_x96: maker.details.lastCumlFunding.belowX96,
-                    last_within_x96: maker.details.lastCumlFunding.withinX96,
-                    last_div_sqrt_within_x96: maker.details.lastCumlFunding.divSqrtPriceWithinX96,
+                    last_below: Funding::from_x96(maker.details.lastCumlFunding.belowX96),
+                    last_within: Funding::from_x96(maker.details.lastCumlFunding.withinX96),
+                    last_div_sqrt_within: FundingPerSqrtPrice::from_x96(
+                        maker.details.lastCumlFunding.divSqrtPriceWithinX96,
+                    ),
                     tick_lower_funding,
                     tick_upper_funding,
-                    fee_growth_inside1_x128: fee_growth_inside1(
+                    fee_growth_inside1: fee_growth_inside1(
                         fg1_global,
                         fg1_out_lower,
                         fg1_out_upper,
@@ -607,7 +618,7 @@ impl StateAt {
                         maker.tick_upper,
                         current_tick,
                     ),
-                    fee_growth_inside1_last_x128: fee_growth.inside_last(i),
+                    fee_growth_inside1_last: fee_growth.inside_last(i),
                 };
                 market.maker_equity(&state).map_err(|e| {
                     tracing::debug!(
@@ -624,7 +635,7 @@ impl StateAt {
     /// block: the pool's global word, each distinct band tick's outside
     /// word, and each position's inside-last word, in one PoolManager
     /// `extsload`.
-    async fn fee_growth(&self, pool_id: B256, pending: &[PendingMaker]) -> Result<FeeGrowth> {
+    async fn fee_growth(&self, pool_id: B256, pending: &[PendingMaker]) -> Result<FeeGrowthWords> {
         let chain = self.market().chain();
         let (layout, slots) = FeeGrowthLayout::new(pool_id, self.market().perp(), pending);
         let words = IPoolManagerState::new(chain.deployments().pool_manager, chain.provider())
@@ -644,7 +655,7 @@ impl StateAt {
             }
             .into());
         }
-        Ok(FeeGrowth { layout, words })
+        Ok(FeeGrowthWords { layout, words })
     }
 
     /// Each distinct tick's two funding words from the Perp contract, at
@@ -706,8 +717,10 @@ impl StateAt {
                         funding.insert(
                             tick,
                             Ok(TickFunding {
-                                cuml_funding_opp_x96: I256::from_raw(opp),
-                                cuml_funding_div_sqrt_p_opp_x96: I256::from_raw(div_sqrt_p_opp),
+                                cuml_funding_opp: Funding::from_x96(I256::from_raw(opp)),
+                                cuml_funding_div_sqrt_p_opp: FundingPerSqrtPrice::from_x96(
+                                    I256::from_raw(div_sqrt_p_opp),
+                                ),
                             }),
                         );
                     }
@@ -755,8 +768,10 @@ impl StateAt {
                 async move {
                     let funding = tokio::try_join!(read(slot_opp), read(slot_div)).map(
                         |(opp, div_sqrt_p_opp)| TickFunding {
-                            cuml_funding_opp_x96: I256::from_raw(opp),
-                            cuml_funding_div_sqrt_p_opp_x96: I256::from_raw(div_sqrt_p_opp),
+                            cuml_funding_opp: Funding::from_x96(I256::from_raw(opp)),
+                            cuml_funding_div_sqrt_p_opp: FundingPerSqrtPrice::from_x96(
+                                I256::from_raw(div_sqrt_p_opp),
+                            ),
                         },
                     );
                     (tick, funding)
@@ -858,23 +873,15 @@ mod tests {
         let words: Vec<B256> = (0u8..8).map(B256::repeat_byte).collect();
         let tick_60 = layout.tick_word[&60];
         let inside_2 = layout.first_inside_word + 2;
-        let fee_growth = FeeGrowth { layout, words };
-        assert_eq!(
-            fee_growth.global(),
-            U256::from_be_bytes(fee_growth.words[0].0)
-        );
-        assert_eq!(
-            fee_growth.outside(60).unwrap(),
-            U256::from_be_bytes(fee_growth.words[tick_60].0)
-        );
+        let fee_growth = FeeGrowthWords { layout, words };
+        let word = |i: usize| FeeGrowth::from_x128(U256::from_be_bytes(fee_growth.words[i].0));
+        assert_eq!(fee_growth.global(), word(0));
+        assert_eq!(fee_growth.outside(60).unwrap(), word(tick_60));
         assert!(matches!(
             fee_growth.outside(90).unwrap_err(),
             PerpCityError::Contract(ContractError::StorageReadFailed { source: None, .. })
         ));
-        assert_eq!(
-            fee_growth.inside_last(2),
-            U256::from_be_bytes(fee_growth.words[inside_2].0)
-        );
+        assert_eq!(fee_growth.inside_last(2), word(inside_2));
     }
 
     /// A band the contract could never store fails before any slot is
@@ -1213,10 +1220,13 @@ mod tests {
         let funding = state.tick_funding(&ticks).await;
         assert_eq!(*funding[&-60].as_ref().unwrap(), TickFunding::default());
         let read = funding[&60].as_ref().unwrap();
-        assert_eq!(read.cuml_funding_opp_x96, I256::from_raw(U256::from(7u8)));
         assert_eq!(
-            read.cuml_funding_div_sqrt_p_opp_x96,
-            I256::from_raw(U256::from(9u8))
+            read.cuml_funding_opp,
+            Funding::from_x96(I256::from_raw(U256::from(7u8)))
+        );
+        assert_eq!(
+            read.cuml_funding_div_sqrt_p_opp,
+            FundingPerSqrtPrice::from_x96(I256::from_raw(U256::from(9u8)))
         );
         assert!(rpc.is_drained(), "one proof, no storage reads");
     }
@@ -1251,10 +1261,13 @@ mod tests {
 
         let funding = state.tick_funding(&ticks).await;
         let read = funding[&60].as_ref().unwrap();
-        assert_eq!(read.cuml_funding_opp_x96, I256::from_raw(U256::from(7u8)));
         assert_eq!(
-            read.cuml_funding_div_sqrt_p_opp_x96,
-            I256::from_raw(U256::from(9u8))
+            read.cuml_funding_opp,
+            Funding::from_x96(I256::from_raw(U256::from(7u8)))
+        );
+        assert_eq!(
+            read.cuml_funding_div_sqrt_p_opp,
+            FundingPerSqrtPrice::from_x96(I256::from_raw(U256::from(9u8)))
         );
         assert!(rpc.is_drained(), "the probe, then two storage reads");
 
