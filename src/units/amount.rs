@@ -13,9 +13,9 @@ use crate::constants::Q96;
 use crate::errors::ValidationError;
 
 use super::price::Price;
-use super::{F64_1E6, MAX_SAFE_F64_INT, count, delta};
+use super::{F64_1E6, MAX_SAFE_F64_INT, bounded_count, count, delta};
 
-count! {
+bounded_count! {
     /// USDC the chain holds: a count of atoms, each a millionth of a
     /// dollar and the smallest amount a market can settle.
     ///
@@ -25,7 +25,7 @@ count! {
     UsdcAtoms(u128) as atoms
 }
 
-count! {
+bounded_count! {
     /// The market's own token: a count of atoms, also six decimals, and
     /// never interchangeable with [`UsdcAtoms`] however alike the two look
     /// as integers.
@@ -265,6 +265,39 @@ impl TryFrom<PerpAtoms> for PerpDelta {
 mod tests {
     use super::*;
 
+    /// The two assets' counts add with an operator and sum from an
+    /// iterator, because the protocol bounds what a sum of balances can
+    /// reach. Subtracting stays checked: a negative count is not a count,
+    /// and that asymmetry is the whole reason `+` is safe here.
+    #[test]
+    fn a_bounded_count_adds_but_does_not_subtract() {
+        let (a, b) = (UsdcAtoms::new(1_500_000), UsdcAtoms::new(250_000));
+        assert_eq!(a + b, UsdcAtoms::new(1_750_000));
+
+        let mut running = UsdcAtoms::ZERO;
+        running += a;
+        running += b;
+        assert_eq!(running, UsdcAtoms::new(1_750_000));
+
+        // The four fee legs of a swap are the motivating fold.
+        let legs = [a, b, UsdcAtoms::new(1), UsdcAtoms::ZERO];
+        assert_eq!(
+            legs.into_iter().sum::<UsdcAtoms>(),
+            UsdcAtoms::new(1_750_001)
+        );
+
+        assert_eq!(a.checked_sub(b), Some(UsdcAtoms::new(1_250_000)));
+        assert_eq!(b.checked_sub(a), None, "a count cannot go below zero");
+        assert_eq!(b.saturating_sub(a), UsdcAtoms::ZERO);
+        // `+` is infallible because the supply bound says so, not because
+        // overflow is impossible in the width; the checked door stays for a
+        // caller holding a figure the chain did not produce.
+        assert_eq!(UsdcAtoms::new(u128::MAX).checked_add(b), None);
+
+        // The other asset is the same shape and still does not mix with it.
+        assert_eq!(PerpAtoms::new(7) + PerpAtoms::new(3), PerpAtoms::new(10));
+    }
+
     /// The scale is the contract's: a dollar is a million atoms, and the
     /// conversion back is the same number.
     #[test]
@@ -323,21 +356,15 @@ mod tests {
         assert_eq!(PerpDelta::ZERO.value_at(price).unwrap(), UsdcDelta::ZERO);
     }
 
-    /// The signed twin adds, negates and sums; the count does neither
-    /// silently, and says so by returning an option.
+    /// The signed twin adds, subtracts, negates and sums, and drops its
+    /// sign through `magnitude`.
     #[test]
-    fn deltas_add_and_counts_are_checked() {
+    fn a_delta_adds_negates_and_sums() {
         let (a, b) = (UsdcDelta::new(7), UsdcDelta::new(-10));
         assert_eq!(a + b, UsdcDelta::new(-3));
         assert_eq!(-b, UsdcDelta::new(10));
         assert_eq!([a, b].into_iter().sum::<UsdcDelta>(), UsdcDelta::new(-3));
         assert_eq!(b.magnitude(), UsdcAtoms::new(10));
-
-        let (big, small) = (UsdcAtoms::new(10), UsdcAtoms::new(7));
-        assert_eq!(big.checked_sub(small), Some(UsdcAtoms::new(3)));
-        assert_eq!(small.checked_sub(big), None);
-        assert_eq!(small.saturating_sub(big), UsdcAtoms::ZERO);
-        assert_eq!(UsdcAtoms::new(u128::MAX).checked_add(small), None);
     }
 
     /// The wire form is the bare number, so a value that was persisted or

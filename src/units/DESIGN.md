@@ -48,13 +48,25 @@ position's exposure both can. So each asset is two types, and the signed
 twin drops the unit word, because *delta* is the contract's own word for
 it in `BalanceDelta` and in a position's `delta`.
 
-**Arithmetic is only what the quantity admits.** The signed twins add,
-subtract, negate and sum, which is safe because every component the
-protocol settles is bounded by the accounting-token supply, far inside
-`i128`. The unsigned counts do not, because their subtraction can go
-below zero, so they offer `checked_sub` and a `saturating_sub` for the
-figures whose floor is the answer. Two amounts of different assets do not
-combine at all.
+**Arithmetic is only what the quantity admits, and the asymmetry is the
+quantity's.** Adding and subtracting are not the same risk, so they do not
+get the same door. Two amounts of one asset *add* with an operator and sum
+from an iterator — a sum of balances can leave the width but never the
+domain, and the accounting-token supply keeps anything the chain can
+produce far inside it, which is the same argument that makes a signed
+delta's `+` infallible. Subtracting is different: a negative count is not a
+count, so it stays `checked_sub`, with a `saturating_sub` for the figures
+whose floor is the answer. The signed twins also negate.
+
+Liquidity is the count that does not get the operator. The pool has no
+supply bound to argue from, so `LUnits` adds through `checked_add` and the
+caller answers for the overflow — which is the same reason every `LDelta`
+operation is checked. Withholding `+` from the asset counts as well was the
+mistake the first consumer found: summing fee legs is the commonest thing
+done to an amount, the reason given for withholding it was about
+subtraction, and the fold had nowhere to go but back to primitives.
+
+Two amounts of different assets do not combine at all.
 
 **The wire format does not change.** Every type is `repr(transparent)`
 and transparent to serde, so a value that was persisted or logged as a
@@ -113,9 +125,9 @@ spelling convention to carry it.
 
 | Type | Invariant | Produced by | Consumed by |
 |---|---|---|---|
-| [`UsdcAtoms`](amount.rs#L18) | USDC the chain holds, as a count of atoms: unsigned, because the contract stores a balance that cannot go below zero | [`PerpAtoms::value_at`](amount.rs#L129), the one crossing from the other asset; [`amounts_for_liquidity`](../math/DESIGN.md) and [`band_amounts`](../math/DESIGN.md), as a band's USDC leg; [`TakerQuote::amt1_limit`](../math/DESIGN.md); [`MakerEquityBreakdown::position_value`](../math/DESIGN.md), which is a value and so never negative | [`estimate_liquidity`](../math/DESIGN.md) and [`liquidity_for_target_ratio`](../math/DESIGN.md), which size liquidity from a margin; [`MakerState`](../math/DESIGN.md), as the position's stored margin. The strategy layer's treasury and sizing hold one wherever a dollar figure must be exact. |
+| [`UsdcAtoms`](amount.rs#L18) | USDC the chain holds, as a count of atoms: unsigned, because the contract stores a balance that cannot go below zero. Two of them add with `+` and sum from an iterator — the supply bound makes that infallible — while subtracting stays `checked_sub`, since a negative count is not a count | [`PerpAtoms::value_at`](amount.rs#L129), the one crossing from the other asset; [`amounts_for_liquidity`](../math/DESIGN.md) and [`band_amounts`](../math/DESIGN.md), as a band's USDC leg; [`TakerQuote::amt1_limit`](../math/DESIGN.md); [`MakerEquityBreakdown::position_value`](../math/DESIGN.md), which is a value and so never negative | [`estimate_liquidity`](../math/DESIGN.md) and [`liquidity_for_target_ratio`](../math/DESIGN.md), which size liquidity from a margin; [`MakerState`](../math/DESIGN.md), as the position's stored margin. The strategy layer's treasury and sizing hold one wherever a dollar figure must be exact. |
 | [`UsdcDelta`](amount.rs#L38) | the same atoms, signed: the width a settle's components and a swap's deltas need, and any sum of them stays far inside `i128` because the accounting-token supply bounds every one. Which way positive points is the **field's**, never the type's — a settle's `funding_owed` is positive when the position *pays* and is subtracted, a swap's `usd_delta` is positive when the position *receives* — so a reader takes the direction from the field before adding it | every component of [`MakerEquityBreakdown`](../math/DESIGN.md) and its derived sums; [`PerpDelta::value_at`](amount.rs#L152), an exposure valued at a price | [`TakerQuote`](../math/DESIGN.md), as the USDC a swap moved; [`MakerState`](../math/DESIGN.md), as the position's recorded USD delta. The strategy layer's pnl folds, which sum these and never a float. |
-| [`PerpAtoms`](amount.rs#L28) | the market's own token, as a count of atoms; never interchangeable with [`UsdcAtoms`](amount.rs#L18) however alike the two look as integers | [`Capacity::on`](../math/DESIGN.md), what a band or a market backs on one side; [`MarketCapacity::headroom`](../math/DESIGN.md) and [`MarketCapacity::open_interest`](../math/DESIGN.md); [`amounts_for_liquidity`](../math/DESIGN.md), as a band's perp leg; [`PerpDelta::magnitude`](amount.rs#L51), an exposure without its sign | [`liquidity_for_capacity`](../math/DESIGN.md), as the capacity target to invert; [`AccrualInputs`](../math/DESIGN.md) and [`MakerState`](../math/DESIGN.md), as the capacity and open-interest legs of the accrual. |
+| [`PerpAtoms`](amount.rs#L28) | the market's own token, as a count of atoms; never interchangeable with [`UsdcAtoms`](amount.rs#L18) however alike the two look as integers. Adds and sums with the operators for the reason USDC does, and subtracts through the same checked door | [`Capacity::on`](../math/DESIGN.md), what a band or a market backs on one side; [`MarketCapacity::headroom`](../math/DESIGN.md) and [`MarketCapacity::open_interest`](../math/DESIGN.md); [`amounts_for_liquidity`](../math/DESIGN.md), as a band's perp leg; [`PerpDelta::magnitude`](amount.rs#L51), an exposure without its sign | [`liquidity_for_capacity`](../math/DESIGN.md), as the capacity target to invert; [`AccrualInputs`](../math/DESIGN.md) and [`MakerState`](../math/DESIGN.md), as the capacity and open-interest legs of the accrual. |
 | [`PerpDelta`](amount.rs#L51) | a signed exposure: positive long, negative short, as a position's `delta` stores it | nothing outside the module makes one: a caller names an exposure and the types carry it | [`PoolSnapshot::quote_perp`](../math/DESIGN.md), as the exposure to quote; [`TakerQuote`](../math/DESIGN.md), as the exposure a swap filled; [`MakerState`](../math/DESIGN.md), as the position's recorded perp delta. The strategy layer's trade parameters, where the sign is the side and nothing else carries it. |
 | [`Price`](price.rs#L25) | USDC per unit of the market's token, Q96; the representation is the type's own and the accessor names it | [`Mark::fair_price`](../math/DESIGN.md), the price the contract values at; [`fair_price`](../math/DESIGN.md), the deployed port; [`SqrtPrice::squared`](price.rs#L140), the one crossing from a root | [`fair_price`](../math/DESIGN.md), as each of its four inputs; [`Mark::advanced`](../math/DESIGN.md), as the pool price and the index; [`PerpAtoms::value_at`](amount.rs#L129), as what values an amount; [`AccruedMakerSnapshot::with_mark`](../math/DESIGN.md) and [`StateAt::maker_equities_at_mark`](../client/DESIGN.md), as a what-if mark. |
 | [`SqrtPrice`](price.rs#L34) | the square root of a price, Q96: what Uniswap stores and what every liquidity formula is linear in | [`get_sqrt_ratio_at_tick`](../math/DESIGN.md), the exact path from a tick; [`TickRange::sqrt_bounds`](../math/DESIGN.md), a range's two ends | [`get_tick_at_sqrt_ratio`](../math/DESIGN.md); [`band_capacity`](../math/DESIGN.md), [`band_amounts`](../math/DESIGN.md), [`amounts_for_liquidity`](../math/DESIGN.md), [`liquidity_for_capacity`](../math/DESIGN.md) and [`liquidity_for_target_ratio`](../math/DESIGN.md), every one of which is a formula in root prices; [`PoolSnapshot::quote_to_price`](../math/DESIGN.md), as the target to walk to; [`Funding::per_sqrt_price`](accumulators.rs#L104), as what it divides by. |
