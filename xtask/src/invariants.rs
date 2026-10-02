@@ -3,12 +3,12 @@
 //! error. Reported ones print under `--report` until the type system is
 //! ready for them.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use rustdoc_types::{Id, ItemEnum, Type};
 
 use crate::design::Graph;
-use crate::index::{Index, Kind, mentions_primitive, result_error};
+use crate::index::{Index, Kind, component_of, mentions_primitive, result_error};
 use crate::nodes::Node;
 use crate::summary::Summary;
 
@@ -85,38 +85,128 @@ fn section_of(text: &str, heading: &str) -> String {
     }
 }
 
+/// Where a node answers a question the report asks. There are two
+/// sections, and which one a structure goes in is the answer: accepted
+/// structure, when the shape is the design and the question has an
+/// argument against it, and debts, when it is work owed. The ratchet takes
+/// either; the report counts only the first as settled, so the debts stay
+/// a work queue.
+pub struct Answers {
+    /// Each node's accepted-structure section, by component.
+    accepted: BTreeMap<String, String>,
+    /// Each node's debts, by component.
+    debts: BTreeMap<String, String>,
+}
+
+impl Answers {
+    pub fn of(nodes: &[Node]) -> Answers {
+        Answers {
+            accepted: nodes
+                .iter()
+                .map(|n| (n.name.clone(), accepted_section(&n.text)))
+                .collect(),
+            debts: nodes
+                .iter()
+                .map(|n| (n.name.clone(), debts_section(&n.text)))
+                .collect(),
+        }
+    }
+
+    /// The sections that may answer for a type one of `owners` owns: that
+    /// component's, since the component owning a type is the one that
+    /// accepts its shape, and two types sharing a name in two components are
+    /// two questions. A type no node owns is answerable anywhere.
+    fn sections(&self, owners: &[&str], accepted_only: bool) -> Vec<&str> {
+        let mut out: Vec<&str> = Vec::new();
+        for o in owners {
+            if let Some(a) = self.accepted.get(*o) {
+                out.push(a);
+                if !accepted_only {
+                    out.push(&self.debts[*o]);
+                }
+            }
+        }
+        if out.is_empty() {
+            out.extend(self.accepted.values().map(String::as_str));
+            if !accepted_only {
+                out.extend(self.debts.values().map(String::as_str));
+            }
+        }
+        out
+    }
+
+    /// The owning component names the type, in either section.
+    fn names(&self, owner: &str, name: &str) -> bool {
+        self.sections(&[owner], false)
+            .iter()
+            .any(|s| names_word(s, name))
+    }
+
+    /// Both names in one section of a node owning one of them: naming one of
+    /// the types for some other reason does not answer for the pair.
+    fn names_pair(&self, owners: (&str, &str), a: &str, b: &str) -> bool {
+        self.sections(&[owners.0, owners.1], false)
+            .iter()
+            .any(|s| names_word(s, a) && names_word(s, b))
+    }
+
+    /// A section names the label anywhere: a function has no owning type.
+    fn names_function(&self, label: &str) -> bool {
+        self.sections(&[], false)
+            .iter()
+            .any(|s| names_word(s, label))
+    }
+
+    /// The owning component calls the type accepted structure.
+    pub fn accepts(&self, owner: &str, name: &str) -> bool {
+        self.sections(&[owner], true)
+            .iter()
+            .any(|s| names_word(s, name))
+    }
+
+    /// A node owning one of the pair calls the cycle accepted structure.
+    pub fn accepts_pair(&self, owners: (&str, &str), a: &str, b: &str) -> bool {
+        self.sections(&[owners.0, owners.1], true)
+            .iter()
+            .any(|s| names_word(s, a) && names_word(s, b))
+    }
+}
+
+/// The component a type path belongs to, as a node names it; `""`, the
+/// root node, for a type at the crate root.
+fn owner_of(path: &str) -> &str {
+    match path.split_once("::") {
+        Some((top, _)) => component_of(top),
+        None => "",
+    }
+}
+
 /// The ratchet: a structure the report questions may exist, but a new one
-/// arrives acknowledged. Every island, dead end and two-cycle the head has
-/// and the base did not is named in some node's debts, and every new flow
-/// between documented types is named by a table or, by function, in a
-/// debts section.
+/// arrives answered. Every island, dead end and two-cycle the head has and
+/// the base did not is named in some node's accepted structure or debts,
+/// and every new flow between documented types is named by a table or, by
+/// function, in one of those sections.
 pub fn ratchet(base: &Summary, head: &Summary, nodes: &[Node], problems: &mut Vec<String>) {
-    let debts: Vec<String> = nodes.iter().map(|n| debts_section(&n.text)).collect();
-    let acknowledged = |name: &str| debts.iter().any(|d| names_word(d, name));
+    let answers = Answers::of(nodes);
     let short = |p: &String| p.rsplit("::").next().unwrap_or(p).to_string();
     for t in head.islands.difference(&base.islands) {
-        if !acknowledged(&short(t)) {
+        if !answers.names(owner_of(t), &short(t)) {
             problems.push(format!(
-                "ratchet: {t} became an island, in no signature and no field with another of the crate's types; name it in a node's debts or connect it"
+                "ratchet: {t} became an island, in no signature and no field with another of the crate's types; name it in its node's accepted structure or debts, or connect it"
             ));
         }
     }
     for t in head.dead_ends.difference(&base.dead_ends) {
-        if !acknowledged(&short(t)) {
+        if !answers.names(owner_of(t), &short(t)) {
             problems.push(format!(
-                "ratchet: {t} became a dead end, produced but consumed by nothing; name it in a node's debts, consume it, or mark it as the strategy layer's"
+                "ratchet: {t} became a dead end, produced but consumed by nothing; name it in its node's accepted structure or debts, consume it, or mark it as the strategy layer's"
             ));
         }
     }
     for (a, b) in head.two_cycles.difference(&base.two_cycles) {
-        // The pair, in one debts section: naming one of the types for some
-        // other reason does not acknowledge the cycle.
-        let pair_named = debts
-            .iter()
-            .any(|d| names_word(d, &short(a)) && names_word(d, &short(b)));
-        if !pair_named {
+        if !answers.names_pair((owner_of(a), owner_of(b)), &short(a), &short(b)) {
             problems.push(format!(
-                "ratchet: {a} and {b} now flow both ways; name the pair in a node's debts or move the conversion to one side"
+                "ratchet: {a} and {b} now flow both ways; name the pair in one of their nodes' accepted structure or debts, or move the conversion to one side"
             ));
         }
     }
@@ -126,9 +216,9 @@ pub fn ratchet(base: &Summary, head: &Summary, nodes: &[Node], problems: &mut Ve
             .get(&(a.clone(), b.clone()))
             .cloned()
             .unwrap_or_default();
-        if !fns.iter().any(|f| acknowledged(f)) {
+        if !fns.iter().any(|f| answers.names_function(f)) {
             problems.push(format!(
-                "ratchet: {a} now flows into {b} through {} and no node names it; add it to a type table's Produced by or Consumed by, or name the function in a debts section",
+                "ratchet: {a} now flows into {b} through {} and no node names it; add it to a type table's Produced by or Consumed by, or name the function in an accepted structure or debts section",
                 fns.iter().cloned().collect::<Vec<_>>().join(", ")
             ));
         }
@@ -147,9 +237,15 @@ pub fn ratchet(base: &Summary, head: &Summary, nodes: &[Node], problems: &mut Ve
     }
 }
 
-/// The text of a node's `## Debts` section.
+/// The text of a node's `## Debts` section: the work the component owes.
 fn debts_section(text: &str) -> String {
     section_of(text, "## Debts")
+}
+
+/// The text of a node's `## Accepted structure` section: the shapes the
+/// report questions and the design keeps, with the argument for each.
+fn accepted_section(text: &str) -> String {
+    section_of(text, "## Accepted structure")
 }
 
 /// `text` contains `word` as a whole identifier.

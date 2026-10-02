@@ -199,6 +199,15 @@ trade is a setting a caller chose.
   tests a half-open breaker.
 - **Reserved**: an endpoint held for one purpose.
 
+## Accepted structure
+
+- **`Reserved` is a verdict, not a value that travels.** `reserve` answers
+  whether this request may go to the endpoint freely or as the one
+  half-open probe, and the pool matches on the answer in the same breath to
+  build a `ProbePermit`. Nothing takes a `Reserved`, because there is
+  nowhere for it to go: the permit is the thing with a lifetime, and it is
+  the permit that carries the `Drop`.
+
 ## Debts
 
 - **Write retries cover outcomes the safety argument does not** (SDK
