@@ -246,6 +246,13 @@ pub struct ScanStats {
     pub rejections: u64,
     /// Logs returned across all accepted requests.
     pub logs: u64,
+    /// Logs whose topic this vocabulary covers and which would not decode:
+    /// a binding that disagrees with the shape on chain, or a value too wide
+    /// to hold. Counted rather than dropped, because a tape that quietly
+    /// shrinks is worse than one that says what it is missing. A non-zero
+    /// count here means the tape has a gap; a scan is not failed over it,
+    /// since one such log should not cost a scan of millions of blocks.
+    pub undecodable: u64,
     /// Width the next request would use, in blocks — the search's
     /// current belief about the provider's `eth_getLogs` limit.
     pub learned_width: u64,
@@ -285,6 +292,11 @@ impl SharedWidths {
 
     fn rejected(&self, width: u64) {
         self.0.lock().unwrap().search.rejected(width);
+    }
+
+    /// Counts logs this vocabulary recognised and could not decode.
+    pub(super) fn undecodable(&self, how_many: u64) {
+        self.0.lock().unwrap().stats.undecodable += how_many;
     }
 
     /// Counts one request and its answer.

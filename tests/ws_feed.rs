@@ -45,7 +45,8 @@ async fn subscribe_and_receive_event() {
 
     let timeout = Duration::from_secs(120);
     match tokio::time::timeout(timeout, feed.next()).await {
-        Ok(Some(event)) => {
+        Ok(Some(Err(e))) => panic!("a log of this vocabulary would not decode: {e}"),
+        Ok(Some(Ok(event))) => {
             println!("Received event:");
             match &event {
                 MarketEvent::TakerOpened { pos_id, swap } => {

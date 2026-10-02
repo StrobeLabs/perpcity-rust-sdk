@@ -160,7 +160,7 @@ fn decode_transfer(log: &Log) -> Result<TokenTransfer> {
         .zip(log.log_index)
         .zip(log.transaction_hash)
         .and_then(|((block, index), tx_hash)| {
-            let event = decode_raw::<IERC20::Transfer>(log)?;
+            let event = decode_raw::<IERC20::Transfer>(log).ok()?;
             Some(TokenTransfer {
                 block_number: block,
                 log_index: index,

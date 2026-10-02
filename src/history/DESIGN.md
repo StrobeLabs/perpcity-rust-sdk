@@ -33,10 +33,12 @@ repeatedly pays the search once.
 **A gap is worse than a failure.** A tape with a missing window is a
 lie about the market. So a scan returns results in range order, delivers
 a window only when it is complete, and returns a typed rejection for the
-one block a provider will not serve rather than skipping it. A log the
-decoder recognises but cannot decode should be an error, not an
-omission; today the decoder returns `None` for it, a debt recorded in
-[`events`](../events/DESIGN.md).
+one block a provider will not serve rather than skipping it. A log of
+this vocabulary that will not decode is an error in
+[`events`](../events/DESIGN.md) rather than an omission, and a scan
+counts it on `ScanStats::undecodable` and reads on: one unreadable log
+should not cost a scan of millions of blocks, but a tape that is short
+must say so.
 
 **Never on the trading path.** A scan is throughput work: thousands of
 requests, minutes of wall time, its own timeout. It shares the transport's
@@ -90,7 +92,7 @@ state.
 | [`IndexPrint`](beacon.rs#L20) | one beacon update: index, chain point and timestamp | [`History::beacon_prints`](mod.rs#L200) and [`History::latest_beacon_prints`](mod.rs#L223) | nothing in the crate. The strategy layer's index series and estimator bootstrap; it keeps the chain point so a print can be joined to the fills after it. |
 | [`TokenTransfer`](transfers.rs#L18) | one ERC-20 transfer between the address sets asked for; the sets are topic filters, not post-filters | [`History::token_transfers`](mod.rs#L287) | nothing in the crate. The strategy layer's fleet derivation and treasury ledger. |
 | [`FakeNode`](test_support.rs#L68), [`Mode`](test_support.rs#L29) | an in-memory node that serves `eth_getLogs` under a chosen cap and answers as a provider would: accept, decline a too-wide range, or fail; behind the `test-utils` feature | [`FakeNode::new`](test_support.rs#L81) from a set of logs and a span cap | every scan test in the crate, through the provider it hands out. The strategy layer's research tests scan against it too, which is why it is a feature and not a test module. |
-| [`ScanStats`](scan.rs#L241) | what a scan cost: requests, rejections, narrowings, the learned width; the number a collector meters | [`History::stats`](mod.rs#L151) | nothing in the crate. The strategy layer's collector, and the benchmark suite, which asserts a scan's request count. |
+| [`ScanStats`](scan.rs#L241) | what a scan cost: requests, rejections, narrowings, the learned width; the number a collector meters. It also counts `undecodable` — logs of this vocabulary that would not decode, which the scan skips rather than dying over, since one such log should not cost a scan of millions of blocks. A non-zero count is how a caller learns the tape it holds is short | [`History::stats`](mod.rs#L151) | nothing in the crate. The strategy layer's collector, and the benchmark suite, which asserts a scan's request count. |
 
 Two decisions shape the surface. The free functions and the handle offer
 the same reads; the handle adds memory, concurrency and telemetry, and a
