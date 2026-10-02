@@ -4,8 +4,10 @@
 //! Decodes a raw [`Log`] into a typed [`MarketEvent`], whatever transport
 //! delivered it — [`crate::feeds`] streams the present over a WebSocket,
 //! [`crate::history`] replays the past from log scans, and both speak
-//! this vocabulary. Consumers get human-readable f64 values for USDC
-//! amounts and prices without touching ABI encoding or Q96 math.
+//! this vocabulary. Every quantity carries its unit as a type — USDC and
+//! perp amounts as counts of atoms, prices as their Q96 word, rates as the
+//! contract's WAD — so a consumer folds exact integers and converts once,
+//! at the end, rather than being handed a rounded `f64` per event.
 //!
 //! The new contracts emit lean, per-market events: each `Perp` contract is a
 //! single market, so the emitting log's `address` identifies the market (there
@@ -16,9 +18,7 @@
 //!
 //! Taker events carry a [`SwapResult`] whose
 //! `delta` is a packed Uniswap V4 `BalanceDelta` (`int128 amount0` = perp,
-//! `int128 amount1` = USD). Internal X96/X128 accounting trackers
-//! (cumulatives, tick funding) are surfaced as raw on-chain integers to avoid
-//! precision loss.
+//! `int128 amount1` = USD), unpacked here into the two delta types.
 //!
 //! Two events come from outside the `Perp`'s own event library: the
 //! PoolManager's `ModifyLiquidity` (perp pools are vanilla V4 pools, so a
@@ -39,10 +39,11 @@
 //! match decode_log(log) {
 //!     // A log this vocabulary covers.
 //!     Ok(Some(MarketEvent::TakerOpened { pos_id, swap })) => {
-//!         println!("taker {pos_id} opened at {}", swap.amm_price);
+//!         // The pool price, not the price the contract marks at.
+//!         println!("taker {pos_id} opened at {:?}", swap.pool_price.to_f64());
 //!     }
 //!     Ok(Some(MarketEvent::OpenInterestUpdated { long_oi, short_oi })) => {
-//!         println!("OI now {long_oi}/{short_oi}");
+//!         println!("OI now {}/{}", long_oi.atoms(), short_oi.atoms());
 //!     }
 //!     Ok(Some(_)) => {}
 //!     // Not one of ours: an admin, ERC20 or pool-internal log. Skip it.
@@ -62,49 +63,56 @@ use alloy::sol_types::SolEvent;
 use serde::{Deserialize, Serialize};
 
 use crate::contracts::{IBeacon, IPoolManagerState, Perp, PerpDeployedEvents, SwapResult};
-use crate::convert::{price_x96_to_f64, scale_from_6dec, unpack_balance_delta};
+use crate::convert::unpack_balance_delta;
 use crate::errors::ValidationError;
-use crate::units::{Earnings, Funding, FundingPerSqrtPrice, LDelta, LUnits};
-
-/// Funding/utilization rates are scaled by 1e18 per day on-chain.
-const WAD_F64: f64 = 1e18;
+use crate::units::{
+    Earnings, Funding, FundingPerSqrtPrice, FundingRate, LDelta, LUnits, PerpAtoms, PerpDelta,
+    Price, UsdcAtoms, UsdcDelta, UtilizationRate,
+};
 
 /// An ERC-20 `Transfer` indexes two of its three fields, so topic0 plus two.
 /// The ERC-721 shape this module wants indexes all three and has four.
 const ERC20_TRANSFER_TOPICS: usize = 3;
 
-/// Decoded details of a taker swap, in human-readable units.
+/// What a taker's swap did, in the units the chain settled it in.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct SwapInfo {
-    /// Perp token delta (positive = received, negative = paid).
-    pub perp_delta: f64,
-    /// USD delta (positive = received, negative = paid).
-    pub usd_delta: f64,
-    /// AMM price after the swap (human-readable).
-    pub amm_price: f64,
-    /// Total fee charged on the swap, in USDC.
-    pub total_fee: f64,
-    /// Portion paid to liquidity providers, in USDC.
-    pub lp_fee: f64,
-    /// Portion paid to the protocol, in USDC.
-    pub protocol_fee: f64,
-    /// Portion paid to the market creator, in USDC.
-    pub creator_fee: f64,
-    /// Portion paid into the insurance fund, in USDC.
-    pub insurance_fee: f64,
+    /// Perp token delta, as V4 signs it: positive received, negative paid.
+    pub perp_delta: PerpDelta,
+    /// USDC delta, as V4 signs it: positive received, negative paid.
+    pub usd_delta: UsdcDelta,
+    /// The *pool* price after the swap — not the price the contract marks
+    /// at, which is the fair price of this, the index and the two EMAs
+    /// ([`crate::math::pricing`]). A basis computed against this is not the
+    /// basis the contract sees.
+    pub pool_price: Price,
+    /// Total fee charged on the swap. Signed because the contract's
+    /// `totalFeeAmt` is, and the four shares below are not.
+    pub total_fee: UsdcDelta,
+    /// Share paid to liquidity providers.
+    pub lp_fee: UsdcAtoms,
+    /// Share paid to the protocol.
+    pub protocol_fee: UsdcAtoms,
+    /// Share paid to the market creator.
+    pub creator_fee: UsdcAtoms,
+    /// Share paid into the insurance fund.
+    pub insurance_fee: UsdcAtoms,
 }
 
-/// Time-settled fees applied to a maker position, in human-readable units.
+/// What a touch settled on a maker position, in the units the chain
+/// settled it in.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct MakerSettle {
-    /// Funding settled (positive = paid by the position), in USDC.
-    pub funding: f64,
-    /// Long-side utilization fees, in USDC.
-    pub long_util_fees: f64,
-    /// Short-side utilization fees, in USDC.
-    pub short_util_fees: f64,
-    /// LP fees earned, in USDC.
-    pub lp_fees: f64,
+    /// Funding settled, positive when the position **pays** — the same
+    /// direction as [`MakerEquityBreakdown::funding_owed`](crate::MakerEquityBreakdown::funding_owed),
+    /// so it is subtracted from the three below rather than added.
+    pub funding: UsdcDelta,
+    /// Long-side utilization fees earned.
+    pub long_util_fees: UsdcAtoms,
+    /// Short-side utilization fees earned.
+    pub short_util_fees: UsdcAtoms,
+    /// LP fees earned.
+    pub lp_fees: UsdcAtoms,
 }
 
 /// The market's cumulative accumulators as the event carried them.
@@ -123,7 +131,7 @@ pub struct CumulativesInfo {
     pub short_util_earnings: Earnings,
 }
 
-/// A decoded market event with human-readable values where meaningful.
+/// A decoded market event, every quantity carrying its unit as a type.
 ///
 /// Each event originates from a single `Perp` market (the log's `address`).
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -144,24 +152,24 @@ pub enum MarketEvent {
     MakerConverted {
         pos_id: U256,
         settle: MakerSettle,
-        liquidation_fee: f64,
+        liquidation_fee: UsdcAtoms,
         is_liquidation: bool,
     },
     /// A maker closed. Tails as on [`Self::MakerConverted`].
     MakerClosed {
         pos_id: U256,
         settle: MakerSettle,
-        liquidation_fee: f64,
+        liquidation_fee: UsdcAtoms,
         is_liquidation: bool,
     },
     MakerLiquidated {
         pos_id: U256,
         liquidity_amount: LUnits,
-        liquidation_fee: f64,
+        liquidation_fee: UsdcAtoms,
     },
     MakerBackstopped {
         pos_id: U256,
-        margin_in: f64,
+        margin_in: UsdcAtoms,
         pos_recipient: Address,
         settle: MakerSettle,
     },
@@ -174,44 +182,44 @@ pub enum MarketEvent {
     TakerAdjusted {
         pos_id: U256,
         swap: SwapInfo,
-        funding: f64,
-        util_fees: f64,
+        funding: UsdcDelta,
+        util_fees: UsdcAtoms,
     },
     /// A taker closed; the deployed event unifies close and liquidation
     /// (`is_liquidation`, with `liquidation_fee` in USDC).
     TakerClosed {
         pos_id: U256,
         swap: SwapInfo,
-        funding: f64,
-        util_fees: f64,
-        liquidation_fee: f64,
+        funding: UsdcDelta,
+        util_fees: UsdcAtoms,
+        liquidation_fee: UsdcAtoms,
         is_liquidation: bool,
     },
     TakerLiquidated {
         pos_id: U256,
-        perp_amount: u128,
-        liquidation_fee: f64,
+        perp_amount: PerpAtoms,
+        liquidation_fee: UsdcAtoms,
     },
     TakerBackstopped {
         pos_id: U256,
-        margin_in: f64,
+        margin_in: UsdcAtoms,
         pos_recipient: Address,
-        funding: f64,
-        util_fees: f64,
+        funding: UsdcDelta,
+        util_fees: UsdcAtoms,
     },
 
     // ── Market state ─────────────────────────────────────────────────
     /// Available taker open-interest capacity supplied by makers, in perp
     /// tokens — the same units the contract checks `OpenInterest` against.
     CapacityUpdated {
-        long: f64,
-        short: f64,
+        long: PerpAtoms,
+        short: PerpAtoms,
     },
     /// Current taker open interest, in perp tokens (multiply by the mark
     /// price for USD).
     OpenInterestUpdated {
-        long_oi: f64,
-        short_oi: f64,
+        long_oi: PerpAtoms,
+        short_oi: PerpAtoms,
     },
     /// Cumulative funding/fee trackers were accrued.
     CumulativesAccrued {
@@ -220,17 +228,18 @@ pub enum MarketEvent {
     /// Funding rate, utilization fees, and EMA prices were refreshed.
     RatesAndEmasRefreshed {
         /// Daily funding rate (positive = longs pay shorts).
-        funding_per_day: f64,
-        /// Long-side utilization fee per day (fraction).
-        long_util_fee_per_day: f64,
-        /// Short-side utilization fee per day (fraction).
-        short_util_fee_per_day: f64,
+        funding_per_day: FundingRate,
+        /// Long-side utilization fee per day.
+        long_util_fee_per_day: UtilizationRate,
+        /// Short-side utilization fee per day.
+        short_util_fee_per_day: UtilizationRate,
         /// Unix timestamp of the accrual.
         last_touch: u64,
-        /// AMM price EMA (human-readable).
-        amm_price_ema: f64,
-        /// Index price EMA (human-readable).
-        index_ema: f64,
+        /// The *pool* price's EMA — the `ammPrice` leg of the contract's
+        /// fair price, not the mark itself.
+        pool_price_ema: Price,
+        /// The index's EMA, the fair price's other smoothed leg.
+        index_ema: Price,
     },
     /// The active tick range was crossed during a swap.
     TicksCrossed {
@@ -252,29 +261,29 @@ pub enum MarketEvent {
     // ── Solvency / insurance ─────────────────────────────────────────
     Donated {
         donor: Address,
-        amount: f64,
-        bad_debt: f64,
-        insurance: f64,
+        amount: UsdcAtoms,
+        bad_debt: UsdcAtoms,
+        insurance: UsdcAtoms,
     },
     BadDebtAccounted {
-        bad_debt: f64,
-        insurance_after: f64,
-        bad_debt_after: f64,
+        bad_debt: UsdcAtoms,
+        insurance_after: UsdcAtoms,
+        bad_debt_after: UsdcAtoms,
     },
     LossSocialized {
-        original_amount: f64,
-        fee_charged: f64,
-        bad_debt_after: f64,
+        original_amount: UsdcAtoms,
+        fee_charged: UsdcAtoms,
+        bad_debt_after: UsdcAtoms,
     },
     MarginTransferred {
-        margin_delta: f64,
-        total_margin: f64,
+        margin_delta: UsdcDelta,
+        total_margin: UsdcAtoms,
     },
 
     // ── Oracle ───────────────────────────────────────────────────────
     /// Index price updated (from the Beacon contract).
     IndexUpdated {
-        index: f64,
+        index: Price,
     },
 
     // ── Pool (Uniswap V4 PoolManager) ────────────────────────────────
@@ -342,7 +351,9 @@ pub fn decode_log(log: &Log) -> Result<Option<MarketEvent>, ValidationError> {
         Some(MarketEvent::MakerConverted {
             pos_id: d.posId,
             settle: maker_settle(d.funding, d.longUtilFees, d.shortUtilFees, d.lpFees)?,
-            liquidation_fee: 0.0,
+            // Defaulted, not observed: this era splits liquidations into
+            // `MakerLiquidated`, so the event carries no tails to read.
+            liquidation_fee: UsdcAtoms::ZERO,
             is_liquidation: false,
         })
     } else if topic0 == Perp::MakerClosed::SIGNATURE_HASH {
@@ -350,7 +361,8 @@ pub fn decode_log(log: &Log) -> Result<Option<MarketEvent>, ValidationError> {
         Some(MarketEvent::MakerClosed {
             pos_id: d.posId,
             settle: maker_settle(d.funding, d.longUtilFees, d.shortUtilFees, d.lpFees)?,
-            liquidation_fee: 0.0,
+            // Defaulted, as on `MakerConverted` above.
+            liquidation_fee: UsdcAtoms::ZERO,
             is_liquidation: false,
         })
 
@@ -387,7 +399,7 @@ pub fn decode_log(log: &Log) -> Result<Option<MarketEvent>, ValidationError> {
         let d = decode_raw::<Perp::MakerBackstopped>(log)?;
         Some(MarketEvent::MakerBackstopped {
             pos_id: d.posId,
-            margin_in: scale_from_6dec(d.marginIn as i128),
+            margin_in: UsdcAtoms::new(d.marginIn),
             pos_recipient: d.posRecipient,
             settle: maker_settle(d.funding, d.longUtilFees, d.shortUtilFees, d.lpFees)?,
         })
@@ -421,14 +433,14 @@ pub fn decode_log(log: &Log) -> Result<Option<MarketEvent>, ValidationError> {
         let d = decode_raw::<Perp::TakerLiquidated>(log)?;
         Some(MarketEvent::TakerLiquidated {
             pos_id: d.posId,
-            perp_amount: d.perpAmount,
+            perp_amount: PerpAtoms::new(d.perpAmount),
             liquidation_fee: u256_usdc(d.liqFee, "settled liquidation fee")?,
         })
     } else if topic0 == Perp::TakerBackstopped::SIGNATURE_HASH {
         let d = decode_raw::<Perp::TakerBackstopped>(log)?;
         Some(MarketEvent::TakerBackstopped {
             pos_id: d.posId,
-            margin_in: scale_from_6dec(d.marginIn as i128),
+            margin_in: UsdcAtoms::new(d.marginIn),
             pos_recipient: d.posRecipient,
             funding: i256_usdc(d.funding, "settled funding")?,
             util_fees: u256_usdc(d.utilFees, "settled utilization fees")?,
@@ -438,14 +450,14 @@ pub fn decode_log(log: &Log) -> Result<Option<MarketEvent>, ValidationError> {
     } else if topic0 == Perp::CapacityUpdated::SIGNATURE_HASH {
         let d = decode_raw::<Perp::CapacityUpdated>(log)?;
         Some(MarketEvent::CapacityUpdated {
-            long: scale_from_6dec(d.cap.long as i128),
-            short: scale_from_6dec(d.cap.short as i128),
+            long: PerpAtoms::new(d.cap.long),
+            short: PerpAtoms::new(d.cap.short),
         })
     } else if topic0 == Perp::OpenInterestUpdated::SIGNATURE_HASH {
         let d = decode_raw::<Perp::OpenInterestUpdated>(log)?;
         Some(MarketEvent::OpenInterestUpdated {
-            long_oi: scale_from_6dec(d.oi.long as i128),
-            short_oi: scale_from_6dec(d.oi.short as i128),
+            long_oi: PerpAtoms::new(d.oi.long),
+            short_oi: PerpAtoms::new(d.oi.short),
         })
     } else if topic0 == Perp::CumulativesAccrued::SIGNATURE_HASH {
         let d = decode_raw::<Perp::CumulativesAccrued>(log)?;
@@ -463,17 +475,16 @@ pub fn decode_log(log: &Log) -> Result<Option<MarketEvent>, ValidationError> {
     } else if topic0 == Perp::RatesAndEmasRefreshed::SIGNATURE_HASH {
         let d = decode_raw::<Perp::RatesAndEmasRefreshed>(log)?;
         Some(MarketEvent::RatesAndEmasRefreshed {
-            funding_per_day: narrow_i128(
+            funding_per_day: FundingRate::from_wad(narrow_i128(
                 d.rates.fundingPerDay.to_string(),
                 d.rates.fundingPerDay.try_into(),
                 "funding per day",
-            )? as f64
-                / WAD_F64,
-            long_util_fee_per_day: d.rates.longUtilFeePerDay as f64 / WAD_F64,
-            short_util_fee_per_day: d.rates.shortUtilFeePerDay as f64 / WAD_F64,
+            )?),
+            long_util_fee_per_day: UtilizationRate::from_wad(d.rates.longUtilFeePerDay),
+            short_util_fee_per_day: UtilizationRate::from_wad(d.rates.shortUtilFeePerDay),
             last_touch: d.rates.lastTouch.to::<u64>(),
-            amm_price_ema: price_x96_to_f64(U256::from(d.emas.ammPrice))?,
-            index_ema: price_x96_to_f64(U256::from(d.emas.index))?,
+            pool_price_ema: Price::from_x96(U256::from(d.emas.ammPrice)),
+            index_ema: Price::from_x96(U256::from(d.emas.index)),
         })
     } else if topic0 == Perp::TicksCrossed::SIGNATURE_HASH {
         let d = decode_raw::<Perp::TicksCrossed>(log)?;
@@ -500,36 +511,36 @@ pub fn decode_log(log: &Log) -> Result<Option<MarketEvent>, ValidationError> {
         let d = decode_raw::<Perp::Donated>(log)?;
         Some(MarketEvent::Donated {
             donor: d.donor,
-            amount: scale_from_6dec(d.amount as i128),
-            bad_debt: scale_from_6dec(d.badDebt as i128),
-            insurance: scale_from_6dec(d.insurance.to::<u128>() as i128),
+            amount: UsdcAtoms::new(d.amount),
+            bad_debt: UsdcAtoms::new(d.badDebt),
+            insurance: UsdcAtoms::new(d.insurance.to::<u128>()),
         })
     } else if topic0 == Perp::BadDebtAccounted::SIGNATURE_HASH {
         let d = decode_raw::<Perp::BadDebtAccounted>(log)?;
         Some(MarketEvent::BadDebtAccounted {
             bad_debt: u256_usdc(d.badDebt, "bad debt")?,
             insurance_after: u256_usdc(d.insuranceAfter, "insurance fund")?,
-            bad_debt_after: scale_from_6dec(d.badDebtAfter as i128),
+            bad_debt_after: UsdcAtoms::new(d.badDebtAfter),
         })
     } else if topic0 == Perp::LossSocialized::SIGNATURE_HASH {
         let d = decode_raw::<Perp::LossSocialized>(log)?;
         Some(MarketEvent::LossSocialized {
             original_amount: u256_usdc(d.originalAmount, "original amount")?,
             fee_charged: u256_usdc(d.feeCharged, "fee charged")?,
-            bad_debt_after: scale_from_6dec(d.badDebtAfter as i128),
+            bad_debt_after: UsdcAtoms::new(d.badDebtAfter),
         })
     } else if topic0 == Perp::MarginTransferred::SIGNATURE_HASH {
         let d = decode_raw::<Perp::MarginTransferred>(log)?;
         Some(MarketEvent::MarginTransferred {
-            margin_delta: scale_from_6dec(d.marginDelta),
-            total_margin: scale_from_6dec(d.totalMargin as i128),
+            margin_delta: UsdcDelta::new(d.marginDelta),
+            total_margin: UsdcAtoms::new(d.totalMargin),
         })
 
     // ── Oracle ───────────────────────────────────────────────────────
     } else if topic0 == IBeacon::IndexUpdated::SIGNATURE_HASH {
         let d = decode_raw::<IBeacon::IndexUpdated>(log)?;
         Some(MarketEvent::IndexUpdated {
-            index: price_x96_to_f64(d.index)?,
+            index: Price::from_x96(d.index),
         })
 
     // ── Pool / position NFT ──────────────────────────────────────────
@@ -589,9 +600,9 @@ pub(crate) fn decode_raw<E: SolEvent>(log: &Log) -> Result<E, ValidationError> {
 fn swap_info(sr: &SwapResult) -> Result<SwapInfo, ValidationError> {
     let (perp, usd) = unpack_balance_delta(sr.delta);
     Ok(SwapInfo {
-        perp_delta: scale_from_6dec(perp),
-        usd_delta: scale_from_6dec(usd),
-        amm_price: price_x96_to_f64(sr.ammPrice)?,
+        perp_delta: PerpDelta::new(perp),
+        usd_delta: UsdcDelta::new(usd),
+        pool_price: Price::from_x96(sr.ammPrice),
         total_fee: i256_usdc(sr.totalFeeAmt, "swap total fee")?,
         lp_fee: u256_usdc(sr.lpFeeAmt, "swap LP fee")?,
         protocol_fee: u256_usdc(sr.protocolFeeAmt, "swap protocol fee")?,
@@ -615,18 +626,18 @@ fn maker_settle(
     })
 }
 
-/// Convert a signed 6-decimal USDC value to f64.
-fn i256_usdc(v: I256, what: &str) -> Result<f64, ValidationError> {
-    Ok(scale_from_6dec(narrow_i128(
+/// A signed USDC word, narrowed to the width the SDK holds a delta in.
+fn i256_usdc(v: I256, what: &str) -> Result<UsdcDelta, ValidationError> {
+    Ok(UsdcDelta::new(narrow_i128(
         v.to_string(),
         v.try_into(),
         what,
     )?))
 }
 
-/// Convert an unsigned 6-decimal USDC value to f64.
-fn u256_usdc(v: U256, what: &str) -> Result<f64, ValidationError> {
-    Ok(scale_from_6dec(narrow_i128(
+/// An unsigned USDC word, narrowed to the width the contracts store it in.
+fn u256_usdc(v: U256, what: &str) -> Result<UsdcAtoms, ValidationError> {
+    Ok(UsdcAtoms::new(narrow_u128(
         v.to_string(),
         v.try_into(),
         what,
@@ -643,6 +654,17 @@ fn narrow_i128<E>(
 ) -> Result<i128, ValidationError> {
     narrowed.map_err(|_| ValidationError::DecodeFailed {
         context: format!("{what} {shown} exceeds i128"),
+    })
+}
+
+/// The unsigned twin of [`narrow_i128`].
+fn narrow_u128<E>(
+    shown: String,
+    narrowed: Result<u128, E>,
+    what: &str,
+) -> Result<u128, ValidationError> {
+    narrowed.map_err(|_| ValidationError::DecodeFailed {
+        context: format!("{what} {shown} exceeds u128"),
     })
 }
 
@@ -671,7 +693,7 @@ mod tests {
     use alloy::primitives::{Address, B256, LogData, U256};
     use alloy::rpc::types::Log as RpcLog;
 
-    use crate::constants::{Q96, Q96_PRECISION};
+    use crate::constants::Q96;
     use crate::convert::pack_balance_delta;
 
     #[test]
@@ -704,10 +726,10 @@ mod tests {
         {
             MarketEvent::TakerOpened { pos_id, swap } => {
                 assert_eq!(pos_id, U256::from(42u64));
-                assert!((swap.perp_delta - 100.0).abs() < 1e-9);
-                assert!((swap.usd_delta - (-100.0)).abs() < 1e-9);
-                assert!((swap.amm_price - 1.0).abs() < Q96_PRECISION);
-                assert!((swap.total_fee - 1.0).abs() < 1e-9);
+                assert_eq!(swap.perp_delta.atoms(), 100_000_000);
+                assert_eq!(swap.usd_delta.atoms(), -100_000_000);
+                assert_eq!(swap.pool_price.x96(), Q96);
+                assert_eq!(swap.total_fee.atoms(), 1_000_000);
             }
             _ => panic!("expected TakerOpened"),
         }
@@ -732,8 +754,8 @@ mod tests {
                 liquidation_fee,
             } => {
                 assert_eq!(pos_id, U256::from(7u64));
-                assert_eq!(perp_amount, 50_000_000u128);
-                assert!((liquidation_fee - 1.0).abs() < 1e-9);
+                assert_eq!(perp_amount.atoms(), 50_000_000);
+                assert_eq!(liquidation_fee.atoms(), 1_000_000);
             }
             _ => panic!("expected TakerLiquidated"),
         }
@@ -768,8 +790,8 @@ mod tests {
             .expect("should decode OpenInterestUpdated")
         {
             MarketEvent::OpenInterestUpdated { long_oi, short_oi } => {
-                assert!((long_oi - 2.0).abs() < 1e-9);
-                assert!((short_oi - 1.0).abs() < 1e-9);
+                assert_eq!(long_oi.atoms(), 2_000_000);
+                assert_eq!(short_oi.atoms(), 1_000_000);
             }
             _ => panic!("expected OpenInterestUpdated"),
         }
@@ -787,7 +809,7 @@ mod tests {
             .expect("should decode IndexUpdated")
         {
             MarketEvent::IndexUpdated { index } => {
-                assert!((index - 100.0).abs() < Q96_PRECISION);
+                assert_eq!(index.x96(), Q96 * U256::from(100u64));
             }
             _ => panic!("expected IndexUpdated"),
         }
@@ -816,11 +838,11 @@ mod tests {
                 is_liquidation,
             } => {
                 assert_eq!(pos_id, U256::from(9u64));
-                assert!((settle.funding - 2.0).abs() < 1e-9);
-                assert!((settle.long_util_fees - 0.5).abs() < 1e-9);
-                assert!((settle.short_util_fees - 0.25).abs() < 1e-9);
-                assert!((settle.lp_fees - 1.5).abs() < 1e-9);
-                assert!((liquidation_fee - 0.75).abs() < 1e-9);
+                assert_eq!(settle.funding.atoms(), 2_000_000);
+                assert_eq!(settle.long_util_fees.atoms(), 500_000);
+                assert_eq!(settle.short_util_fees.atoms(), 250_000);
+                assert_eq!(settle.lp_fees.atoms(), 1_500_000);
+                assert_eq!(liquidation_fee.atoms(), 750_000);
                 assert!(is_liquidation);
             }
             other => panic!("expected MakerClosed, got {other:?}"),
@@ -847,7 +869,7 @@ mod tests {
                 is_liquidation,
                 ..
             } => {
-                assert_eq!(liquidation_fee, 0.0);
+                assert_eq!(liquidation_fee, UsdcAtoms::ZERO);
                 assert!(!is_liquidation);
             }
             other => panic!("expected MakerClosed, got {other:?}"),
@@ -886,9 +908,9 @@ mod tests {
                 ..
             } => {
                 assert_eq!(pos_id, U256::from(5u64));
-                assert!((funding + 0.25).abs() < 1e-9);
-                assert!((util_fees - 0.01).abs() < 1e-9);
-                assert!((liquidation_fee - 1.25).abs() < 1e-9);
+                assert_eq!(funding.atoms(), -250_000);
+                assert_eq!(util_fees.atoms(), 10_000);
+                assert_eq!(liquidation_fee.atoms(), 1_250_000);
                 assert!(is_liquidation);
             }
             other => panic!("expected TakerClosed, got {other:?}"),
@@ -938,12 +960,14 @@ mod tests {
                 is_liquidation,
             } => {
                 assert_eq!(pos_id, U256::from(54u64));
-                assert!((settle.funding - 209.633223).abs() < 1e-9);
-                assert!((settle.long_util_fees - 0.432735).abs() < 1e-9);
-                assert!((settle.short_util_fees - 24.630722).abs() < 1e-9);
-                assert!((settle.lp_fees - 7.722360).abs() < 1e-9);
+                // The exact atoms the log carried, not an f64 within an
+                // epsilon of them: the whole point of the typed fields.
+                assert_eq!(settle.funding.atoms(), 209_633_223);
+                assert_eq!(settle.long_util_fees.atoms(), 432_735);
+                assert_eq!(settle.short_util_fees.atoms(), 24_630_722);
+                assert_eq!(settle.lp_fees.atoms(), 7_722_360);
                 // The liquidation tails: liqFee 0x15696a = 1.403242 USDC.
-                assert!((liquidation_fee - 1.403242).abs() < 1e-9);
+                assert_eq!(liquidation_fee.atoms(), 1_403_242);
                 assert!(is_liquidation);
             }
             other => panic!("expected MakerConverted, got {other:?}"),

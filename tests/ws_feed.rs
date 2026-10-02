@@ -51,8 +51,8 @@ async fn subscribe_and_receive_event() {
             match &event {
                 MarketEvent::TakerOpened { pos_id, swap } => {
                     println!(
-                        "  TakerOpened — pos_id: {pos_id}, amm_price: {}",
-                        swap.amm_price
+                        "  TakerOpened — pos_id: {pos_id}, pool price: {:?}",
+                        swap.pool_price.to_f64()
                     );
                 }
                 MarketEvent::MakerOpened { pos_id } => {
@@ -60,15 +60,19 @@ async fn subscribe_and_receive_event() {
                 }
                 MarketEvent::TakerClosed { pos_id, swap, .. } => {
                     println!(
-                        "  TakerClosed — pos_id: {pos_id}, amm_price: {}",
-                        swap.amm_price
+                        "  TakerClosed — pos_id: {pos_id}, pool price: {:?}",
+                        swap.pool_price.to_f64()
                     );
                 }
                 MarketEvent::OpenInterestUpdated { long_oi, short_oi } => {
-                    println!("  OpenInterestUpdated — long: {long_oi}, short: {short_oi}");
+                    println!(
+                        "  OpenInterestUpdated — long: {}, short: {}",
+                        long_oi.perp(),
+                        short_oi.perp()
+                    );
                 }
                 MarketEvent::IndexUpdated { index } => {
-                    println!("  IndexUpdated — index: {index}");
+                    println!("  IndexUpdated — index: {:?}", index.to_f64());
                 }
                 other => {
                     println!("  {other:?}");

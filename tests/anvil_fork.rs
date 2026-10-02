@@ -310,22 +310,23 @@ async fn open_and_close_taker_on_fork() {
     println!("Position opened! ID: {pos_id}");
     println!("  tx_hash: {}", open_result.tx_hash);
     println!(
-        "  realized perp_delta: {}  usd_delta: {}",
-        open_result.perp_delta, open_result.usd_delta
+        "  realized perp atoms: {}  usdc atoms: {}",
+        open_result.perp_delta.atoms(),
+        open_result.usd_delta.atoms()
     );
 
     // Realized swap decoded from the TakerOpened event. Opening a long
     // receives perp (+) and pays USD (-); the realized perp size should match
     // the requested 0.001 closely (small price impact on this tiny trade).
     assert!(
-        (open_result.perp_delta - 0.001).abs() < 1e-4,
-        "realized perp_delta {} should be ~0.001",
-        open_result.perp_delta
+        (open_result.perp_delta.atoms() - 1_000).abs() < 100,
+        "realized perp atoms {} should be ~1_000 (0.001 perp)",
+        open_result.perp_delta.atoms()
     );
     assert!(
-        open_result.usd_delta < 0.0,
-        "opening a long should pay USD (negative usd_delta), got {}",
-        open_result.usd_delta
+        open_result.usd_delta.atoms() < 0,
+        "opening a long should pay USDC (negative delta), got {}",
+        open_result.usd_delta.atoms()
     );
 
     // 9. Read position on-chain. `delta` is a packed BalanceDelta; `margin` is
@@ -356,17 +357,19 @@ async fn open_and_close_taker_on_fork() {
         .unwrap();
     println!("  tx_hash: {}", adjust_result.tx_hash);
     println!(
-        "  realized perp_delta: {}  usd_delta: {}",
-        adjust_result.perp_delta, adjust_result.usd_delta
+        "  realized perp atoms: {}  usdc atoms: {}",
+        adjust_result.perp_delta.atoms(),
+        adjust_result.usd_delta.atoms()
     );
 
     // Realized swap decoded from the TakerAdjusted event. Reducing a long
     // sells perp (negative perp_delta) and receives USD (positive usd_delta).
     assert!(
-        (adjust_result.perp_delta - (-0.0005)).abs() < 1e-4 && adjust_result.usd_delta > 0.0,
-        "realized adjust deltas wrong: perp_delta={} usd_delta={}",
-        adjust_result.perp_delta,
-        adjust_result.usd_delta
+        (adjust_result.perp_delta.atoms() - (-500)).abs() < 100
+            && adjust_result.usd_delta.atoms() > 0,
+        "realized adjust deltas wrong: perp atoms={} usdc atoms={}",
+        adjust_result.perp_delta.atoms(),
+        adjust_result.usd_delta.atoms()
     );
 
     // 11. Adjust margin — deposit 2 more USDC (margin-only adjustment)
@@ -398,17 +401,18 @@ async fn open_and_close_taker_on_fork() {
 
     println!("Position closed! tx: {}", close_result.tx_hash);
     println!(
-        "  realized perp_delta: {}  usd_delta: {}",
-        close_result.perp_delta, close_result.usd_delta
+        "  realized perp atoms: {}  usdc atoms: {}",
+        close_result.perp_delta.atoms(),
+        close_result.usd_delta.atoms()
     );
 
     // Closing a long reverses the delta: sells perp (negative perp_delta) and
     // receives USD (positive usd_delta), decoded from the TakerClosed event.
     assert!(
-        close_result.perp_delta < 0.0 && close_result.usd_delta > 0.0,
-        "close should sell perp and receive USD, got perp_delta={} usd_delta={}",
-        close_result.perp_delta,
-        close_result.usd_delta
+        close_result.perp_delta.atoms() < 0 && close_result.usd_delta.atoms() > 0,
+        "close should sell perp and receive USDC, got perp atoms={} usdc atoms={}",
+        close_result.perp_delta.atoms(),
+        close_result.usd_delta.atoms()
     );
 
     // 13. Check final balance
