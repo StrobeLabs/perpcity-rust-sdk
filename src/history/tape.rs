@@ -216,7 +216,7 @@ pub(super) async fn market_events_with<P: Provider>(
 ) -> Result<Vec<TapeEvent>> {
     let filter = perp_filter(perp)?;
     let logs = scan_all(provider, &filter, from_block, to_block, widths, in_flight).await?;
-    tape_rows(provider, decode_known(logs)).await
+    tape_rows(provider, decode_known(logs, widths)).await
 }
 
 /// The newest `limit` market events `perp` emitted in blocks
@@ -267,7 +267,7 @@ pub(super) async fn latest_market_events_with<P: Provider>(
     while held < limit
         && let Some(chunk) = chunks.try_next().await?
     {
-        let decoded = decode_known(chunk);
+        let decoded = decode_known(chunk, widths);
         held += decoded.len();
         newest_first.push(decoded);
     }
@@ -286,11 +286,36 @@ fn perp_filter(perp: Address) -> std::result::Result<Filter, ValidationError> {
     Ok(Filter::new().address(perp))
 }
 
-/// Decodes the logs the feed decoder recognizes, each kept with its log.
-fn decode_known(logs: Vec<Log>) -> Vec<(Log, MarketEvent)> {
-    logs.into_iter()
-        .filter_map(|log| decode_log(&log).map(|event| (log, event)))
-        .collect()
+/// Decodes the logs this vocabulary recognizes, each kept with its log.
+///
+/// A log of another vocabulary is skipped, which is what a filter on one
+/// address returns plenty of. A log of *this* vocabulary that will not
+/// decode is counted on the scan's [`ScanStats::undecodable`] and skipped
+/// too: the scan is not failed over it, because one such log should not cost
+/// a scan of millions of blocks, but the count is how a caller learns the
+/// tape has a gap rather than being told nothing at all.
+fn decode_known(logs: Vec<Log>, widths: &SharedWidths) -> Vec<(Log, MarketEvent)> {
+    let mut undecodable = 0;
+    let decoded = logs
+        .into_iter()
+        .filter_map(|log| match decode_log(&log) {
+            Ok(Some(event)) => Some((log, event)),
+            Ok(None) => None,
+            Err(e) => {
+                undecodable += 1;
+                tracing::warn!(
+                    error = %e,
+                    block = ?log.block_number,
+                    "log recognised but undecodable; the tape has a gap here"
+                );
+                None
+            }
+        })
+        .collect();
+    if undecodable > 0 {
+        widths.undecodable(undecodable);
+    }
+    decoded
 }
 
 /// Builds tape rows from decoded logs, reading the block header for any

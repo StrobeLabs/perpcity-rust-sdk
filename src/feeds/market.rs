@@ -34,6 +34,7 @@ use alloy::primitives::Address;
 use alloy::rpc::types::{Filter, Log};
 use tokio::sync::mpsc;
 
+use crate::errors::ValidationError;
 use crate::events::{MarketEvent, decode_log};
 use crate::transport::ws::WsManager;
 
@@ -63,15 +64,32 @@ impl MarketFeed {
 
     /// Receive the next decoded event for this market.
     ///
-    /// Blocks until a recognized event arrives. Returns `None` when the
-    /// WebSocket connection is lost (sender dropped). Unrecognized events
-    /// (admin/governance, pool-internal, etc.) are skipped.
-    pub async fn next(&mut self) -> Option<MarketEvent> {
+    /// Blocks until a recognized event arrives. `None` means the WebSocket
+    /// connection is lost and no further event will come. Unrecognized logs
+    /// (admin, governance, pool-internal) are skipped silently, because
+    /// there is nothing wrong with them.
+    ///
+    /// A `Some(Err(_))` is a log of *this* vocabulary that would not decode.
+    /// It is surfaced rather than skipped: the feed would otherwise show a
+    /// caller a stream with a hole in it, and only the caller can decide
+    /// whether to carry on. The feed does carry on — the next `next` reads
+    /// the following log.
+    pub async fn next(&mut self) -> Option<Result<MarketEvent, ValidationError>> {
         loop {
             let log = self.rx.recv().await?;
-            if let Some(event) = decode_log(&log) {
-                tracing::trace!(perp = %self.perp, event = ?event, "market event received");
-                return Some(event);
+            match decode_log(&log) {
+                Ok(Some(event)) => {
+                    tracing::trace!(perp = %self.perp, event = ?event, "market event received");
+                    return Some(Ok(event));
+                }
+                Ok(None) => continue,
+                Err(e) => {
+                    tracing::warn!(
+                        perp = %self.perp, error = %e,
+                        "market event recognised but undecodable"
+                    );
+                    return Some(Err(e));
+                }
             }
         }
     }

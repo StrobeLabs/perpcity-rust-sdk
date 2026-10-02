@@ -36,16 +36,20 @@
 //! use perpcity_sdk::feeds::events::{MarketEvent, decode_log};
 //! # use alloy::rpc::types::Log;
 //! # fn example(log: &Log) {
-//! if let Some(event) = decode_log(log) {
-//!     match event {
-//!         MarketEvent::TakerOpened { pos_id, swap } => {
-//!             println!("taker {pos_id} opened at {}", swap.amm_price);
-//!         }
-//!         MarketEvent::OpenInterestUpdated { long_oi, short_oi } => {
-//!             println!("OI now {long_oi}/{short_oi}");
-//!         }
-//!         _ => {}
+//! match decode_log(log) {
+//!     // A log this vocabulary covers.
+//!     Ok(Some(MarketEvent::TakerOpened { pos_id, swap })) => {
+//!         println!("taker {pos_id} opened at {}", swap.amm_price);
 //!     }
+//!     Ok(Some(MarketEvent::OpenInterestUpdated { long_oi, short_oi })) => {
+//!         println!("OI now {long_oi}/{short_oi}");
+//!     }
+//!     Ok(Some(_)) => {}
+//!     // Not one of ours: an admin, ERC20 or pool-internal log. Skip it.
+//!     Ok(None) => {}
+//!     // One of ours that would not decode, so this market's history has a
+//!     // gap here. Worth saying out loud rather than skipping.
+//!     Err(e) => eprintln!("undecodable market log: {e}"),
 //! }
 //! # }
 //! ```
@@ -59,6 +63,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::contracts::{IBeacon, IPoolManagerState, Perp, PerpDeployedEvents, SwapResult};
 use crate::convert::{price_x96_to_f64, scale_from_6dec, unpack_balance_delta};
+use crate::errors::ValidationError;
 use crate::units::{Earnings, Funding, FundingPerSqrtPrice, LDelta, LUnits};
 
 /// Funding/utilization rates are scaled by 1e18 per day on-chain.
@@ -295,18 +300,29 @@ pub enum MarketEvent {
 
 /// Decode a raw Alloy [`Log`] into a [`MarketEvent`], if recognized.
 ///
-/// Returns `None` for unrecognized events (admin/governance events, ERC20
-/// events, pool-internal events, etc.).
+/// `Ok(None)` is a log this vocabulary does not cover: an admin or
+/// governance event, an ERC20 event, a pool-internal event. There is
+/// nothing wrong with it and a caller skips it.
 ///
 /// # Errors
 ///
-/// Returns `None` (not an error) if ABI decoding or value conversion fails.
-/// This is intentional — a malformed log should not crash the event stream.
-pub fn decode_log(log: &Log) -> Option<MarketEvent> {
-    let topic0 = *log.topic0()?;
+/// [`ValidationError::DecodeFailed`] when the topic *is* one of ours and
+/// the log still will not decode — the binding disagrees with the shape on
+/// chain, or a value is too wide to hold. That is a gap in what a caller
+/// can see, so it is an error rather than another `None`: the two used to
+/// be indistinguishable, and a scan dropped the second kind silently.
+pub fn decode_log(log: &Log) -> Result<Option<MarketEvent>, ValidationError> {
+    let Some(topic0) = log.topic0().copied() else {
+        return Ok(None);
+    };
 
+    // The chain below stays `Option`-shaped — `Some` for a topic this
+    // vocabulary covers, `None` for one it does not — while every `?` in it
+    // returns an error from this function. So the two outcomes the old
+    // signature collapsed stay separate without an arm having to say so.
+    //
     // ── Maker lifecycle ──────────────────────────────────────────────
-    if topic0 == Perp::MakerOpened::SIGNATURE_HASH {
+    let event = if topic0 == Perp::MakerOpened::SIGNATURE_HASH {
         let d = decode_raw::<Perp::MakerOpened>(log)?;
         Some(MarketEvent::MakerOpened { pos_id: d.posId })
     } else if topic0 == Perp::MakerAdjusted::SIGNATURE_HASH {
@@ -345,7 +361,7 @@ pub fn decode_log(log: &Log) -> Option<MarketEvent> {
         Some(MarketEvent::MakerConverted {
             pos_id: d.posId,
             settle: maker_settle(d.funding, d.longUtilFees, d.shortUtilFees, d.lpFees)?,
-            liquidation_fee: u256_usdc(d.liqFee)?,
+            liquidation_fee: u256_usdc(d.liqFee, "settled liquidation fee")?,
             is_liquidation: d.isLiquidation,
         })
     } else if topic0 == PerpDeployedEvents::MakerClosed::SIGNATURE_HASH {
@@ -353,7 +369,7 @@ pub fn decode_log(log: &Log) -> Option<MarketEvent> {
         Some(MarketEvent::MakerClosed {
             pos_id: d.posId,
             settle: maker_settle(d.funding, d.longUtilFees, d.shortUtilFees, d.lpFees)?,
-            liquidation_fee: u256_usdc(d.liqFee)?,
+            liquidation_fee: u256_usdc(d.liqFee, "settled liquidation fee")?,
             is_liquidation: d.isLiquidation,
         })
     } else if topic0 == Perp::MakerLiquidated::SIGNATURE_HASH {
@@ -361,7 +377,7 @@ pub fn decode_log(log: &Log) -> Option<MarketEvent> {
         Some(MarketEvent::MakerLiquidated {
             pos_id: d.posId,
             liquidity_amount: LUnits::new(d.liquidityAmount),
-            liquidation_fee: u256_usdc(d.liqFee)?,
+            liquidation_fee: u256_usdc(d.liqFee, "settled liquidation fee")?,
         })
     } else if topic0 == Perp::MakerBackstopped::SIGNATURE_HASH {
         let d = decode_raw::<Perp::MakerBackstopped>(log)?;
@@ -384,17 +400,17 @@ pub fn decode_log(log: &Log) -> Option<MarketEvent> {
         Some(MarketEvent::TakerAdjusted {
             pos_id: d.posId,
             swap: swap_info(&d.sr)?,
-            funding: i256_usdc(d.funding)?,
-            util_fees: u256_usdc(d.utilFees)?,
+            funding: i256_usdc(d.funding, "settled funding")?,
+            util_fees: u256_usdc(d.utilFees, "settled utilization fees")?,
         })
     } else if topic0 == Perp::TakerClosed::SIGNATURE_HASH {
         let d = decode_raw::<Perp::TakerClosed>(log)?;
         Some(MarketEvent::TakerClosed {
             pos_id: d.posId,
             swap: swap_info(&d.sr)?,
-            funding: i256_usdc(d.funding)?,
-            util_fees: u256_usdc(d.utilFees)?,
-            liquidation_fee: u256_usdc(d.liqFee)?,
+            funding: i256_usdc(d.funding, "settled funding")?,
+            util_fees: u256_usdc(d.utilFees, "settled utilization fees")?,
+            liquidation_fee: u256_usdc(d.liqFee, "settled liquidation fee")?,
             is_liquidation: d.isLiquidation,
         })
     } else if topic0 == Perp::TakerLiquidated::SIGNATURE_HASH {
@@ -402,7 +418,7 @@ pub fn decode_log(log: &Log) -> Option<MarketEvent> {
         Some(MarketEvent::TakerLiquidated {
             pos_id: d.posId,
             perp_amount: d.perpAmount,
-            liquidation_fee: u256_usdc(d.liqFee)?,
+            liquidation_fee: u256_usdc(d.liqFee, "settled liquidation fee")?,
         })
     } else if topic0 == Perp::TakerBackstopped::SIGNATURE_HASH {
         let d = decode_raw::<Perp::TakerBackstopped>(log)?;
@@ -410,8 +426,8 @@ pub fn decode_log(log: &Log) -> Option<MarketEvent> {
             pos_id: d.posId,
             margin_in: scale_from_6dec(d.marginIn as i128),
             pos_recipient: d.posRecipient,
-            funding: i256_usdc(d.funding)?,
-            util_fees: u256_usdc(d.utilFees)?,
+            funding: i256_usdc(d.funding, "settled funding")?,
+            util_fees: u256_usdc(d.utilFees, "settled utilization fees")?,
         })
 
     // ── Market state ─────────────────────────────────────────────────
@@ -443,12 +459,17 @@ pub fn decode_log(log: &Log) -> Option<MarketEvent> {
     } else if topic0 == Perp::RatesAndEmasRefreshed::SIGNATURE_HASH {
         let d = decode_raw::<Perp::RatesAndEmasRefreshed>(log)?;
         Some(MarketEvent::RatesAndEmasRefreshed {
-            funding_per_day: i128::try_from(d.rates.fundingPerDay).ok()? as f64 / WAD_F64,
+            funding_per_day: narrow_i128(
+                d.rates.fundingPerDay.to_string(),
+                d.rates.fundingPerDay.try_into(),
+                "funding per day",
+            )? as f64
+                / WAD_F64,
             long_util_fee_per_day: d.rates.longUtilFeePerDay as f64 / WAD_F64,
             short_util_fee_per_day: d.rates.shortUtilFeePerDay as f64 / WAD_F64,
             last_touch: d.rates.lastTouch.to::<u64>(),
-            amm_price_ema: price_x96_to_f64(U256::from(d.emas.ammPrice)).ok()?,
-            index_ema: price_x96_to_f64(U256::from(d.emas.index)).ok()?,
+            amm_price_ema: price_x96_to_f64(U256::from(d.emas.ammPrice))?,
+            index_ema: price_x96_to_f64(U256::from(d.emas.index))?,
         })
     } else if topic0 == Perp::TicksCrossed::SIGNATURE_HASH {
         let d = decode_raw::<Perp::TicksCrossed>(log)?;
@@ -482,15 +503,15 @@ pub fn decode_log(log: &Log) -> Option<MarketEvent> {
     } else if topic0 == Perp::BadDebtAccounted::SIGNATURE_HASH {
         let d = decode_raw::<Perp::BadDebtAccounted>(log)?;
         Some(MarketEvent::BadDebtAccounted {
-            bad_debt: u256_usdc(d.badDebt)?,
-            insurance_after: u256_usdc(d.insuranceAfter)?,
+            bad_debt: u256_usdc(d.badDebt, "bad debt")?,
+            insurance_after: u256_usdc(d.insuranceAfter, "insurance fund")?,
             bad_debt_after: scale_from_6dec(d.badDebtAfter as i128),
         })
     } else if topic0 == Perp::LossSocialized::SIGNATURE_HASH {
         let d = decode_raw::<Perp::LossSocialized>(log)?;
         Some(MarketEvent::LossSocialized {
-            original_amount: u256_usdc(d.originalAmount)?,
-            fee_charged: u256_usdc(d.feeCharged)?,
+            original_amount: u256_usdc(d.originalAmount, "original amount")?,
+            fee_charged: u256_usdc(d.feeCharged, "fee charged")?,
             bad_debt_after: scale_from_6dec(d.badDebtAfter as i128),
         })
     } else if topic0 == Perp::MarginTransferred::SIGNATURE_HASH {
@@ -504,7 +525,7 @@ pub fn decode_log(log: &Log) -> Option<MarketEvent> {
     } else if topic0 == IBeacon::IndexUpdated::SIGNATURE_HASH {
         let d = decode_raw::<IBeacon::IndexUpdated>(log)?;
         Some(MarketEvent::IndexUpdated {
-            index: price_x96_to_f64(d.index).ok()?,
+            index: price_x96_to_f64(d.index)?,
         })
 
     // ── Pool / position NFT ──────────────────────────────────────────
@@ -515,44 +536,59 @@ pub fn decode_log(log: &Log) -> Option<MarketEvent> {
             sender: d.sender,
             tick_lower: d.tickLower.as_i32(),
             tick_upper: d.tickUpper.as_i32(),
-            liquidity_delta: LDelta::new(i128::try_from(d.liquidityDelta).ok()?),
+            liquidity_delta: LDelta::new(narrow_i128(
+                d.liquidityDelta.to_string(),
+                d.liquidityDelta.try_into(),
+                "liquidity delta",
+            )?),
             salt: d.salt,
         })
     } else if topic0 == Perp::Transfer::SIGNATURE_HASH {
-        // Same topic0 as ERC20 Transfer; the ERC721 shape needs three
-        // indexed topics, so an ERC20 log fails here and returns None.
-        let d = decode_raw::<Perp::Transfer>(log)?;
-        Some(MarketEvent::PositionTransferred {
-            from: d.from,
-            to: d.to,
-            pos_id: d.tokenId,
-        })
+        // Same topic0 as ERC20 Transfer, and the ERC721 shape needs three
+        // indexed topics. An ERC20 log therefore fails to decode here, which
+        // is the one place a decode failure is not a gap: the topic is
+        // shared, so it is a log of someone else's event. Hence `ok()`
+        // rather than `?`.
+        decode_raw::<Perp::Transfer>(log)
+            .ok()
+            .map(|d| MarketEvent::PositionTransferred {
+                from: d.from,
+                to: d.to,
+                pos_id: d.tokenId,
+            })
     } else {
         None
-    }
+    };
+    Ok(event)
 }
 
 /// Decode a typed event from a raw log's topics + data.
-pub(crate) fn decode_raw<E: SolEvent>(log: &Log) -> Option<E> {
+///
+/// The topic already said which event this is, so a failure here is a log
+/// whose shape disagrees with the binding — an era we decode wrongly, or a
+/// value we cannot hold — and the error names the signature it was read as.
+pub(crate) fn decode_raw<E: SolEvent>(log: &Log) -> Result<E, ValidationError> {
     E::decode_raw_log(
         log.inner.data.topics().iter().copied(),
         log.inner.data.data.as_ref(),
     )
-    .ok()
+    .map_err(|e| ValidationError::DecodeFailed {
+        context: format!("{}: {e}", E::SIGNATURE),
+    })
 }
 
 /// Build a [`SwapInfo`] from a contract [`SwapResult`].
-fn swap_info(sr: &SwapResult) -> Option<SwapInfo> {
+fn swap_info(sr: &SwapResult) -> Result<SwapInfo, ValidationError> {
     let (perp, usd) = unpack_balance_delta(sr.delta);
-    Some(SwapInfo {
+    Ok(SwapInfo {
         perp_delta: scale_from_6dec(perp),
         usd_delta: scale_from_6dec(usd),
-        amm_price: price_x96_to_f64(sr.ammPrice).ok()?,
-        total_fee: i256_usdc(sr.totalFeeAmt)?,
-        lp_fee: u256_usdc(sr.lpFeeAmt)?,
-        protocol_fee: u256_usdc(sr.protocolFeeAmt)?,
-        creator_fee: u256_usdc(sr.creatorFeeAmt)?,
-        insurance_fee: u256_usdc(sr.insuranceFeeAmt)?,
+        amm_price: price_x96_to_f64(sr.ammPrice)?,
+        total_fee: i256_usdc(sr.totalFeeAmt, "swap total fee")?,
+        lp_fee: u256_usdc(sr.lpFeeAmt, "swap LP fee")?,
+        protocol_fee: u256_usdc(sr.protocolFeeAmt, "swap protocol fee")?,
+        creator_fee: u256_usdc(sr.creatorFeeAmt, "swap creator fee")?,
+        insurance_fee: u256_usdc(sr.insuranceFeeAmt, "swap insurance fee")?,
     })
 }
 
@@ -562,23 +598,44 @@ fn maker_settle(
     long_util_fees: U256,
     short_util_fees: U256,
     lp_fees: U256,
-) -> Option<MakerSettle> {
-    Some(MakerSettle {
-        funding: i256_usdc(funding)?,
-        long_util_fees: u256_usdc(long_util_fees)?,
-        short_util_fees: u256_usdc(short_util_fees)?,
-        lp_fees: u256_usdc(lp_fees)?,
+) -> Result<MakerSettle, ValidationError> {
+    Ok(MakerSettle {
+        funding: i256_usdc(funding, "settled funding")?,
+        long_util_fees: u256_usdc(long_util_fees, "settled long utilization fees")?,
+        short_util_fees: u256_usdc(short_util_fees, "settled short utilization fees")?,
+        lp_fees: u256_usdc(lp_fees, "settled LP fees")?,
     })
 }
 
 /// Convert a signed 6-decimal USDC value to f64.
-fn i256_usdc(v: I256) -> Option<f64> {
-    Some(scale_from_6dec(i128::try_from(v).ok()?))
+fn i256_usdc(v: I256, what: &str) -> Result<f64, ValidationError> {
+    Ok(scale_from_6dec(narrow_i128(
+        v.to_string(),
+        v.try_into(),
+        what,
+    )?))
 }
 
 /// Convert an unsigned 6-decimal USDC value to f64.
-fn u256_usdc(v: U256) -> Option<f64> {
-    Some(scale_from_6dec(i128::try_from(v).ok()?))
+fn u256_usdc(v: U256, what: &str) -> Result<f64, ValidationError> {
+    Ok(scale_from_6dec(narrow_i128(
+        v.to_string(),
+        v.try_into(),
+        what,
+    )?))
+}
+
+/// A contract word narrowed to the width the SDK holds an amount in, naming
+/// the field when it does not fit: a value this wide is a log the decoder
+/// recognised and cannot represent, which is an error rather than a gap.
+fn narrow_i128<E>(
+    shown: String,
+    narrowed: Result<i128, E>,
+    what: &str,
+) -> Result<i128, ValidationError> {
+    narrowed.map_err(|_| ValidationError::DecodeFailed {
+        context: format!("{what} {shown} exceeds i128"),
+    })
 }
 
 /// An RPC log carrying `event`, emitted by `address`, as a receipt returns
@@ -633,7 +690,10 @@ mod tests {
         };
 
         let log = rpc_log(&event, Address::ZERO);
-        match decode_log(&log).expect("should decode TakerOpened") {
+        match decode_log(&log)
+            .unwrap()
+            .expect("should decode TakerOpened")
+        {
             MarketEvent::TakerOpened { pos_id, swap } => {
                 assert_eq!(pos_id, U256::from(42u64));
                 assert!((swap.perp_delta - 100.0).abs() < 1e-9);
@@ -654,7 +714,10 @@ mod tests {
         };
 
         let log = rpc_log(&event, Address::ZERO);
-        match decode_log(&log).expect("should decode TakerLiquidated") {
+        match decode_log(&log)
+            .unwrap()
+            .expect("should decode TakerLiquidated")
+        {
             MarketEvent::TakerLiquidated {
                 pos_id,
                 perp_amount,
@@ -674,7 +737,10 @@ mod tests {
             posId: U256::from(3u64),
         };
         let log = rpc_log(&event, Address::ZERO);
-        match decode_log(&log).expect("should decode MakerOpened") {
+        match decode_log(&log)
+            .unwrap()
+            .expect("should decode MakerOpened")
+        {
             MarketEvent::MakerOpened { pos_id } => assert_eq!(pos_id, U256::from(3u64)),
             _ => panic!("expected MakerOpened"),
         }
@@ -689,7 +755,10 @@ mod tests {
             },
         };
         let log = rpc_log(&event, Address::ZERO);
-        match decode_log(&log).expect("should decode OpenInterestUpdated") {
+        match decode_log(&log)
+            .unwrap()
+            .expect("should decode OpenInterestUpdated")
+        {
             MarketEvent::OpenInterestUpdated { long_oi, short_oi } => {
                 assert!((long_oi - 2.0).abs() < 1e-9);
                 assert!((short_oi - 1.0).abs() < 1e-9);
@@ -705,7 +774,10 @@ mod tests {
         };
 
         let log = rpc_log(&event, Address::ZERO);
-        match decode_log(&log).expect("should decode IndexUpdated") {
+        match decode_log(&log)
+            .unwrap()
+            .expect("should decode IndexUpdated")
+        {
             MarketEvent::IndexUpdated { index } => {
                 assert!((index - 100.0).abs() < Q96_PRECISION);
             }
@@ -725,7 +797,10 @@ mod tests {
             isLiquidation: true,
         };
         let log = rpc_log(&event, Address::ZERO);
-        match decode_log(&log).expect("should decode deployed-era MakerClosed") {
+        match decode_log(&log)
+            .unwrap()
+            .expect("should decode deployed-era MakerClosed")
+        {
             MarketEvent::MakerClosed {
                 pos_id,
                 settle,
@@ -755,7 +830,10 @@ mod tests {
             lpFees: U256::ZERO,
         };
         let log = rpc_log(&event, Address::ZERO);
-        match decode_log(&log).expect("should decode MakerClosed") {
+        match decode_log(&log)
+            .unwrap()
+            .expect("should decode MakerClosed")
+        {
             MarketEvent::MakerClosed {
                 liquidation_fee,
                 is_liquidation,
@@ -787,7 +865,10 @@ mod tests {
             isLiquidation: true,
         };
         let log = rpc_log(&event, Address::ZERO);
-        match decode_log(&log).expect("should decode TakerClosed") {
+        match decode_log(&log)
+            .unwrap()
+            .expect("should decode TakerClosed")
+        {
             MarketEvent::TakerClosed {
                 pos_id,
                 funding,
@@ -838,7 +919,10 @@ mod tests {
             log_index: None,
             removed: false,
         };
-        match decode_log(&log).expect("should decode mainnet MakerConverted") {
+        match decode_log(&log)
+            .unwrap()
+            .expect("should decode mainnet MakerConverted")
+        {
             MarketEvent::MakerConverted {
                 pos_id,
                 settle,
@@ -871,7 +955,10 @@ mod tests {
             salt: B256::from(U256::from(54u64)),
         };
         let log = rpc_log(&event, Address::repeat_byte(0x36));
-        match decode_log(&log).expect("should decode ModifyLiquidity") {
+        match decode_log(&log)
+            .unwrap()
+            .expect("should decode ModifyLiquidity")
+        {
             MarketEvent::ModifyLiquidity {
                 pool_id: id,
                 sender,
@@ -890,11 +977,13 @@ mod tests {
         }
     }
 
-    /// A `liquidityDelta` outside `i128` cannot come from a V4 pool
-    /// (liquidity is `uint128`); like the other decoders, the malformed
-    /// log yields `None` rather than a panic.
+    /// A `liquidityDelta` outside `i128` cannot come from a V4 pool, where
+    /// liquidity is `uint128`. The topic is ours and the value is not one we
+    /// can hold, which is the case this signature exists to separate: it is
+    /// an error naming the field, not another `None` a scan would drop
+    /// alongside every admin log it skips.
     #[test]
-    fn modify_liquidity_delta_overflow_returns_none() {
+    fn a_known_log_we_cannot_represent_is_an_error() {
         let event = IPoolManagerState::ModifyLiquidity {
             id: B256::ZERO,
             sender: Address::ZERO,
@@ -903,7 +992,11 @@ mod tests {
             liquidityDelta: I256::MAX,
             salt: B256::ZERO,
         };
-        assert!(decode_log(&rpc_log(&event, Address::ZERO)).is_none());
+        let err = decode_log(&rpc_log(&event, Address::ZERO)).unwrap_err();
+        assert!(
+            matches!(&err, ValidationError::DecodeFailed { context } if context.contains("liquidity delta")),
+            "the error names the field that would not fit: {err}"
+        );
     }
 
     #[test]
@@ -915,7 +1008,7 @@ mod tests {
             tokenId: U256::from(77u64),
         };
         let log = rpc_log(&event, Address::ZERO);
-        match decode_log(&log).expect("should decode Transfer") {
+        match decode_log(&log).unwrap().expect("should decode Transfer") {
             MarketEvent::PositionTransferred { from, to, pos_id } => {
                 assert_eq!(from, Address::ZERO);
                 assert_eq!(to, holder);
@@ -936,7 +1029,10 @@ mod tests {
         };
         let log = rpc_log(&event, Address::ZERO);
         assert_eq!(log.topic0(), Some(&Perp::Transfer::SIGNATURE_HASH));
-        assert!(decode_log(&log).is_none());
+        // Not an error, even though the topic is one of ours: the topic is
+        // *shared* with ERC20, so this is someone else's event rather than a
+        // log of ours we cannot read.
+        assert!(decode_log(&log).unwrap().is_none());
     }
 
     #[test]
@@ -954,7 +1050,7 @@ mod tests {
             log_index: None,
             removed: false,
         };
-        assert!(decode_log(&log).is_none());
+        assert!(decode_log(&log).unwrap().is_none());
     }
 
     #[test]
@@ -972,6 +1068,6 @@ mod tests {
             log_index: None,
             removed: false,
         };
-        assert!(decode_log(&log).is_none());
+        assert!(decode_log(&log).unwrap().is_none());
     }
 }

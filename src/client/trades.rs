@@ -54,11 +54,15 @@ fn parse_minted_token_id(receipt: &TransactionReceipt) -> std::result::Result<U2
 /// zero fill. (Maker opens emit no taker swap, but they don't call this.)
 fn parse_taker_swap(receipt: &TransactionReceipt) -> Option<(f64, f64)> {
     for log in receipt.inner.logs() {
-        if let Some(
+        // An undecodable log is no different here from an unrecognised one:
+        // the caller's `ok_or` turns a receipt with no readable swap into
+        // `EventNotFound`, which says the same thing with the position's
+        // context attached.
+        if let Ok(Some(
             MarketEvent::TakerOpened { swap, .. }
             | MarketEvent::TakerAdjusted { swap, .. }
             | MarketEvent::TakerClosed { swap, .. },
-        ) = decode_log(log)
+        )) = decode_log(log)
         {
             return Some((swap.perp_delta, swap.usd_delta));
         }
@@ -98,7 +102,7 @@ fn closes_taker(logs: &[RpcLog], pos_id: U256) -> bool {
     logs.iter().any(|log| {
         matches!(
             decode_log(log),
-            Some(MarketEvent::TakerClosed { pos_id: closed, .. }) if closed == pos_id
+            Ok(Some(MarketEvent::TakerClosed { pos_id: closed, .. })) if closed == pos_id
         )
     })
 }

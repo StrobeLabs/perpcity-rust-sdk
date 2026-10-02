@@ -161,7 +161,9 @@ async fn with_timestamps<P: Provider>(provider: &P, logs: &[Log]) -> Result<Vec<
                 .block_number
                 .zip(log.log_index)
                 .and_then(|(block, index)| {
-                    let event = decode_raw::<IBeacon::IndexUpdated>(log)?;
+                    // The surrounding `ok_or_else` already names this log and
+                    // its transaction, which beats the signature alone.
+                    let event = decode_raw::<IBeacon::IndexUpdated>(log).ok()?;
                     Some((block, index, event.index))
                 });
             let (block_number, log_index, index_x96) =

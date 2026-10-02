@@ -14,7 +14,7 @@ use super::scan::{SharedWidths, scan_newest};
 use super::test_support::{FakeNode, Mode, mined_log, timestamp_of};
 use super::*;
 use crate::constants::Q96;
-use crate::contracts::{IBeacon, IERC20, Perp, SwapResult};
+use crate::contracts::{IBeacon, IERC20, IPoolManagerState, Perp, SwapResult};
 use crate::convert::pack_balance_delta;
 use crate::errors::{ContractError, PerpCityError, ValidationError};
 use crate::events::MarketEvent;
@@ -686,6 +686,39 @@ async fn custody_folds_out_of_the_tape_and_answers_at_a_point() {
     // A position the tape never saw, and an empty fold.
     assert_eq!(custody.owner_at(U256::from(11), at(10, 0)), None);
     assert!(OwnershipLog::fold(&[]).is_empty());
+}
+
+/// A log of this vocabulary that will not decode is a gap in the tape, and
+/// the scan says so rather than either dying or hiding it. Dying would cost
+/// a scan of millions of blocks over one log; hiding it is what the old
+/// `Option` did, indistinguishably from the admin logs it also skipped.
+#[tokio::test]
+async fn an_undecodable_known_log_is_counted_and_the_scan_carries_on() {
+    // `liquidityDelta` past `i128` is a value no V4 pool produces, so it
+    // stands in for a binding that disagrees with the shape on chain.
+    let unreadable = IPoolManagerState::ModifyLiquidity {
+        id: B256::ZERO,
+        sender: Address::ZERO,
+        tickLower: alloy::primitives::Signed::<24, 1>::ZERO,
+        tickUpper: alloy::primitives::Signed::<24, 1>::ZERO,
+        liquidityDelta: alloy::primitives::I256::MAX,
+        salt: B256::ZERO,
+    };
+    let logs = vec![
+        mined_event_log(&taker_opened(1), PERP, 10, 0, Some(41)),
+        mined_event_log(&unreadable, PERP, 15, 0, Some(42)),
+        mined_event_log(&taker_opened(2), PERP, 20, 0, Some(43)),
+    ];
+    let node = FakeNode::new(logs, u64::MAX);
+    let history = History::new(node.provider());
+
+    let tape = history.market_events(PERP, 0, Some(100)).await.unwrap();
+    assert_eq!(tape.len(), 2, "the two readable events survive: {tape:?}");
+    assert_eq!(
+        history.stats().undecodable,
+        1,
+        "the gap is counted, so a caller can see the tape is short"
+    );
 }
 
 #[tokio::test]
