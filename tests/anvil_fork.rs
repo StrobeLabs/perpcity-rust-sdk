@@ -511,17 +511,17 @@ async fn perp_snapshot_via_multicall() {
     deal_eth(&anvil.url, address).await;
 
     // 4. Fetch snapshot via multicall
-    let (perp_data, snapshot) = client.market().get_perp_snapshot().await.unwrap();
+    let (config, snapshot) = client.market().get_snapshot().await.unwrap();
 
-    println!("PerpData:");
-    println!("  perp: {}", perp_data.perp);
-    println!("  tick_spacing: {}", perp_data.tick_spacing);
-    println!("  pool_price: {}", perp_data.pool_price);
-    println!("  beacon: {:?}", perp_data.beacon);
-    println!("  bounds: {:?}", perp_data.bounds);
-    println!("  fees: {:?}", perp_data.fees);
+    println!("MarketConfig:");
+    println!("  perp: {}", config.perp);
+    println!("  tick_spacing: {}", config.tick_spacing);
+    println!("  pool_price: {}", config.pool_price);
+    println!("  beacon: {:?}", config.beacon);
+    println!("  bounds: {:?}", config.bounds);
+    println!("  fees: {:?}", config.fees);
 
-    println!("PerpSnapshot:");
+    println!("MarketSnapshot:");
     println!("  pool_price: {}", snapshot.pool_price);
     println!("  index_price: {}", snapshot.index_price);
     println!("  funding_rate_daily: {}", snapshot.funding_rate_daily);
@@ -530,16 +530,13 @@ async fn perp_snapshot_via_multicall() {
         snapshot.open_interest.long_oi, snapshot.open_interest.short_oi
     );
 
-    // 5. Verify PerpData
-    assert_eq!(perp_data.perp, PERP);
-    assert!(
-        perp_data.tick_spacing > 0,
-        "tick_spacing should be positive"
-    );
-    assert!(perp_data.pool_price > 0.0, "pool price should be positive");
-    assert_ne!(perp_data.beacon, Address::ZERO, "beacon should not be zero");
+    // 5. Verify MarketConfig
+    assert_eq!(config.perp, PERP);
+    assert!(config.tick_spacing > 0, "tick_spacing should be positive");
+    assert!(config.pool_price > 0.0, "pool price should be positive");
+    assert_ne!(config.beacon, Address::ZERO, "beacon should not be zero");
 
-    // 6. Verify PerpSnapshot
+    // 6. Verify MarketSnapshot
     assert!(
         snapshot.pool_price > 0.0,
         "snapshot pool price should be positive"
@@ -551,12 +548,12 @@ async fn perp_snapshot_via_multicall() {
         "funding rate should be finite"
     );
 
-    // 7. Cross-check: the pool price from the snapshot should match PerpData
+    // 7. Cross-check: the snapshot's pool price should match the config's
     assert!(
-        (snapshot.pool_price - perp_data.pool_price).abs() < 0.0001,
-        "snapshot pool price ({}) should match perp_data pool price ({})",
+        (snapshot.pool_price - config.pool_price).abs() < 0.0001,
+        "snapshot pool price ({}) should match the config's ({})",
         snapshot.pool_price,
-        perp_data.pool_price,
+        config.pool_price,
     );
 
     // 8. Cross-check: individual methods should match multicall results

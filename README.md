@@ -109,7 +109,7 @@ Every write method takes an `Urgency` level that scales the EIP-1559 priority fe
 
 ```rust
 // Snapshot — config + live data, one block, in one multicall plus the index
-let (config, snapshot) = client.market().get_perp_snapshot().await?;
+let (config, snapshot) = client.market().get_snapshot().await?;
 
 // Or individually
 let price    = client.market().get_pool_price().await?;        // the pool's spot price, f64

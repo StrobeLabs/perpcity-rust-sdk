@@ -205,7 +205,7 @@ send would ask.
 | Type | Invariant | Produced by | Consumed by |
 |---|---|---|---|
 | [`ChainReader`](chain.rs#L44) | one chain: one transport, one deployment set, one set of caches shared by everything built over it | [`ChainReader::new`](chain.rs#L91) over an [`HftTransport`](../transport/DESIGN.md) and a [`ChainDeployments`](../types/DESIGN.md); [`ChainReader::arbitrum`](chain.rs#L99) and [`ChainReader::arbitrum_sepolia`](chain.rs#L112) for the known chains | [`ChainReader::market`](market.rs#L30), which is how every market reader is made; [`ChainReader::history`](chain.rs#L174), which hands out the scanning handle; the wallet and index reads; any helper bounded on `AsRef<ChainReader>`. The strategy layer builds one per process, and that sharing is why the caches live here and not on a market. |
-| [`MarketReader`](market.rs#L23) | one market, read now: a `Perp` over a `ChainReader`; every read is independently current; no read takes a block | [`ChainReader::market`](market.rs#L30) | [`MarketReader::state`](state.rs#L152) and [`MarketReader::state_at`](state.rs#L172), the door to the other tense; [`PerpClient::new`](mod.rs#L232), as the market a signer trades; [`LiveTakerMarket::subscribe`](../feeds/DESIGN.md), as the reader a publisher refreshes through; any helper bounded on `AsRef<MarketReader>`. It is the reader a live cache seeds from and the one a research process holds without a signer, which is why it exists apart from `PerpClient`. |
+| [`MarketReader`](market.rs#L23) | one market, read now: a `Perp` over a `ChainReader`; every read is independently current; no read takes a block; every read is named for what it returns, so the market it reads is never in the name | [`ChainReader::market`](market.rs#L30) | [`MarketReader::state`](state.rs#L152) and [`MarketReader::state_at`](state.rs#L172), the door to the other tense; [`PerpClient::new`](mod.rs#L232), as the market a signer trades; [`LiveTakerMarket::subscribe`](../feeds/DESIGN.md), as the reader a publisher refreshes through; any helper bounded on `AsRef<MarketReader>`. It is the reader a live cache seeds from and the one a research process holds without a signer, which is why it exists apart from `PerpClient`. |
 | [`StateAt`](state.rs#L67) | one market at one block: the handle resolved one header; every read is pinned to its hash; results carry the block | [`MarketReader::state`](state.rs#L152), at the lagged snapshot block; [`MarketReader::state_at`](state.rs#L172), at a block the caller names | its own reads, which fill the snapshots in `math` and the state types in `types`, and are where the tense rule is enforced; its batches, [`StateAt::positions`](state.rs#L300) and [`StateAt::maker_equities`](maker_equity.rs#L317), which fan one block out over many ids; the strategy layer's block-pinned sources, which hold it behind a trait so a forensic read can be stubbed. |
 | [`RowOutcome`](state.rs#L75) | one id's row in a batch: exactly one per input id, in input order; `Ok(None)` is an id with no row; `Err` is that id's failure and says whether to retry | [`StateAt::positions`](state.rs#L300), one row multicall per chunk | nothing in the crate but the maker-equity batch, which reads its rows through the same driver. The strategy layer's solvency folds, which sweep every id a market ever minted and need an answer for each. |
 | [`PerpClient`](mod.rs#L179) | one signer on one market: a `MarketReader` plus a wallet and a pipeline; the pipeline owns the next nonce | [`PerpClient::new`](mod.rs#L232) from a [`MarketReader`](market.rs#L23) and any alloy signer | [`PerpClient::tx`](transactions.rs#L379) for a raw call, and the trades, probes and transfers over it, each a builder plus a decode of the receipt; the [`TxBuilder`](transactions.rs#L40) borrows it for the pipeline and the wallet. The strategy layer holds one per wallet; a helper that only reads should not take it. |
@@ -252,9 +252,8 @@ views it batches.
 |---|---|---|---|
 | `get_pool_price`, `get_funding_rate` | 1 | head | fast layer, 2 s |
 | `get_open_interest` | 1 | head | no |
-| `get_perp_config` | 4, plus 3 for fees and bounds on a slow-layer miss | head | slow layer, 60 s |
-| `get_perp_data` | 3 | head | no |
-| `get_perp_snapshot` | 1 multicall + 1 pinned index, plus the slow layer on a miss | one block, the head | slow layer for fees and bounds |
+| `get_config` | 4, plus 3 for fees and bounds on a slow-layer miss | head | slow layer, 60 s |
+| `get_snapshot` | 1 multicall + 1 pinned index, plus the slow layer on a miss | one lagged block | slow layer for fees and bounds |
 | `state()` | 2 (block number, header) | lagged | no |
 | `state_at(n)` | 1 (header) | named | no |
 | `get_capacity`, `get_margin_ratios`, `get_pool_snapshot`, `get_mark`, `get_maker_equities` | `state()` plus the pinned read below | lagged | as the pinned read |
@@ -305,7 +304,7 @@ Two costs in this table are not what they should be and are debts:
 - Out to the strategy layer: every reader a strategy holds is one of
   these three handles; a research source over block-pinned reads is
   `StateAt` behind a trait; a live cache is seeded from
-  `get_perp_snapshot` and then follows the feed.
+  `get_snapshot` and then follows the feed.
 
 ## Terminology
 
@@ -342,9 +341,9 @@ Two costs in this table are not what they should be and are debts:
 - **The liquidation twins are keyed by an enum called `Book`.** It names
   which kind of position a liquidation targets, and "book" is retired
   vocabulary; it should be a position kind.
-- **`get_perp_config` is four separate calls** where `get_perp_snapshot`
-  is one batch; the older read predates the batch and has not been folded
-  into it.
+- **`get_config` is four separate calls** where `get_snapshot` is one
+  batch; the older read predates the batch and has not been folded into
+  it.
 - **Transience is by wrapping path for bare calls.** A now-read that
   fails at the transport surfaces as an ABI error the classification does
   not recognise as transient (SDK #115). Pinned reads classify correctly;
