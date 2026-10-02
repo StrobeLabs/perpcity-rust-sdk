@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Breaking
+
+- **`Side` moved from `types` to `math::capacity`**, and `ValidationError::NoBandCapacity` no longer carries one. The crate-root re-export is unchanged, so `perpcity_sdk::Side` and the prelude still work; only a direct `perpcity_sdk::types::Side` breaks. `Side` lives with the capacity math because that is what it keys, and because having it in the human surface made `errors` — the module everything else depends on — depend on a module above it. The error drops the field for the same reason: the caller passed the side in, so naming it back was both redundant and the thing holding the inverted edge in place.
+
+### Fixed
+
+- **`TransactionError::TooManyInFlight` is transient.** A full pipeline clears itself as receipts arrive, exactly as `NonceDesynced` does, but `is_transient` said otherwise — so a backoff loop gave up on the condition that resolves itself while retrying ones that do not. Nothing is signed or sent when it fires.
+
 ## [0.5.0] - 2026-10-02
 
 A release about units. Every quantity the contract settles now carries its unit

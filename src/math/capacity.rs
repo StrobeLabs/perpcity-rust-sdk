@@ -40,9 +40,32 @@ use crate::errors::ValidationError;
 use crate::math::BlockContext;
 use crate::math::range::{MakerBand, TickRange};
 use crate::math::swap::amount0_delta;
-use crate::types::Side;
 use crate::units::fixed_point::{Rounding, mul_div};
 use crate::units::{LUnits, PerpAtoms, SqrtPrice};
+
+/// A taker direction: a long gains when the price rises, a short when it
+/// falls.
+///
+/// It lives with the capacity math because that is what a side keys: a
+/// band's liquidity above the pool price backs longs and below it backs
+/// shorts, and every side-keyed read is on [`Capacity`] or
+/// [`MarketCapacity`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum Side {
+    /// Long exposure (positive perp delta).
+    Long,
+    /// Short exposure (negative perp delta).
+    Short,
+}
+
+impl std::fmt::Display for Side {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Long => "long",
+            Self::Short => "short",
+        })
+    }
+}
 
 /// Taker capacity per side: the contract's `Capacity` struct.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -178,7 +201,6 @@ pub fn liquidity_for_capacity(
         return Err(ValidationError::NoBandCapacity {
             lower: range.lower(),
             upper: range.upper(),
-            side,
         });
     }
     // `getAmount0ForLiquidity` is floor(floor(L·2^96·(hi − lo) / hi) / lo),
@@ -511,8 +533,7 @@ mod tests {
             ),
             Err(ValidationError::NoBandCapacity {
                 lower: 20_000,
-                upper: 30_000,
-                side: Side::Long
+                upper: 30_000
             })
         ));
         assert!(matches!(
@@ -522,10 +543,7 @@ mod tests {
                 Side::Short,
                 PerpAtoms::new(1)
             ),
-            Err(ValidationError::NoBandCapacity {
-                side: Side::Short,
-                ..
-            })
+            Err(ValidationError::NoBandCapacity { .. })
         ));
         assert_eq!(
             liquidity_for_capacity(
@@ -554,17 +572,11 @@ mod tests {
         let one = PerpAtoms::new(1);
         assert!(matches!(
             liquidity_for_capacity(sqrt_lower, &range(30_000, 38_000), Side::Short, one),
-            Err(ValidationError::NoBandCapacity {
-                side: Side::Short,
-                ..
-            })
+            Err(ValidationError::NoBandCapacity { .. })
         ));
         assert!(matches!(
             liquidity_for_capacity(sqrt_upper, &range(30_000, 38_000), Side::Long, one),
-            Err(ValidationError::NoBandCapacity {
-                side: Side::Long,
-                ..
-            })
+            Err(ValidationError::NoBandCapacity { .. })
         ));
     }
 
