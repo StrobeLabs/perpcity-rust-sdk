@@ -51,10 +51,12 @@
 
 use alloy::primitives::U256;
 
+mod accumulators;
 mod amount;
 pub(crate) mod fixed_point;
 mod price;
 
+pub use accumulators::{Earnings, FeeGrowth, Funding, FundingPerSqrtPrice};
 pub use amount::{PerpAtoms, PerpDelta, UsdcAtoms, UsdcDelta};
 pub use price::{Price, SqrtPrice};
 
@@ -232,4 +234,48 @@ macro_rules! delta {
     };
 }
 
-pub(crate) use {count, delta};
+/// Declare a cumulative accumulator: a word the contract only ever adds
+/// to, which a position reads as the growth since its own checkpoint rather
+/// than as a level. `$from` and `$enc` name the fixed-point encoding, so it
+/// is spoken at both boundaries and nowhere in between.
+///
+/// The rule for taking that difference is written per type rather than
+/// generated here, because it is the one thing these do not share: see
+/// [`Funding::since`], [`Earnings::since`] and [`FeeGrowth::since`].
+macro_rules! accumulator {
+    (
+        $(#[$doc:meta])*
+        $name:ident($prim:ty), $from:ident / $enc:ident
+    ) => {
+        $(#[$doc])*
+        #[derive(
+            Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash,
+            serde::Serialize, serde::Deserialize,
+        )]
+        #[repr(transparent)]
+        #[serde(transparent)]
+        pub struct $name($prim);
+
+        impl $name {
+            /// Nothing accumulated.
+            pub const ZERO: Self = Self(<$prim>::ZERO);
+
+            /// From the contract's word.
+            pub const fn $from(word: $prim) -> Self {
+                Self(word)
+            }
+
+            /// The word, for exact arithmetic.
+            pub const fn $enc(self) -> $prim {
+                self.0
+            }
+
+            /// Whether nothing has accumulated.
+            pub fn is_zero(self) -> bool {
+                self.0.is_zero()
+            }
+        }
+    };
+}
+
+pub(crate) use {accumulator, count, delta};

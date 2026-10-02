@@ -37,21 +37,23 @@ use crate::math::liquidity::amounts_for_liquidity;
 use crate::math::swap::amount0_delta;
 use crate::math::tick::get_sqrt_ratio_at_tick;
 use crate::units::fixed_point::{
-    Rounding, add_i, add_u, mul_div, s_full_mul_div, sub_i, sub_u, to_i256, u512_to_u256,
+    Rounding, add_i, add_u, mul_div, s_full_mul_div, sub_i, to_i256, u512_to_u256,
 };
-use crate::units::{PerpAtoms, PerpDelta, Price, SqrtPrice, UsdcAtoms, UsdcDelta};
+use crate::units::{
+    Earnings, FeeGrowth, Funding, FundingPerSqrtPrice, PerpAtoms, PerpDelta, Price, SqrtPrice,
+    UsdcAtoms, UsdcDelta,
+};
 
 /// One `TickInfo` from the Perp's tick funding mapping (`s.ticks[tick]`),
 /// fields named after the contract's.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TickFunding {
     /// `TickInfo.cumlFundingOppX96`: cumulative funding checkpointed on the
-    /// opposite side of the tick (X96), signed.
-    pub cuml_funding_opp_x96: I256,
+    /// opposite side of the tick.
+    pub cuml_funding_opp: Funding,
     /// `TickInfo.cumlFundingDivSqrtPOppX96`: cumulative funding divided by
-    /// sqrt price, checkpointed on the opposite side of the tick (X96),
-    /// signed.
-    pub cuml_funding_div_sqrt_p_opp_x96: I256,
+    /// sqrt price, checkpointed on the opposite side of the tick.
+    pub cuml_funding_div_sqrt_p_opp: FundingPerSqrtPrice,
 }
 
 /// Block-pinned market-wide inputs shared by every position's computation.
@@ -63,14 +65,14 @@ pub struct TickFunding {
 pub struct MakerMarketSnapshot {
     /// Block containing all state in this snapshot.
     pub block: BlockContext,
-    /// Cumulative funding (X96), signed.
-    pub funding_x96: I256,
-    /// Cumulative funding divided by sqrt price (X96), signed.
-    pub funding_div_sqrt_p_x96: I256,
-    /// Cumulative long utilization earnings (X96).
-    pub long_util_earnings_x96: U256,
-    /// Cumulative short utilization earnings (X96).
-    pub short_util_earnings_x96: U256,
+    /// Cumulative funding.
+    pub funding: Funding,
+    /// Cumulative funding divided by sqrt price.
+    pub funding_div_sqrt_p: FundingPerSqrtPrice,
+    /// Cumulative long utilization earnings.
+    pub long_util_earnings: Earnings,
+    /// Cumulative short utilization earnings.
+    pub short_util_earnings: Earnings,
     /// Current pool tick.
     pub tick: i32,
     /// The pool's current price.
@@ -136,7 +138,7 @@ pub struct MakerState {
     pub delta_usd: UsdcDelta,
     /// `positions(id).lastCumlFundingX96`: market funding cumulative at the
     /// position's last settle.
-    pub last_cuml_funding_x96: I256,
+    pub last_cuml_funding: Funding,
     /// `makerDetails(id).tickLower`: band lower tick.
     pub tick_lower: i32,
     /// `makerDetails(id).tickUpper`: band upper tick.
@@ -145,32 +147,31 @@ pub struct MakerState {
     pub liquidity: u128,
     /// `makerDetails(id).lastLongUtilEarningsX96`: long utilization
     /// earnings cumulative at the last settle.
-    pub last_long_util_earnings_x96: U256,
+    pub last_long_util_earnings: Earnings,
     /// `makerDetails(id).lastShortUtilEarningsX96`: short utilization
     /// earnings cumulative at the last settle.
-    pub last_short_util_earnings_x96: U256,
+    pub last_short_util_earnings: Earnings,
     /// `makerDetails(id).capacity.long`.
     pub cap_long: PerpAtoms,
     /// `makerDetails(id).capacity.short`.
     pub cap_short: PerpAtoms,
     /// `makerDetails(id).lastCumlFunding.belowX96`: below-band funding
     /// cumulative at the last settle.
-    pub last_below_x96: I256,
+    pub last_below: Funding,
     /// `makerDetails(id).lastCumlFunding.withinX96`: within-band funding
     /// cumulative at the last settle.
-    pub last_within_x96: I256,
+    pub last_within: Funding,
     /// `makerDetails(id).lastCumlFunding.divSqrtPriceWithinX96`:
     /// within-band funding/sqrtP cumulative at the last settle.
-    pub last_div_sqrt_within_x96: I256,
+    pub last_div_sqrt_within: FundingPerSqrtPrice,
     /// `ticks[tickLower]`: the lower tick's live funding checkpoints.
     pub tick_lower_funding: TickFunding,
     /// `ticks[tickUpper]`: the upper tick's live funding checkpoints.
     pub tick_upper_funding: TickFunding,
-    /// V4 `feeGrowthInside1X128` of the band now (X128; wraps by design).
-    pub fee_growth_inside1_x128: U256,
-    /// V4 `feeGrowthInside1LastX128` at the position's last checkpoint
-    /// (X128; wraps by design).
-    pub fee_growth_inside1_last_x128: U256,
+    /// V4 `feeGrowthInside1X128` of the band now.
+    pub fee_growth_inside1: FeeGrowth,
+    /// V4 `feeGrowthInside1LastX128` at the position's last checkpoint.
+    pub fee_growth_inside1_last: FeeGrowth,
 }
 
 /// What the contract would settle if the position were touched now.
@@ -409,25 +410,17 @@ impl MakerMarketSnapshot {
             U256::from(INTERVAL),
             Rounding::TowardZero,
         )?;
-        let funding_accrued = s_full_mul_div(
+        let funding_accrued = Funding::from_x96(s_full_mul_div(
             I256::unchecked_from(accrual.funding_per_day_wad),
             to_i256(dt_days, "accrual dt in days")?,
             WAD,
             Rounding::TowardZero,
-        )?;
-        self.funding_x96 = add_i(
-            self.funding_x96,
-            funding_accrued,
-            "accrued funding cumulative",
-        )?;
-        self.funding_div_sqrt_p_x96 = add_i(
-            self.funding_div_sqrt_p_x96,
-            s_full_mul_div(
-                funding_accrued,
-                I256::from_raw(Q96),
-                self.sqrt_price.x96(),
-                Rounding::TowardZero,
-            )?,
+        )?);
+        self.funding = self
+            .funding
+            .advanced_by(funding_accrued, "accrued funding cumulative")?;
+        self.funding_div_sqrt_p = self.funding_div_sqrt_p.advanced_by(
+            funding_accrued.per_sqrt_price(self.sqrt_price)?,
             "accrued funding/sqrtP cumulative",
         )?;
 
@@ -445,26 +438,24 @@ impl MakerMarketSnapshot {
             Rounding::TowardZero,
         )?;
         if !accrual.cap_long.is_zero() {
-            self.long_util_earnings_x96 = add_u(
-                self.long_util_earnings_x96,
-                mul_div(
+            self.long_util_earnings = self.long_util_earnings.advanced_by(
+                Earnings::from_x96(mul_div(
                     lu_accrued,
                     U256::from(accrual.oi_long.atoms()),
                     U256::from(accrual.cap_long.atoms()),
                     Rounding::TowardZero,
-                )?,
+                )?),
                 "accrued long utilization cumulative",
             )?;
         }
         if !accrual.cap_short.is_zero() {
-            self.short_util_earnings_x96 = add_u(
-                self.short_util_earnings_x96,
-                mul_div(
+            self.short_util_earnings = self.short_util_earnings.advanced_by(
+                Earnings::from_x96(mul_div(
                     su_accrued,
                     U256::from(accrual.oi_short.atoms()),
                     U256::from(accrual.cap_short.atoms()),
                     Rounding::TowardZero,
-                )?,
+                )?),
                 "accrued short utilization cumulative",
             )?;
         }
@@ -527,11 +518,10 @@ impl AccruedMakerSnapshot {
         // ── makerFeesAccrued ────────────────────────────────────────────
         let base_funding = s_full_mul_div(
             I256::unchecked_from(maker.delta_perp.atoms()),
-            sub_i(
-                self.0.funding_x96,
-                maker.last_cuml_funding_x96,
-                "funding cumulative delta",
-            )?,
+            self.0
+                .funding
+                .since(maker.last_cuml_funding, "funding cumulative delta")?
+                .x96(),
             Q96,
             Rounding::Up,
         )?;
@@ -546,26 +536,22 @@ impl AccruedMakerSnapshot {
         )?;
         let funding_below = s_full_mul_div(
             perp_below,
-            sub_i(mf_below, maker.last_below_x96, "below-band funding delta")?,
+            mf_below
+                .since(maker.last_below, "below-band funding delta")?
+                .x96(),
             Q96,
             Rounding::Up,
         )?;
-        let div_amm = sub_i(
-            mf_div_sqrt_within,
-            maker.last_div_sqrt_within_x96,
-            "within-band funding/sqrtP delta",
-        )?;
-        let d_within = sub_i(
-            mf_within,
-            maker.last_within_x96,
-            "within-band funding delta",
-        )?;
-        let div_upper = s_full_mul_div(
-            d_within,
-            I256::from_raw(Q96),
-            sqrt_u.x96(),
-            Rounding::TowardZero,
-        )?;
+        let div_amm = mf_div_sqrt_within
+            .since(
+                maker.last_div_sqrt_within,
+                "within-band funding/sqrtP delta",
+            )?
+            .x96();
+        let div_upper = mf_within
+            .since(maker.last_within, "within-band funding delta")?
+            .per_sqrt_price(sqrt_u)?
+            .x96();
         let funding_within = s_full_mul_div(
             I256::unchecked_from(maker.liquidity),
             sub_i(div_amm, div_upper, "within-band funding components")?,
@@ -580,32 +566,36 @@ impl AccruedMakerSnapshot {
 
         let long_util = mul_div(
             U256::from(maker.cap_long.atoms()),
-            sub_u(
-                self.0.long_util_earnings_x96,
-                maker.last_long_util_earnings_x96,
-                "long utilization checkpoint ahead of market cumulative",
-            )?,
+            self.0
+                .long_util_earnings
+                .since(
+                    maker.last_long_util_earnings,
+                    "long utilization checkpoint ahead of market cumulative",
+                )?
+                .x96(),
             Q96,
             Rounding::TowardZero,
         )?;
         let short_util = mul_div(
             U256::from(maker.cap_short.atoms()),
-            sub_u(
-                self.0.short_util_earnings_x96,
-                maker.last_short_util_earnings_x96,
-                "short utilization checkpoint ahead of market cumulative",
-            )?,
+            self.0
+                .short_util_earnings
+                .since(
+                    maker.last_short_util_earnings,
+                    "short utilization checkpoint ahead of market cumulative",
+                )?
+                .x96(),
             Q96,
             Rounding::TowardZero,
         )?;
 
         // ── V4 LP fees: liquidity × Δ feeGrowthInside1 / 2^128 ──────────
-        // Fee growth deltas wrap by design in Uniswap; wrapping_sub matches.
         let fee_growth_delta = maker
-            .fee_growth_inside1_x128
-            .wrapping_sub(maker.fee_growth_inside1_last_x128);
-        let lp_fees =
-            u512_to_u256((U512::from(maker.liquidity) * U512::from(fee_growth_delta)) >> 128)?;
+            .fee_growth_inside1
+            .since(maker.fee_growth_inside1_last);
+        let lp_fees = u512_to_u256(
+            (U512::from(maker.liquidity) * U512::from(fee_growth_delta.x128())) >> 128,
+        )?;
 
         // ── valPnl (maker overload) ─────────────────────────────────────
         // A SIGNED sum, per `PerpLogic.valPnl` (`perpcity-contracts@4bbe554f`):
@@ -676,82 +666,63 @@ impl MakerMarketSnapshot {
     fn maker_cuml_funding(
         &self,
         maker: &MakerState,
-    ) -> Result<(I256, I256, I256), ValidationError> {
+    ) -> Result<(Funding, Funding, FundingPerSqrtPrice), ValidationError> {
         let lower = &maker.tick_lower_funding;
         let upper = &maker.tick_upper_funding;
 
         let (below, div_below_lower) = if self.tick >= maker.tick_lower {
-            (
-                lower.cuml_funding_opp_x96,
-                lower.cuml_funding_div_sqrt_p_opp_x96,
-            )
+            (lower.cuml_funding_opp, lower.cuml_funding_div_sqrt_p_opp)
         } else {
             (
-                sub_i(
-                    self.funding_x96,
-                    lower.cuml_funding_opp_x96,
-                    "lower-tick funding checkpoint",
-                )?,
-                sub_i(
-                    self.funding_div_sqrt_p_x96,
-                    lower.cuml_funding_div_sqrt_p_opp_x96,
+                self.funding
+                    .since(lower.cuml_funding_opp, "lower-tick funding checkpoint")?,
+                self.funding_div_sqrt_p.since(
+                    lower.cuml_funding_div_sqrt_p_opp,
                     "lower-tick funding/sqrtP checkpoint",
                 )?,
             )
         };
         let (below_upper, div_below_upper) = if self.tick >= maker.tick_upper {
-            (
-                upper.cuml_funding_opp_x96,
-                upper.cuml_funding_div_sqrt_p_opp_x96,
-            )
+            (upper.cuml_funding_opp, upper.cuml_funding_div_sqrt_p_opp)
         } else {
             (
-                sub_i(
-                    self.funding_x96,
-                    upper.cuml_funding_opp_x96,
-                    "upper-tick funding checkpoint",
-                )?,
-                sub_i(
-                    self.funding_div_sqrt_p_x96,
-                    upper.cuml_funding_div_sqrt_p_opp_x96,
+                self.funding
+                    .since(upper.cuml_funding_opp, "upper-tick funding checkpoint")?,
+                self.funding_div_sqrt_p.since(
+                    upper.cuml_funding_div_sqrt_p_opp,
                     "upper-tick funding/sqrtP checkpoint",
                 )?,
             )
         };
         Ok((
             below,
-            sub_i(below_upper, below, "within-band cumulative funding")?,
-            sub_i(
-                div_below_upper,
-                div_below_lower,
-                "within-band cumulative funding/sqrtP",
-            )?,
+            below_upper.since(below, "within-band cumulative funding")?,
+            div_below_upper.since(div_below_lower, "within-band cumulative funding/sqrtP")?,
         ))
     }
 }
 
 /// Compute `feeGrowthInside1X128` for a band from the global growth and the
 /// two ticks' `feeGrowthOutside1X128`, per Uniswap's `getFeeGrowthInside`.
-/// Fee growth arithmetic wraps by design.
 pub(crate) fn fee_growth_inside1(
-    global_x128: U256,
-    outside_lower_x128: U256,
-    outside_upper_x128: U256,
+    global: FeeGrowth,
+    outside_lower: FeeGrowth,
+    outside_upper: FeeGrowth,
     tick_lower: i32,
     tick_upper: i32,
     current_tick: i32,
-) -> U256 {
+) -> FeeGrowth {
     let below = if current_tick >= tick_lower {
-        outside_lower_x128
+        outside_lower
     } else {
-        global_x128.wrapping_sub(outside_lower_x128)
+        global.since(outside_lower)
     };
     let above = if current_tick < tick_upper {
-        outside_upper_x128
+        outside_upper
     } else {
-        global_x128.wrapping_sub(outside_upper_x128)
+        global.since(outside_upper)
     };
-    global_x128.wrapping_sub(below).wrapping_sub(above)
+    global.since(below).since(above)
 }
 
 /// Maximum settle-component magnitude accepted into a
@@ -803,10 +774,12 @@ mod tests {
                 hash: B256::ZERO,
                 timestamp: 1788260191,
             },
-            funding_x96: i("-5817301051923220663714693204286"),
-            funding_div_sqrt_p_x96: i("-1332253658657311045256648214058"),
-            long_util_earnings_x96: u("361206840527920163630096383165"),
-            short_util_earnings_x96: u("512938731932611361114843741066"),
+            funding: Funding::from_x96(i("-5817301051923220663714693204286")),
+            funding_div_sqrt_p: FundingPerSqrtPrice::from_x96(i(
+                "-1332253658657311045256648214058",
+            )),
+            long_util_earnings: Earnings::from_x96(u("361206840527920163630096383165")),
+            short_util_earnings: Earnings::from_x96(u("512938731932611361114843741066")),
             tick: 28543,
             sqrt_price: SqrtPrice::from_x96(u("330115084885190701587787251116")),
             mark: Price::from_x96(u("1375470108235016714305503507110")),
@@ -829,31 +802,33 @@ mod tests {
             liq_margin_ratio_e6: 50_000,
             delta_perp: PerpDelta::new(-134328),
             delta_usd: UsdcDelta::new(-137992489),
-            last_cuml_funding_x96: i("-10162710870332004796583430787875"),
+            last_cuml_funding: Funding::from_x96(i("-10162710870332004796583430787875")),
             tick_lower: 33810,
             tick_upper: 34710,
             liquidity: 570282387,
-            last_long_util_earnings_x96: u("105980308075601242205274025040"),
-            last_short_util_earnings_x96: u("79412639757423009537924209956"),
+            last_long_util_earnings: Earnings::from_x96(u("105980308075601242205274025040")),
+            last_short_util_earnings: Earnings::from_x96(u("79412639757423009537924209956")),
             cap_long: PerpAtoms::new(134327),
             cap_short: PerpAtoms::new(4493830),
-            last_below_x96: i("-10162710870332004796583430787875"),
-            last_within_x96: I256::ZERO,
-            last_div_sqrt_within_x96: I256::ZERO,
+            last_below: Funding::from_x96(i("-10162710870332004796583430787875")),
+            last_within: Funding::ZERO,
+            last_div_sqrt_within: FundingPerSqrtPrice::ZERO,
             tick_lower_funding: TickFunding {
-                cuml_funding_opp_x96: i("2413781515094096341489935830192"),
-                cuml_funding_div_sqrt_p_opp_x96: i("440051787484224301957495580026"),
+                cuml_funding_opp: Funding::from_x96(i("2413781515094096341489935830192")),
+                cuml_funding_div_sqrt_p_opp: FundingPerSqrtPrice::from_x96(i(
+                    "440051787484224301957495580026",
+                )),
             },
             tick_upper_funding: TickFunding::default(),
-            fee_growth_inside1_x128: fee_growth_inside1(
-                u("28998515790711655837734081581084912609"),
-                u("4607862979514044838473387691959359354"),
-                U256::ZERO,
+            fee_growth_inside1: fee_growth_inside1(
+                FeeGrowth::from_x128(u("28998515790711655837734081581084912609")),
+                FeeGrowth::from_x128(u("4607862979514044838473387691959359354")),
+                FeeGrowth::ZERO,
                 33810,
                 34710,
                 28543,
             ),
-            fee_growth_inside1_last_x128: U256::ZERO,
+            fee_growth_inside1_last: FeeGrowth::ZERO,
         };
         (market, accrual, maker)
     }
@@ -1088,12 +1063,14 @@ mod tests {
     #[test]
     fn maker_cuml_funding_branches_match_the_contract() {
         let i = |v: i64| I256::try_from(v).unwrap();
+        let f = |v: i64| Funding::from_x96(i(v));
+        let d = |v: i64| FundingPerSqrtPrice::from_x96(i(v));
         let market_at = |tick: i32| MakerMarketSnapshot {
             block: BlockContext::default(),
-            funding_x96: i(1000),
-            funding_div_sqrt_p_x96: i(500),
-            long_util_earnings_x96: U256::ZERO,
-            short_util_earnings_x96: U256::ZERO,
+            funding: f(1000),
+            funding_div_sqrt_p: d(500),
+            long_util_earnings: Earnings::ZERO,
+            short_util_earnings: Earnings::ZERO,
             tick,
             sqrt_price: SqrtPrice::from_x96(Q96),
             mark: Price::from_x96(Q96),
@@ -1102,29 +1079,29 @@ mod tests {
         maker.tick_lower = 0;
         maker.tick_upper = 100;
         maker.tick_lower_funding = TickFunding {
-            cuml_funding_opp_x96: i(30),
-            cuml_funding_div_sqrt_p_opp_x96: i(7),
+            cuml_funding_opp: f(30),
+            cuml_funding_div_sqrt_p_opp: d(7),
         };
         maker.tick_upper_funding = TickFunding {
-            cuml_funding_opp_x96: i(20),
-            cuml_funding_div_sqrt_p_opp_x96: i(3),
+            cuml_funding_opp: f(20),
+            cuml_funding_div_sqrt_p_opp: d(3),
         };
 
         // Above range: both checkpoints are already below-side values.
         // (below, within, divWithin) = (Lo, Uo − Lo, Ud − Ld).
         assert_eq!(
             market_at(150).maker_cuml_funding(&maker).unwrap(),
-            (i(30), i(-10), i(-4))
+            (f(30), f(-10), d(-4))
         );
         // Inside range: the upper tick flips to (F − Uo, D − Ud).
         assert_eq!(
             market_at(50).maker_cuml_funding(&maker).unwrap(),
-            (i(30), i(1000 - 20 - 30), i(500 - 3 - 7))
+            (f(30), f(1000 - 20 - 30), d(500 - 3 - 7))
         );
         // Below range: both flip — within collapses to checkpoint deltas.
         assert_eq!(
             market_at(-50).maker_cuml_funding(&maker).unwrap(),
-            (i(1000 - 30), i(10), i(4))
+            (f(1000 - 30), f(10), d(4))
         );
     }
 
@@ -1147,8 +1124,8 @@ mod tests {
     fn checkpoint_ahead_of_market_cumulative_is_an_error_not_a_number() {
         let (market, accrual, mut maker) = golden_market_and_maker();
         let market = market.accrued(&accrual).unwrap();
-        maker.last_long_util_earnings_x96 =
-            market.snapshot().long_util_earnings_x96 + U256::from(1u8);
+        maker.last_long_util_earnings =
+            Earnings::from_x96(market.snapshot().long_util_earnings.x96() + U256::from(1u8));
         let err = market.maker_equity(&maker).unwrap_err();
         assert!(matches!(err, ValidationError::Overflow { .. }), "{err}");
     }
@@ -1208,23 +1185,16 @@ mod tests {
 
     #[test]
     fn fee_growth_inside_matches_uniswap_branches() {
-        let g = U256::from(1000u64);
-        let ol = U256::from(100u64);
-        let ou = U256::from(50u64);
+        let fg = |v: u64| FeeGrowth::from_x128(U256::from(v));
+        let (g, ol, ou) = (fg(1000), fg(100), fg(50));
         // In range: inside = global − outsideLower − outsideUpper.
-        assert_eq!(
-            fee_growth_inside1(g, ol, ou, -10, 10, 0),
-            U256::from(850u64)
-        );
+        assert_eq!(fee_growth_inside1(g, ol, ou, -10, 10, 0), fg(850));
         // Below range: below = g − ol, above = ou → inside = ol − ou.
-        assert_eq!(
-            fee_growth_inside1(g, ol, ou, -10, 10, -20),
-            U256::from(50u64)
-        );
+        assert_eq!(fee_growth_inside1(g, ol, ou, -10, 10, -20), fg(50));
         // Above range: below = ol, above = g − ou → inside = ou − ol (wraps).
         assert_eq!(
             fee_growth_inside1(g, ol, ou, -10, 10, 20),
-            U256::from(50u64).wrapping_sub(U256::from(100u64))
+            fg(50).since(fg(100))
         );
     }
 }

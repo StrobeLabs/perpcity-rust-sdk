@@ -59,6 +59,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::contracts::{IBeacon, IPoolManagerState, Perp, PerpDeployedEvents, SwapResult};
 use crate::convert::{price_x96_to_f64, scale_from_6dec, unpack_balance_delta};
+use crate::units::{Earnings, Funding, FundingPerSqrtPrice};
 
 /// Funding/utilization rates are scaled by 1e18 per day on-chain.
 const WAD_F64: f64 = 1e18;
@@ -97,19 +98,20 @@ pub struct MakerSettle {
     pub lp_fees: f64,
 }
 
-/// Raw cumulative funding/fee trackers (X96 / X128 fixed-point, on-chain units).
+/// The market's cumulative accumulators as the event carried them.
 ///
-/// These are internal accounting values surfaced verbatim — convert downstream
-/// only if needed.
+/// Levels, not growth: what a position owes or has earned is the difference
+/// between one of these and the position's own checkpoint, which each type
+/// takes with the rule that accumulator follows.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[allow(missing_docs)]
 pub struct CumulativesInfo {
-    pub funding_x96: I256,
-    pub funding_div_sqrt_p_x96: I256,
-    pub long_util_payments_x96: U256,
-    pub short_util_payments_x96: U256,
-    pub long_util_earnings_x96: U256,
-    pub short_util_earnings_x96: U256,
+    pub funding: Funding,
+    pub funding_div_sqrt_p: FundingPerSqrtPrice,
+    pub long_util_payments: Earnings,
+    pub short_util_payments: Earnings,
+    pub long_util_earnings: Earnings,
+    pub short_util_earnings: Earnings,
 }
 
 /// A decoded market event with human-readable values where meaningful.
@@ -227,11 +229,11 @@ pub enum MarketEvent {
         ending_tick: i32,
         zero_for_one: bool,
     },
-    /// A tick was initialized (raw X96 funding trackers).
+    /// A tick was initialized, with the funding checkpoints it starts from.
     TickInitialized {
         tick: i32,
-        cuml_funding_opp_x96: I256,
-        cuml_funding_div_sqrt_p_opp_x96: I256,
+        cuml_funding_opp: Funding,
+        cuml_funding_div_sqrt_p_opp: FundingPerSqrtPrice,
     },
     /// A tick was deleted.
     TickDeleted {
@@ -430,12 +432,12 @@ pub fn decode_log(log: &Log) -> Option<MarketEvent> {
         let c = &d.cumls;
         Some(MarketEvent::CumulativesAccrued {
             cumulatives: CumulativesInfo {
-                funding_x96: c.fundingX96,
-                funding_div_sqrt_p_x96: c.fundingDivSqrtPX96,
-                long_util_payments_x96: c.longUtilPaymentsX96,
-                short_util_payments_x96: c.shortUtilPaymentsX96,
-                long_util_earnings_x96: c.longUtilEarningsX96,
-                short_util_earnings_x96: c.shortUtilEarningsX96,
+                funding: Funding::from_x96(c.fundingX96),
+                funding_div_sqrt_p: FundingPerSqrtPrice::from_x96(c.fundingDivSqrtPX96),
+                long_util_payments: Earnings::from_x96(c.longUtilPaymentsX96),
+                short_util_payments: Earnings::from_x96(c.shortUtilPaymentsX96),
+                long_util_earnings: Earnings::from_x96(c.longUtilEarningsX96),
+                short_util_earnings: Earnings::from_x96(c.shortUtilEarningsX96),
             },
         })
     } else if topic0 == Perp::RatesAndEmasRefreshed::SIGNATURE_HASH {
@@ -459,8 +461,8 @@ pub fn decode_log(log: &Log) -> Option<MarketEvent> {
         let d = decode_raw::<Perp::TickInitialized>(log)?;
         Some(MarketEvent::TickInitialized {
             tick: d.tick.as_i32(),
-            cuml_funding_opp_x96: d.cumlFundingOppX96,
-            cuml_funding_div_sqrt_p_opp_x96: d.cumlFundingDivSqrtPOppX96,
+            cuml_funding_opp: Funding::from_x96(d.cumlFundingOppX96),
+            cuml_funding_div_sqrt_p_opp: FundingPerSqrtPrice::from_x96(d.cumlFundingDivSqrtPOppX96),
         })
     } else if topic0 == Perp::TickDeleted::SIGNATURE_HASH {
         let d = decode_raw::<Perp::TickDeleted>(log)?;

@@ -178,9 +178,9 @@ that carries it, the invariant it holds, and the node that owns it.
 | A price pair | [`PricePair`](src/math/pricing.rs#L41) | the contract's `uint128` pair, spot or EMA | [`math::pricing`](src/math/pricing.rs#L1) |
 | Capacity and its draw | [`MarketCapacity`](src/math/capacity.rs#L78) | capacity and open interest from one block | [`math::capacity`](src/math/capacity.rs#L1) |
 | The pool at a block | [`PoolSnapshot`](src/math/swap.rs#L71) | price, liquidity and a tick map that reconciles with it | [`math::swap`](src/math/swap.rs#L1) |
-| A settle previewed | [`MakerEquityBreakdown`](src/math/maker_equity.rs#L188) | exact atoms, the contract's arithmetic | [`math::maker_equity`](src/math/maker_equity.rs#L1) |
-| A block | [`BlockContext`](src/math/mod.rs#L50) | number, hash, timestamp of one header | [`math`](src/math/DESIGN.md) |
-| An event | [`MarketEvent`](src/events.rs#L120) | the market's vocabulary, human units, either tense | [`events`](src/events/DESIGN.md) |
+| A settle previewed | [`MakerEquityBreakdown`](src/math/maker_equity.rs#L189) | exact atoms, the contract's arithmetic | [`math::maker_equity`](src/math/maker_equity.rs#L1) |
+| A block | [`BlockContext`](src/math/mod.rs#L51) | number, hash, timestamp of one header | [`math`](src/math/DESIGN.md) |
+| An event | [`MarketEvent`](src/events.rs#L122) | the market's vocabulary, human units, either tense | [`events`](src/events/DESIGN.md) |
 | An event in chain order | [`TapeEvent`](src/history/tape.rs#L56), [`ChainPoint`](src/history/tape.rs#L47) | block and log index | [`history`](src/history/DESIGN.md) |
 | Custody over time | [`OwnershipLog`](src/history/tape.rs#L100) | a fold of transfers; owner at a chain point | [`history`](src/history/DESIGN.md) |
 | A print | [`IndexPrint`](src/history/beacon.rs#L20) | the index at a chain point and time | [`history`](src/history/DESIGN.md) |
