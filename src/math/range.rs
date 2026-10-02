@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use crate::constants::{MAX_TICK, MIN_TICK};
 use crate::errors::ValidationError;
 use crate::math::tick::get_sqrt_ratio_at_tick;
-use crate::units::SqrtPrice;
+use crate::units::{LUnits, SqrtPrice};
 
 /// A tick interval `[lower, upper)`, valid by construction: `lower <
 /// upper`, both within the V4 domain `[MIN_TICK, MAX_TICK]`.
@@ -116,12 +116,12 @@ pub struct MakerBand {
     /// The range the liquidity stands in.
     pub range: TickRange,
     /// Liquidity in the range, in the pool's liquidity units.
-    pub liquidity: u128,
+    pub liquidity: LUnits,
 }
 
 impl MakerBand {
     /// `liquidity` standing in `range`.
-    pub const fn new(range: TickRange, liquidity: u128) -> Self {
+    pub const fn new(range: TickRange, liquidity: LUnits) -> Self {
         Self { range, liquidity }
     }
 }
@@ -186,7 +186,7 @@ mod tests {
     /// A range read back from JSON is checked like one built in code.
     #[test]
     fn serde_keeps_the_invariant() {
-        let band = MakerBand::new(range(38_340, 38_430), 7);
+        let band = MakerBand::new(range(38_340, 38_430), LUnits::new(7));
         let json = serde_json::to_string(&band).unwrap();
         assert_eq!(
             json,

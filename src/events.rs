@@ -59,7 +59,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::contracts::{IBeacon, IPoolManagerState, Perp, PerpDeployedEvents, SwapResult};
 use crate::convert::{price_x96_to_f64, scale_from_6dec, unpack_balance_delta};
-use crate::units::{Earnings, Funding, FundingPerSqrtPrice};
+use crate::units::{Earnings, Funding, FundingPerSqrtPrice, LDelta, LUnits};
 
 /// Funding/utilization rates are scaled by 1e18 per day on-chain.
 const WAD_F64: f64 = 1e18;
@@ -147,7 +147,7 @@ pub enum MarketEvent {
     },
     MakerLiquidated {
         pos_id: U256,
-        liquidity_amount: u128,
+        liquidity_amount: LUnits,
         liq_fee: f64,
     },
     MakerBackstopped {
@@ -278,7 +278,7 @@ pub enum MarketEvent {
         sender: Address,
         tick_lower: i32,
         tick_upper: i32,
-        liquidity_delta: i128,
+        liquidity_delta: LDelta,
         salt: B256,
     },
 
@@ -360,7 +360,7 @@ pub fn decode_log(log: &Log) -> Option<MarketEvent> {
         let d = decode_raw::<Perp::MakerLiquidated>(log)?;
         Some(MarketEvent::MakerLiquidated {
             pos_id: d.posId,
-            liquidity_amount: d.liquidityAmount,
+            liquidity_amount: LUnits::new(d.liquidityAmount),
             liq_fee: u256_usdc(d.liqFee)?,
         })
     } else if topic0 == Perp::MakerBackstopped::SIGNATURE_HASH {
@@ -515,7 +515,7 @@ pub fn decode_log(log: &Log) -> Option<MarketEvent> {
             sender: d.sender,
             tick_lower: d.tickLower.as_i32(),
             tick_upper: d.tickUpper.as_i32(),
-            liquidity_delta: i128::try_from(d.liquidityDelta).ok()?,
+            liquidity_delta: LDelta::new(i128::try_from(d.liquidityDelta).ok()?),
             salt: d.salt,
         })
     } else if topic0 == Perp::Transfer::SIGNATURE_HASH {
@@ -883,7 +883,7 @@ mod tests {
                 assert_eq!(id, pool_id);
                 assert_eq!(sender, perp);
                 assert_eq!((tick_lower, tick_upper), (-60, 120));
-                assert_eq!(liquidity_delta, -570_282_387);
+                assert_eq!(liquidity_delta, LDelta::new(-570_282_387));
                 assert_eq!(U256::from_be_bytes(salt.0), U256::from(54u64));
             }
             other => panic!("expected ModifyLiquidity, got {other:?}"),

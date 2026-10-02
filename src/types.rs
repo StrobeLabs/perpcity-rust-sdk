@@ -26,6 +26,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::math::BlockContext;
 use crate::math::pricing::Emas;
+use crate::units::{LDelta, LUnits};
 
 /// The addresses every market on a chain shares.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -277,7 +278,7 @@ pub struct OpenMakerParams {
     /// Upper bound of the price range.
     pub price_upper: f64,
     /// Liquidity amount to provide.
-    pub liquidity: u128,
+    pub liquidity: LUnits,
     /// Maximum amount of token0 willing to deposit.
     pub max_amt0_in: u128,
     /// Maximum amount of token1 willing to deposit.
@@ -322,7 +323,7 @@ pub struct AdjustMakerParams {
     /// Margin delta in USDC: positive to deposit, negative to withdraw.
     pub margin_delta: f64,
     /// Liquidity delta: positive to add, negative to remove.
-    pub liquidity_delta: i128,
+    pub liquidity_delta: LDelta,
     /// Max/min amount of token0 for slippage protection.
     pub amt0_limit: u128,
     /// Max/min amount of token1 for slippage protection.

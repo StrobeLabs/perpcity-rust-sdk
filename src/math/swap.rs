@@ -18,15 +18,15 @@ use crate::math::tick::{
     UNISWAP_MAX_TICK, UNISWAP_MIN_TICK, get_sqrt_ratio_at_tick, get_tick_at_sqrt_ratio,
 };
 use crate::units::fixed_point::{Rounding, mul_div, u512_to_u256};
-use crate::units::{PerpAtoms, PerpDelta, SqrtPrice, UsdcAtoms, UsdcDelta};
+use crate::units::{LDelta, LUnits, PerpAtoms, PerpDelta, SqrtPrice, UsdcAtoms, UsdcDelta};
 
 /// Liquidity stored at an initialized tick.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TickLiquidity {
     /// Total liquidity referencing the tick.
-    pub gross: u128,
+    pub gross: LUnits,
     /// Liquidity change when crossing from left to right.
-    pub net: i128,
+    pub net: LDelta,
 }
 
 /// The constraint that stopped the quote.
@@ -76,7 +76,7 @@ pub struct PoolSnapshot {
     /// Current pool tick.
     pub tick: i32,
     /// Active liquidity at the current tick.
-    pub liquidity: u128,
+    pub liquidity: LUnits,
     /// Initialized ticks keyed in ascending order.
     pub ticks: BTreeMap<i32, TickLiquidity>,
     /// Minimum price the Perp swap itself can reach.
@@ -98,7 +98,7 @@ impl Default for PoolSnapshot {
             block: BlockContext::default(),
             sqrt_price: SqrtPrice::from_x96(Q96),
             tick: 0,
-            liquidity: 0,
+            liquidity: LUnits::ZERO,
             ticks: BTreeMap::new(),
             protocol_sqrt_min: SqrtPrice::from_x96(MIN_SWAP_SQRT_PRICE_X96),
             protocol_sqrt_max: SqrtPrice::from_x96(MAX_SWAP_SQRT_PRICE_X96),
@@ -124,7 +124,7 @@ pub struct TakerQuote {
     /// Ending tick using V4 boundary semantics.
     pub tick_after: i32,
     /// Active liquidity after the swap.
-    pub liquidity_after: u128,
+    pub liquidity_after: LUnits,
     /// Initialized ticks crossed by the swap.
     pub ticks_crossed: Vec<i32>,
     /// Whether the complete requested amount filled.
@@ -181,7 +181,7 @@ struct Simulation {
     usd_delta: i128,
     sqrt_after: U256,
     tick_after: i32,
-    liquidity_after: u128,
+    liquidity_after: LUnits,
     crossed: Vec<i32>,
     fully_filled: bool,
     hit_limit: bool,
@@ -282,22 +282,21 @@ impl PoolSnapshot {
         &self,
         lower: i32,
         upper: i32,
-        delta: i128,
+        delta: LDelta,
     ) -> Result<Self, ValidationError> {
         if lower >= upper {
             return Err(ValidationError::InvalidTickRange { lower, upper });
         }
-        // i128::MIN has no negation, so its removal at `upper` would overflow.
-        if delta == i128::MIN {
-            return Err(ValidationError::Overflow {
-                context: "liquidity delta".into(),
-            });
-        }
+        // The upper tick carries the negation of the lower tick's change,
+        // which is where `i128::MIN` is refused.
+        let removed = delta.negated()?;
         let mut next = self.clone();
         apply_tick_delta(&mut next.ticks, lower, delta, delta)?;
-        apply_tick_delta(&mut next.ticks, upper, -delta, delta)?;
+        apply_tick_delta(&mut next.ticks, upper, removed, delta)?;
         if self.tick >= lower && self.tick < upper {
-            next.liquidity = add_liquidity(self.liquidity, delta)?;
+            next.liquidity = self
+                .liquidity
+                .checked_add_signed(delta, "active liquidity")?;
         }
         Ok(next)
     }
@@ -362,42 +361,44 @@ impl PoolSnapshot {
                 sqrt_after,
                 used,
                 other,
-            } = if liquidity == 0 {
+            } = if liquidity.is_zero() {
                 StepResult {
                     sqrt_after: target,
                     used: U256::ZERO,
                     other: U256::ZERO,
                 }
             } else if zero_for_one {
-                let to_target = amount0_delta(target, sqrt, liquidity, Rounding::Up)?;
+                let l = liquidity.units();
+                let to_target = amount0_delta(target, sqrt, l, Rounding::Up)?;
                 if remaining >= to_target {
                     StepResult {
                         sqrt_after: target,
                         used: to_target,
-                        other: amount1_delta(target, sqrt, liquidity, Rounding::TowardZero)?,
+                        other: amount1_delta(target, sqrt, l, Rounding::TowardZero)?,
                     }
                 } else {
-                    let after = next_sqrt_from_amount0(sqrt, liquidity, remaining, true)?;
+                    let after = next_sqrt_from_amount0(sqrt, l, remaining, true)?;
                     StepResult {
                         sqrt_after: after,
                         used: remaining,
-                        other: amount1_delta(after, sqrt, liquidity, Rounding::TowardZero)?,
+                        other: amount1_delta(after, sqrt, l, Rounding::TowardZero)?,
                     }
                 }
             } else {
-                let to_target = amount0_delta(sqrt, target, liquidity, Rounding::TowardZero)?;
+                let l = liquidity.units();
+                let to_target = amount0_delta(sqrt, target, l, Rounding::TowardZero)?;
                 if remaining >= to_target {
                     StepResult {
                         sqrt_after: target,
                         used: to_target,
-                        other: amount1_delta(sqrt, target, liquidity, Rounding::Up)?,
+                        other: amount1_delta(sqrt, target, l, Rounding::Up)?,
                     }
                 } else {
-                    let after = next_sqrt_from_amount0(sqrt, liquidity, remaining, false)?;
+                    let after = next_sqrt_from_amount0(sqrt, l, remaining, false)?;
                     StepResult {
                         sqrt_after: after,
                         used: remaining,
-                        other: amount1_delta(sqrt, after, liquidity, Rounding::Up)?,
+                        other: amount1_delta(sqrt, after, l, Rounding::Up)?,
                     }
                 }
             };
@@ -409,8 +410,12 @@ impl PoolSnapshot {
             let mut crossed_this_step = false;
             if sqrt == sqrt_next {
                 if let Some(info) = self.ticks.get(&next_tick) {
-                    let net = if zero_for_one { -info.net } else { info.net };
-                    liquidity = add_liquidity(liquidity, net)?;
+                    let net = if zero_for_one {
+                        info.net.negated()?
+                    } else {
+                        info.net
+                    };
+                    liquidity = liquidity.checked_add_signed(net, "active liquidity")?;
                     crossed.push(next_tick);
                     crossed_this_step = true;
                 }
@@ -457,64 +462,29 @@ impl PoolSnapshot {
 pub(crate) fn active_liquidity(
     ticks: &BTreeMap<i32, TickLiquidity>,
     tick: i32,
-) -> Result<u128, ValidationError> {
+) -> Result<LUnits, ValidationError> {
     ticks
         .range(..=tick)
-        .try_fold(0u128, |active, (_, info)| {
-            if info.net >= 0 {
-                active.checked_add(info.net as u128)
-            } else {
-                active.checked_sub(info.net.unsigned_abs())
-            }
-        })
-        .ok_or_else(|| ValidationError::Overflow {
-            context: "reconstructing active liquidity".into(),
+        .try_fold(LUnits::ZERO, |active, (_, info)| {
+            active.checked_add_signed(info.net, "reconstructing active liquidity")
         })
 }
 
 fn apply_tick_delta(
     ticks: &mut BTreeMap<i32, TickLiquidity>,
     tick: i32,
-    net_delta: i128,
-    gross_delta: i128,
+    net_delta: LDelta,
+    gross_delta: LDelta,
 ) -> Result<(), ValidationError> {
     let entry = ticks.entry(tick).or_default();
-    entry.net = entry
-        .net
-        .checked_add(net_delta)
-        .ok_or_else(|| ValidationError::Overflow {
-            context: "tick liquidityNet".into(),
-        })?;
-    if gross_delta >= 0 {
-        entry.gross = entry
-            .gross
-            .checked_add(gross_delta as u128)
-            .ok_or_else(|| ValidationError::Overflow {
-                context: "tick liquidityGross".into(),
-            })?;
-    } else {
-        entry.gross = entry
-            .gross
-            .checked_sub(gross_delta.unsigned_abs())
-            .ok_or_else(|| ValidationError::Overflow {
-                context: "tick liquidityGross".into(),
-            })?;
-    }
-    if entry.gross == 0 {
+    entry.net = entry.net.checked_add(net_delta, "tick liquidityNet")?;
+    entry.gross = entry
+        .gross
+        .checked_add_signed(gross_delta, "tick liquidityGross")?;
+    if entry.gross.is_zero() {
         ticks.remove(&tick);
     }
     Ok(())
-}
-
-fn add_liquidity(liquidity: u128, delta: i128) -> Result<u128, ValidationError> {
-    if delta >= 0 {
-        liquidity.checked_add(delta as u128)
-    } else {
-        liquidity.checked_sub(delta.unsigned_abs())
-    }
-    .ok_or_else(|| ValidationError::Overflow {
-        context: "active liquidity".into(),
-    })
 }
 
 /// Uniswap `SqrtPriceMath.getAmount0Delta`: token0 owed between two sqrt
@@ -599,26 +569,39 @@ fn u256_to_i128(value: U256) -> Result<i128, ValidationError> {
 mod tests {
     use super::*;
 
+    /// Liquidity standing at a tick, gross then net.
+    fn tick_liquidity(gross: u128, net: i128) -> TickLiquidity {
+        TickLiquidity {
+            gross: LUnits::new(gross),
+            net: LDelta::new(net),
+        }
+    }
+
+    /// A depth in the pool's units.
+    fn l(units: u128) -> LUnits {
+        LUnits::new(units)
+    }
+
     /// Only ticks at or below the current one count, each by its net.
     #[test]
     fn active_liquidity_is_the_net_at_or_below_the_tick() {
         let ticks = BTreeMap::from([
-            (-60, TickLiquidity { gross: 5, net: 5 }),
-            (0, TickLiquidity { gross: 3, net: -2 }),
-            (60, TickLiquidity { gross: 7, net: 7 }),
+            (-60, tick_liquidity(5, 5)),
+            (0, tick_liquidity(3, -2)),
+            (60, tick_liquidity(7, 7)),
         ]);
-        assert_eq!(active_liquidity(&ticks, -61).unwrap(), 0);
-        assert_eq!(active_liquidity(&ticks, -60).unwrap(), 5);
-        assert_eq!(active_liquidity(&ticks, 0).unwrap(), 3);
-        assert_eq!(active_liquidity(&ticks, 59).unwrap(), 3);
-        assert_eq!(active_liquidity(&ticks, 60).unwrap(), 10);
+        assert_eq!(active_liquidity(&ticks, -61).unwrap(), l(0));
+        assert_eq!(active_liquidity(&ticks, -60).unwrap(), l(5));
+        assert_eq!(active_liquidity(&ticks, 0).unwrap(), l(3));
+        assert_eq!(active_liquidity(&ticks, 59).unwrap(), l(3));
+        assert_eq!(active_liquidity(&ticks, 60).unwrap(), l(10));
     }
 
     /// More liquidity leaving than ever entered is a map that cannot be a
     /// pool's, not a wrapped sum.
     #[test]
     fn a_net_below_zero_is_an_overflow() {
-        let ticks = BTreeMap::from([(0, TickLiquidity { gross: 1, net: -1 })]);
+        let ticks = BTreeMap::from([(0, tick_liquidity(1, -1))]);
         assert!(matches!(
             active_liquidity(&ticks, 0),
             Err(ValidationError::Overflow { .. })
@@ -631,24 +614,17 @@ mod tests {
     }
 
     fn pool() -> PoolSnapshot {
+        let depth: u128 = 1_000_000_000_000;
         let mut market = PoolSnapshot {
-            liquidity: 1_000_000_000_000,
+            liquidity: l(depth),
             ..Default::default()
         };
-        market.ticks.insert(
-            -300,
-            TickLiquidity {
-                gross: market.liquidity,
-                net: market.liquidity as i128,
-            },
-        );
-        market.ticks.insert(
-            300,
-            TickLiquidity {
-                gross: market.liquidity,
-                net: -(market.liquidity as i128),
-            },
-        );
+        market
+            .ticks
+            .insert(-300, tick_liquidity(depth, depth as i128));
+        market
+            .ticks
+            .insert(300, tick_liquidity(depth, -(depth as i128)));
         market
     }
 
@@ -675,36 +651,25 @@ mod tests {
     /// A pool whose current price sits exactly on the initialized tick at 0:
     /// −600 (+L), 0 (+M), 600 (−(L+M)).
     fn pool_at_boundary(tick: i32) -> PoolSnapshot {
-        let l: u128 = 1_000_000_000_000;
-        let m: u128 = 500_000_000_000;
+        let lower: u128 = 1_000_000_000_000;
+        let middle: u128 = 500_000_000_000;
         // Active liquidity is the sum of net for initialized ticks <= tick.
-        let liquidity = if tick >= 0 { l + m } else { l };
+        let active = if tick >= 0 { lower + middle } else { lower };
         let mut market = PoolSnapshot {
             sqrt_price: get_sqrt_ratio_at_tick(0).unwrap(),
             tick,
-            liquidity,
+            liquidity: l(active),
             ..Default::default()
         };
-        market.ticks.insert(
-            -600,
-            TickLiquidity {
-                gross: l,
-                net: l as i128,
-            },
-        );
-        market.ticks.insert(
-            0,
-            TickLiquidity {
-                gross: m,
-                net: m as i128,
-            },
-        );
+        market
+            .ticks
+            .insert(-600, tick_liquidity(lower, lower as i128));
+        market
+            .ticks
+            .insert(0, tick_liquidity(middle, middle as i128));
         market.ticks.insert(
             600,
-            TickLiquidity {
-                gross: l + m,
-                net: -((l + m) as i128),
-            },
+            tick_liquidity(lower + middle, -((lower + middle) as i128)),
         );
         market
     }

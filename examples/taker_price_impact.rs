@@ -13,8 +13,8 @@ use alloy::primitives::{Address, U256};
 use alloy::signers::local::PrivateKeySigner;
 use perpcity_sdk::constants::TICK_SPACING;
 use perpcity_sdk::{
-    ChainReader, HftTransport, PerpClient, PerpDelta, QuoteConstraints, SqrtPrice, TransportConfig,
-    align_tick_down,
+    ChainReader, HftTransport, LDelta, PerpClient, PerpDelta, QuoteConstraints, SqrtPrice,
+    TransportConfig, align_tick_down,
 };
 
 #[tokio::main]
@@ -73,7 +73,7 @@ async fn main() -> perpcity_sdk::Result<()> {
     // mutating the shared live snapshot.
     let lower = align_tick_down(market.tick - 10 * TICK_SPACING, TICK_SPACING);
     let upper = align_tick_down(market.tick + 10 * TICK_SPACING, TICK_SPACING);
-    let seeded = market.with_liquidity_delta(lower, upper, 1_000_000_000)?;
+    let seeded = market.with_liquidity_delta(lower, upper, LDelta::new(1_000_000_000))?;
     let seeded_buy = seeded.quote_perp(PerpDelta::new(1_000_000))?;
     println!(
         "same buy after hypothetical liquidity: usd_delta={} end_sqrt={}",

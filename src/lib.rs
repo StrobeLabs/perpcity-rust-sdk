@@ -92,7 +92,10 @@ pub use types::{
 };
 
 #[doc(inline)]
-pub use units::{PerpAtoms, PerpDelta, Price, SqrtPrice, UsdcAtoms, UsdcDelta};
+pub use units::{
+    Earnings, FeeGrowth, Funding, FundingPerSqrtPrice, LDelta, LUnits, PerpAtoms, PerpDelta, Price,
+    SqrtPrice, UsdcAtoms, UsdcDelta,
+};
 
 #[doc(inline)]
 pub use math::BlockContext;

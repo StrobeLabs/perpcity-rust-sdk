@@ -40,8 +40,8 @@ use crate::units::fixed_point::{
     Rounding, add_i, add_u, mul_div, s_full_mul_div, sub_i, to_i256, u512_to_u256,
 };
 use crate::units::{
-    Earnings, FeeGrowth, Funding, FundingPerSqrtPrice, PerpAtoms, PerpDelta, Price, SqrtPrice,
-    UsdcAtoms, UsdcDelta,
+    Earnings, FeeGrowth, Funding, FundingPerSqrtPrice, LUnits, PerpAtoms, PerpDelta, Price,
+    SqrtPrice, UsdcAtoms, UsdcDelta,
 };
 
 /// One `TickInfo` from the Perp's tick funding mapping (`s.ticks[tick]`),
@@ -144,7 +144,7 @@ pub struct MakerState {
     /// `makerDetails(id).tickUpper`: band upper tick.
     pub tick_upper: i32,
     /// `makerDetails(id).liquidity`: V4 liquidity in the band.
-    pub liquidity: u128,
+    pub liquidity: LUnits,
     /// `makerDetails(id).lastLongUtilEarningsX96`: long utilization
     /// earnings cumulative at the last settle.
     pub last_long_util_earnings: Earnings,
@@ -529,7 +529,7 @@ impl AccruedMakerSnapshot {
             amount0_delta(
                 sqrt_l.x96(),
                 sqrt_u.x96(),
-                maker.liquidity,
+                maker.liquidity.units(),
                 Rounding::TowardZero,
             )?,
             "band perp amount",
@@ -553,7 +553,7 @@ impl AccruedMakerSnapshot {
             .per_sqrt_price(sqrt_u)?
             .x96();
         let funding_within = s_full_mul_div(
-            I256::unchecked_from(maker.liquidity),
+            I256::unchecked_from(maker.liquidity.units()),
             sub_i(div_amm, div_upper, "within-band funding components")?,
             Q96,
             Rounding::Up,
@@ -594,7 +594,7 @@ impl AccruedMakerSnapshot {
             .fee_growth_inside1
             .since(maker.fee_growth_inside1_last);
         let lp_fees = u512_to_u256(
-            (U512::from(maker.liquidity) * U512::from(fee_growth_delta.x128())) >> 128,
+            (U512::from(maker.liquidity.units()) * U512::from(fee_growth_delta.x128())) >> 128,
         )?;
 
         // ── valPnl (maker overload) ─────────────────────────────────────
@@ -805,7 +805,7 @@ mod tests {
             last_cuml_funding: Funding::from_x96(i("-10162710870332004796583430787875")),
             tick_lower: 33810,
             tick_upper: 34710,
-            liquidity: 570282387,
+            liquidity: LUnits::new(570282387),
             last_long_util_earnings: Earnings::from_x96(u("105980308075601242205274025040")),
             last_short_util_earnings: Earnings::from_x96(u("79412639757423009537924209956")),
             cap_long: PerpAtoms::new(134327),

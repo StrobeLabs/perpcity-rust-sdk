@@ -15,6 +15,7 @@ use crate::types::{
     AdjustMakerParams, AdjustMakerResult, AdjustTakerParams, AdjustTakerResult,
     ExactAdjustTakerParams, ExactOpenTakerParams, OpenMakerParams, OpenResult, OpenTakerParams,
 };
+use crate::units::LUnits;
 
 use super::market::{Book, validate_fee_recipient};
 use super::{MAX_APPROVAL, PerpClient, i32_to_i24};
@@ -221,7 +222,7 @@ impl PerpClient {
             margin: margin_scaled as u128,
             tickLower: i32_to_i24(tick_lower),
             tickUpper: i32_to_i24(tick_upper),
-            liquidity: params.liquidity,
+            liquidity: params.liquidity.units(),
             maxAmt0In: U256::from(params.max_amt0_in),
             maxAmt1In: U256::from(params.max_amt1_in),
         };
@@ -371,7 +372,7 @@ impl PerpClient {
         let wire_params = crate::contracts::AdjustMakerParams {
             posId: params.pos_id,
             marginDelta: margin_delta,
-            liquidityDelta: params.liquidity_delta,
+            liquidityDelta: params.liquidity_delta.units(),
             amt0Limit: U256::from(params.amt0_limit),
             amt1Limit: U256::from(params.amt1_limit),
         };
@@ -379,7 +380,7 @@ impl PerpClient {
         tracing::debug!(
             pos_id = %params.pos_id,
             margin_delta = params.margin_delta,
-            liquidity_delta = params.liquidity_delta,
+            liquidity_delta = params.liquidity_delta.units(),
             ?urgency,
             "adjusting maker position"
         );
@@ -414,14 +415,10 @@ impl PerpClient {
     pub async fn close_maker(
         &self,
         pos_id: U256,
-        current_liquidity: u128,
+        current_liquidity: LUnits,
         urgency: Urgency,
     ) -> Result<AdjustMakerResult> {
-        let liquidity_delta = i128::try_from(current_liquidity).map(|l| -l).map_err(|_| {
-            ValidationError::Overflow {
-                context: format!("liquidity {current_liquidity} exceeds i128::MAX"),
-            }
-        })?;
+        let liquidity_delta = current_liquidity.negated()?;
         self.adjust_maker(
             &AdjustMakerParams {
                 pos_id,
