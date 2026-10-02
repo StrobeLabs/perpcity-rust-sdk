@@ -26,7 +26,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::math::BlockContext;
 use crate::math::pricing::Emas;
-use crate::units::{LDelta, LUnits};
+use crate::units::{LDelta, LUnits, Ratio};
 
 /// The addresses every market on a chain shares.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -74,60 +74,24 @@ pub struct Bounds {
     pub min_taker_leverage: f64,
     /// Maximum taker leverage (e.g. `100.0`).
     pub max_taker_leverage: f64,
-    /// Margin ratio at which taker liquidation occurs, as a fraction
-    /// (e.g. `0.005` = 0.5%).
-    pub liquidation_taker_ratio: f64,
+    /// Margin ratio at which taker liquidation occurs.
+    pub liquidation_taker_ratio: Ratio,
 }
 
-/// One side's margin-ratio thresholds, as fractions of position value.
+/// One side's margin-ratio thresholds.
 ///
-/// Built from the module's 1e6-scaled `uint24` values by [`Self::from_e6`];
-/// the `*_e6` getters recover them exactly.
+/// Each is the contract's own `uint24` at 1e6, so the integers here are the
+/// module's values rather than a fraction recovered from one; `fraction()`
+/// on any of them is the number a person reads.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct MarginRatioTriple {
     /// Minimum equity over value to open or increase a position.
-    pub init: f64,
-    /// Equity over value below which the position is liquidatable.
-    pub liquidation: f64,
+    pub init: Ratio,
+    /// Equity over value below which the position is liquidatable — the
+    /// ratio a position opened now stores as its own.
+    pub liquidation: Ratio,
     /// Equity over value below which the position can be backstopped.
-    pub backstop: f64,
-}
-
-/// `MarginRatioTriple` fractions are the on-chain e6 values over this.
-const RATIO_E6_F64: f64 = 1_000_000.0;
-
-impl MarginRatioTriple {
-    /// Build from the module's 1e6-scaled values (`1_000_000` = 100%).
-    pub fn from_e6(init_e6: u32, liquidation_e6: u32, backstop_e6: u32) -> Self {
-        Self {
-            init: init_e6 as f64 / RATIO_E6_F64,
-            liquidation: liquidation_e6 as f64 / RATIO_E6_F64,
-            backstop: backstop_e6 as f64 / RATIO_E6_F64,
-        }
-    }
-
-    /// `init` as the on-chain 1e6-scaled value.
-    pub fn init_e6(&self) -> u32 {
-        to_e6(self.init)
-    }
-
-    /// `liquidation` as the on-chain 1e6-scaled value — the
-    /// `liq_margin_ratio_e6` a position opened now stores.
-    pub fn liquidation_e6(&self) -> u32 {
-        to_e6(self.liquidation)
-    }
-
-    /// `backstop` as the on-chain 1e6-scaled value.
-    pub fn backstop_e6(&self) -> u32 {
-        to_e6(self.backstop)
-    }
-}
-
-/// Recover a `uint24` e6 value from its fraction. Exact: the fraction came
-/// from an integer below 2^24 divided by 1e6, so the product rounds back
-/// to that integer.
-fn to_e6(ratio: f64) -> u32 {
-    (ratio * RATIO_E6_F64).round() as u32
+    pub backstop: Ratio,
 }
 
 /// The market's `IMarginRatios` module: maker and taker thresholds.
@@ -135,7 +99,7 @@ fn to_e6(ratio: f64) -> u32 {
 /// These are the module's CURRENT values, applied to positions opened from
 /// now on; an open position keeps the liquidation ratio stored on it at
 /// open (`positions(id).liqMarginRatio`, surfaced by
-/// [`MakerEquityBreakdown::liq_margin_ratio_e6`](crate::MakerEquityBreakdown::liq_margin_ratio_e6)).
+/// [`MakerEquityBreakdown::liquidation_margin_ratio`](crate::MakerEquityBreakdown::liquidation_margin_ratio)).
 /// Read with [`MarketReader::get_margin_ratios`](crate::MarketReader::get_margin_ratios).
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct MarginRatios {
@@ -145,19 +109,23 @@ pub struct MarginRatios {
     pub taker: MarginRatioTriple,
 }
 
-/// Fee percentages for a perpetual market, expressed as fractions of 1.
+/// A market's fee rates, each a share of the thing it is charged on.
 ///
-/// For example, `0.001` means 0.1% (which is `1_000` on-chain at 1e6 scale).
+/// The contract holds all four as `uint24` at 1e6, so `1_000` is 0.1%, and
+/// `fraction()` on any of them is the number a person reads. They are
+/// [`Ratio`] rather than `f64` because a liquidation's fee *rate* and the
+/// USDC a liquidation *settles* are both called the liquidation fee, and as
+/// two floats they substituted for each other.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Fees {
-    /// Fee paid to the perp creator.
-    pub creator_fee: f64,
-    /// Fee that goes to the insurance fund.
-    pub insurance_fee: f64,
-    /// Fee earned by liquidity providers.
-    pub lp_fee: f64,
-    /// Fee charged on liquidations.
-    pub liquidation_fee: f64,
+    /// Share paid to the perp creator.
+    pub creator_fee: Ratio,
+    /// Share that goes to the insurance fund.
+    pub insurance_fee: Ratio,
+    /// Share earned by liquidity providers.
+    pub lp_fee: Ratio,
+    /// Share charged on a liquidation, applied to the position's value.
+    pub liquidation_fee: Ratio,
 }
 
 /// A taker direction: a long gains when the price rises, a short when it
@@ -417,30 +385,36 @@ mod tests {
     }
 
     /// The deployed HORMUZ-TRAFFIC module values (2026-09-07): maker
-    /// 1.0 / 0.9 / 0.8, taker 0.1 / 0.05 / 0.02 — and the e6 getters
-    /// recover every `uint24` exactly.
+    /// 1.0 / 0.9 / 0.8, taker 0.1 / 0.05 / 0.02. The ratios are stored as
+    /// the module's own `uint24`, so the fractions are derived and nothing
+    /// round-trips through a float.
     #[test]
-    fn margin_ratio_triple_e6_roundtrip() {
-        let maker = MarginRatioTriple::from_e6(1_000_000, 900_000, 800_000);
+    fn margin_ratio_triple_holds_the_modules_own_integers() {
+        let triple = |init, liquidation, backstop| MarginRatioTriple {
+            init: Ratio::from_e6(init).unwrap(),
+            liquidation: Ratio::from_e6(liquidation).unwrap(),
+            backstop: Ratio::from_e6(backstop).unwrap(),
+        };
+        let maker = triple(1_000_000, 900_000, 800_000);
         assert_eq!(
-            (maker.init, maker.liquidation, maker.backstop),
+            (
+                maker.init.fraction(),
+                maker.liquidation.fraction(),
+                maker.backstop.fraction()
+            ),
             (1.0, 0.9, 0.8)
         );
-        let taker = MarginRatioTriple::from_e6(100_000, 50_000, 20_000);
+        let taker = triple(100_000, 50_000, 20_000);
         assert_eq!(
-            (taker.init, taker.liquidation, taker.backstop),
+            (
+                taker.init.fraction(),
+                taker.liquidation.fraction(),
+                taker.backstop.fraction()
+            ),
             (0.1, 0.05, 0.02)
         );
-        assert_eq!(
-            (maker.init_e6(), maker.liquidation_e6(), maker.backstop_e6()),
-            (1_000_000, 900_000, 800_000)
-        );
-        assert_eq!(
-            (taker.init_e6(), taker.liquidation_e6(), taker.backstop_e6()),
-            (100_000, 50_000, 20_000)
-        );
         for e6 in [0u32, 1, 3, 333_333, 999_999, (1 << 24) - 1] {
-            assert_eq!(MarginRatioTriple::from_e6(e6, e6, e6).init_e6(), e6);
+            assert_eq!(triple(e6, e6, e6).init.e6(), e6);
         }
 
         let ratios = MarginRatios { maker, taker };

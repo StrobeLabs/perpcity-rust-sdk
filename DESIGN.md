@@ -178,7 +178,7 @@ that carries it, the invariant it holds, and the node that owns it.
 | A price pair | [`PricePair`](src/math/pricing.rs#L41) | the contract's `uint128` pair, spot or EMA | [`math::pricing`](src/math/pricing.rs#L1) |
 | Capacity and its draw | [`MarketCapacity`](src/math/capacity.rs#L78) | capacity and open interest from one block | [`math::capacity`](src/math/capacity.rs#L1) |
 | The pool at a block | [`PoolSnapshot`](src/math/swap.rs#L71) | price, liquidity and a tick map that reconciles with it | [`math::swap`](src/math/swap.rs#L1) |
-| A settle previewed | [`MakerEquityBreakdown`](src/math/maker_equity.rs#L189) | exact atoms, the contract's arithmetic | [`math::maker_equity`](src/math/maker_equity.rs#L1) |
+| A settle previewed | [`MakerEquityBreakdown`](src/math/maker_equity.rs#L188) | exact atoms, the contract's arithmetic | [`math::maker_equity`](src/math/maker_equity.rs#L1) |
 | A block | [`BlockContext`](src/math/mod.rs#L51) | number, hash, timestamp of one header | [`math`](src/math/DESIGN.md) |
 | An event | [`MarketEvent`](src/events.rs#L122) | the market's vocabulary, human units, either tense | [`events`](src/events/DESIGN.md) |
 | An event in chain order | [`TapeEvent`](src/history/tape.rs#L56), [`ChainPoint`](src/history/tape.rs#L47) | block and log index | [`history`](src/history/DESIGN.md) |
@@ -254,9 +254,12 @@ or changes this list, in the same PR, with the reason.
   whether it is transient.
 - Every public type is in exactly one node's table.
 
-Two more are reported, not enforced, until #124's unit conversions land:
-no `f64` in a function or field whose name carries a wire suffix, and a
-suffixed field has the primitive its suffix names.
+Two more used to be reported rather than enforced: no `f64` behind a name
+carrying a wire suffix, and a suffixed field holding the primitive its
+suffix names. Both were about a spelling convention standing in for a type.
+The unit types replaced that convention, so the last suffixed name is gone
+and both checks became vacuous; they are deleted rather than kept as
+predicates that can no longer fire.
 
 One more is a ratchet rather than a rule, and runs where there is a base
 to compare with, on every pull request: a structure the report

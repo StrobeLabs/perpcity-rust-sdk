@@ -130,25 +130,25 @@ pub enum MarketEvent {
     },
     /// A maker converted to a taker. On the deployed contracts this is
     /// also how a maker liquidation surfaces (`is_liquidation`, with
-    /// `liq_fee` in USDC); the untailed shape from contracts that split
+    /// `liquidation_fee` in USDC); the untailed shape from contracts that split
     /// liquidations into dedicated events decodes as `0.0` / `false`.
     MakerConverted {
         pos_id: U256,
         settle: MakerSettle,
-        liq_fee: f64,
+        liquidation_fee: f64,
         is_liquidation: bool,
     },
     /// A maker closed. Tails as on [`Self::MakerConverted`].
     MakerClosed {
         pos_id: U256,
         settle: MakerSettle,
-        liq_fee: f64,
+        liquidation_fee: f64,
         is_liquidation: bool,
     },
     MakerLiquidated {
         pos_id: U256,
         liquidity_amount: LUnits,
-        liq_fee: f64,
+        liquidation_fee: f64,
     },
     MakerBackstopped {
         pos_id: U256,
@@ -169,19 +169,19 @@ pub enum MarketEvent {
         util_fees: f64,
     },
     /// A taker closed; the deployed event unifies close and liquidation
-    /// (`is_liquidation`, with `liq_fee` in USDC).
+    /// (`is_liquidation`, with `liquidation_fee` in USDC).
     TakerClosed {
         pos_id: U256,
         swap: SwapInfo,
         funding: f64,
         util_fees: f64,
-        liq_fee: f64,
+        liquidation_fee: f64,
         is_liquidation: bool,
     },
     TakerLiquidated {
         pos_id: U256,
         perp_amount: u128,
-        liq_fee: f64,
+        liquidation_fee: f64,
     },
     TakerBackstopped {
         pos_id: U256,
@@ -322,7 +322,7 @@ pub fn decode_log(log: &Log) -> Option<MarketEvent> {
         Some(MarketEvent::MakerConverted {
             pos_id: d.posId,
             settle: maker_settle(d.funding, d.longUtilFees, d.shortUtilFees, d.lpFees)?,
-            liq_fee: 0.0,
+            liquidation_fee: 0.0,
             is_liquidation: false,
         })
     } else if topic0 == Perp::MakerClosed::SIGNATURE_HASH {
@@ -330,7 +330,7 @@ pub fn decode_log(log: &Log) -> Option<MarketEvent> {
         Some(MarketEvent::MakerClosed {
             pos_id: d.posId,
             settle: maker_settle(d.funding, d.longUtilFees, d.shortUtilFees, d.lpFees)?,
-            liq_fee: 0.0,
+            liquidation_fee: 0.0,
             is_liquidation: false,
         })
 
@@ -345,7 +345,7 @@ pub fn decode_log(log: &Log) -> Option<MarketEvent> {
         Some(MarketEvent::MakerConverted {
             pos_id: d.posId,
             settle: maker_settle(d.funding, d.longUtilFees, d.shortUtilFees, d.lpFees)?,
-            liq_fee: u256_usdc(d.liqFee)?,
+            liquidation_fee: u256_usdc(d.liqFee)?,
             is_liquidation: d.isLiquidation,
         })
     } else if topic0 == PerpDeployedEvents::MakerClosed::SIGNATURE_HASH {
@@ -353,7 +353,7 @@ pub fn decode_log(log: &Log) -> Option<MarketEvent> {
         Some(MarketEvent::MakerClosed {
             pos_id: d.posId,
             settle: maker_settle(d.funding, d.longUtilFees, d.shortUtilFees, d.lpFees)?,
-            liq_fee: u256_usdc(d.liqFee)?,
+            liquidation_fee: u256_usdc(d.liqFee)?,
             is_liquidation: d.isLiquidation,
         })
     } else if topic0 == Perp::MakerLiquidated::SIGNATURE_HASH {
@@ -361,7 +361,7 @@ pub fn decode_log(log: &Log) -> Option<MarketEvent> {
         Some(MarketEvent::MakerLiquidated {
             pos_id: d.posId,
             liquidity_amount: LUnits::new(d.liquidityAmount),
-            liq_fee: u256_usdc(d.liqFee)?,
+            liquidation_fee: u256_usdc(d.liqFee)?,
         })
     } else if topic0 == Perp::MakerBackstopped::SIGNATURE_HASH {
         let d = decode_raw::<Perp::MakerBackstopped>(log)?;
@@ -394,7 +394,7 @@ pub fn decode_log(log: &Log) -> Option<MarketEvent> {
             swap: swap_info(&d.sr)?,
             funding: i256_usdc(d.funding)?,
             util_fees: u256_usdc(d.utilFees)?,
-            liq_fee: u256_usdc(d.liqFee)?,
+            liquidation_fee: u256_usdc(d.liqFee)?,
             is_liquidation: d.isLiquidation,
         })
     } else if topic0 == Perp::TakerLiquidated::SIGNATURE_HASH {
@@ -402,7 +402,7 @@ pub fn decode_log(log: &Log) -> Option<MarketEvent> {
         Some(MarketEvent::TakerLiquidated {
             pos_id: d.posId,
             perp_amount: d.perpAmount,
-            liq_fee: u256_usdc(d.liqFee)?,
+            liquidation_fee: u256_usdc(d.liqFee)?,
         })
     } else if topic0 == Perp::TakerBackstopped::SIGNATURE_HASH {
         let d = decode_raw::<Perp::TakerBackstopped>(log)?;
@@ -658,11 +658,11 @@ mod tests {
             MarketEvent::TakerLiquidated {
                 pos_id,
                 perp_amount,
-                liq_fee,
+                liquidation_fee,
             } => {
                 assert_eq!(pos_id, U256::from(7u64));
                 assert_eq!(perp_amount, 50_000_000u128);
-                assert!((liq_fee - 1.0).abs() < 1e-9);
+                assert!((liquidation_fee - 1.0).abs() < 1e-9);
             }
             _ => panic!("expected TakerLiquidated"),
         }
@@ -729,7 +729,7 @@ mod tests {
             MarketEvent::MakerClosed {
                 pos_id,
                 settle,
-                liq_fee,
+                liquidation_fee,
                 is_liquidation,
             } => {
                 assert_eq!(pos_id, U256::from(9u64));
@@ -737,7 +737,7 @@ mod tests {
                 assert!((settle.long_util_fees - 0.5).abs() < 1e-9);
                 assert!((settle.short_util_fees - 0.25).abs() < 1e-9);
                 assert!((settle.lp_fees - 1.5).abs() < 1e-9);
-                assert!((liq_fee - 0.75).abs() < 1e-9);
+                assert!((liquidation_fee - 0.75).abs() < 1e-9);
                 assert!(is_liquidation);
             }
             other => panic!("expected MakerClosed, got {other:?}"),
@@ -757,11 +757,11 @@ mod tests {
         let log = rpc_log(&event, Address::ZERO);
         match decode_log(&log).expect("should decode MakerClosed") {
             MarketEvent::MakerClosed {
-                liq_fee,
+                liquidation_fee,
                 is_liquidation,
                 ..
             } => {
-                assert_eq!(liq_fee, 0.0);
+                assert_eq!(liquidation_fee, 0.0);
                 assert!(!is_liquidation);
             }
             other => panic!("expected MakerClosed, got {other:?}"),
@@ -792,14 +792,14 @@ mod tests {
                 pos_id,
                 funding,
                 util_fees,
-                liq_fee,
+                liquidation_fee,
                 is_liquidation,
                 ..
             } => {
                 assert_eq!(pos_id, U256::from(5u64));
                 assert!((funding + 0.25).abs() < 1e-9);
                 assert!((util_fees - 0.01).abs() < 1e-9);
-                assert!((liq_fee - 1.25).abs() < 1e-9);
+                assert!((liquidation_fee - 1.25).abs() < 1e-9);
                 assert!(is_liquidation);
             }
             other => panic!("expected TakerClosed, got {other:?}"),
@@ -842,7 +842,7 @@ mod tests {
             MarketEvent::MakerConverted {
                 pos_id,
                 settle,
-                liq_fee,
+                liquidation_fee,
                 is_liquidation,
             } => {
                 assert_eq!(pos_id, U256::from(54u64));
@@ -851,7 +851,7 @@ mod tests {
                 assert!((settle.short_util_fees - 24.630722).abs() < 1e-9);
                 assert!((settle.lp_fees - 7.722360).abs() < 1e-9);
                 // The liquidation tails: liqFee 0x15696a = 1.403242 USDC.
-                assert!((liq_fee - 1.403242).abs() < 1e-9);
+                assert!((liquidation_fee - 1.403242).abs() < 1e-9);
                 assert!(is_liquidation);
             }
             other => panic!("expected MakerConverted, got {other:?}"),

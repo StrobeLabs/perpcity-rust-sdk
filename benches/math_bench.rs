@@ -6,6 +6,7 @@
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
 
 use alloy::primitives::I256;
+use perpcity_sdk::Ratio;
 use perpcity_sdk::math::position::{entry_price, liquidation_price};
 use perpcity_sdk::math::tick::{get_sqrt_ratio_at_tick, price_to_tick, tick_to_price};
 
@@ -111,7 +112,7 @@ fn bench_liquidation_price(c: &mut Criterion) {
                 black_box(perp_delta),
                 black_box(usd_delta),
                 black_box(100.0),
-                black_box(25_000),
+                black_box(Ratio::from_e6(25_000).unwrap()),
                 black_box(true),
             )
         })
@@ -127,7 +128,7 @@ fn bench_liquidation_price(c: &mut Criterion) {
                 black_box(perp_delta_short),
                 black_box(usd_delta_short),
                 black_box(100.0),
-                black_box(25_000),
+                black_box(Ratio::from_e6(25_000).unwrap()),
                 black_box(false),
             )
         })
@@ -156,7 +157,7 @@ fn bench_price_update_hot_path(c: &mut Criterion) {
                 black_box(perp_delta),
                 black_box(usd_delta),
                 black_box(100.0),
-                black_box(25_000),
+                black_box(Ratio::from_e6(25_000).unwrap()),
                 black_box(true),
             )
         })

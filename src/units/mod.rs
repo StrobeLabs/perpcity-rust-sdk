@@ -56,11 +56,13 @@ mod amount;
 pub(crate) mod fixed_point;
 mod liquidity;
 mod price;
+mod rates;
 
 pub use accumulators::{Earnings, FeeGrowth, Funding, FundingPerSqrtPrice};
 pub use amount::{PerpAtoms, PerpDelta, UsdcAtoms, UsdcDelta};
 pub use liquidity::{LDelta, LUnits};
 pub use price::{Price, SqrtPrice};
+pub use rates::{FundingRate, Ratio, UtilizationRate};
 
 /// 10^6 as `f64`: the scale between a human amount and its atoms, and the
 /// 6-decimal intermediate the price conversions keep.

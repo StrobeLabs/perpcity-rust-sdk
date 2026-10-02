@@ -79,7 +79,7 @@ async fn main() -> perpcity_sdk::Result<()> {
                     b.unrealized_pnl().usdc(),
                     b.position_value().usdc(),
                     b.margin_ratio(),
-                    b.liq_margin_ratio(),
+                    b.liquidation_margin_ratio().fraction(),
                 );
                 candidates.push((pos_id, b));
             }
@@ -96,9 +96,13 @@ async fn main() -> perpcity_sdk::Result<()> {
     // position — not the market-wide taker ratio, and not the margin.
     // The contract remains the oracle — the filter only saves eth_calls on
     // obviously healthy positions, so it keeps anything near the line.
-    let liq_fee = client.market().get_config().await?.fees.liquidation_fee;
+    // The fee *rate*, which is what the health check applies to the
+    // position's value. The USDC a liquidation settles is a different
+    // quantity, and the types keep them apart.
+    let liquidation_fee = client.market().get_config().await?.fees.liquidation_fee;
     candidates.retain(|(_, b)| {
-        b.is_liquidatable(liq_fee) || b.margin_ratio() < b.liq_margin_ratio() * 1.1
+        b.is_liquidatable(liquidation_fee)
+            || b.margin_ratio() < b.liquidation_margin_ratio().fraction() * 1.1
     });
     println!(
         "\n{} candidate(s) at or near their liquidation ratio — probing the contract",

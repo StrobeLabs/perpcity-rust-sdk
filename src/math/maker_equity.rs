@@ -40,8 +40,8 @@ use crate::units::fixed_point::{
     Rounding, add_i, add_u, mul_div, s_full_mul_div, sub_i, to_i256, u512_to_u256,
 };
 use crate::units::{
-    Earnings, FeeGrowth, Funding, FundingPerSqrtPrice, LUnits, PerpAtoms, PerpDelta, Price,
-    SqrtPrice, UsdcAtoms, UsdcDelta,
+    Earnings, FeeGrowth, Funding, FundingPerSqrtPrice, FundingRate, LUnits, PerpAtoms, PerpDelta,
+    Price, Ratio, SqrtPrice, UsdcAtoms, UsdcDelta, UtilizationRate,
 };
 
 /// One `TickInfo` from the Perp's tick funding mapping (`s.ticks[tick]`),
@@ -91,14 +91,13 @@ pub struct MakerMarketSnapshot {
 /// Fields named after the contract's.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AccrualInputs {
-    /// `rates().fundingPerDay` (int88): daily funding rate scaled by 1e18.
-    pub funding_per_day_wad: i128,
-    /// `rates().longUtilFeePerDay`: daily long-utilization fee rate scaled
-    /// by 1e18.
-    pub long_util_fee_per_day_wad: u64,
-    /// `rates().shortUtilFeePerDay`: daily short-utilization fee rate
-    /// scaled by 1e18.
-    pub short_util_fee_per_day_wad: u64,
+    /// `rates().fundingPerDay`: the daily funding rate, positive when longs
+    /// pay shorts.
+    pub funding_per_day: FundingRate,
+    /// `rates().longUtilFeePerDay`: the daily long-utilization fee rate.
+    pub long_util_fee_per_day: UtilizationRate,
+    /// `rates().shortUtilFeePerDay`: the daily short-utilization fee rate.
+    pub short_util_fee_per_day: UtilizationRate,
     /// `rates().lastTouch`: timestamp the cumulatives were last advanced.
     pub last_touch: u64,
     /// Timestamp to accrue to — the snapshot block's timestamp, never a
@@ -126,10 +125,10 @@ pub struct MakerState {
     /// `positions(id).margin`: last-settled margin.
     pub margin: UsdcAtoms,
     /// `positions(id).liqMarginRatio`: the liquidation margin ratio stored
-    /// on the position, scaled by 1e6 (`50_000` = 5%). The contract's
-    /// health check compares the position's equity/value ratio against
-    /// this, not against the market-wide module value.
-    pub liq_margin_ratio_e6: u32,
+    /// on the position. The contract's health check compares the position's
+    /// equity/value ratio against this, not against the market-wide module
+    /// value.
+    pub liquidation_margin_ratio: Ratio,
     /// `positions(id).delta` amount0, unpacked from the packed
     /// `BalanceDelta`. Negative = owed to the pool.
     pub delta_perp: PerpDelta,
@@ -194,7 +193,7 @@ pub struct MakerEquityBreakdown {
     lp_fees: UsdcDelta,
     unrealized_pnl: UsdcDelta,
     position_value: UsdcAtoms,
-    liq_margin_ratio_e6: u32,
+    liquidation_margin_ratio: Ratio,
 }
 
 /// Deserialization shadow of [`MakerEquityBreakdown`]: identical fields,
@@ -209,7 +208,7 @@ struct RawMakerEquityBreakdown {
     lp_fees: UsdcDelta,
     unrealized_pnl: UsdcDelta,
     position_value: UsdcAtoms,
-    liq_margin_ratio_e6: u32,
+    liquidation_margin_ratio: Ratio,
 }
 
 impl TryFrom<RawMakerEquityBreakdown> for MakerEquityBreakdown {
@@ -247,21 +246,12 @@ impl TryFrom<RawMakerEquityBreakdown> for MakerEquityBreakdown {
                     context: "deserialized position value".into(),
                 });
             },
-            liq_margin_ratio_e6: if raw.liq_margin_ratio_e6 <= MAX_UINT24 {
-                raw.liq_margin_ratio_e6
-            } else {
-                return Err(ValidationError::InvalidMarginRatio {
-                    value: raw.liq_margin_ratio_e6,
-                    min: 0,
-                    max: MAX_UINT24,
-                });
-            },
+            // The ratio's own domain, the contract's `uint24`, is checked
+            // where a `Ratio` is deserialised.
+            liquidation_margin_ratio: raw.liquidation_margin_ratio,
         })
     }
 }
-
-/// `type(uint24).max`: the domain of the contract's margin ratios.
-const MAX_UINT24: u32 = (1 << 24) - 1;
 
 impl MakerEquityBreakdown {
     /// Last-settled margin (`positions(id).margin`).
@@ -321,15 +311,10 @@ impl MakerEquityBreakdown {
         self.position_value
     }
 
-    /// `positions(id).liqMarginRatio`, scaled by 1e6 (`50_000` = 5%).
-    pub fn liq_margin_ratio_e6(&self) -> u32 {
-        self.liq_margin_ratio_e6
-    }
-
-    /// The position's own liquidation margin ratio as a fraction
-    /// (`0.05` = 5%).
-    pub fn liq_margin_ratio(&self) -> f64 {
-        f64::from(self.liq_margin_ratio_e6) / 1e6
+    /// `positions(id).liqMarginRatio`: the ratio the contract's health check
+    /// compares this position against.
+    pub fn liquidation_margin_ratio(&self) -> Ratio {
+        self.liquidation_margin_ratio
     }
 
     /// The position's margin ratio as `PerpLogic.isHealthy` computes it:
@@ -341,18 +326,25 @@ impl MakerEquityBreakdown {
     }
 
     /// Whether the contract would liquidate the position now, given the
-    /// market's liquidation fee as a fraction
-    /// ([`Fees::liquidation_fee`](crate::types::Fees::liquidation_fee)):
-    /// the negation of
+    /// market's liquidation fee *rate*
+    /// ([`Fees::liquidation_fee`](crate::types::Fees::liquidation_fee)): the
+    /// negation of
     /// `isHealthy(equity − posVal·liqFee, posVal, liqMarginRatio)`.
+    ///
+    /// The parameter is a [`Ratio`] because the fee a liquidation *settles*
+    /// is a USDC amount carried under the same name, and as two `f64` the two
+    /// substituted for each other: passing the amount made the fee leg a
+    /// multiple of the whole position and every position read as
+    /// liquidatable.
     ///
     /// A screening gate, not the oracle: the fee leg is applied in `f64`,
     /// so a position within an atom of the boundary can go either way.
     /// Confirm with `simulate_liquidate_maker` before sending.
-    pub fn is_liquidatable(&self, liquidation_fee: f64) -> bool {
-        let fee_atoms = self.position_value.atoms() as f64 * liquidation_fee;
+    pub fn is_liquidatable(&self, liquidation_fee: Ratio) -> bool {
+        let fee_atoms = self.position_value.atoms() as f64 * liquidation_fee.fraction();
         let equity_after_fee = self.equity().atoms() as f64 - fee_atoms;
-        Self::health_ratio(equity_after_fee, self.position_value) < self.liq_margin_ratio()
+        Self::health_ratio(equity_after_fee, self.position_value)
+            < self.liquidation_margin_ratio.fraction()
     }
 
     fn health_ratio(equity_atoms: f64, position_value: UsdcAtoms) -> f64 {
@@ -411,7 +403,7 @@ impl MakerMarketSnapshot {
             Rounding::TowardZero,
         )?;
         let funding_accrued = Funding::from_x96(s_full_mul_div(
-            I256::unchecked_from(accrual.funding_per_day_wad),
+            I256::unchecked_from(accrual.funding_per_day.wad()),
             to_i256(dt_days, "accrual dt in days")?,
             WAD,
             Rounding::TowardZero,
@@ -426,13 +418,13 @@ impl MakerMarketSnapshot {
 
         let dt_days_mult_mark = mul_div(dt_days, self.mark.x96(), Q96, Rounding::TowardZero)?;
         let lu_accrued = mul_div(
-            U256::from(accrual.long_util_fee_per_day_wad),
+            U256::from(accrual.long_util_fee_per_day.wad()),
             dt_days_mult_mark,
             WAD,
             Rounding::TowardZero,
         )?;
         let su_accrued = mul_div(
-            U256::from(accrual.short_util_fee_per_day_wad),
+            U256::from(accrual.short_util_fee_per_day.wad()),
             dt_days_mult_mark,
             WAD,
             Rounding::TowardZero,
@@ -654,7 +646,7 @@ impl AccruedMakerSnapshot {
             position_value: UsdcAtoms::new(
                 atoms(to_i256(liquidity_val, "position value")?, "position value")?.unsigned_abs(),
             ),
-            liq_margin_ratio_e6: maker.liq_margin_ratio_e6,
+            liquidation_margin_ratio: maker.liquidation_margin_ratio,
         })
     }
 }
@@ -756,6 +748,11 @@ mod tests {
 
     use super::*;
 
+    /// A ratio from its millionths, as the contract stores one.
+    fn ratio(e6: u32) -> Ratio {
+        Ratio::from_e6(e6).unwrap()
+    }
+
     /// Golden vector: CHINA-PC (`0x796f…8ed0`) position 54, chain state at
     /// block 500612175 — the block before its liquidation. The liquidation's
     /// `MakerConverted` event settled at timestamp 1788260191 with funding
@@ -785,9 +782,9 @@ mod tests {
             mark: Price::from_x96(u("1375470108235016714305503507110")),
         };
         let accrual = AccrualInputs {
-            funding_per_day_wad: 840374978539967329,
-            long_util_fee_per_day_wad: 10000000000000000,
-            short_util_fee_per_day_wad: 10000000000000000,
+            funding_per_day: FundingRate::from_wad(840374978539967329),
+            long_util_fee_per_day: UtilizationRate::from_wad(10000000000000000),
+            short_util_fee_per_day: UtilizationRate::from_wad(10000000000000000),
             last_touch: 1788254416,
             accrue_to: 1788260191,
             oi_long: PerpAtoms::new(2587247),
@@ -799,7 +796,7 @@ mod tests {
             margin: UsdcAtoms::new(143730198),
             // A pass-through the settle event does not exercise; 5% is the
             // maker liquidation ratio the client tests use.
-            liq_margin_ratio_e6: 50_000,
+            liquidation_margin_ratio: ratio(50_000),
             delta_perp: PerpDelta::new(-134328),
             delta_usd: UsdcDelta::new(-137992489),
             last_cuml_funding: Funding::from_x96(i("-10162710870332004796583430787875")),
@@ -903,12 +900,12 @@ mod tests {
             (b.position_value().usdc() - b.unrealized_pnl().usdc()).abs() > 100.0,
             "position value is the band value, not the PnL"
         );
-        assert_eq!(b.liq_margin_ratio_e6(), 50_000);
-        assert!((b.liq_margin_ratio() - 0.05).abs() < 1e-12);
+        assert_eq!(b.liquidation_margin_ratio(), ratio(50_000));
+        assert_eq!(b.liquidation_margin_ratio().fraction(), 0.05);
         assert!(b.equity().is_negative());
         assert_eq!(b.margin_ratio(), 0.0);
-        assert!(b.is_liquidatable(0.0));
-        assert!(b.is_liquidatable(0.01));
+        assert!(b.is_liquidatable(Ratio::ZERO));
+        assert!(b.is_liquidatable(ratio(10_000)));
 
         // Same band, no accrued liabilities, a fat margin: healthy, and the
         // fee leg alone must not flip it.
@@ -921,18 +918,18 @@ mod tests {
             lp_fees: UsdcDelta::ZERO,
             unrealized_pnl: UsdcDelta::ZERO,
             position_value: value,
-            liq_margin_ratio_e6: 50_000,
+            liquidation_margin_ratio: ratio(50_000),
         };
         assert!((healthy.margin_ratio() - 1.0).abs() < 1e-12);
-        assert!(!healthy.is_liquidatable(0.01));
+        assert!(!healthy.is_liquidatable(ratio(10_000)));
         // Equity of 5.5% of value: healthy at a 0% fee, liquidatable once
         // a 1% fee takes it under the 5% line.
         let thin = MakerEquityBreakdown {
             margin: UsdcDelta::new(value.atoms() as i128 * 55 / 1000),
             ..healthy
         };
-        assert!(!thin.is_liquidatable(0.0));
-        assert!(thin.is_liquidatable(0.01));
+        assert!(!thin.is_liquidatable(Ratio::ZERO));
+        assert!(thin.is_liquidatable(ratio(10_000)));
     }
 
     /// Without the accrual replay the funding is stale to lastTouch — the
@@ -1162,9 +1159,11 @@ mod tests {
             serde_json::from_str::<MakerEquityBreakdown>(&negative_value).is_err(),
             "posVal is a uint on chain"
         );
+        // The ratio's own domain travels with the ratio: this breakdown no
+        // longer checks it, `Ratio` does, wherever one is deserialised.
         let wide_ratio = json.replace(
-            "\"liq_margin_ratio_e6\":50000",
-            "\"liq_margin_ratio_e6\":16777216",
+            "\"liquidation_margin_ratio\":50000",
+            "\"liquidation_margin_ratio\":16777216",
         );
         assert_ne!(json, wide_ratio, "replacement must have applied");
         assert!(

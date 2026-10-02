@@ -32,7 +32,7 @@ use crate::math::range::{MakerBand, TickRange};
 use crate::math::swap::{PoolSnapshot, TickLiquidity, active_liquidity};
 use crate::storage::{v4_tick_bitmap_slot, v4_tick_slot};
 use crate::types::{MarginRatioTriple, MarginRatios, SolvencyState};
-use crate::units::{LDelta, LUnits, PerpAtoms, Price, SqrtPrice};
+use crate::units::{LDelta, LUnits, PerpAtoms, Price, Ratio, SqrtPrice};
 
 use super::market::MarketReader;
 use super::queries::{MarketImmutables, multicall_error, registered_module};
@@ -498,17 +498,16 @@ impl StateAt {
         let taker_call = ratios.takerMarginRatios().block(self.id());
         let (maker, taker) = tokio::try_join!(maker_call.call(), taker_call.call())
             .map_err(|e| self.read_error(e))?;
+        let triple = |init, liq, backstop| -> Result<MarginRatioTriple> {
+            Ok(MarginRatioTriple {
+                init: Ratio::from_e6(u24_to_u32(init))?,
+                liquidation: Ratio::from_e6(u24_to_u32(liq))?,
+                backstop: Ratio::from_e6(u24_to_u32(backstop))?,
+            })
+        };
         Ok(MarginRatios {
-            maker: MarginRatioTriple::from_e6(
-                u24_to_u32(maker.init),
-                u24_to_u32(maker.liq),
-                u24_to_u32(maker.backstop),
-            ),
-            taker: MarginRatioTriple::from_e6(
-                u24_to_u32(taker.init),
-                u24_to_u32(taker.liq),
-                u24_to_u32(taker.backstop),
-            ),
+            maker: triple(maker.init, maker.liq, maker.backstop)?,
+            taker: triple(taker.init, taker.liq, taker.backstop)?,
         })
     }
 
@@ -1031,7 +1030,7 @@ mod tests {
         let ratios = state.margin_ratios().await.unwrap();
         assert_eq!(capacity.block, state.block());
         assert_eq!(capacity.block.number, 92);
-        assert_eq!(ratios.maker.init, 1.0);
+        assert_eq!(ratios.maker.init, Ratio::ONE);
         assert!(
             rpc.is_drained(),
             "the header once at construction, then one multicall and three calls"
@@ -1254,19 +1253,19 @@ mod tests {
         let ratios = client.market().get_margin_ratios().await.unwrap();
         assert_eq!(
             (
-                ratios.maker.init,
-                ratios.maker.liquidation,
-                ratios.maker.backstop
+                ratios.maker.init.e6(),
+                ratios.maker.liquidation.e6(),
+                ratios.maker.backstop.e6()
             ),
-            (1.0, 0.9, 0.8)
+            (1_000_000, 900_000, 800_000)
         );
         assert_eq!(
             (
-                ratios.taker.init,
-                ratios.taker.liquidation,
-                ratios.taker.backstop
+                ratios.taker.init.e6(),
+                ratios.taker.liquidation.e6(),
+                ratios.taker.backstop.e6()
             ),
-            (0.1, 0.05, 0.02)
+            (100_000, 50_000, 20_000)
         );
         assert!(
             rpc.is_drained(),

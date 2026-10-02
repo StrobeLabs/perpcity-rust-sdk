@@ -93,8 +93,8 @@ pub use types::{
 
 #[doc(inline)]
 pub use units::{
-    Earnings, FeeGrowth, Funding, FundingPerSqrtPrice, LDelta, LUnits, PerpAtoms, PerpDelta, Price,
-    SqrtPrice, UsdcAtoms, UsdcDelta,
+    Earnings, FeeGrowth, Funding, FundingPerSqrtPrice, FundingRate, LDelta, LUnits, PerpAtoms,
+    PerpDelta, Price, Ratio, SqrtPrice, UsdcAtoms, UsdcDelta, UtilizationRate,
 };
 
 #[doc(inline)]

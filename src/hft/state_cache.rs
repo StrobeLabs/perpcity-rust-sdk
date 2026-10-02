@@ -13,22 +13,26 @@
 //! # Example
 //!
 //! ```
+//! use perpcity_sdk::Ratio;
 //! use perpcity_sdk::hft::state_cache::{StateCache, StateCacheConfig, CachedFees};
 //!
 //! let mut cache = StateCache::new(StateCacheConfig::default());
 //! let addr = [0xAA; 20];
 //! let fees = CachedFees {
-//!     creator_fee: 0.001,
-//!     insurance_fee: 0.0005,
-//!     lp_fee: 0.003,
-//!     liquidation_fee: 0.01,
+//!     creator_fee: Ratio::from_e6(1_000)?,
+//!     insurance_fee: Ratio::from_e6(500)?,
+//!     lp_fee: Ratio::from_e6(3_000)?,
+//!     liquidation_fee: Ratio::from_e6(10_000)?,
 //! };
 //! cache.put_fees(addr, fees, 1000);
 //! assert!(cache.get_fees(&addr, 1050).is_some()); // within 60s TTL
 //! assert!(cache.get_fees(&addr, 1061).is_none()); // expired
+//! # Ok::<(), perpcity_sdk::ValidationError>(())
 //! ```
 
 use std::collections::HashMap;
+
+use crate::units::Ratio;
 
 /// A cached value with an expiration timestamp.
 #[derive(Debug, Clone, Copy)]
@@ -50,14 +54,14 @@ impl<T> CachedValue<T> {
 /// Cached fee configuration for a perpetual market.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CachedFees {
-    /// Creator fee (e.g. 0.001 = 0.1%).
-    pub creator_fee: f64,
-    /// Insurance fund fee.
-    pub insurance_fee: f64,
-    /// LP fee.
-    pub lp_fee: f64,
-    /// Liquidation fee.
-    pub liquidation_fee: f64,
+    /// Creator fee share.
+    pub creator_fee: Ratio,
+    /// Insurance fund fee share.
+    pub insurance_fee: Ratio,
+    /// LP fee share.
+    pub lp_fee: Ratio,
+    /// Liquidation fee share.
+    pub liquidation_fee: Ratio,
 }
 
 /// Cached position/leverage bounds for a perpetual market.
@@ -70,7 +74,7 @@ pub struct CachedBounds {
     /// Maximum taker leverage.
     pub max_taker_leverage: f64,
     /// Liquidation margin ratio for takers.
-    pub liquidation_taker_ratio: f64,
+    pub liquidation_taker_ratio: Ratio,
 }
 
 /// Configuration for [`StateCache`] TTL tiers.
@@ -268,12 +272,17 @@ impl StateCache {
 mod tests {
     use super::*;
 
+    /// A ratio from its millionths.
+    fn e6(value: u32) -> Ratio {
+        Ratio::from_e6(value).unwrap()
+    }
+
     fn sample_fees() -> CachedFees {
         CachedFees {
-            creator_fee: 0.001,
-            insurance_fee: 0.0005,
-            lp_fee: 0.003,
-            liquidation_fee: 0.01,
+            creator_fee: e6(1_000),
+            insurance_fee: e6(500),
+            lp_fee: e6(3_000),
+            liquidation_fee: e6(10_000),
         }
     }
 
@@ -282,7 +291,7 @@ mod tests {
             min_margin: 5.0,
             min_taker_leverage: 1.0,
             max_taker_leverage: 100.0,
-            liquidation_taker_ratio: 0.05,
+            liquidation_taker_ratio: e6(50_000),
         }
     }
 
