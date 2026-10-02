@@ -134,6 +134,14 @@ pub fn liquidity_for_target_ratio(
             context: format!("computed liquidity is not finite: {liquidity_f}"),
         });
     }
+    // A float-to-integer cast saturates rather than wrapping, so without
+    // this a size past the pool's `uint128` would silently become the
+    // largest one — the same failure `estimate_liquidity` refuses.
+    if liquidity_f >= u128::MAX as f64 {
+        return Err(ValidationError::Overflow {
+            context: "liquidity exceeds the uint128 the pool stores".into(),
+        });
+    }
 
     Ok(LUnits::new(liquidity_f as u128))
 }
@@ -342,6 +350,18 @@ mod tests {
         assert!(
             liquidity_for_target_ratio(UsdcAtoms::ZERO, &range(-100, 100), one(), 0.1).is_err()
         );
+    }
+
+    /// A size past the `uint128` the pool stores fails rather than becoming
+    /// the largest one: a float-to-integer cast saturates, so the bound has
+    /// to be checked before it.
+    #[test]
+    fn target_ratio_rejects_a_size_past_the_pools_width() {
+        // A vanishingly thin band over an enormous margin: the liquidity per
+        // unit of quote is tiny, so the required liquidity leaves `u128`.
+        let huge = UsdcAtoms::new(u128::MAX / 2);
+        let err = liquidity_for_target_ratio(huge, &range(-30, 30), one(), 1e-6).unwrap_err();
+        assert!(matches!(err, ValidationError::Overflow { .. }), "{err}");
     }
 
     // ── amounts_for_liquidity ────────────────────────────────────
