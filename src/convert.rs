@@ -1,9 +1,13 @@
-//! Conversions between client-facing types (`f64`, human-readable) and
-//! on-chain types (6-decimal integers, `U256`, `sqrtPriceX96`).
+//! The `f64` doors onto the units, kept for the event decoder.
 //!
-//! All conversion functions validate inputs and return [`Result`] on
-//! failure. The math mirrors `perpcity-zig-sdk/src/conversions.zig` but
-//! uses Alloy's `U256` instead of Zig's `u256`.
+//! Every function here is one line over [`crate::units`], which owns the
+//! arithmetic: a scaling is a conversion on an amount type, a price
+//! conversion is a constructor or accessor on [`Price`] or [`SqrtPrice`].
+//! They remain because the event vocabulary is human units by design and
+//! decodes through them; they go when the decoder speaks the units
+//! directly, which leaves only the V4 balance-delta packing in this module.
+//!
+//! All of them validate and return [`Result`] on failure.
 //!
 //! # Precision model
 //!
@@ -18,20 +22,12 @@ use std::fmt;
 
 use alloy::primitives::{I256, U256};
 
-use crate::constants::Q96;
 use crate::errors::ValidationError;
+use crate::units::{Price, SqrtPrice, UsdcDelta};
 
-// ── Module-level constants ─────────────────────────────────────────────
-
-/// 10^6 as f64, for floating-point scaling.
+/// 10^6 as f64, for the leverage ↔ margin-ratio pair below, which is the
+/// one conversion here that is not a unit's own.
 const F64_1E6: f64 = 1_000_000.0;
-
-/// 10^6 as U256, for big-integer scaling.
-const BIGINT_1E6: U256 = U256::from_limbs([1_000_000, 0, 0, 0]);
-
-/// Maximum integer exactly representable as f64 (2^53).
-/// Values beyond this lose precision in float ↔ int conversion.
-const MAX_SAFE_F64_INT: u64 = 1_u64 << 53; // 9_007_199_254_740_992
 
 // ── Scaling: f64 ↔ 6-decimal integers ──────────────────────────────────
 
@@ -53,17 +49,7 @@ const MAX_SAFE_F64_INT: u64 = 1_u64 << 53; // 9_007_199_254_740_992
 /// assert_eq!(scale_to_6dec(-2.5).unwrap(), -2_500_000);
 /// ```
 pub fn scale_to_6dec(amount: f64) -> Result<i128, ValidationError> {
-    if amount.is_nan() || amount.is_infinite() {
-        return Err(ValidationError::Overflow {
-            context: format!("amount {amount} is not finite"),
-        });
-    }
-    if amount.abs() > MAX_SAFE_F64_INT as f64 {
-        return Err(ValidationError::Overflow {
-            context: format!("amount {amount} exceeds safe f64 integer range (2^53)"),
-        });
-    }
-    Ok((amount * F64_1E6).floor() as i128)
+    UsdcDelta::try_from(amount).map(UsdcDelta::atoms)
 }
 
 /// Convert a 6-decimal on-chain value back to human-readable f64.
@@ -81,7 +67,7 @@ pub fn scale_to_6dec(amount: f64) -> Result<i128, ValidationError> {
 /// assert_eq!(scale_from_6dec(-2_000_000), -2.0);
 /// ```
 pub fn scale_from_6dec(value: i128) -> f64 {
-    value as f64 / F64_1E6
+    UsdcDelta::new(value).usdc()
 }
 
 /// A 6-decimal on-chain amount as human-readable f64, for the unsigned
@@ -203,22 +189,7 @@ pub fn margin_ratio_to_leverage(margin_ratio: u32) -> Result<f64, ValidationErro
 /// assert!((price - 1.0).abs() < Q96_PRECISION);
 /// ```
 pub fn price_x96_to_f64(value: U256) -> Result<f64, ValidationError> {
-    if value.is_zero() {
-        return Err(ValidationError::InvalidPrice {
-            reason: "Q96 price value must be non-zero".into(),
-        });
-    }
-
-    let intermediate = (value * BIGINT_1E6) / Q96;
-
-    if intermediate > U256::from(MAX_SAFE_F64_INT) {
-        return Err(ValidationError::Overflow {
-            context: "Q96 price exceeds safe f64 integer range after scaling".into(),
-        });
-    }
-
-    let int_val = intermediate.as_limbs()[0];
-    Ok(int_val as f64 / F64_1E6)
+    Price::from_x96(value).to_f64()
 }
 
 /// Convert a human-readable price to its Q96 fixed-point representation.
@@ -243,19 +214,7 @@ pub fn price_x96_to_f64(value: U256) -> Result<f64, ValidationError> {
 /// assert!(price_f64_to_x96(f64::NAN).is_err());
 /// ```
 pub fn price_f64_to_x96(price: f64) -> Result<U256, ValidationError> {
-    if !price.is_finite() || price <= 0.0 {
-        return Err(ValidationError::InvalidPrice {
-            reason: format!("price must be a positive finite number, got {price}"),
-        });
-    }
-    const PRICE_LIMIT: f64 = (1u128 << 80) as f64;
-    if price >= PRICE_LIMIT {
-        return Err(ValidationError::InvalidPrice {
-            reason: format!("price {price} exceeds the representable Q96 range (2^80)"),
-        });
-    }
-    let hi = (price * (1u64 << 48) as f64) as u128;
-    Ok(U256::from(hi) << 48)
+    Price::try_from(price).map(Price::x96)
 }
 
 // ── Price ↔ sqrtPriceX96 ──────────────────────────────────────────────
@@ -284,29 +243,7 @@ pub fn price_f64_to_x96(price: f64) -> Result<U256, ValidationError> {
 /// assert!(diff < Q96 / U256::from(1_000_000));
 /// ```
 pub fn price_to_sqrt_price_x96(price: f64) -> Result<U256, ValidationError> {
-    if price.is_nan() || price.is_infinite() || price <= 0.0 {
-        return Err(ValidationError::InvalidPrice {
-            reason: format!("price must be a positive finite number, got {price}"),
-        });
-    }
-    if price > 1e30 {
-        return Err(ValidationError::InvalidPrice {
-            reason: format!("price {price} exceeds maximum (1e30)"),
-        });
-    }
-
-    let sqrt_price = price.sqrt();
-    let scaled = sqrt_price * F64_1E6;
-
-    if scaled > MAX_SAFE_F64_INT as f64 {
-        return Err(ValidationError::InvalidPrice {
-            reason: format!("scaled sqrt(price) {scaled} exceeds safe f64 integer range"),
-        });
-    }
-
-    // Cast via u128 to avoid platform-specific float→bigint issues.
-    let scaled_int = U256::from(scaled as u128);
-    Ok((scaled_int * Q96) / BIGINT_1E6)
+    SqrtPrice::from_price(price).map(SqrtPrice::x96)
 }
 
 /// Convert a `sqrtPriceX96` value back to a human-readable price.
@@ -331,21 +268,7 @@ pub fn price_to_sqrt_price_x96(price: f64) -> Result<U256, ValidationError> {
 /// assert!((price - 1.0).abs() < Q96_PRECISION);
 /// ```
 pub fn sqrt_price_x96_to_price(sqrt_price_x96: U256) -> Result<f64, ValidationError> {
-    if sqrt_price_x96.is_zero() {
-        return Err(ValidationError::InvalidPrice {
-            reason: "sqrtPriceX96 must be non-zero".into(),
-        });
-    }
-
-    let squared =
-        sqrt_price_x96
-            .checked_mul(sqrt_price_x96)
-            .ok_or_else(|| ValidationError::Overflow {
-                context: "sqrtPriceX96² overflows U256".into(),
-            })?;
-
-    let price_x96 = squared / Q96;
-    price_x96_to_f64(price_x96)
+    SqrtPrice::from_x96(sqrt_price_x96).price()
 }
 
 // ── BalanceDelta unpacking ─────────────────────────────────────────────
@@ -395,7 +318,7 @@ pub(crate) fn pack_balance_delta(amount0: i128, amount1: i128) -> I256 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::constants::{MAX_SQRT_PRICE_X96, Q96_PRECISION};
+    use crate::constants::{MAX_SQRT_PRICE_X96, Q96, Q96_PRECISION};
 
     // ── price_f64_to_x96 ───────────────────────────────────────────
 

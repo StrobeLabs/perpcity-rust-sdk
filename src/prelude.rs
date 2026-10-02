@@ -19,8 +19,10 @@
 //! `amounts_for_liquidity`), a maker's geometry (`TickRange`,
 //! `MakerBand`), taker capacity (`Side`, `Capacity`, `MarketCapacity`,
 //! `band_capacity`, `liquidity_for_capacity`), the
-//! contract's mark (`Mark`, `Emas`, `fair_price`, `fair_price_x96`), and
-//! tick/price conversion (`price_to_tick`, `tick_to_price`, ...).
+//! contract's mark (`Mark`, `Emas`, `fair_price`, `fair_price_f64`), the
+//! units every exact figure is denominated in (`UsdcAtoms`, `UsdcDelta`,
+//! `PerpAtoms`, `PerpDelta`, `Price`, `SqrtPrice`), and tick/price
+//! conversion (`price_to_tick`, `tick_to_price`, ...).
 //!
 //! It re-exports exactly that set, nothing more: lower-level ABI/
 //! contract-interface types (`contracts::*`) and the fine-grained
@@ -38,10 +40,10 @@ pub use crate::{
     MAX_ROW_BATCH, MakerBand, MakerEquityBreakdown, MakerEquityKind, MakerEquityOutcome,
     MakerMarketSnapshot, MakerState, MarginRatioTriple, MarginRatios, Mark, MarketCapacity,
     MarketConfig, MarketEvent, MarketFeed, MarketReader, MarketSnapshot, OpenInterest,
-    OpenMakerParams, OpenResult, OpenTakerParams, PerpCityError, PerpClient, Result, RowOutcome,
-    Side, SolvencyState, StateAt, TickFunding, TickRange, TransactionError, TransportConfig,
-    TxBuilder, Urgency, ValidationError, align_tick_down, align_tick_up, amounts_for_liquidity,
-    band_capacity, decode_log, estimate_liquidity, fair_price, fair_price_x96,
-    get_sqrt_ratio_at_tick, get_tick_at_sqrt_ratio, liquidity_for_capacity,
-    liquidity_for_target_ratio, price_to_tick, tick_to_price,
+    OpenMakerParams, OpenResult, OpenTakerParams, PerpAtoms, PerpCityError, PerpClient, PerpDelta,
+    Price, Result, RowOutcome, Side, SolvencyState, SqrtPrice, StateAt, TickFunding, TickRange,
+    TransactionError, TransportConfig, TxBuilder, Urgency, UsdcAtoms, UsdcDelta, ValidationError,
+    align_tick_down, align_tick_up, amounts_for_liquidity, band_capacity, decode_log,
+    estimate_liquidity, fair_price, fair_price_f64, get_sqrt_ratio_at_tick, get_tick_at_sqrt_ratio,
+    liquidity_for_capacity, liquidity_for_target_ratio, price_to_tick, tick_to_price,
 };

@@ -32,6 +32,7 @@ use crate::math::range::{MakerBand, TickRange};
 use crate::math::swap::{PoolSnapshot, TickLiquidity, active_liquidity};
 use crate::storage::{v4_tick_bitmap_slot, v4_tick_slot};
 use crate::types::{MarginRatioTriple, MarginRatios, SolvencyState};
+use crate::units::{PerpAtoms, Price, SqrtPrice};
 
 use super::market::MarketReader;
 use super::queries::{MarketImmutables, multicall_error, registered_module};
@@ -460,8 +461,8 @@ impl StateAt {
         Ok(MarketCapacity {
             block: self.block,
             capacity: capacity.into(),
-            long_open_interest_atoms: oi.long,
-            short_open_interest_atoms: oi.short,
+            long_open_interest: PerpAtoms::new(oi.long),
+            short_open_interest: PerpAtoms::new(oi.short),
         })
     }
 
@@ -557,14 +558,14 @@ impl StateAt {
         }
         Ok(PoolSnapshot {
             block: self.block,
-            sqrt_price_x96: pool.sqrtPrice.to::<U256>(),
+            sqrt_price: SqrtPrice::from_x96(pool.sqrtPrice.to::<U256>()),
             tick,
             liquidity: pool.liquidity,
             ticks,
-            protocol_sqrt_min_x96: MIN_SWAP_SQRT_PRICE_X96,
-            protocol_sqrt_max_x96: MAX_SWAP_SQRT_PRICE_X96,
-            impact_sqrt_min_x96: bounds.sqrtMin,
-            impact_sqrt_max_x96: bounds.sqrtMax,
+            protocol_sqrt_min: SqrtPrice::from_x96(MIN_SWAP_SQRT_PRICE_X96),
+            protocol_sqrt_max: SqrtPrice::from_x96(MAX_SWAP_SQRT_PRICE_X96),
+            impact_sqrt_min: SqrtPrice::from_x96(bounds.sqrtMin),
+            impact_sqrt_max: SqrtPrice::from_x96(bounds.sqrtMax),
         })
     }
 
@@ -608,8 +609,8 @@ impl StateAt {
             .map_err(|e| self.read_error(e))?;
         Ok(Mark::advanced(
             self.block,
-            views.pool_state.ammPrice,
-            index,
+            Price::from_x96(views.pool_state.ammPrice),
+            Price::from_x96(index),
             views.stored_emas,
             views.last_touch,
             views.ema_window,
@@ -625,8 +626,8 @@ impl StateAt {
         let module = registered_module(price_impact, "IPriceImpact")?;
         IPriceImpact::new(module, self.market.chain.provider())
             .sqrtPriceBounds(
-                mark.amm_price_x96,
-                mark.index_x96,
+                mark.pool_price.x96(),
+                mark.index.x96(),
                 U256::from(mark.emas.amm),
                 U256::from(mark.emas.index),
             )
@@ -1048,7 +1049,10 @@ mod tests {
 
         let mark = state.mark().await.unwrap();
         assert_eq!(mark.block, state.block());
-        assert_eq!((mark.amm_price_x96, mark.index_x96), (one, one));
+        assert_eq!(
+            (mark.pool_price, mark.index),
+            (Price::from_x96(one), Price::from_x96(one))
+        );
         assert_eq!(
             mark.emas,
             PricePair {
@@ -1056,7 +1060,7 @@ mod tests {
                 index: one.to::<u128>()
             }
         );
-        assert_eq!(mark.fair_price_x96(), one);
+        assert_eq!(mark.fair_price(), Price::from_x96(one));
         assert!(rpc.is_drained(), "one multicall, one index call");
     }
 
@@ -1342,11 +1346,11 @@ mod tests {
                     timestamp: TIMESTAMP,
                 },
                 capacity: Capacity {
-                    long_atoms: 10,
-                    short_atoms: 20,
+                    long: PerpAtoms::new(10),
+                    short: PerpAtoms::new(20),
                 },
-                long_open_interest_atoms: 3,
-                short_open_interest_atoms: 4,
+                long_open_interest: PerpAtoms::new(3),
+                short_open_interest: PerpAtoms::new(4),
             }
         );
         assert!(rpc.is_drained(), "blockNumber, block, one multicall");
@@ -1441,14 +1445,14 @@ mod tests {
                 hash,
                 timestamp: TOUCHED_AT,
             },
-            sqrt_price_x96: one,
+            sqrt_price: SqrtPrice::from_x96(one),
             tick: 0,
             liquidity,
             ticks: BTreeMap::new(),
-            protocol_sqrt_min_x96: MIN_SWAP_SQRT_PRICE_X96,
-            protocol_sqrt_max_x96: MAX_SWAP_SQRT_PRICE_X96,
-            impact_sqrt_min_x96: one >> 1,
-            impact_sqrt_max_x96: one << 1,
+            protocol_sqrt_min: SqrtPrice::from_x96(MIN_SWAP_SQRT_PRICE_X96),
+            protocol_sqrt_max: SqrtPrice::from_x96(MAX_SWAP_SQRT_PRICE_X96),
+            impact_sqrt_min: SqrtPrice::from_x96(one >> 1),
+            impact_sqrt_max: SqrtPrice::from_x96(one << 1),
         }
     }
 

@@ -39,9 +39,11 @@ invalid in a way the chain would care about before the call is built.
 That is why the validated values, `TickRange` and its kin, are not here:
 they would make the module's promise false.
 
-**Names say units.** An unsuffixed `f64` field is a human unit; a
-suffixed field is a wire unit. A reader should never have to open a doc
-to know whether a number is dollars or atoms.
+**Types say units.** A bare `f64` field here is the human view; anything
+exact carries a type from [`units`](../units/DESIGN.md), which is also
+what the exact door takes. A reader never has to open a doc to know
+whether a number is dollars or atoms, and a caller cannot pass one for the
+other.
 
 ## The mental model
 
@@ -78,14 +80,14 @@ the chain would refuse.
 | [`OpenInterest`](../types.rs#L184) | the two sides' draw in perp tokens | [`MarketReader::get_open_interest`](../client/DESIGN.md) | [`MarketSnapshot`](../types.rs#L212), as a field; the strategy layer's capacity gauges. |
 | [`SolvencyState`](../types.rs#L196) | the market's solvency in USDC, at a block | [`StateAt::solvency`](../client/DESIGN.md) | nothing in the crate. The strategy layer's solvency audits. |
 | [`ChainDeployments`](../types.rs#L32) | the addresses a chain shares: collateral and pool manager | the known chains' constants, or the caller for another | [`ChainReader::new`](../client/DESIGN.md). |
-| [`Side`](../types.rs#L165) | long or short: the taker direction, nothing else | the caller | [`Capacity::atoms`](../math/DESIGN.md), [`MarketCapacity::headroom_atoms`](../math/DESIGN.md) and the other side-keyed reads on capacity; [`liquidity_for_capacity`](../math/DESIGN.md), which sizes for one side. |
+| [`Side`](../types.rs#L165) | long or short: the taker direction, nothing else | the caller | [`Capacity::on`](../math/DESIGN.md), [`MarketCapacity::headroom`](../math/DESIGN.md), [`MarketCapacity::open_interest`](../math/DESIGN.md) and [`MarketCapacity::utilization_e6`](../math/DESIGN.md), every side-keyed read on capacity; [`liquidity_for_capacity`](../math/DESIGN.md), which sizes for one side. |
 
 `convert` has no row because its functions are edges, not nodes. Every
-read that returns a price calls [`price_x96_to_f64`](../convert.rs#L205)
-once; the trades call [`scale_to_6dec`](../convert.rs#L55)
+read that returns a price calls [`price_x96_to_f64`](../convert.rs#L191)
+once; the trades call [`scale_to_6dec`](../convert.rs#L51)
 once; the balance and solvency reads call
-[`usdc_from_atoms`](../convert.rs#L105); the decoder and the
-maker-equity batch call [`unpack_balance_delta`](../convert.rs#L374).
+[`usdc_from_atoms`](../convert.rs#L91); the decoder and the
+maker-equity batch call [`unpack_balance_delta`](../convert.rs#L297).
 Each validates and refuses what the chain would, and none is called from
 the middle of a computation.
 
@@ -113,7 +115,8 @@ without risk.
 
 - **Human unit**: USDC, perp tokens, a price, a fraction, a leverage;
   `f64`, unsuffixed.
-- **Wire unit**: atoms, X96, X128, WAD, e6; integers, suffixed.
+- **Wire unit**: a count of atoms or a fixed-point encoding; a type from
+  [`units`](../units/DESIGN.md), never a bare integer.
 - **Scale**: the 6-decimal conversion; exact. **Precision bound**: the
   known loss of an X96 to `f64` conversion.
 - **Exact door**: the `Exact*` parameter types.

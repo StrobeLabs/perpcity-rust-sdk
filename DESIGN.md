@@ -28,10 +28,13 @@ types.
 
 ## What matters
 
-**Money is exact.** Every quantity the contract settles is an integer in a
-wire unit, and the SDK carries it as one until the last moment. The f64
-surface exists for humans and dashboards, never for arithmetic the chain
-will check. Ported contract math is transcribed one-to-one in `U256` and
+**Money is exact, and its unit is a type.** Every quantity the contract
+settles is an integer in a unit the market is denominated in, and the SDK
+carries it as one until the last moment. Which unit is the type, not the
+field's spelling, so a function's signature is its unit list and the two
+pairs that look alike as integers — the two assets, a price and its square
+root — cannot be swapped. The f64 surface exists for humans and
+dashboards, never for arithmetic the chain will check. Ported contract math is transcribed one-to-one in `U256` and
 `I256` with the contract's rounding, and is anchored to golden vectors
 from real chain state, not to synthetic fixtures. A port that reproduces a
 live settle to the atom is correct; one that is close is wrong.
@@ -138,11 +141,13 @@ over a WebSocket; the tape replays the past from log scans. Both produce
 the same decoded `MarketEvent`, so anything that folds events, ownership,
 economics, a series, works on either tense unchanged.
 
-**Two unit systems, one boundary.** The chain speaks in atoms, X96, X128,
-WAD and e6. Humans speak in USDC, perp tokens, prices and fractions. A
-name carries its unit as a suffix when it is a wire unit and none when it
-is human. Conversion happens at the crate's surface, once, in `convert`,
-and never in the middle of math.
+**Two unit systems, one boundary.** The chain speaks in counts of atoms
+and in fixed-point encodings; humans speak in USDC, perp tokens, prices
+and fractions. The chain's side is one type per unit, in
+[`units`](src/units/DESIGN.md), so a signature says what it takes; the
+human side is `f64`, reached by a conversion on the type that says what it
+costs. The crossing happens at the crate's surface and never in the middle
+of math.
 
 **Sending is a pipeline with an execution model.** Prepare with no RPC
 (nonce from the manager, gas from the cache), sign locally, broadcast,
@@ -164,17 +169,17 @@ that carries it, the invariant it holds, and the node that owns it.
 |---|---|---|---|
 | A chain | [`ChainReader`](src/client/chain.rs#L44) | one transport, one deployment set, shared caches | [`client`](src/client/DESIGN.md) |
 | A market, now | [`MarketReader`](src/client/market.rs#L23) | one `Perp` over a `ChainReader`; every read is current | [`client`](src/client/DESIGN.md) |
-| A market, at a block | [`StateAt`](src/client/state.rs#L67) | the handle is the block; every read pinned to its hash | [`client`](src/client/DESIGN.md) |
+| A market, at a block | [`StateAt`](src/client/state.rs#L68) | the handle is the block; every read pinned to its hash | [`client`](src/client/DESIGN.md) |
 | A market with a signer | [`PerpClient`](src/client/mod.rs#L179) | a `MarketReader` plus the send pipeline | [`client`](src/client/DESIGN.md) |
 | A send | [`TxBuilder`](src/client/transactions.rs#L40) | one transaction, one nonce, one outcome | [`client`](src/client/DESIGN.md) |
 | A tick interval | [`TickRange`](src/math/range.rs#L25) | `lower < upper`, both in the V4 domain, checked at construction | [`math::range`](src/math/range.rs#L1) |
 | A maker's geometry | [`MakerBand`](src/math/range.rs#L115) | a `TickRange` with liquidity | [`math::range`](src/math/range.rs#L1) |
-| The mark's inputs | [`Mark`](src/math/pricing.rs#L113) | pool price, index and EMAs from one block, advanced to it | [`math::pricing`](src/math/pricing.rs#L1) |
-| A price pair | [`PricePair`](src/math/pricing.rs#L40) | the contract's `uint128` pair, spot or EMA | [`math::pricing`](src/math/pricing.rs#L1) |
+| The mark's inputs | [`Mark`](src/math/pricing.rs#L114) | pool price, index and EMAs from one block, advanced to it | [`math::pricing`](src/math/pricing.rs#L1) |
+| A price pair | [`PricePair`](src/math/pricing.rs#L41) | the contract's `uint128` pair, spot or EMA | [`math::pricing`](src/math/pricing.rs#L1) |
 | Capacity and its draw | [`MarketCapacity`](src/math/capacity.rs#L78) | capacity and open interest from one block | [`math::capacity`](src/math/capacity.rs#L1) |
-| The pool at a block | [`PoolSnapshot`](src/math/swap.rs#L70) | price, liquidity and a tick map that reconciles with it | [`math::swap`](src/math/swap.rs#L1) |
-| A settle previewed | [`MakerEquityBreakdown`](src/math/maker_equity.rs#L189) | exact atoms, the contract's arithmetic | [`math::maker_equity`](src/math/maker_equity.rs#L1) |
-| A block | [`BlockContext`](src/math/mod.rs#L47) | number, hash, timestamp of one header | [`math`](src/math/DESIGN.md) |
+| The pool at a block | [`PoolSnapshot`](src/math/swap.rs#L71) | price, liquidity and a tick map that reconciles with it | [`math::swap`](src/math/swap.rs#L1) |
+| A settle previewed | [`MakerEquityBreakdown`](src/math/maker_equity.rs#L188) | exact atoms, the contract's arithmetic | [`math::maker_equity`](src/math/maker_equity.rs#L1) |
+| A block | [`BlockContext`](src/math/mod.rs#L50) | number, hash, timestamp of one header | [`math`](src/math/DESIGN.md) |
 | An event | [`MarketEvent`](src/events.rs#L120) | the market's vocabulary, human units, either tense | [`events`](src/events/DESIGN.md) |
 | An event in chain order | [`TapeEvent`](src/history/tape.rs#L56), [`ChainPoint`](src/history/tape.rs#L47) | block and log index | [`history`](src/history/DESIGN.md) |
 | Custody over time | [`OwnershipLog`](src/history/tape.rs#L100) | a fold of transfers; owner at a chain point | [`history`](src/history/DESIGN.md) |
@@ -341,6 +346,8 @@ The shape first, then the reasons.
   │   │ transport   every request; reads and writes classified      │  │
   │   ├─────────────────────────────────────────────────────────────┤  │
   │   │ errors      every failure typed, with a stated transience   │  │
+  │   ├─────────────────────────────────────────────────────────────┤  │
+  │   │ units       what every number is, and its fixed-point math  │  │
   │   └─────────────────────────────────────────────────────────────┘  │
   └────────────────────────────────────────────────────────────────────┘
 ```
@@ -351,10 +358,10 @@ they are. `client` is the centre because it is the only place a caller
 addresses the chain: it fills the human surface on the left, hands
 snapshots to `math` on the right, and reaches down to the three
 machineries. `feeds` and `history` are the two tenses of the same
-vocabulary, which is why both arrows land on `events`. The two bands at
+vocabulary, which is why both arrows land on `events`. The three bands at
 the bottom have no arrows because everything above them uses them: every
-request passes through `transport`, and every failure is one of `errors`'
-variants. The strategy layer above the crate consumes the public surface
+request passes through `transport`, every failure is one of `errors`'
+variants, and every number is one of `units`' types. The strategy layer above the crate consumes the public surface
 and nothing else; it appears because its needs are why several types
 exist, and it is the one edge that leaves the repository.
 
@@ -383,8 +390,13 @@ exist, and it is the one edge that leaves the repository.
 - **`contracts`** and **`storage`**: the deployed shapes. Bindings, ABI
   locks, slot derivation. Consumed by `client` and `math`; never by a
   strategy directly.
-- **`types`** and **`convert`**: the human surface and the unit boundary.
-  Consumed by `client` on the way out and by callers on the way in.
+- **`types`** and **`convert`**: the human surface. Consumed by `client` on
+  the way out and by callers on the way in.
+- **`units`**: what every number is. Provides one type per unit the market
+  is denominated in, the one legal crossing between each dangerous pair,
+  and the Solidity-compatible fixed-point arithmetic over those encodings,
+  which `math`'s ports are built on. Depends on nothing but `errors` and
+  `constants`, which is why every other module can take its types.
 
 **Downstream** is the edge out of this crate: the strategy layer built on
 it, ours or anyone's. Its vocabulary builds on these types rather than
@@ -411,8 +423,13 @@ these are the ones every node uses.
   **band**, a **range** with liquidity.
 - **Capacity, open interest, headroom, utilization**: what bands can back,
   what takers hold, the difference, and the ratio.
-- **Atoms, X96, X128, WAD, e6**: the wire units, always suffixed. USDC,
-  perp tokens, prices and fractions: the human units, never suffixed.
+- **Unit of account, encoding**: a count of something indivisible, where
+  the integer is the quantity, against a packing of a continuous quantity
+  into one. The first names the unit in its type, the second names the
+  quantity and leaves the encoding to the accessor. The
+  [`units`](src/units/DESIGN.md) node is the home of the distinction.
+- **Atoms, X96, X128, WAD, e6**: a unit and four encodings. USDC, perp
+  tokens, prices and fractions: the human view, always `f64`.
 - **Now, at a block**: the two tenses of a read. A **snapshot** carries its
   block. **Pinned** means read by hash. The **lagged snapshot block** is
   the head less the lag.

@@ -51,6 +51,7 @@ pub mod prelude;
 pub(crate) mod storage;
 pub mod transport;
 pub mod types;
+pub mod units;
 
 #[doc(inline)]
 pub use client::{
@@ -91,10 +92,13 @@ pub use types::{
 };
 
 #[doc(inline)]
+pub use units::{PerpAtoms, PerpDelta, Price, SqrtPrice, UsdcAtoms, UsdcDelta};
+
+#[doc(inline)]
 pub use math::BlockContext;
 
 #[doc(inline)]
-pub use math::pricing::{Emas, Mark, PricePair, calculate_emas, fair_price, fair_price_x96};
+pub use math::pricing::{Emas, Mark, PricePair, calculate_emas, fair_price, fair_price_f64};
 
 #[doc(inline)]
 pub use math::maker_equity::{

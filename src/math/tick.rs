@@ -7,6 +7,7 @@
 use alloy::primitives::{U256, uint};
 
 use crate::errors::ValidationError;
+use crate::units::SqrtPrice;
 
 /// Uniswap V4 absolute tick bounds.
 pub(crate) const UNISWAP_MIN_TICK: i32 = -887_272;
@@ -21,7 +22,8 @@ const INV_LN_1_0001: f64 = 10000.499991668185;
 /// bit-shift lookup table.
 ///
 /// This is a faithful port of the Solidity `TickMath.getSqrtRatioAtTick`.
-/// The result equals `sqrt(1.0001^tick) * 2^96`, returned as `U256`.
+/// The result is `sqrt(1.0001^tick)`, which is exactly what a
+/// [`SqrtPrice`] holds, so this is the exact way to one.
 ///
 /// Internally uses native `u128` arithmetic instead of `U256` for the
 /// multiply-shift loop. All magic constants and intermediate ratios fit
@@ -37,9 +39,9 @@ const INV_LN_1_0001: f64 = 10000.499991668185;
 /// # use perpcity_sdk::math::tick::get_sqrt_ratio_at_tick;
 /// # use perpcity_sdk::constants::Q96;
 /// let sqrt_price = get_sqrt_ratio_at_tick(0).unwrap();
-/// assert_eq!(sqrt_price, Q96); // tick 0 → sqrtPrice = 1.0
+/// assert_eq!(sqrt_price.x96(), Q96); // tick 0 → sqrtPrice = 1.0
 /// ```
-pub fn get_sqrt_ratio_at_tick(tick: i32) -> Result<U256, ValidationError> {
+pub fn get_sqrt_ratio_at_tick(tick: i32) -> Result<SqrtPrice, ValidationError> {
     let abs_tick = tick.unsigned_abs();
     if abs_tick > UNISWAP_MAX_TICK as u32 {
         return Err(ValidationError::InvalidTickRange {
@@ -113,22 +115,22 @@ pub fn get_sqrt_ratio_at_tick(tick: i32) -> Result<U256, ValidationError> {
 
     // V4 rounds up when reducing Q128.128 to Q64.96 so the inverse
     // getTickAtSqrtPrice relationship is stable at exact boundaries.
-    Ok((result + U256::from(u32::MAX)) >> 32)
+    Ok(SqrtPrice::from_x96((result + U256::from(u32::MAX)) >> 32))
 }
 
 /// Return the greatest tick whose encoded sqrt price is less than or equal to
-/// `sqrt_price_x96`.
+/// `sqrt_price`.
 ///
 /// This uses the canonical [`get_sqrt_ratio_at_tick`] implementation as the
 /// comparison oracle. The fixed 21-iteration binary search is inexpensive for
 /// off-chain quoting and, importantly, inherits exactly the same boundary
 /// rounding as the Solidity implementation.
-pub fn get_tick_at_sqrt_ratio(sqrt_price_x96: U256) -> Result<i32, ValidationError> {
+pub fn get_tick_at_sqrt_ratio(sqrt_price: SqrtPrice) -> Result<i32, ValidationError> {
     let min = get_sqrt_ratio_at_tick(UNISWAP_MIN_TICK)?;
     let max = get_sqrt_ratio_at_tick(UNISWAP_MAX_TICK)?;
-    if sqrt_price_x96 < min || sqrt_price_x96 >= max {
+    if sqrt_price < min || sqrt_price >= max {
         return Err(ValidationError::InvalidPrice {
-            reason: format!("sqrtPriceX96 {sqrt_price_x96} outside Uniswap bounds"),
+            reason: format!("sqrtPriceX96 {} outside Uniswap bounds", sqrt_price.x96()),
         });
     }
 
@@ -136,7 +138,7 @@ pub fn get_tick_at_sqrt_ratio(sqrt_price_x96: U256) -> Result<i32, ValidationErr
     let mut hi = UNISWAP_MAX_TICK;
     while lo + 1 < hi {
         let mid = lo + (hi - lo) / 2;
-        if get_sqrt_ratio_at_tick(mid)? <= sqrt_price_x96 {
+        if get_sqrt_ratio_at_tick(mid)? <= sqrt_price {
             lo = mid;
         } else {
             hi = mid;
@@ -311,7 +313,7 @@ mod tests {
     fn tick_0_gives_q96() {
         // At tick 0, sqrtPrice = 1.0, so sqrtPriceX96 = Q96 exactly.
         let result = get_sqrt_ratio_at_tick(0).unwrap();
-        assert_eq!(result, Q96);
+        assert_eq!(result.x96(), Q96);
     }
 
     #[test]
@@ -334,7 +336,7 @@ mod tests {
         // because sqrt(1.0001^tick) * sqrt(1.0001^-tick) = 1, so in X96: Q96^2.
         let pos = get_sqrt_ratio_at_tick(1000).unwrap();
         let neg = get_sqrt_ratio_at_tick(-1000).unwrap();
-        let product = pos * neg;
+        let product = pos.x96() * neg.x96();
         let q96_squared = Q96 * Q96;
         let diff = product.abs_diff(q96_squared);
         // Allow small rounding error (< 1 ppm of Q96^2).
@@ -367,7 +369,12 @@ mod tests {
         let mut prev = get_sqrt_ratio_at_tick(-1000).unwrap();
         for t in (-999..=1000).step_by(100) {
             let curr = get_sqrt_ratio_at_tick(t).unwrap();
-            assert!(curr > prev, "not monotonic at tick {t}: {curr} <= {prev}");
+            assert!(
+                curr > prev,
+                "not monotonic at tick {t}: {} <= {}",
+                curr.x96(),
+                prev.x96()
+            );
             prev = curr;
         }
     }
@@ -376,7 +383,7 @@ mod tests {
     fn known_tick_30_value() {
         // price at tick 30 = 1.0001^30 ≈ 1.003004
         let sqrt_px96 = get_sqrt_ratio_at_tick(30).unwrap();
-        let price = sqrt_price_x96_to_f64_price(sqrt_px96).unwrap();
+        let price = sqrt_price_x96_to_f64_price(sqrt_px96.x96()).unwrap();
         let expected = 1.0001_f64.powi(30);
         let rel_err = (price - expected).abs() / expected;
         assert!(
@@ -389,7 +396,7 @@ mod tests {
     fn known_tick_neg300_value() {
         // price at tick -300 = 1.0001^(-300) ≈ 0.97044
         let sqrt_px96 = get_sqrt_ratio_at_tick(-300).unwrap();
-        let price = sqrt_price_x96_to_f64_price(sqrt_px96).unwrap();
+        let price = sqrt_price_x96_to_f64_price(sqrt_px96.x96()).unwrap();
         let expected = 1.0001_f64.powi(-300);
         let rel_err = (price - expected).abs() / expected;
         assert!(

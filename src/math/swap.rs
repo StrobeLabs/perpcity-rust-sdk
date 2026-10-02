@@ -14,10 +14,11 @@ use serde::{Deserialize, Serialize};
 use crate::constants::{MAX_SWAP_SQRT_PRICE_X96, MIN_SWAP_SQRT_PRICE_X96, Q96};
 use crate::errors::ValidationError;
 use crate::math::BlockContext;
-use crate::math::fixed_point::{Rounding, mul_div, u512_to_u256};
 use crate::math::tick::{
     UNISWAP_MAX_TICK, UNISWAP_MIN_TICK, get_sqrt_ratio_at_tick, get_tick_at_sqrt_ratio,
 };
+use crate::units::fixed_point::{Rounding, mul_div, u512_to_u256};
+use crate::units::{PerpAtoms, PerpDelta, SqrtPrice, UsdcAtoms, UsdcDelta};
 
 /// Liquidity stored at an initialized tick.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -50,8 +51,8 @@ pub enum QuoteLimit {
 pub struct QuoteConstraints {
     /// Enforce the price-impact module's current bounds.
     pub enforce_price_impact: bool,
-    /// Optional absolute cap on the perp atoms traded.
-    pub max_perp: Option<u128>,
+    /// Optional absolute cap on the perp traded.
+    pub max_perp: Option<PerpAtoms>,
 }
 
 impl Default for QuoteConstraints {
@@ -70,8 +71,8 @@ impl Default for QuoteConstraints {
 pub struct PoolSnapshot {
     /// Block containing all state in this snapshot.
     pub block: BlockContext,
-    /// Current Q64.96 square-root price.
-    pub sqrt_price_x96: U256,
+    /// The pool's current price.
+    pub sqrt_price: SqrtPrice,
     /// Current pool tick.
     pub tick: i32,
     /// Active liquidity at the current tick.
@@ -79,13 +80,13 @@ pub struct PoolSnapshot {
     /// Initialized ticks keyed in ascending order.
     pub ticks: BTreeMap<i32, TickLiquidity>,
     /// Minimum price the Perp swap itself can reach.
-    pub protocol_sqrt_min_x96: U256,
+    pub protocol_sqrt_min: SqrtPrice,
     /// Maximum price the Perp swap itself can reach.
-    pub protocol_sqrt_max_x96: U256,
+    pub protocol_sqrt_max: SqrtPrice,
     /// Current lower bound returned by the price-impact module.
-    pub impact_sqrt_min_x96: U256,
+    pub impact_sqrt_min: SqrtPrice,
     /// Current upper bound returned by the price-impact module.
-    pub impact_sqrt_max_x96: U256,
+    pub impact_sqrt_max: SqrtPrice,
 }
 
 impl Default for PoolSnapshot {
@@ -95,14 +96,14 @@ impl Default for PoolSnapshot {
     fn default() -> Self {
         Self {
             block: BlockContext::default(),
-            sqrt_price_x96: Q96,
+            sqrt_price: SqrtPrice::from_x96(Q96),
             tick: 0,
             liquidity: 0,
             ticks: BTreeMap::new(),
-            protocol_sqrt_min_x96: MIN_SWAP_SQRT_PRICE_X96,
-            protocol_sqrt_max_x96: MAX_SWAP_SQRT_PRICE_X96,
-            impact_sqrt_min_x96: MIN_SWAP_SQRT_PRICE_X96,
-            impact_sqrt_max_x96: MAX_SWAP_SQRT_PRICE_X96,
+            protocol_sqrt_min: SqrtPrice::from_x96(MIN_SWAP_SQRT_PRICE_X96),
+            protocol_sqrt_max: SqrtPrice::from_x96(MAX_SWAP_SQRT_PRICE_X96),
+            impact_sqrt_min: SqrtPrice::from_x96(MIN_SWAP_SQRT_PRICE_X96),
+            impact_sqrt_max: SqrtPrice::from_x96(MAX_SWAP_SQRT_PRICE_X96),
         }
     }
 }
@@ -110,16 +111,16 @@ impl Default for PoolSnapshot {
 /// Exact result of a local taker simulation.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TakerQuote {
-    /// Requested signed perp atoms.
-    pub requested_perp_delta: i128,
-    /// Filled signed perp atoms.
-    pub perp_delta: i128,
-    /// Signed token1 atoms: negative when paid, positive when received.
-    pub usd_delta: i128,
-    /// Starting Q64.96 square-root price.
-    pub sqrt_price_start_x96: U256,
-    /// Ending Q64.96 square-root price.
-    pub sqrt_price_after_x96: U256,
+    /// The exposure the caller asked for.
+    pub requested_perp_delta: PerpDelta,
+    /// The exposure that filled.
+    pub perp_delta: PerpDelta,
+    /// The USDC moved: negative when paid, positive when received.
+    pub usd_delta: UsdcDelta,
+    /// The pool's price before the swap.
+    pub sqrt_price_start: SqrtPrice,
+    /// The pool's price after it.
+    pub sqrt_price_after: SqrtPrice,
     /// Ending tick using V4 boundary semantics.
     pub tick_after: i32,
     /// Active liquidity after the swap.
@@ -144,24 +145,25 @@ impl TakerQuote {
     /// `slippage_bps` is clamped to 10 000 (100%) so a sell can never
     /// silently produce a zero minimum-proceeds limit from an oversized
     /// cushion.
-    pub fn amt1_limit(&self, slippage_bps: u32) -> u128 {
+    pub fn amt1_limit(&self, slippage_bps: u32) -> UsdcAtoms {
         debug_assert!(
             slippage_bps <= 10_000,
             "slippage_bps {slippage_bps} exceeds 100%"
         );
-        let amount = self.usd_delta.unsigned_abs();
+        let amount = self.usd_delta.magnitude().atoms();
         let bps = (slippage_bps as u128).min(10_000);
-        if self.perp_delta > 0 {
+        UsdcAtoms::new(if self.perp_delta.atoms() > 0 {
             amount.saturating_mul(10_000 + bps).saturating_add(9_999) / 10_000
         } else {
             amount.saturating_mul(10_000 - bps) / 10_000
-        }
+        })
     }
 
     /// Average execution price in human-readable token1/token0 units.
     pub fn effective_price(&self) -> Option<f64> {
-        (self.perp_delta != 0)
-            .then(|| self.usd_delta.unsigned_abs() as f64 / self.perp_delta.unsigned_abs() as f64)
+        (!self.perp_delta.is_zero()).then(|| {
+            self.usd_delta.magnitude().atoms() as f64 / self.perp_delta.magnitude().atoms() as f64
+        })
     }
 }
 
@@ -196,13 +198,13 @@ impl PoolSnapshot {
     /// liquidity spans multiple words, on-chain amounts can exceed the local
     /// quote by a few atoms — covered by the [`TakerQuote::amt1_limit`]
     /// cushion, but not byte-exact against receipts.
-    pub fn quote_perp(&self, perp_delta: i128) -> Result<TakerQuote, ValidationError> {
-        let limit = if perp_delta < 0 {
-            self.protocol_sqrt_min_x96
+    pub fn quote_perp(&self, perp_delta: PerpDelta) -> Result<TakerQuote, ValidationError> {
+        let limit = if perp_delta.is_negative() {
+            self.protocol_sqrt_min.x96()
         } else {
-            self.protocol_sqrt_max_x96
+            self.protocol_sqrt_max.x96()
         };
-        let sim = self.simulate(perp_delta, limit)?;
+        let sim = self.simulate(perp_delta.atoms(), limit)?;
         let reason = if sim.fully_filled {
             QuoteLimit::Filled
         } else if sim.hit_limit {
@@ -210,49 +212,50 @@ impl PoolSnapshot {
         } else {
             QuoteLimit::InsufficientLiquidity
         };
-        Ok(self.finish_quote(perp_delta, sim, reason))
+        Ok(self.finish_quote(perp_delta.atoms(), sim, reason))
     }
 
-    /// Size and quote the largest trade toward `target_sqrt_price_x96` without
+    /// Size and quote the largest trade toward `target_sqrt_price` without
     /// overshooting it or an enabled price-impact bound.
     pub fn quote_to_price(
         &self,
-        target_sqrt_price_x96: U256,
+        target_sqrt_price: SqrtPrice,
         constraints: QuoteConstraints,
     ) -> Result<TakerQuote, ValidationError> {
-        if target_sqrt_price_x96 == self.sqrt_price_x96 {
-            return self.quote_perp(0);
+        if target_sqrt_price == self.sqrt_price {
+            return self.quote_perp(PerpDelta::ZERO);
         }
-        let buy = target_sqrt_price_x96 > self.sqrt_price_x96;
+        let (target, current) = (target_sqrt_price.x96(), self.sqrt_price.x96());
+        let buy = target > current;
         let protocol_limit = if buy {
-            self.protocol_sqrt_max_x96
+            self.protocol_sqrt_max.x96()
         } else {
-            self.protocol_sqrt_min_x96
+            self.protocol_sqrt_min.x96()
         };
         let mut limit = if buy {
-            target_sqrt_price_x96.min(protocol_limit)
+            target.min(protocol_limit)
         } else {
-            target_sqrt_price_x96.max(protocol_limit)
+            target.max(protocol_limit)
         };
-        let mut reason = if limit == protocol_limit && target_sqrt_price_x96 != protocol_limit {
+        let mut reason = if limit == protocol_limit && target != protocol_limit {
             QuoteLimit::TerminalPrice
         } else {
             QuoteLimit::TargetPrice
         };
         if constraints.enforce_price_impact {
             let bounded = if buy {
-                limit.min(self.impact_sqrt_max_x96)
+                limit.min(self.impact_sqrt_max.x96())
             } else {
-                limit.max(self.impact_sqrt_min_x96)
+                limit.max(self.impact_sqrt_min.x96())
             };
             if bounded != limit {
                 reason = QuoteLimit::PriceImpact;
                 limit = bounded;
             }
         }
-        if (buy && limit <= self.sqrt_price_x96) || (!buy && limit >= self.sqrt_price_x96) {
-            let mut quote = self.quote_perp(0)?;
-            quote.requested_perp_delta = 0;
+        if (buy && limit <= current) || (!buy && limit >= current) {
+            let mut quote = self.quote_perp(PerpDelta::ZERO)?;
+            quote.requested_perp_delta = PerpDelta::ZERO;
             quote.limit = QuoteLimit::PriceImpact;
             return Ok(quote);
         }
@@ -260,7 +263,7 @@ impl PoolSnapshot {
         let probe = if buy { i128::MAX } else { -i128::MAX };
         let capacity = self.simulate(probe, limit)?.perp_delta;
         let capped = constraints.max_perp.map_or(capacity, |max| {
-            let max = max.min(i128::MAX as u128) as i128;
+            let max = max.atoms().min(i128::MAX as u128) as i128;
             if buy {
                 capacity.min(max)
             } else {
@@ -300,17 +303,17 @@ impl PoolSnapshot {
     }
 
     fn finish_quote(&self, requested: i128, sim: Simulation, mut reason: QuoteLimit) -> TakerQuote {
-        let allowed = sim.sqrt_after >= self.impact_sqrt_min_x96
-            && sim.sqrt_after <= self.impact_sqrt_max_x96;
+        let allowed = sim.sqrt_after >= self.impact_sqrt_min.x96()
+            && sim.sqrt_after <= self.impact_sqrt_max.x96();
         if sim.fully_filled && !allowed {
             reason = QuoteLimit::PriceImpact;
         }
         TakerQuote {
-            requested_perp_delta: requested,
-            perp_delta: sim.perp_delta,
-            usd_delta: sim.usd_delta,
-            sqrt_price_start_x96: self.sqrt_price_x96,
-            sqrt_price_after_x96: sim.sqrt_after,
+            requested_perp_delta: PerpDelta::new(requested),
+            perp_delta: PerpDelta::new(sim.perp_delta),
+            usd_delta: UsdcDelta::new(sim.usd_delta),
+            sqrt_price_start: self.sqrt_price,
+            sqrt_price_after: SqrtPrice::from_x96(sim.sqrt_after),
             tick_after: sim.tick_after,
             liquidity_after: sim.liquidity_after,
             ticks_crossed: sim.crossed,
@@ -326,7 +329,7 @@ impl PoolSnapshot {
         let exact_amount = requested.unsigned_abs();
         let mut remaining = U256::from(exact_amount);
         let mut calculated = U256::ZERO;
-        let mut sqrt = self.sqrt_price_x96;
+        let mut sqrt = self.sqrt_price.x96();
         let mut tick = self.tick;
         let mut liquidity = self.liquidity;
         let mut crossed = Vec::new();
@@ -348,7 +351,7 @@ impl PoolSnapshot {
             } else {
                 UNISWAP_MAX_TICK
             });
-            let sqrt_next = get_sqrt_ratio_at_tick(next_tick)?;
+            let sqrt_next = get_sqrt_ratio_at_tick(next_tick)?.x96();
             let target = if zero_for_one {
                 sqrt_next.max(sqrt_limit)
             } else {
@@ -417,7 +420,7 @@ impl PoolSnapshot {
                     next_tick
                 };
             } else if sqrt != start {
-                tick = get_tick_at_sqrt_ratio(sqrt)?;
+                tick = get_tick_at_sqrt_ratio(SqrtPrice::from_x96(sqrt))?;
             }
             // A zero-amount step that crossed a tick is progress (the price
             // sat exactly on an initialized boundary); only a step that moved
@@ -622,6 +625,11 @@ mod tests {
         ));
     }
 
+    /// An exposure in perp atoms: positive long, negative short.
+    fn perp(atoms: i128) -> PerpDelta {
+        PerpDelta::new(atoms)
+    }
+
     fn pool() -> PoolSnapshot {
         let mut market = PoolSnapshot {
             liquidity: 1_000_000_000_000,
@@ -647,21 +655,21 @@ mod tests {
     #[test]
     fn buy_and_sell_move_price_in_expected_direction() {
         let market = pool();
-        let buy = market.quote_perp(1_000_000).unwrap();
-        let sell = market.quote_perp(-1_000_000).unwrap();
+        let buy = market.quote_perp(perp(1_000_000)).unwrap();
+        let sell = market.quote_perp(perp(-1_000_000)).unwrap();
         assert!(buy.fully_filled && sell.fully_filled);
-        assert!(buy.sqrt_price_after_x96 > market.sqrt_price_x96);
-        assert!(sell.sqrt_price_after_x96 < market.sqrt_price_x96);
-        assert!(buy.usd_delta < 0 && sell.usd_delta > 0);
+        assert!(buy.sqrt_price_after > market.sqrt_price);
+        assert!(sell.sqrt_price_after < market.sqrt_price);
+        assert!(buy.usd_delta < UsdcDelta::ZERO && sell.usd_delta > UsdcDelta::ZERO);
     }
 
     #[test]
     fn directional_amount_limits_round_safely() {
         let market = pool();
-        let buy = market.quote_perp(1_000_000).unwrap();
-        let sell = market.quote_perp(-1_000_000).unwrap();
-        assert!(buy.amt1_limit(25) >= buy.usd_delta.unsigned_abs());
-        assert!(sell.amt1_limit(25) <= sell.usd_delta.unsigned_abs());
+        let buy = market.quote_perp(perp(1_000_000)).unwrap();
+        let sell = market.quote_perp(perp(-1_000_000)).unwrap();
+        assert!(buy.amt1_limit(25) >= buy.usd_delta.magnitude());
+        assert!(sell.amt1_limit(25) <= sell.usd_delta.magnitude());
     }
 
     /// A pool whose current price sits exactly on the initialized tick at 0:
@@ -672,7 +680,7 @@ mod tests {
         // Active liquidity is the sum of net for initialized ticks <= tick.
         let liquidity = if tick >= 0 { l + m } else { l };
         let mut market = PoolSnapshot {
-            sqrt_price_x96: get_sqrt_ratio_at_tick(0).unwrap(),
+            sqrt_price: get_sqrt_ratio_at_tick(0).unwrap(),
             tick,
             liquidity,
             ..Default::default()
@@ -707,13 +715,13 @@ mod tests {
         // zero amounts. The swap must continue into the liquidity below
         // instead of reporting the liquidity exhausted.
         let market = pool_at_boundary(0);
-        let sell = market.quote_perp(-1_000_000).unwrap();
+        let sell = market.quote_perp(perp(-1_000_000)).unwrap();
         assert!(sell.fully_filled, "limit={:?}", sell.limit);
         assert_eq!(sell.limit, QuoteLimit::Filled);
-        assert_eq!(sell.perp_delta, -1_000_000);
-        assert!(sell.usd_delta > 0);
+        assert_eq!(sell.perp_delta, perp(-1_000_000));
+        assert!(sell.usd_delta > UsdcDelta::ZERO);
         assert_eq!(sell.ticks_crossed, vec![0]);
-        assert!(sell.sqrt_price_after_x96 < market.sqrt_price_x96);
+        assert!(sell.sqrt_price_after < market.sqrt_price);
     }
 
     #[test]
@@ -722,13 +730,13 @@ mod tests {
         // when it stops exactly on the boundary. A buy's first step crosses
         // tick 0 upward with zero amounts and must keep going.
         let market = pool_at_boundary(-1);
-        let buy = market.quote_perp(1_000_000).unwrap();
+        let buy = market.quote_perp(perp(1_000_000)).unwrap();
         assert!(buy.fully_filled, "limit={:?}", buy.limit);
         assert_eq!(buy.limit, QuoteLimit::Filled);
-        assert_eq!(buy.perp_delta, 1_000_000);
-        assert!(buy.usd_delta < 0);
+        assert_eq!(buy.perp_delta, perp(1_000_000));
+        assert!(buy.usd_delta < UsdcDelta::ZERO);
         assert_eq!(buy.ticks_crossed, vec![0]);
-        assert!(buy.sqrt_price_after_x96 > market.sqrt_price_x96);
+        assert!(buy.sqrt_price_after > market.sqrt_price);
     }
 
     #[test]
@@ -743,9 +751,9 @@ mod tests {
                 },
             )
             .unwrap();
-        assert!(uncapped.perp_delta > 1);
+        assert!(uncapped.perp_delta > perp(1));
 
-        let cap = (uncapped.perp_delta / 2) as u128;
+        let cap = PerpAtoms::new(uncapped.perp_delta.magnitude().atoms() / 2);
         let capped = market
             .quote_to_price(
                 get_sqrt_ratio_at_tick(100).unwrap(),
@@ -756,21 +764,21 @@ mod tests {
             )
             .unwrap();
         assert_eq!(capped.limit, QuoteLimit::MaxPerp);
-        assert_eq!(capped.perp_delta, cap as i128);
-        assert!(capped.sqrt_price_after_x96 < uncapped.sqrt_price_after_x96);
+        assert_eq!(capped.perp_delta.magnitude(), cap);
+        assert!(capped.sqrt_price_after < uncapped.sqrt_price_after);
     }
 
     #[test]
     fn target_quote_respects_impact_bound() {
         let mut market = pool();
-        market.impact_sqrt_max_x96 = get_sqrt_ratio_at_tick(10).unwrap();
+        market.impact_sqrt_max = get_sqrt_ratio_at_tick(10).unwrap();
         let quote = market
             .quote_to_price(
                 get_sqrt_ratio_at_tick(100).unwrap(),
                 QuoteConstraints::default(),
             )
             .unwrap();
-        assert!(quote.sqrt_price_after_x96 <= market.impact_sqrt_max_x96);
+        assert!(quote.sqrt_price_after <= market.impact_sqrt_max);
         assert!(quote.price_impact_allowed);
         assert_eq!(quote.limit, QuoteLimit::PriceImpact);
     }
