@@ -250,7 +250,9 @@ impl TryFrom<f64> for Ratio {
         let scaled = (fraction * F64_1E6).round();
         if scaled > f64::from(MAX_E6) {
             return Err(ValidationError::InvalidMarginRatio {
-                value: MAX_E6,
+                // The rejected value, not the bound: a float-to-integer cast
+                // saturates, so a vast fraction reports `u32::MAX`.
+                value: scaled as u32,
                 min: 0,
                 max: MAX_E6,
             });
