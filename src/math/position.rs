@@ -14,6 +14,8 @@
 
 use alloy::primitives::I256;
 
+use crate::units::Ratio;
+
 /// Scale factor for on-chain 6-decimal values.
 const SCALE_1E6: f64 = 1_000_000.0;
 
@@ -168,30 +170,32 @@ pub fn leverage(position_value: f64, effective_margin: f64) -> f64 {
 ///
 /// - `entry_perp_delta`, `entry_usd_delta`: On-chain signed deltas (I256, scaled 1e6)
 /// - `margin`: Current margin in USDC (human-readable f64)
-/// - `liq_ratio_scaled`: Liquidation margin ratio, scaled by 1e6 (e.g. `25_000` = 2.5%)
+/// - `liquidation_margin_ratio`: the ratio the position is liquidated at
 /// - `is_long`: Whether this is a long position
 ///
 /// # Examples
 ///
 /// ```
 /// # use perpcity_sdk::math::position::liquidation_price;
+/// # use perpcity_sdk::Ratio;
 /// # use alloy::primitives::I256;
-/// // Long 1 ETH at $1500, $100 margin, 2.5% liq ratio
+/// // Long 1 ETH at $1500, $100 margin, 2.5% liquidation ratio
 /// let liq = liquidation_price(
 ///     I256::try_from(1_000_000i64).unwrap(),
 ///     I256::try_from(-1_500_000_000i64).unwrap(),
 ///     100.0,
-///     25_000,
+///     Ratio::from_e6(25_000)?,
 ///     true,
 /// );
 /// assert!((liq.unwrap() - 1437.5).abs() < 0.01);
+/// # Ok::<(), perpcity_sdk::ValidationError>(())
 /// ```
 #[inline]
 pub fn liquidation_price(
     entry_perp_delta: I256,
     entry_usd_delta: I256,
     margin: f64,
-    liq_ratio_scaled: u32,
+    liquidation_margin_ratio: Ratio,
     is_long: bool,
 ) -> Option<f64> {
     let size = position_size(entry_perp_delta);
@@ -205,9 +209,7 @@ pub fn liquidation_price(
     let ep = entry_price(entry_perp_delta, entry_usd_delta);
     let abs_size = size.abs();
     let notional = abs_size * ep;
-    let liq_ratio = liq_ratio_scaled as f64 / SCALE_1E6;
-
-    let margin_excess = margin - liq_ratio * notional;
+    let margin_excess = margin - liquidation_margin_ratio.fraction() * notional;
 
     if is_long {
         let liq = ep - margin_excess / abs_size;
@@ -223,6 +225,11 @@ pub fn liquidation_price(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 2.5%, the liquidation ratio these fixtures use.
+    fn liq_ratio() -> Ratio {
+        Ratio::from_e6(25_000).unwrap()
+    }
 
     // Helper to make I256 from i64 without verbosity.
     fn i(val: i64) -> I256 {
@@ -375,7 +382,7 @@ mod tests {
     fn liquidation_price_long() {
         // Long 1 ETH at $1500, $100 margin, 2.5% liq ratio
         // liq = 1500 - (100 - 0.025 * 1500) / 1 = 1500 - 62.5 = 1437.5
-        let liq = liquidation_price(i(1_000_000), i(-1_500_000_000), 100.0, 25_000, true);
+        let liq = liquidation_price(i(1_000_000), i(-1_500_000_000), 100.0, liq_ratio(), true);
         assert!(liq.is_some());
         assert!(
             (liq.unwrap() - 1437.5).abs() < 0.01,
@@ -388,7 +395,7 @@ mod tests {
     fn liquidation_price_short() {
         // Short 1 ETH at $1500, $100 margin, 2.5% liq ratio
         // liq = 1500 + (100 - 0.025 * 1500) / 1 = 1500 + 62.5 = 1562.5
-        let liq = liquidation_price(i(-1_000_000), i(1_500_000_000), 100.0, 25_000, false);
+        let liq = liquidation_price(i(-1_000_000), i(1_500_000_000), 100.0, liq_ratio(), false);
         assert!(liq.is_some());
         assert!(
             (liq.unwrap() - 1562.5).abs() < 0.01,
@@ -402,7 +409,7 @@ mod tests {
         // If margin is so large that liq_price would go negative, clamp to 0.
         // 1 ETH at $100, $200 margin, 2.5% liq ratio
         // liq = 100 - (200 - 0.025 * 100) / 1 = 100 - 197.5 = -97.5 → clamped to 0
-        let liq = liquidation_price(i(1_000_000), i(-100_000_000), 200.0, 25_000, true);
+        let liq = liquidation_price(i(1_000_000), i(-100_000_000), 200.0, liq_ratio(), true);
         assert!(liq.is_some());
         assert_eq!(liq.unwrap(), 0.0);
     }
@@ -410,7 +417,7 @@ mod tests {
     #[test]
     fn liquidation_price_zero_size() {
         assert_eq!(
-            liquidation_price(I256::ZERO, I256::ZERO, 100.0, 25_000, true),
+            liquidation_price(I256::ZERO, I256::ZERO, 100.0, liq_ratio(), true),
             None
         );
     }
@@ -418,7 +425,7 @@ mod tests {
     #[test]
     fn liquidation_price_zero_margin() {
         assert_eq!(
-            liquidation_price(i(1_000_000), i(-1_500_000_000), 0.0, 25_000, true),
+            liquidation_price(i(1_000_000), i(-1_500_000_000), 0.0, liq_ratio(), true),
             None
         );
     }
@@ -426,7 +433,7 @@ mod tests {
     #[test]
     fn liquidation_price_negative_margin() {
         assert_eq!(
-            liquidation_price(i(1_000_000), i(-1_500_000_000), -50.0, 25_000, true),
+            liquidation_price(i(1_000_000), i(-1_500_000_000), -50.0, liq_ratio(), true),
             None
         );
     }
@@ -436,7 +443,7 @@ mod tests {
         // 1 ETH at $1500, $15 margin (100x leverage), 2.5% liq ratio
         // liq = 1500 - (15 - 0.025 * 1500) / 1 = 1500 - (15 - 37.5) = 1500 + 22.5 = 1522.5
         // With extremely high leverage, liq price is ABOVE entry (very close to liquidation).
-        let liq = liquidation_price(i(1_000_000), i(-1_500_000_000), 15.0, 25_000, true);
+        let liq = liquidation_price(i(1_000_000), i(-1_500_000_000), 15.0, liq_ratio(), true);
         assert!(liq.is_some());
         let liq_val = liq.unwrap();
         assert!(
@@ -452,7 +459,13 @@ mod tests {
         // Long 2 ETH at $1000, $200 margin, 5% liq ratio
         // notional = 2 * 1000 = 2000
         // liq = 1000 - (200 - 0.05 * 2000) / 2 = 1000 - (200 - 100) / 2 = 1000 - 50 = 950
-        let liq = liquidation_price(i(2_000_000), i(-2_000_000_000), 200.0, 50_000, true);
+        let liq = liquidation_price(
+            i(2_000_000),
+            i(-2_000_000_000),
+            200.0,
+            Ratio::from_e6(50_000).unwrap(),
+            true,
+        );
         assert!(liq.is_some());
         assert!(
             (liq.unwrap() - 950.0).abs() < 0.01,

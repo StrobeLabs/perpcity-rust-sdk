@@ -124,6 +124,9 @@ spelling convention to carry it.
 | [`FeeGrowth`](accumulators.rs#L60) | Uniswap's fee growth per unit of liquidity, Q128 unsigned and **modular**: the word wraps by design and the difference is still correct across the wrap | nothing public makes one: the maker-equity batch reads the pool's global word and each band tick's outside word, and a crate-private fold turns them into the growth inside a band | [`MakerState`](../math/DESIGN.md), as the band's growth now and at the last checkpoint. |
 | [`LUnits`](liquidity.rs#L24) | liquidity in the pool's own units, unsigned, as a `uint128`: neither asset, but the depth a range holds, and what every concentrated-liquidity formula is linear in | [`estimate_liquidity`](../math/DESIGN.md), [`liquidity_for_target_ratio`](../math/DESIGN.md) and [`liquidity_for_capacity`](../math/DESIGN.md), the three ways to size a band; [`LDelta::magnitude`](liquidity.rs#L120) | [`MakerBand`](../math/DESIGN.md), as the depth standing in a range; [`amounts_for_liquidity`](../math/DESIGN.md), whose other three arguments are root prices; [`PoolSnapshot`](../math/DESIGN.md) and [`TakerQuote`](../math/DESIGN.md), as the active depth before and after a swap; [`MakerState`](../math/DESIGN.md); [`OpenMakerParams`](../types/DESIGN.md) and [`PerpClient::close_maker`](../client/DESIGN.md). The strategy layer's ladders and corridors size in these. |
 | [`LDelta`](liquidity.rs#L55) | a change in liquidity, signed: what an adjust asks for and what a tick's `liquidityNet` stores. Every operation is checked, because unlike a balance there is no supply bound to argue from | [`LUnits::negated`](liquidity.rs#L86), the delta that closes a band; [`LDelta::negated`](liquidity.rs#L132), the mirror a band's upper tick carries | [`LUnits::checked_add_signed`](liquidity.rs#L65), the one place a depth moves; [`PoolSnapshot::with_liquidity_delta`](../math/DESIGN.md), a what-if band; [`TickLiquidity`](../math/DESIGN.md); [`AdjustMakerParams`](../types/DESIGN.md) and [`MarketEvent`](../events/DESIGN.md). |
+| [`FundingRate`](rates.rs#L38) | the funding rate per day, WAD, signed: positive means longs pay shorts. `int88` on chain, so it always fits an `i128` | the caller, or a `rates()` read; nothing in the crate derives one | [`AccrualInputs`](../math/DESIGN.md), the only consumer, which turns a day's rate and an elapsed interval into the growth the funding cumulative advances by. |
+| [`UtilizationRate`](rates.rs#L50) | a utilization fee rate per day, WAD, unsigned: the contract charges it and never pays it, and stores it as `uint64`. Separate from the funding rate for exactly that reason — one signed type would either lose this claim or force a check the width already makes | the caller, or a `rates()` read | [`AccrualInputs`](../math/DESIGN.md), one per side, feeding the two utilization legs of the replay. |
+| [`Ratio`](rates.rs#L62) | a dimensionless ratio — a margin threshold, a fee share — as the contract holds it: `uint24` millionths, so `50_000` is 5%. The domain is checked at every door, construction and deserialisation alike, so a value no contract produced cannot be carried | [`leverage_to_margin_ratio`](../types/DESIGN.md), the one line over [`Ratio::for_leverage`](rates.rs#L182); [`MakerEquityBreakdown::liquidation_margin_ratio`](../math/DESIGN.md), the ratio a previewed position was opened under; otherwise a read builds one from a module's `uint24` at the read, which is where the domain is checked | [`MarginRatioTriple`](../types/DESIGN.md) and [`Fees`](../types/DESIGN.md), as every threshold and share; [`MakerState`](../math/DESIGN.md) and [`MakerEquityBreakdown`](../math/DESIGN.md), as the ratio stored on a position; [`MakerEquityBreakdown::is_liquidatable`](../math/DESIGN.md) and [`liquidation_price`](../math/DESIGN.md), which both take a rate and would otherwise take a float an amount could pass as. |
 
 The two right-hand columns are where a unit travels. A link under
 *Produced by* is the function that makes one; under *Consumed by*, a
@@ -211,29 +214,31 @@ path the chain checks.
   other's `From`: they are different geometry, and the band's price range
   is the third argument that makes them not inverses of one another at a
   different price.
+- **A [`Ratio`](rates.rs#L62) goes into a settle preview and comes back
+  out.** [`MakerEquityBreakdown`](../math/DESIGN.md) stores the ratio the
+  position was opened under and hands it back, because a caller comparing
+  the health ratio to the threshold needs both from the same preview. A
+  value held and returned is not a conversion with two homes.
 - **`PricePair` holds two `u128` prices rather than two [`Price`](price.rs#L25).**
   It mirrors the contract's struct, whose cast to `uint128` is the check
   its constructor performs, and a `Price` does not remember that width.
 
 ## Debts
 
-- **The pool's own unit and the rates are still primitives.** `LiqUnits`,
-  `LiqDelta`, `Rate` and `Ratio` are named and planned; until they land,
-  the fields behind them are bare `u128`, `i128`, `u64` and `u32` beside
-  typed neighbours, which is where a new bare primitive could now go
-  unnoticed. Liquidity is the exposed one: it is a `u128` next to two
-  other `u128` counts, and [`amounts_for_liquidity`](../math/DESIGN.md)
-  takes three typed arguments and one bare one.
+- **The event vocabulary still speaks `f64` for money.** A settled amount
+  on a `MarketEvent` is a float, and `convert`'s scaling doors survive for
+  the decoder that fills them. They go when the decoder speaks these types,
+  which leaves only the V4 balance-delta packing in that module.
 - **The two utilization payment words have no reader.** The event carries
   the paid side of the earnings accumulator beside the earned side, and
   nothing in the crate uses it; it is typed as [`Earnings`](accumulators.rs#L51)
   because it is the same quantity from the other direction, which the name
   does not say.
-- **The two reported invariants are about to become vacuous.** The graph
-  still reports on `f64` behind a wire suffix and on a suffix matching its
-  primitive. Both are structural once the last suffixed field is typed,
-  and they are deleted then.
-- **`convert` still exists as the `f64` doors.** Each function is one line
-  over a type here, kept because the event vocabulary decodes through
-  them; they go when the decoder speaks the units, leaving only the V4
-  balance-delta packing.
+- **A computed utilization is not a [`Ratio`](rates.rs#L62).**
+  [`MarketCapacity::utilization_e6`](../math/DESIGN.md) still answers in a
+  bare `u32`, because it is derived rather than stored: open interest above
+  capacity is state the contract refuses but a caller can construct, and
+  the result then leaves the `uint24` domain the type enforces. Typing it
+  would mean either a new failure mode or a silent clamp, so it keeps the
+  `Option` whose `None` already means "the contract would pass a sentinel
+  here".

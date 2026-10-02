@@ -153,7 +153,6 @@ pub fn run(opts: Options) -> Result<bool> {
 
     if opts.report {
         report::print(&index, &graph, &nodes);
-        invariants::reported(&index);
     }
     if let Some(base_ref) = &opts.diff {
         let base = at_ref(&root, base_ref)?;

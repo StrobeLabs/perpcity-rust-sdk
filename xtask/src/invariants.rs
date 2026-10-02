@@ -1,18 +1,14 @@
-//! The graph-level invariants. Each enforced one is a sentence in the root
-//! node's "Invariants" section and a predicate here; the sentence is the
-//! error. Reported ones print under `--report` until the type system is
-//! ready for them.
+//! The graph-level invariants. Each is a sentence in the root node's
+//! "Invariants" section and a predicate here; the sentence is the error.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use rustdoc_types::{Id, ItemEnum, Type};
 
 use crate::design::Graph;
-use crate::index::{Index, Kind, component_of, mentions_primitive, result_error};
+use crate::index::{Index, Kind, component_of, result_error};
 use crate::nodes::Node;
 use crate::summary::Summary;
-
-const WIRE_SUFFIXES: [&str; 5] = ["_x96", "_x128", "_atoms", "_e6", "_wad"];
 
 /// The enforced invariants, each as the opening of its sentence in the
 /// root node's Invariants section. The list and the predicates are tied:
@@ -256,72 +252,6 @@ fn names_word(text: &str, word: &str) -> bool {
         !before.is_some_and(|c| c.is_alphanumeric() || c == '_')
             && !after.is_some_and(|c| c.is_alphanumeric() || c == '_')
     })
-}
-
-/// Print the findings of the invariants that are measured but not yet
-/// enforced.
-pub fn reported(index: &Index) {
-    println!("\nReported invariants (not enforced until #124's conversions land):");
-    let mut n = 0;
-    for (label, (id, sig)) in index.functions() {
-        let e = match index
-            .self_of
-            .get(&id)
-            .or(Some(&id))
-            .and_then(|t| index.entries.get(t))
-        {
-            Some(e) => e,
-            None => continue,
-        };
-        if e.top() != "math" {
-            continue;
-        }
-        let name = index.name_of(id);
-        if WIRE_SUFFIXES.iter().any(|s| name.ends_with(s)) {
-            let leaks = sig
-                .input_types
-                .iter()
-                .chain(sig.output.iter())
-                .any(|t| mentions_primitive(t, "f64") || mentions_primitive(t, "f32"));
-            if leaks {
-                println!("  float in an exact path: {label} carries an f64");
-                n += 1;
-            }
-        }
-    }
-    for e in index.sorted() {
-        if !e.kind.is_type() || e.top() != "math" {
-            continue;
-        }
-        for (fname, _, ty, _) in index.fields.get(&e.id).into_iter().flatten() {
-            let expected: Option<&[&str]> = if fname.ends_with("_x96") || fname.ends_with("_x128") {
-                Some(&["U256", "I256", "u128", "i128", "u256"])
-            } else if fname.ends_with("_atoms") {
-                Some(&["u128", "i128", "U256", "I256"])
-            } else if fname.ends_with("_e6") {
-                Some(&["u32", "u64"])
-            } else if fname.ends_with("_wad") {
-                Some(&["U256", "I256", "u64", "i64"])
-            } else {
-                None
-            };
-            if let Some(exp) = expected {
-                let shown = type_name(ty);
-                if !exp.iter().any(|x| shown.ends_with(x)) {
-                    println!(
-                        "  suffix does not match the primitive: {}.{fname} is {shown}",
-                        e.path()
-                    );
-                    n += 1;
-                }
-            }
-            if mentions_primitive(ty, "f64") && WIRE_SUFFIXES.iter().any(|s| fname.ends_with(s)) {
-                println!("  float in an exact field: {}.{fname}", e.path());
-                n += 1;
-            }
-        }
-    }
-    println!("  {n} finding(s)");
 }
 
 /// A type as a reader would name it, for messages, suffix checks and the

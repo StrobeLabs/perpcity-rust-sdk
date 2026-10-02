@@ -20,12 +20,12 @@ use alloy::primitives::{Address, B256, U256};
 use alloy::providers::MulticallError;
 
 use crate::contracts::{IFees, IMarginRatios, Perp, Position};
-use crate::convert::{margin_ratio_to_leverage, price_x96_to_f64, scale_from_6dec};
+use crate::convert::{price_x96_to_f64, scale_from_6dec};
 use crate::errors::{ContractError, PerpCityError, Result, ValidationError};
 use crate::hft::state_cache::{CachedBounds, CachedFees};
 use crate::math::pricing::{Emas, Mark, PricePair};
 use crate::types::{Bounds, Fees, MarketConfig, MarketSnapshot, OpenInterest};
-use crate::units::Price;
+use crate::units::{Price, Ratio};
 
 use super::market::MarketReader;
 use super::state::{ema_window_secs, pinned_read_error};
@@ -474,18 +474,13 @@ impl MarketReader {
         );
 
         let fee_result = fees_contract.fees().call().await?;
-        let c_fee = u24_to_u32(fee_result.cFee);
-        let ins_fee = u24_to_u32(fee_result.insFee);
-        let lp_fee = u24_to_u32(fee_result.lpFee);
+        let liquidation_fee = fees_contract.liqFee().call().await?;
 
-        let liq_fee = u24_to_u32(fees_contract.liqFee().call().await?);
-
-        let scale = SCALE_F64;
         Ok(Fees {
-            creator_fee: c_fee as f64 / scale,
-            insurance_fee: ins_fee as f64 / scale,
-            lp_fee: lp_fee as f64 / scale,
-            liquidation_fee: liq_fee as f64 / scale,
+            creator_fee: Ratio::from_e6(u24_to_u32(fee_result.cFee))?,
+            insurance_fee: Ratio::from_e6(u24_to_u32(fee_result.insFee))?,
+            lp_fee: Ratio::from_e6(u24_to_u32(fee_result.lpFee))?,
+            liquidation_fee: Ratio::from_e6(u24_to_u32(liquidation_fee))?,
         })
     }
 
@@ -497,13 +492,12 @@ impl MarketReader {
         );
         let taker = ratios_contract.takerMarginRatios().call().await?;
 
-        let scale = SCALE_F64;
         Ok(Bounds {
             min_margin: scale_from_6dec(crate::constants::MIN_OPENING_MARGIN as i128),
             // The initial margin ratio is the minimum margin → maximum leverage.
             min_taker_leverage: 1.0,
-            max_taker_leverage: margin_ratio_to_leverage(u24_to_u32(taker.init))?,
-            liquidation_taker_ratio: u24_to_u32(taker.liq) as f64 / scale,
+            max_taker_leverage: Ratio::from_e6(u24_to_u32(taker.init))?.leverage()?,
+            liquidation_taker_ratio: Ratio::from_e6(u24_to_u32(taker.liq))?,
         })
     }
 }
@@ -554,12 +548,17 @@ mod tests {
         rpc.call::<IFees::liqFeeCall>(&e6(50_000));
     }
 
+    /// A ratio from its millionths, as the modules store one.
+    fn ratio(value: u32) -> Ratio {
+        Ratio::from_e6(value).unwrap()
+    }
+
     fn expected_fees() -> Fees {
         Fees {
-            creator_fee: 0.001,
-            insurance_fee: 0.002,
-            lp_fee: 0.003,
-            liquidation_fee: 0.05,
+            creator_fee: ratio(1_000),
+            insurance_fee: ratio(2_000),
+            lp_fee: ratio(3_000),
+            liquidation_fee: ratio(50_000),
         }
     }
 
@@ -577,7 +576,7 @@ mod tests {
             min_margin: 5.0,
             min_taker_leverage: 1.0,
             max_taker_leverage: 10.0,
-            liquidation_taker_ratio: 0.05,
+            liquidation_taker_ratio: ratio(50_000),
         }
     }
 

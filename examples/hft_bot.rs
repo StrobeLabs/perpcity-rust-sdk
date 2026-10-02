@@ -176,7 +176,10 @@ async fn main() -> perpcity_sdk::Result<()> {
     println!("\n=== Market Config ===");
     println!("  Max leverage: {:.0}x", config.bounds.max_taker_leverage);
     println!("  Min margin:   {:.2} USDC", config.bounds.min_margin);
-    println!("  LP fee:       {:.4}%", config.fees.lp_fee * 100.0);
+    println!(
+        "  LP fee:       {:.4}%",
+        config.fees.lp_fee.fraction() * 100.0
+    );
 
     let balance = client.get_usdc_balance().await?;
     println!("  Wallet USDC:  {balance:.2}");

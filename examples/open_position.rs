@@ -111,8 +111,14 @@ async fn main() -> perpcity_sdk::Result<()> {
         config.bounds.max_taker_leverage
     );
     println!("  Min margin:      {:.2} USDC", config.bounds.min_margin);
-    println!("  Creator fee:     {:.4}%", config.fees.creator_fee * 100.0);
-    println!("  LP fee:          {:.4}%", config.fees.lp_fee * 100.0);
+    println!(
+        "  Creator fee:     {:.4}%",
+        config.fees.creator_fee.fraction() * 100.0
+    );
+    println!(
+        "  LP fee:          {:.4}%",
+        config.fees.lp_fee.fraction() * 100.0
+    );
 
     let funding = client.market().get_funding_rate().await?;
     println!("  Daily funding:   {:.6}%", funding * 100.0);

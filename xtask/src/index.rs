@@ -615,34 +615,3 @@ pub fn result_error(ty: &Type) -> Option<Option<Id>> {
         None => Some(None),
     }
 }
-
-/// Whether a type mentions a primitive by name, e.g. `f64`, anywhere.
-pub fn mentions_primitive(ty: &Type, prim: &str) -> bool {
-    match ty {
-        Type::Primitive(p) => p == prim,
-        Type::ResolvedPath(p) => p
-            .args
-            .as_ref()
-            .is_some_and(|a| args_mention_primitive(a, prim)),
-        Type::Tuple(ts) => ts.iter().any(|t| mentions_primitive(t, prim)),
-        Type::Slice(t) | Type::RawPointer { type_: t, .. } | Type::BorrowedRef { type_: t, .. } => {
-            mentions_primitive(t, prim)
-        }
-        Type::Array { type_, .. } => mentions_primitive(type_, prim),
-        _ => false,
-    }
-}
-
-/// Whether generic arguments mention a primitive by name.
-fn args_mention_primitive(a: &GenericArgs, prim: &str) -> bool {
-    match a {
-        GenericArgs::AngleBracketed { args, .. } => args
-            .iter()
-            .any(|arg| matches!(arg, GenericArg::Type(t) if mentions_primitive(t, prim))),
-        GenericArgs::Parenthesized { inputs, output } => {
-            inputs.iter().any(|t| mentions_primitive(t, prim))
-                || output.as_ref().is_some_and(|o| mentions_primitive(o, prim))
-        }
-        GenericArgs::ReturnTypeNotation => false,
-    }
-}

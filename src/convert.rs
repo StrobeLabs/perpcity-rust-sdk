@@ -23,11 +23,7 @@ use std::fmt;
 use alloy::primitives::{I256, U256};
 
 use crate::errors::ValidationError;
-use crate::units::{Price, SqrtPrice, UsdcDelta};
-
-/// 10^6 as f64, for the leverage ↔ margin-ratio pair below, which is the
-/// one conversion here that is not a unit's own.
-const F64_1E6: f64 = 1_000_000.0;
+use crate::units::{Price, Ratio, SqrtPrice, UsdcDelta};
 
 // ── Scaling: f64 ↔ 6-decimal integers ──────────────────────────────────
 
@@ -117,23 +113,13 @@ where
 ///
 /// ```
 /// # use perpcity_sdk::convert::leverage_to_margin_ratio;
-/// assert_eq!(leverage_to_margin_ratio(10.0).unwrap(), 100_000);
-/// assert_eq!(leverage_to_margin_ratio(1.0).unwrap(), 1_000_000);
-/// assert_eq!(leverage_to_margin_ratio(100.0).unwrap(), 10_000);
+/// assert_eq!(leverage_to_margin_ratio(10.0)?.e6(), 100_000);
+/// assert_eq!(leverage_to_margin_ratio(1.0)?.e6(), 1_000_000);
+/// assert_eq!(leverage_to_margin_ratio(100.0)?.e6(), 10_000);
+/// # Ok::<(), perpcity_sdk::ValidationError>(())
 /// ```
-pub fn leverage_to_margin_ratio(leverage: f64) -> Result<u32, ValidationError> {
-    if leverage.is_nan() || leverage.is_infinite() || leverage <= 0.0 {
-        return Err(ValidationError::InvalidLeverage {
-            reason: format!("leverage must be a positive finite number, got {leverage}"),
-        });
-    }
-    let ratio = (F64_1E6 / leverage).round();
-    if ratio < 1.0 || ratio > u32::MAX as f64 {
-        return Err(ValidationError::InvalidLeverage {
-            reason: format!("leverage {leverage} produces out-of-range margin ratio {ratio}"),
-        });
-    }
-    Ok(ratio as u32)
+pub fn leverage_to_margin_ratio(leverage: f64) -> Result<Ratio, ValidationError> {
+    Ratio::for_leverage(leverage)
 }
 
 /// Convert an on-chain margin ratio (scaled by 1e6) to leverage.
@@ -148,18 +134,13 @@ pub fn leverage_to_margin_ratio(leverage: f64) -> Result<u32, ValidationError> {
 ///
 /// ```
 /// # use perpcity_sdk::convert::margin_ratio_to_leverage;
-/// let lev = margin_ratio_to_leverage(100_000).unwrap();
+/// # use perpcity_sdk::Ratio;
+/// let lev = margin_ratio_to_leverage(Ratio::from_e6(100_000)?)?;
 /// assert!((lev - 10.0).abs() < 0.0001);
+/// # Ok::<(), perpcity_sdk::ValidationError>(())
 /// ```
-pub fn margin_ratio_to_leverage(margin_ratio: u32) -> Result<f64, ValidationError> {
-    if margin_ratio == 0 {
-        return Err(ValidationError::InvalidMarginRatio {
-            value: 0,
-            min: 1,
-            max: u32::MAX,
-        });
-    }
-    Ok(F64_1E6 / margin_ratio as f64)
+pub fn margin_ratio_to_leverage(margin_ratio: Ratio) -> Result<f64, ValidationError> {
+    margin_ratio.leverage()
 }
 
 // ── Q96 fixed-point ↔ f64 ─────────────────────────────────────────────
@@ -444,32 +425,37 @@ mod tests {
         }
     }
 
+    /// A ratio from its millionths, for the tests below.
+    fn e6(value: u32) -> Ratio {
+        Ratio::from_e6(value).unwrap()
+    }
+
     // ── leverage_to_margin_ratio ───────────────────────────────────
 
     #[test]
     fn leverage_1x() {
-        assert_eq!(leverage_to_margin_ratio(1.0).unwrap(), 1_000_000);
+        assert_eq!(leverage_to_margin_ratio(1.0).unwrap().e6(), 1_000_000);
     }
 
     #[test]
     fn leverage_2x() {
-        assert_eq!(leverage_to_margin_ratio(2.0).unwrap(), 500_000);
+        assert_eq!(leverage_to_margin_ratio(2.0).unwrap().e6(), 500_000);
     }
 
     #[test]
     fn leverage_10x() {
-        assert_eq!(leverage_to_margin_ratio(10.0).unwrap(), 100_000);
+        assert_eq!(leverage_to_margin_ratio(10.0).unwrap().e6(), 100_000);
     }
 
     #[test]
     fn leverage_100x() {
-        assert_eq!(leverage_to_margin_ratio(100.0).unwrap(), 10_000);
+        assert_eq!(leverage_to_margin_ratio(100.0).unwrap().e6(), 10_000);
     }
 
     #[test]
     fn leverage_fractional_3x() {
         // 1e6 / 3 = 333333.33... → rounds to 333333
-        assert_eq!(leverage_to_margin_ratio(3.0).unwrap(), 333_333);
+        assert_eq!(leverage_to_margin_ratio(3.0).unwrap().e6(), 333_333);
     }
 
     #[test]
@@ -502,25 +488,25 @@ mod tests {
 
     #[test]
     fn margin_ratio_10_percent() {
-        let lev = margin_ratio_to_leverage(100_000).unwrap();
+        let lev = margin_ratio_to_leverage(e6(100_000)).unwrap();
         assert!((lev - 10.0).abs() < 1e-10);
     }
 
     #[test]
     fn margin_ratio_100_percent() {
-        let lev = margin_ratio_to_leverage(1_000_000).unwrap();
+        let lev = margin_ratio_to_leverage(e6(1_000_000)).unwrap();
         assert!((lev - 1.0).abs() < 1e-10);
     }
 
     #[test]
     fn margin_ratio_1_percent() {
-        let lev = margin_ratio_to_leverage(10_000).unwrap();
+        let lev = margin_ratio_to_leverage(e6(10_000)).unwrap();
         assert!((lev - 100.0).abs() < 1e-10);
     }
 
     #[test]
     fn margin_ratio_zero_rejected() {
-        assert!(margin_ratio_to_leverage(0).is_err());
+        assert!(margin_ratio_to_leverage(Ratio::ZERO).is_err());
     }
 
     // ── leverage ↔ margin_ratio roundtrip ──────────────────────────
@@ -532,7 +518,8 @@ mod tests {
             let recovered = margin_ratio_to_leverage(ratio).unwrap();
             assert!(
                 (recovered - lev).abs() < 0.01,
-                "roundtrip failed for {lev}x: ratio={ratio}, recovered={recovered}"
+                "roundtrip failed for {lev}x: ratio={}, recovered={recovered}",
+                ratio.e6()
             );
         }
     }
@@ -728,7 +715,7 @@ mod tests {
     #[test]
     fn leverage_10x_to_ratio_and_back() {
         let ratio = leverage_to_margin_ratio(10.0).unwrap();
-        assert_eq!(ratio, 100_000);
+        assert_eq!(ratio.e6(), 100_000);
         let lev = margin_ratio_to_leverage(ratio).unwrap();
         assert!((lev - 10.0).abs() < 1e-10);
     }

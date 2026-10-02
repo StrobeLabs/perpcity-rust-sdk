@@ -34,8 +34,8 @@ use crate::storage::{
     v4_tick_fee_growth_outside1_slot,
 };
 use crate::units::{
-    Earnings, FeeGrowth, Funding, FundingPerSqrtPrice, LUnits, PerpAtoms, PerpDelta, Price,
-    SqrtPrice, UsdcAtoms, UsdcDelta,
+    Earnings, FeeGrowth, Funding, FundingPerSqrtPrice, FundingRate, LUnits, PerpAtoms, PerpDelta,
+    Price, Ratio, SqrtPrice, UsdcAtoms, UsdcDelta, UtilizationRate,
 };
 
 use super::market::MarketReader;
@@ -455,10 +455,11 @@ impl StateAt {
             mark: mark.fair_price(),
         }
         .accrued(&AccrualInputs {
-            funding_per_day_wad: i128::try_from(rates.fundingPerDay)
-                .expect("int88 always fits i128"),
-            long_util_fee_per_day_wad: rates.longUtilFeePerDay,
-            short_util_fee_per_day_wad: rates.shortUtilFeePerDay,
+            funding_per_day: FundingRate::from_wad(
+                i128::try_from(rates.fundingPerDay).expect("int88 always fits i128"),
+            ),
+            long_util_fee_per_day: UtilizationRate::from_wad(rates.longUtilFeePerDay),
+            short_util_fee_per_day: UtilizationRate::from_wad(rates.shortUtilFeePerDay),
             last_touch: views.last_touch,
             accrue_to: block.timestamp,
             oi_long: PerpAtoms::new(oi.long),
@@ -588,7 +589,9 @@ impl StateAt {
                 let (delta_perp, delta_usd) = unpack_balance_delta(maker.position.delta);
                 let state = MakerState {
                     margin: UsdcAtoms::new(maker.position.margin),
-                    liq_margin_ratio_e6: u24_to_u32(maker.position.liqMarginRatio),
+                    liquidation_margin_ratio: Ratio::from_e6(u24_to_u32(
+                        maker.position.liqMarginRatio,
+                    ))?,
                     delta_perp: PerpDelta::new(delta_perp),
                     delta_usd: UsdcDelta::new(delta_usd),
                     last_cuml_funding: Funding::from_x96(maker.position.lastCumlFundingX96),

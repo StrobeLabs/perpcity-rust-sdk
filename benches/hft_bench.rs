@@ -8,6 +8,7 @@
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use std::collections::HashMap;
 
+use perpcity_sdk::Ratio;
 use perpcity_sdk::hft::gas::{FeeCache, GasLimits, Urgency};
 use perpcity_sdk::hft::latency::LatencyTracker;
 use perpcity_sdk::hft::nonce::NonceManager;
@@ -159,10 +160,10 @@ fn bench_state_cache(c: &mut Criterion) {
         cache.put_fees(
             addr,
             CachedFees {
-                creator_fee: 0.001,
-                insurance_fee: 0.0005,
-                lp_fee: 0.003,
-                liquidation_fee: 0.01,
+                creator_fee: Ratio::from_e6(1_000).unwrap(),
+                insurance_fee: Ratio::from_e6(500).unwrap(),
+                lp_fee: Ratio::from_e6(3_000).unwrap(),
+                liquidation_fee: Ratio::from_e6(10_000).unwrap(),
             },
             1000,
         );
