@@ -136,6 +136,47 @@ macro_rules! count {
                 Self(self.0.saturating_sub(rhs.0))
             }
         }
+
+    };
+}
+
+/// A count whose sums the protocol bounds, so addition is an operator.
+///
+/// Only the two assets qualify: the accounting token's supply keeps any sum
+/// of balances the chain can produce far inside the width, which is the same
+/// argument that makes a delta's `+` infallible. Subtraction stays a
+/// `checked_sub` either way, because a negative count is not a count — the
+/// asymmetry is the quantity's, not an oversight. Liquidity is deliberately
+/// not here: the pool has no supply bound to argue from, so a depth is added
+/// through [`LUnits::checked_add`].
+macro_rules! bounded_count {
+    (
+        $(#[$doc:meta])*
+        $name:ident($prim:ty) as $raw:ident
+    ) => {
+        count! {
+            $(#[$doc])*
+            $name($prim) as $raw
+        }
+
+        impl std::ops::Add for $name {
+            type Output = Self;
+            fn add(self, rhs: Self) -> Self {
+                Self(self.0 + rhs.0)
+            }
+        }
+
+        impl std::ops::AddAssign for $name {
+            fn add_assign(&mut self, rhs: Self) {
+                self.0 += rhs.0;
+            }
+        }
+
+        impl std::iter::Sum for $name {
+            fn sum<I: Iterator<Item = Self>>(iter: I) -> Self {
+                iter.fold(Self::ZERO, |total, next| total + next)
+            }
+        }
     };
 }
 
@@ -282,4 +323,4 @@ macro_rules! accumulator {
     };
 }
 
-pub(crate) use {accumulator, count, delta};
+pub(crate) use {accumulator, bounded_count, count, delta};

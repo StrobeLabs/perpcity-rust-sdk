@@ -176,6 +176,23 @@ impl TryFrom<U256> for LUnits {
 mod tests {
     use super::*;
 
+    /// Liquidity is the count that does *not* get an addition operator. The
+    /// two assets' do, because the protocol's supply bounds their sums; the
+    /// pool has no such bound, so a depth is added through `checked_add` and
+    /// the caller answers for the overflow. A compile-fail test would pin it
+    /// better than this, which only pins that the checked door is the one
+    /// that exists.
+    #[test]
+    fn a_depth_is_added_through_the_checked_door() {
+        let (a, b) = (LUnits::new(1_000), LUnits::new(2_500));
+        assert_eq!(a.checked_add(b), Some(LUnits::new(3_500)));
+        assert_eq!(
+            LUnits::new(u128::MAX).checked_add(LUnits::new(1)),
+            None,
+            "no supply bound argues this away, so it is the caller's"
+        );
+    }
+
     /// A delta applies to a depth in either direction, and the two failures
     /// are the ones the pool itself could not represent.
     #[test]
