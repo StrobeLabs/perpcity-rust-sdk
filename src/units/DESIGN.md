@@ -122,6 +122,8 @@ spelling convention to carry it.
 | [`FundingPerSqrtPrice`](accumulators.rs#L39) | the same funding per unit of sqrt-price exposure, Q96 signed: the form a maker's within-band leg accumulates in, because a band's exposure is linear in the root | [`Funding::per_sqrt_price`](accumulators.rs#L104), the one crossing from the funding it divides; [`FundingPerSqrtPrice::since`](accumulators.rs#L124) and [`FundingPerSqrtPrice::advanced_by`](accumulators.rs#L133) | one field in each of the four places its undivided twin has one: [`MakerMarketSnapshot`](../math/DESIGN.md), [`MakerState`](../math/DESIGN.md), [`TickFunding`](../math/DESIGN.md) and [`CumulativesInfo`](../events/DESIGN.md). They are the same signed word, subtracted from their own checkpoints a line apart, which is what the two types keep straight. |
 | [`Earnings`](accumulators.rs#L51) | cumulative utilization earnings, USDC per perp token of capacity, Q96 unsigned: the contract only adds, so a checkpoint ahead of it is inconsistent state | [`Earnings::since`](accumulators.rs#L145) and [`Earnings::advanced_by`](accumulators.rs#L154) | [`MakerMarketSnapshot`](../math/DESIGN.md) and [`MakerState`](../math/DESIGN.md), two each for the two sides; [`CumulativesInfo`](../events/DESIGN.md), which carries the paid side under the same shape. |
 | [`FeeGrowth`](accumulators.rs#L60) | Uniswap's fee growth per unit of liquidity, Q128 unsigned and **modular**: the word wraps by design and the difference is still correct across the wrap | nothing public makes one: the maker-equity batch reads the pool's global word and each band tick's outside word, and a crate-private fold turns them into the growth inside a band | [`MakerState`](../math/DESIGN.md), as the band's growth now and at the last checkpoint. |
+| [`LUnits`](liquidity.rs#L24) | liquidity in the pool's own units, unsigned, as a `uint128`: neither asset, but the depth a range holds, and what every concentrated-liquidity formula is linear in | [`estimate_liquidity`](../math/DESIGN.md), [`liquidity_for_target_ratio`](../math/DESIGN.md) and [`liquidity_for_capacity`](../math/DESIGN.md), the three ways to size a band; [`LDelta::magnitude`](liquidity.rs#L120) | [`MakerBand`](../math/DESIGN.md), as the depth standing in a range; [`amounts_for_liquidity`](../math/DESIGN.md), whose other three arguments are root prices; [`PoolSnapshot`](../math/DESIGN.md) and [`TakerQuote`](../math/DESIGN.md), as the active depth before and after a swap; [`MakerState`](../math/DESIGN.md); [`OpenMakerParams`](../types/DESIGN.md) and [`PerpClient::close_maker`](../client/DESIGN.md). The strategy layer's ladders and corridors size in these. |
+| [`LDelta`](liquidity.rs#L55) | a change in liquidity, signed: what an adjust asks for and what a tick's `liquidityNet` stores. Every operation is checked, because unlike a balance there is no supply bound to argue from | [`LUnits::negated`](liquidity.rs#L86), the delta that closes a band; [`LDelta::negated`](liquidity.rs#L132), the mirror a band's upper tick carries | [`LUnits::checked_add_signed`](liquidity.rs#L65), the one place a depth moves; [`PoolSnapshot::with_liquidity_delta`](../math/DESIGN.md), a what-if band; [`TickLiquidity`](../math/DESIGN.md); [`AdjustMakerParams`](../types/DESIGN.md) and [`MarketEvent`](../events/DESIGN.md). |
 
 The two right-hand columns are where a unit travels. A link under
 *Produced by* is the function that makes one; under *Consumed by*, a
@@ -196,6 +198,19 @@ path the chain checks.
 - **`Price` and `Mark` also convert both ways.** `Mark` is three prices at
   a block and its `fair_price` is a fourth, so prices go in and a price
   comes out. The cycle is the relation itself.
+- **`LUnits` and `LDelta` convert both ways**, for the reason the asset
+  pairs do: the pool stores a depth that cannot be negative and an adjust
+  asks for a change that can.
+- **A sizing formula and its inverse make `LUnits` flow both ways against
+  each asset.** `estimate_liquidity` turns a [`UsdcAtoms`](amount.rs#L18)
+  margin into a depth and `amounts_for_liquidity` turns a depth back into
+  the two assets it holds; `liquidity_for_capacity` inverts a
+  [`PerpAtoms`](amount.rs#L28) target the same way. The graph reads the
+  round trip as a cycle, and here that is what an invertible formula looks
+  like rather than a conversion with two homes. Neither direction is the
+  other's `From`: they are different geometry, and the band's price range
+  is the third argument that makes them not inverses of one another at a
+  different price.
 - **`PricePair` holds two `u128` prices rather than two [`Price`](price.rs#L25).**
   It mirrors the contract's struct, whose cast to `uint128` is the check
   its constructor performs, and a `Price` does not remember that width.

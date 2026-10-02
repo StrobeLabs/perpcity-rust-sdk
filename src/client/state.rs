@@ -32,7 +32,7 @@ use crate::math::range::{MakerBand, TickRange};
 use crate::math::swap::{PoolSnapshot, TickLiquidity, active_liquidity};
 use crate::storage::{v4_tick_bitmap_slot, v4_tick_slot};
 use crate::types::{MarginRatioTriple, MarginRatios, SolvencyState};
-use crate::units::{PerpAtoms, Price, SqrtPrice};
+use crate::units::{LDelta, LUnits, PerpAtoms, Price, SqrtPrice};
 
 use super::market::MarketReader;
 use super::queries::{MarketImmutables, multicall_error, registered_module};
@@ -410,7 +410,7 @@ impl StateAt {
             return Ok(None);
         }
         let range = TickRange::new(i24_to_i32(maker.tickLower), i24_to_i32(maker.tickUpper))?;
-        Ok(Some(MakerBand::new(range, maker.liquidity)))
+        Ok(Some(MakerBand::new(range, LUnits::new(maker.liquidity))))
     }
 
     /// The pool's current tick.
@@ -546,10 +546,11 @@ impl StateAt {
         let pool = &views.pool_state;
         let tick = i24_to_i32(pool.tick);
         let reconstructed = active_liquidity(&ticks, tick)?;
-        if reconstructed != pool.liquidity {
+        if reconstructed != LUnits::new(pool.liquidity) {
             return Err(ContractError::StorageReadFailed {
                 context: format!(
-                    "tick map liquidity mismatch: reconstructed {reconstructed}, pool {}",
+                    "tick map liquidity mismatch: reconstructed {}, pool {}",
+                    reconstructed.units(),
                     pool.liquidity
                 ),
                 source: None,
@@ -560,7 +561,7 @@ impl StateAt {
             block: self.block,
             sqrt_price: SqrtPrice::from_x96(pool.sqrtPrice.to::<U256>()),
             tick,
-            liquidity: pool.liquidity,
+            liquidity: LUnits::new(pool.liquidity),
             ticks,
             protocol_sqrt_min: SqrtPrice::from_x96(MIN_SWAP_SQRT_PRICE_X96),
             protocol_sqrt_max: SqrtPrice::from_x96(MAX_SWAP_SQRT_PRICE_X96),
@@ -694,8 +695,8 @@ impl StateAt {
             .map(|(tick, word)| {
                 // `liquidityNet` in the high half, `liquidityGross` in the low.
                 let raw = U256::from_be_bytes(word.0);
-                let gross = (raw & U256::from(u128::MAX)).to::<u128>();
-                let net = (raw >> 128usize).to::<u128>() as i128;
+                let gross = LUnits::new((raw & U256::from(u128::MAX)).to::<u128>());
+                let net = LDelta::new((raw >> 128usize).to::<u128>() as i128);
                 (tick, TickLiquidity { gross, net })
             })
             .collect())
@@ -961,7 +962,7 @@ mod tests {
             state.maker_band(U256::from(1_691)).await.unwrap(),
             Some(MakerBand::new(
                 TickRange::new(38_340, 38_430).unwrap(),
-                97_506_535
+                LUnits::new(97_506_535)
             ))
         );
     }
@@ -1437,7 +1438,15 @@ mod tests {
         B256::from((U256::from(net as u128) << 128) | U256::from(gross))
     }
 
-    fn expected_snapshot(hash: B256, liquidity: u128) -> PoolSnapshot {
+    /// Liquidity standing at a tick, gross then net.
+    fn tick_liquidity(gross: u128, net: i128) -> TickLiquidity {
+        TickLiquidity {
+            gross: LUnits::new(gross),
+            net: LDelta::new(net),
+        }
+    }
+
+    fn expected_snapshot(hash: B256, liquidity: LUnits) -> PoolSnapshot {
         let one = x96(1, 0);
         PoolSnapshot {
             block: BlockContext {
@@ -1466,7 +1475,7 @@ mod tests {
 
         assert_eq!(
             client.market().get_pool_snapshot().await.unwrap(),
-            expected_snapshot(hash, 0)
+            expected_snapshot(hash, LUnits::ZERO)
         );
         assert!(rpc.is_drained(), "eight answers, none left over");
     }
@@ -1493,22 +1502,10 @@ mod tests {
             snapshot,
             PoolSnapshot {
                 ticks: BTreeMap::from([
-                    (
-                        -60,
-                        TickLiquidity {
-                            gross: L,
-                            net: L as i128
-                        }
-                    ),
-                    (
-                        60,
-                        TickLiquidity {
-                            gross: L,
-                            net: -(L as i128)
-                        }
-                    ),
+                    (-60, tick_liquidity(L, L as i128)),
+                    (60, tick_liquidity(L, -(L as i128))),
                 ]),
-                ..expected_snapshot(hash, L)
+                ..expected_snapshot(hash, LUnits::new(L))
             }
         );
         assert!(rpc.is_drained(), "nine answers");
@@ -1555,7 +1552,7 @@ mod tests {
         let hash = snapshot_answers(&rpc, 0, bitmap(&[]), None);
         assert_eq!(
             client.market().get_pool_snapshot().await.unwrap(),
-            expected_snapshot(hash, 0)
+            expected_snapshot(hash, LUnits::ZERO)
         );
         assert!(rpc.is_drained(), "six answers: no immutables");
     }

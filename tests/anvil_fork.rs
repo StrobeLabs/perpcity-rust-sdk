@@ -748,7 +748,7 @@ async fn state_reads_pin_the_block_they_were_asked_for() {
         if let Some(band) = lagged.maker_band(pos_id).await.unwrap() {
             makers += 1;
             assert!(
-                band.liquidity > 0 && band.range.width() > 0,
+                !band.liquidity.is_zero() && band.range.width() > 0,
                 "{pos_id}: {band:?}"
             );
         }

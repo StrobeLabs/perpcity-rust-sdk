@@ -54,10 +54,12 @@ use alloy::primitives::U256;
 mod accumulators;
 mod amount;
 pub(crate) mod fixed_point;
+mod liquidity;
 mod price;
 
 pub use accumulators::{Earnings, FeeGrowth, Funding, FundingPerSqrtPrice};
 pub use amount::{PerpAtoms, PerpDelta, UsdcAtoms, UsdcDelta};
+pub use liquidity::{LDelta, LUnits};
 pub use price::{Price, SqrtPrice};
 
 /// 10^6 as `f64`: the scale between a human amount and its atoms, and the

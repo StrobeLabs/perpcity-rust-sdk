@@ -12,7 +12,7 @@ use crate::errors::ValidationError;
 use crate::math::range::{MakerBand, TickRange};
 use crate::math::swap::{amount0_delta, amount1_delta};
 use crate::units::fixed_point::Rounding;
-use crate::units::{PerpAtoms, SqrtPrice, UsdcAtoms};
+use crate::units::{LUnits, PerpAtoms, SqrtPrice, UsdcAtoms};
 
 /// Estimate the liquidity needed to deploy `usd_amount` of value across
 /// `range`.
@@ -26,8 +26,10 @@ use crate::units::{PerpAtoms, SqrtPrice, UsdcAtoms};
 /// # Errors
 ///
 /// - [`ValidationError::InvalidMargin`] if `usd` is zero
-/// - [`ValidationError::Overflow`] if the sqrt price delta is zero
-pub fn estimate_liquidity(range: &TickRange, usd: UsdcAtoms) -> Result<U256, ValidationError> {
+/// - [`ValidationError::Overflow`] if the sqrt price delta is zero, or if
+///   the result exceeds the `uint128` the pool stores, which is a size
+///   nothing could place rather than a large position
+pub fn estimate_liquidity(range: &TickRange, usd: UsdcAtoms) -> Result<LUnits, ValidationError> {
     if usd.is_zero() {
         return Err(ValidationError::InvalidMargin {
             reason: "USD amount must be non-zero".into(),
@@ -44,7 +46,7 @@ pub fn estimate_liquidity(range: &TickRange, usd: UsdcAtoms) -> Result<U256, Val
     }
 
     let numerator = U256::from(usd.atoms()) * Q96;
-    Ok(numerator / delta)
+    LUnits::try_from(numerator / delta)
 }
 
 /// Calculate the liquidity needed for a maker position given a target margin
@@ -73,7 +75,7 @@ pub fn liquidity_for_target_ratio(
     range: &TickRange,
     current_sqrt_price: SqrtPrice,
     target_margin_ratio: f64,
-) -> Result<u128, ValidationError> {
+) -> Result<LUnits, ValidationError> {
     if target_margin_ratio <= 0.0 || target_margin_ratio >= 1.0 {
         return Err(ValidationError::InvalidLeverage {
             reason: format!("target_margin_ratio must be in (0, 1), got {target_margin_ratio}"),
@@ -132,8 +134,16 @@ pub fn liquidity_for_target_ratio(
             context: format!("computed liquidity is not finite: {liquidity_f}"),
         });
     }
+    // A float-to-integer cast saturates rather than wrapping, so without
+    // this a size past the pool's `uint128` would silently become the
+    // largest one — the same failure `estimate_liquidity` refuses.
+    if liquidity_f >= u128::MAX as f64 {
+        return Err(ValidationError::Overflow {
+            context: "liquidity exceeds the uint128 the pool stores".into(),
+        });
+    }
 
-    Ok(liquidity_f as u128)
+    Ok(LUnits::new(liquidity_f as u128))
 }
 
 /// Uniswap `LiquidityAmounts.getAmountsForLiquidity`: what `liquidity`
@@ -152,10 +162,10 @@ pub fn liquidity_for_target_ratio(
 ///
 /// ```
 /// use perpcity_sdk::math::liquidity::band_amounts;
-/// use perpcity_sdk::{MakerBand, SqrtPrice, TickRange, band_capacity};
+/// use perpcity_sdk::{LUnits, MakerBand, SqrtPrice, TickRange, band_capacity};
 ///
 /// let sqrt_price = SqrtPrice::from_price(35.0)?;
-/// let band = MakerBand::new(TickRange::new(27_090, 38_100)?, 1_757_959);
+/// let band = MakerBand::new(TickRange::new(27_090, 38_100)?, LUnits::new(1_757_959));
 /// let (perp, _usdc) = band_amounts(sqrt_price, &band)?;
 /// assert_eq!(perp, band_capacity(sqrt_price, &band)?.long);
 /// # Ok::<(), perpcity_sdk::ValidationError>(())
@@ -170,7 +180,7 @@ pub fn amounts_for_liquidity(
     sqrt_price: SqrtPrice,
     sqrt_price_a: SqrtPrice,
     sqrt_price_b: SqrtPrice,
-    liquidity: u128,
+    liquidity: LUnits,
 ) -> Result<(PerpAtoms, UsdcAtoms), ValidationError> {
     if sqrt_price.is_zero() || sqrt_price_a.is_zero() || sqrt_price_b.is_zero() {
         return Err(ValidationError::InvalidPrice {
@@ -183,8 +193,9 @@ pub fn amounts_for_liquidity(
         (sqrt_price_b.x96(), sqrt_price_a.x96())
     };
     let sp = sqrt_price.x96().clamp(sa, sb);
-    let amount0 = amount0_delta(sp, sb, liquidity, Rounding::TowardZero)?;
-    let amount1 = amount1_delta(sa, sp, liquidity, Rounding::TowardZero)?;
+    let l = liquidity.units();
+    let amount0 = amount0_delta(sp, sb, l, Rounding::TowardZero)?;
+    let amount1 = amount1_delta(sa, sp, l, Rounding::TowardZero)?;
     Ok((
         PerpAtoms::new(narrow(amount0, "band perp amount")?),
         UsdcAtoms::new(narrow(amount1, "band USDC amount")?),
@@ -251,7 +262,7 @@ mod tests {
         let wide = estimate_liquidity(&range(-1000, 1000), usd(1_000_000)).unwrap();
         assert!(
             narrow > wide,
-            "narrower range should concentrate more liquidity: narrow={narrow}, wide={wide}"
+            "narrower range should concentrate more liquidity: narrow={narrow:?}, wide={wide:?}"
         );
     }
 
@@ -261,7 +272,7 @@ mod tests {
         let large = estimate_liquidity(&range(-100, 100), usd(10_000_000)).unwrap();
         assert!(
             large > small,
-            "more USD should give more liquidity: large={large}, small={small}"
+            "more USD should give more liquidity: large={large:?}, small={small:?}"
         );
     }
 
@@ -272,9 +283,9 @@ mod tests {
         // from (2*x)/d by at most 1.
         let base = estimate_liquidity(&range(-1000, 1000), usd(1_000_000)).unwrap();
         let doubled = estimate_liquidity(&range(-1000, 1000), usd(2_000_000)).unwrap();
-        let diff = doubled.abs_diff(base * U256::from(2u64));
+        let diff = doubled.units().abs_diff(base.units() * 2);
         assert!(
-            diff <= U256::from(1u64),
+            diff <= 1,
             "expected proportional within ±1, got diff={diff}"
         );
     }
@@ -295,7 +306,7 @@ mod tests {
             0.1,   // 10% margin ratio
         )
         .unwrap();
-        assert!(liq > 0, "liquidity should be positive");
+        assert!(!liq.is_zero(), "liquidity should be positive");
     }
 
     #[test]
@@ -307,7 +318,7 @@ mod tests {
             liquidity_for_target_ratio(usd(1_000_000), &range(-1000, 1000), one(), 0.2).unwrap();
         assert!(
             low_ratio > high_ratio,
-            "lower ratio needs more liquidity: low={low_ratio}, high={high_ratio}"
+            "lower ratio needs more liquidity: low={low_ratio:?}, high={high_ratio:?}"
         );
     }
 
@@ -319,7 +330,7 @@ mod tests {
             liquidity_for_target_ratio(usd(10_000_000), &range(-1000, 1000), one(), 0.1).unwrap();
         assert!(
             large > small,
-            "more margin should give more liquidity: large={large}, small={small}"
+            "more margin should give more liquidity: large={large:?}, small={small:?}"
         );
     }
 
@@ -341,6 +352,18 @@ mod tests {
         );
     }
 
+    /// A size past the `uint128` the pool stores fails rather than becoming
+    /// the largest one: a float-to-integer cast saturates, so the bound has
+    /// to be checked before it.
+    #[test]
+    fn target_ratio_rejects_a_size_past_the_pools_width() {
+        // A vanishingly thin band over an enormous margin: the liquidity per
+        // unit of quote is tiny, so the required liquidity leaves `u128`.
+        let huge = UsdcAtoms::new(u128::MAX / 2);
+        let err = liquidity_for_target_ratio(huge, &range(-30, 30), one(), 1e-6).unwrap_err();
+        assert!(matches!(err, ValidationError::Overflow { .. }), "{err}");
+    }
+
     // ── amounts_for_liquidity ────────────────────────────────────
 
     /// Uniswap's three branches, with the price at each band edge landing
@@ -349,13 +372,13 @@ mod tests {
     fn amounts_follow_price_position() {
         let sa = get_sqrt_ratio_at_tick(-600).unwrap();
         let sb = get_sqrt_ratio_at_tick(600).unwrap();
-        let liquidity = 1_000_000_000u128;
+        let liquidity = LUnits::new(1_000_000_000);
         let whole = |amount: U256| amount.to::<u128>();
         let full0 = PerpAtoms::new(whole(
-            amount0_delta(sa.x96(), sb.x96(), liquidity, Rounding::TowardZero).unwrap(),
+            amount0_delta(sa.x96(), sb.x96(), liquidity.units(), Rounding::TowardZero).unwrap(),
         ));
         let full1 = UsdcAtoms::new(whole(
-            amount1_delta(sa.x96(), sb.x96(), liquidity, Rounding::TowardZero).unwrap(),
+            amount1_delta(sa.x96(), sb.x96(), liquidity.units(), Rounding::TowardZero).unwrap(),
         ));
 
         let below = get_sqrt_ratio_at_tick(-1200).unwrap();
@@ -387,8 +410,8 @@ mod tests {
         let sa = get_sqrt_ratio_at_tick(-600).unwrap();
         let sb = get_sqrt_ratio_at_tick(600).unwrap();
         assert_eq!(
-            amounts_for_liquidity(one(), sa, sb, 1_000_000).unwrap(),
-            amounts_for_liquidity(one(), sb, sa, 1_000_000).unwrap()
+            amounts_for_liquidity(one(), sa, sb, LUnits::new(1_000_000)).unwrap(),
+            amounts_for_liquidity(one(), sb, sa, LUnits::new(1_000_000)).unwrap()
         );
     }
 
@@ -397,11 +420,11 @@ mod tests {
         let sb = get_sqrt_ratio_at_tick(600).unwrap();
         let zero = SqrtPrice::from_x96(U256::ZERO);
         assert!(matches!(
-            amounts_for_liquidity(zero, one(), sb, 1),
+            amounts_for_liquidity(zero, one(), sb, LUnits::new(1)),
             Err(ValidationError::InvalidPrice { .. })
         ));
         assert!(matches!(
-            amounts_for_liquidity(one(), zero, sb, 1),
+            amounts_for_liquidity(one(), zero, sb, LUnits::new(1)),
             Err(ValidationError::InvalidPrice { .. })
         ));
     }

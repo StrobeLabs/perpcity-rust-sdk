@@ -42,7 +42,7 @@ use crate::math::range::{MakerBand, TickRange};
 use crate::math::swap::amount0_delta;
 use crate::types::Side;
 use crate::units::fixed_point::{Rounding, mul_div};
-use crate::units::{PerpAtoms, SqrtPrice};
+use crate::units::{LUnits, PerpAtoms, SqrtPrice};
 
 /// Taker capacity per side: the contract's `Capacity` struct.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -168,10 +168,10 @@ pub fn liquidity_for_capacity(
     range: &TickRange,
     side: Side,
     target: PerpAtoms,
-) -> Result<u128, ValidationError> {
+) -> Result<LUnits, ValidationError> {
     let priced = PricedRange::new(sqrt_price, range)?;
     if target.is_zero() {
-        return Ok(0);
+        return Ok(LUnits::ZERO);
     }
     let (lo, hi) = priced.span(side);
     if lo == hi {
@@ -195,7 +195,7 @@ pub fn liquidity_for_capacity(
             context: "liquidity for capacity exceeds u128".into(),
         });
     }
-    let liquidity = liquidity.to::<u128>();
+    let liquidity = LUnits::new(liquidity.to::<u128>());
     // Capacity grows with liquidity, so if this band cannot be opened
     // because a side overflows `u128`, no liquidity reaching the target can.
     priced.capacity(liquidity)?;
@@ -236,16 +236,16 @@ impl PricedRange {
         }
     }
 
-    fn capacity(&self, liquidity: u128) -> Result<Capacity, ValidationError> {
+    fn capacity(&self, liquidity: LUnits) -> Result<Capacity, ValidationError> {
         Ok(Capacity {
             long: self.perp(Side::Long, liquidity)?,
             short: self.perp(Side::Short, liquidity)?,
         })
     }
 
-    fn perp(&self, side: Side, liquidity: u128) -> Result<PerpAtoms, ValidationError> {
+    fn perp(&self, side: Side, liquidity: LUnits) -> Result<PerpAtoms, ValidationError> {
         let (lo, hi) = self.span(side);
-        let atoms = amount0_delta(lo, hi, liquidity, Rounding::TowardZero)?;
+        let atoms = amount0_delta(lo, hi, liquidity.units(), Rounding::TowardZero)?;
         u128::try_from(atoms)
             .map(PerpAtoms::new)
             .map_err(|_| ValidationError::Overflow {
@@ -267,7 +267,7 @@ mod tests {
     }
 
     fn band(lower: i32, upper: i32, liquidity: u128) -> MakerBand {
-        MakerBand::new(range(lower, upper), liquidity)
+        MakerBand::new(range(lower, upper), LUnits::new(liquidity))
     }
 
     /// A mainnet maker open, reproduced exactly: the pool price just before
@@ -451,14 +451,16 @@ mod tests {
         let reached = band_capacity(sqrt_price, &MakerBand::new(range, liquidity)).unwrap();
         assert!(
             reached.on(side) >= target,
-            "{side} target {target:?}: liquidity {liquidity} gives {:?}",
+            "{side} target {target:?}: liquidity {} gives {:?}",
+            liquidity.units(),
             reached.on(side)
         );
-        let below = band_capacity(sqrt_price, &MakerBand::new(range, liquidity - 1)).unwrap();
+        let one_less = liquidity.checked_sub(LUnits::new(1)).unwrap();
+        let below = band_capacity(sqrt_price, &MakerBand::new(range, one_less)).unwrap();
         assert!(
             below.on(side) < target,
             "{side} target {target:?}: liquidity {} already gives {:?}",
-            liquidity - 1,
+            one_less.units(),
             below.on(side)
         );
     }
@@ -479,7 +481,7 @@ mod tests {
                     target,
                 )
                 .unwrap();
-                assert!(liquidity <= g.liquidity);
+                assert!(liquidity.units() <= g.liquidity);
             }
         }
     }
@@ -533,7 +535,7 @@ mod tests {
                 PerpAtoms::ZERO
             )
             .unwrap(),
-            0
+            LUnits::ZERO
         );
     }
 
@@ -573,7 +575,7 @@ mod tests {
             assert_eq!(
                 liquidity_for_capacity(sqrt_price, &range(30_000, 38_000), side, PerpAtoms::ZERO)
                     .unwrap(),
-                0
+                LUnits::ZERO
             );
         }
     }
@@ -590,7 +592,7 @@ mod tests {
         assert_least(sqrt_price, 0, MAX_TICK, Side::Short, full);
         assert_eq!(
             liquidity_for_capacity(sqrt_price, &range(0, MAX_TICK), Side::Short, full).unwrap(),
-            u128::MAX
+            LUnits::new(u128::MAX)
         );
     }
 

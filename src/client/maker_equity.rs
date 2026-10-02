@@ -34,8 +34,8 @@ use crate::storage::{
     v4_tick_fee_growth_outside1_slot,
 };
 use crate::units::{
-    Earnings, FeeGrowth, Funding, FundingPerSqrtPrice, PerpAtoms, PerpDelta, Price, SqrtPrice,
-    UsdcAtoms, UsdcDelta,
+    Earnings, FeeGrowth, Funding, FundingPerSqrtPrice, LUnits, PerpAtoms, PerpDelta, Price,
+    SqrtPrice, UsdcAtoms, UsdcDelta,
 };
 
 use super::market::MarketReader;
@@ -594,7 +594,7 @@ impl StateAt {
                     last_cuml_funding: Funding::from_x96(maker.position.lastCumlFundingX96),
                     tick_lower: maker.tick_lower,
                     tick_upper: maker.tick_upper,
-                    liquidity: maker.details.liquidity,
+                    liquidity: LUnits::new(maker.details.liquidity),
                     last_long_util_earnings: Earnings::from_x96(
                         maker.details.lastLongUtilEarningsX96,
                     ),

@@ -139,20 +139,16 @@ async fn main() -> perpcity_sdk::Result<()> {
     // ── Estimate liquidity ──────────────────────────────────────────
     //
     // Convert margin to 6-decimal scaled value for the liquidity formula.
-    let liquidity_u256 = estimate_liquidity(
+    // The depth the pool can hold, or an error: a size past `uint128` is one
+    // no pool could store, so there is nothing sensible to clamp it to.
+    let liquidity = estimate_liquidity(
         &TickRange::new(tick_lower, tick_upper)?,
         UsdcAtoms::try_from(MARGIN_USDC)?,
     )?;
 
-    // The on-chain liquidity field is uint120, so cap at max u120.
-    let max_u120: u128 = (1u128 << 120) - 1;
-    let liquidity: u128 = u128::try_from(liquidity_u256)
-        .unwrap_or(max_u120)
-        .min(max_u120);
-
     println!("\n=== Liquidity Estimate ===");
     println!("  Margin:       {MARGIN_USDC:.2} USDC");
-    println!("  Liquidity:    {liquidity}");
+    println!("  Liquidity:    {}", liquidity.units());
 
     // ── Open maker position ─────────────────────────────────────────
     println!("\nOpening maker position...");

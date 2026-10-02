@@ -90,15 +90,14 @@ async fn main() -> Result<()> {
 
     // -- Estimate liquidity for 100 USDC margin --
     let margin = 100.0;
-    let liquidity_u256 = estimate_liquidity(
+    // `estimate_liquidity` returns the depth the pool can hold or an error:
+    // a size past `uint128` is not a large position, it is one no pool could
+    // store, so there is nothing sensible to clamp it to.
+    let liquidity = estimate_liquidity(
         &TickRange::new(tick_lower, tick_upper)?,
         UsdcAtoms::try_from(margin)?,
     )?;
-    let max_u120: u128 = (1u128 << 120) - 1;
-    let liquidity: u128 = u128::try_from(liquidity_u256)
-        .unwrap_or(max_u120)
-        .min(max_u120);
-    println!("liquidity: {liquidity}");
+    println!("liquidity: {}", liquidity.units());
 
     // -- Open maker position --
     let pos_id = client
