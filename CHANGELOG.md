@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+The changes below break the public API, so the next release is 0.6.0 (a minor bump, as for any breaking change before 1.0).
+
 ### Breaking
 
 - **`Side` moved from `types` to `math::capacity`**, and `ValidationError::NoBandCapacity` no longer carries one. The crate-root re-export is unchanged, so `perpcity_sdk::Side` and the prelude still work; only a direct `perpcity_sdk::types::Side` breaks. `Side` lives with the capacity math because that is what it keys, and because having it in the human surface made `errors` — the module everything else depends on — depend on a module above it. The error drops the field for the same reason: the caller passed the side in, so naming it back was both redundant and the thing holding the inverted edge in place.
