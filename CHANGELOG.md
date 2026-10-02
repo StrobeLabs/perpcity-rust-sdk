@@ -7,7 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-The changes below break the public API, so the next release is 0.5.0 (a minor bump, as for any breaking change before 1.0).
+## [0.5.0] - 2026-10-02
+
+A release about units. Every quantity the contract settles now carries its unit
+as a type rather than as a name suffix, which is why the breaking list is long
+and why none of it changes a value on the wire.
 
 ### Breaking
 
@@ -364,7 +368,8 @@ The changes below break the public API, so the next release is 0.5.0 (a minor bu
 - Examples: quickstart, open_position, open_maker, market_maker, hft_bot
 - Benchmarks: math, HFT pipeline, transport
 
-[Unreleased]: https://github.com/StrobeLabs/perpcity-rust-sdk/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/StrobeLabs/perpcity-rust-sdk/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/StrobeLabs/perpcity-rust-sdk/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/StrobeLabs/perpcity-rust-sdk/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/StrobeLabs/perpcity-rust-sdk/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/StrobeLabs/perpcity-rust-sdk/compare/v0.2.0...v0.2.1
