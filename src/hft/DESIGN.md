@@ -179,8 +179,40 @@ This module's specification is a number: zero requests on the hot path.
 - **Hot path**: the code between deciding to send and broadcasting; makes
   no RPC.
 
+## Accepted structure
+
+- **A cache and its entry convert both ways, which is what a cache is.**
+  `StateCache` takes a `CachedFees` or a `CachedBounds` in and hands the
+  same type back, so the graph shows two cycles. The conversion is not
+  mis-homed; there is no conversion, only storage with an expiry.
+- **A registry and its element do the same.** `PositionManager` takes a
+  `ManagedPosition` in and lends one out, by reference, because the
+  manager advances each position's trailing anchor in place.
+- **`TxPipeline` hands out a `PreparedTx` and takes it back.** That round
+  trip is the mechanism, not an accident of it: `prepare` acquires the
+  nonce and `record_submission` is the only thing that settles it, so the
+  loan is what keeps the nonce accounting closed.
+- **`TriggerAction` flows back into `PositionManager` through an output
+  buffer.** `check_triggers_into` takes `&mut Vec<TriggerAction>` so a hot
+  loop allocates nothing, and the graph reads that parameter as an input.
+  Nothing consumes a trigger inside the crate; the second direction is the
+  buffer, not a conversion.
+- **`GasLimits` is a namespace, not a value.** It is a field-less struct
+  carrying ten constants, so it is produced by nothing and consumed by
+  nothing, and the row says as much.
+
 ## Debts
 
+- **The cached fees and bounds duplicate the surface types field for
+  field.** `CachedFees` and `CachedBounds` hold the same four `f64` as
+  `Fees` and `Bounds` in [`types`](../types/DESIGN.md), with four identity
+  `From` impls between them, and the cycle the graph draws over those impls
+  is the usual conclusion holding: two types that want to be one. The
+  cache should hold the surface type.
+- **`BumpParams` is the strategy layer's and the table does not say so.**
+  `prepare_bump` computes a replacement's fees and nothing in the crate
+  sends one, so the type reads as a dead end rather than as part of the
+  surface a caller builds on.
 - **`position_manager` is a bot's strategy state, not chain truth.** It
   predates the boundary rule and is the one module here an outside
   market maker would not want from an SDK. It should move to the strategy

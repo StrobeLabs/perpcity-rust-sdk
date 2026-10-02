@@ -123,20 +123,52 @@ the chain does not. That list is the cutover's checklist.
   offset**: the layout's transcribed constants. **Mapping rule**:
   `keccak256(abi.encode(key, base))`.
 
+## Accepted structure
+
+The bindings are the deployed contract's shape, and most of them are
+islands in the graph: a binding is a word on the wire, not a value the
+crate passes around. These are the ones where that is the whole answer.
+
+- **The four call-parameter structs are the ABI's word order and nothing
+  else.** `OpenTakerParams`, `OpenMakerParams`, `AdjustTakerParams` and
+  `AdjustMakerParams` are assembled inside the send that uses them, from
+  the crate's own twin in [`types`](../types/DESIGN.md), and never travel
+  as a value. The twin is the point: a caller states a trade in human
+  units, and the ABI's field order is a detail of the call.
+- **`Taker`, `FeeFund` and `TickInfo` are bound and unread.** The
+  interface is the deployed contract's, not a list of the calls the SDK
+  makes, so a binding with no caller is the interface being complete, and
+  the ABI lock is its consumer. `TickInfo`'s per-tick funding words are
+  read as slots instead, beside the fee-growth slots in the same batch.
+- **`Modules` is the one binding kept whole.** Its fields are module
+  addresses, so there is nothing to narrow, and the reads hold it in a
+  crate-private view; a public type whose only holder is private draws no
+  edge.
+- **`SwapResult` crosses by a crate-private free function.** `swap_info`
+  turns it into [`SwapInfo`](../events/DESIGN.md), once, for the three
+  taker events. The conversion is the decoder's and belongs with it, so
+  the graph of the public surface shows none of it.
+- **The `Perp` interface follows main for events and the chain for
+  calls.** That is the era rule working. It means the interface is not one
+  era's shape, and a reader has to know which events are live; the module
+  doc's list is where they find out.
+
 ## Debts
 
-- **Narrowing is field by field, and invisible to the type graph.** Only
-  `Capacity` and `SwapResult` cross into the crate's types through a
-  conversion a signature shows; the open interest, price pair, rates,
-  cumulatives, solvency and position structs are copied field by field
-  inside the reads that use them. As `From` and `TryFrom` impls those
-  edges would be typed, checked and drawn, and the unit checks of #124
-  would have one place to live.
-- **The `Perp` interface follows main for events and the chain for
-  calls.** That is the era rule working, but it means the interface is
-  not one era's shape, and a reader has to know which events are live.
+- **Narrowing is field by field, and invisible to the type graph.**
+  `Capacity` is the only binding that crosses into the crate's types
+  through a `From` impl, and two of its three read paths bypass even that;
+  `OpenInterest`, `PricePair`, `Rates`, `Cumulatives`, `SolvencyState` and
+  `PoolKey` are copied field by field inside the reads that use them. As
+  `From` and `TryFrom` impls those edges would be typed, checked and
+  drawn, and the unit checks of #124 would have one place to live.
 - **The `Maker` struct carries `capacity` on the deployed era and not on
   main.** The cutover's checklist starts here.
+- **`Position` is on the surface and its row does not say so.** The
+  position reads on [`StateAt`](../client/DESIGN.md) hand it back raw, so
+  the strategy layer consumes it; inside the crate only two private
+  callers take one. It shares a row with three types that are not the
+  surface, so marking it is a row of its own, not a phrase.
 - **Slot constants are locked only by outcomes.** That is the right lock,
   but a layout change would fail a golden test rather than a test that
   names the slot; the failure would need reading to be understood.

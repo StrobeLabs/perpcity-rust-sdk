@@ -180,22 +180,27 @@ fn a_predicate_without_its_sentence_is_reported() {
     assert_eq!(missing, invariants::ENFORCED.len() - 1, "{problems:?}");
 }
 
-/// The ratchet fires on what is new and unacknowledged, and on nothing
-/// that a debts section names or that the base already had.
+/// The ratchet fires on what is new and unanswered, and on nothing that a
+/// node's accepted structure or debts names, or that the base already had.
 #[test]
-fn the_ratchet_fires_on_new_unacknowledged_structures_only() {
+fn the_ratchet_fires_on_new_unanswered_structures_only() {
     use xtask::summary::Summary;
     let mut base = Summary::default();
     base.islands.insert("math::OldIsland".into());
     let mut head = base.clone();
     head.islands.insert("math::NewIsland".into());
     head.islands.insert("math::NamedIsland".into());
+    head.islands.insert("math::AcceptedIsland".into());
     head.dead_ends.insert("hft::Stub".into());
-    head.two_cycles
-        .insert(("client::A".into(), "client::B".into()));
+    // An island the math node names, which is not the node that owns it.
+    head.islands.insert("contracts::Foreign".into());
+    head.two_cycles.insert(("math::A".into(), "math::B".into()));
     // A cycle where the debts name one of the pair for another reason.
-    head.two_cycles
-        .insert(("client::C".into(), "client::D".into()));
+    head.two_cycles.insert(("math::C".into(), "math::D".into()));
+    // A pair the accepted structure names.
+    head.two_cycles.insert(("math::G".into(), "math::H".into()));
+    // A pair split across the two sections, which answers neither.
+    head.two_cycles.insert(("math::E".into(), "math::F".into()));
     head.flows.insert(
         ("math::X".into(), "math::Y".into()),
         ["convert_x".to_string()].into(),
@@ -218,13 +223,20 @@ fn the_ratchet_fires_on_new_unacknowledged_structures_only() {
         .insert("math::Same".into(), ["as_is() -> u8".to_string()].into());
     head.rows
         .insert("math::Rewritten".into(), "a new row".into());
-    let node = Node {
-        name: "math".into(),
-        path: PathBuf::from("src/math/DESIGN.md"),
-        text: "# math\n\n## Debts\n\n- **`NamedIsland` is an island** on purpose.\n- The pair `A` and `B`.\n- `C` is slow.\n\n## Terminology\n\nStub is not a debt here.\n".into(),
-    };
+    let nodes = [
+        Node {
+            name: "math".into(),
+            path: PathBuf::from("src/math/DESIGN.md"),
+            text: "# math\n\n## Accepted structure\n\n- `AcceptedIsland` stands alone by design.\n- The pair `G` and `H` is one quantity in two forms.\n- `E` is the pool's own unit.\n\n## Debts\n\n- **`NamedIsland` is an island** on purpose.\n- `Foreign` is named in the wrong node.\n- The pair `A` and `B`.\n- `C` is slow.\n- `F` should fold into its neighbour.\n\n## Terminology\n\nStub is not a debt here.\n".into(),
+        },
+        Node {
+            name: "contracts".into(),
+            path: PathBuf::from("src/contracts/DESIGN.md"),
+            text: "# contracts\n\n## Debts\n\n- The bindings narrow field by field.\n".into(),
+        },
+    ];
     let mut problems = Vec::new();
-    invariants::ratchet(&base, &head, &[node], &mut problems);
+    invariants::ratchet(&base, &head, &nodes, &mut problems);
     assert!(
         problems
             .iter()
@@ -252,10 +264,14 @@ fn the_ratchet_fires_on_new_unacknowledged_structures_only() {
         "already in the base: {problems:?}"
     );
     assert!(
-        !problems
-            .iter()
-            .any(|p| p.contains("client::A and client::B")),
+        !problems.iter().any(|p| p.contains("math::A and math::B")),
         "the pair is named: {problems:?}"
+    );
+    assert!(
+        problems
+            .iter()
+            .any(|p| p.contains("contracts::Foreign became an island")),
+        "a foreign node's mention does not answer: {problems:?}"
     );
     assert!(
         problems
@@ -270,12 +286,54 @@ fn the_ratchet_fires_on_new_unacknowledged_structures_only() {
     assert!(
         problems
             .iter()
-            .any(|p| p.contains("client::C and client::D now flow both ways")),
+            .any(|p| p.contains("math::C and math::D now flow both ways")),
         "one name is not the pair: {problems:?}"
     );
     assert!(
         !problems.iter().any(|p| p.contains("math::Same")),
         "unchanged shape: {problems:?}"
     );
-    assert_eq!(problems.len(), 5, "{problems:?}");
+    assert!(
+        !problems.iter().any(|p| p.contains("AcceptedIsland")),
+        "accepted structure answers for it: {problems:?}"
+    );
+    assert!(
+        !problems.iter().any(|p| p.contains("math::G and math::H")),
+        "the pair is accepted: {problems:?}"
+    );
+    assert!(
+        problems
+            .iter()
+            .any(|p| p.contains("math::E and math::F now flow both ways")),
+        "a pair split across the two sections answers neither: {problems:?}"
+    );
+    assert_eq!(problems.len(), 7, "{problems:?}");
+}
+
+/// The report nets out what a node calls accepted structure and nothing
+/// else: a debt is work owed, so it stays on the questioned list.
+#[test]
+fn only_accepted_structure_is_netted_out_of_the_report() {
+    let node = Node {
+        name: "units".into(),
+        path: PathBuf::from("src/units/DESIGN.md"),
+        text: "# units\n\n## Accepted structure\n\n- `Price` and `Mark` convert both ways.\n\n## Debts\n\n- `Ratio` is still a primitive.\n- `Funding` and `FeeGrowth` are still primitives.\n".into(),
+    };
+    let math = Node {
+        name: "math".into(),
+        path: PathBuf::from("src/math/DESIGN.md"),
+        text: "# math\n\n## Debts\n\n- The settle preview is deployed-era compensation.\n".into(),
+    };
+    let answers = invariants::Answers::of(&[node, math]);
+    assert!(answers.accepts("units", "Price"));
+    assert!(answers.accepts_pair(("units", "math"), "Price", "Mark"));
+    assert!(!answers.accepts("units", "Ratio"), "a debt is not accepted");
+    assert!(
+        !answers.accepts_pair(("units", "units"), "Funding", "FeeGrowth"),
+        "a pair named in the debts is owed work, not accepted structure"
+    );
+    assert!(
+        !answers.accepts("math", "Price"),
+        "a type is accepted by the node that owns it, not by a namesake elsewhere"
+    );
 }

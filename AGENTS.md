@@ -38,7 +38,10 @@ graph of nodes, and it is part of what a change must keep true.
 ## When you change a component
 
 - Update its `DESIGN.md` in the same change: the type table, the edges,
-  the terminology, the debts. If the node became harder to write, say so
+  the terminology, the accepted structure, the debts. A shape the design
+  graph questions and the design keeps goes in "Accepted structure" with
+  the argument for it; work owed goes in "Debts". If the node became
+  harder to write, say so
   in the PR; that is the design degrading and it is worth a conversation
   before it lands.
 - A new or changed type gets a row in the node's type table, and its
@@ -49,8 +52,10 @@ graph of nodes, and it is part of what a change must keep true.
   `cargo xtask design --check` to verify the claims and the invariants
   listed in the root node. `cargo xtask design --open` draws the graph,
   and `--diff origin/main` says what your change did to it, which the
-  design job also posts on the pull request: a new island, dead end or
-  unnamed flow there is a question the PR should answer.
+  design job also posts on the pull request: a new island, dead end,
+  two-cycle or unnamed flow there is a question the PR answers by removing
+  it, by naming it in a type table, or by naming it in the accepted
+  structure or debts of the node that owns the type.
 - A behaviour that a caller can observe gets a changelog entry under
   `[Unreleased]`, breaking changes first. A change that breaks the public
   API also bumps the version in `Cargo.toml` in the same PR (a minor bump

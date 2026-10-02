@@ -164,10 +164,7 @@ path the chain checks.
 - **The human view**: the `f64` a type converts to for a person; lossy,
   and never arithmetic the chain will check.
 
-## Debts
-
-Three of these are accepted structure rather than defects: the graph
-questions them, and this is the answer.
+## Accepted structure
 
 - **Each asset's two types convert both ways, so the graph shows a cycle.**
   `UsdcAtoms` and `UsdcDelta` are one of them and `PerpAtoms` and
@@ -175,20 +172,24 @@ questions them, and this is the answer.
   the same unit: widening a count is one direction and taking a
   magnitude, or narrowing a non-negative delta, is the other, and both are
   needed where the chain stores unsigned and the math computes signed.
-  Collapsing either side would mean losing the "cannot be negative" claim
-  on a balance, which is the reason there are two.
+  A cycle usually means two types want to be one; here collapsing either
+  side would lose the "cannot be negative" claim on a balance, which is
+  the reason there are two.
 - **`Price` and `Mark` also convert both ways.** `Mark` is three prices at
   a block and its `fair_price` is a fourth, so prices go in and a price
   comes out. The cycle is the relation itself.
+- **`PricePair` holds two `u128` prices rather than two [`Price`](price.rs#L25).**
+  It mirrors the contract's struct, whose cast to `uint128` is the check
+  its constructor performs, and a `Price` does not remember that width.
+
+## Debts
+
 - **The accumulators, the pool's own unit and the rates are still
   primitives.** `Funding`, `FundingPerSqrtPrice`, `Earnings`, `FeeGrowth`,
   `LiqUnits`, `LiqDelta`, `Rate` and `Ratio` are named and planned; until
   they land, the fields behind them are bare `I256`, `U256`, `u128` and
   `u32` beside typed neighbours, which is where a new bare primitive could
   now go unnoticed.
-- **`PricePair` holds two `u128` prices rather than two [`Price`](price.rs#L25).**
-  It mirrors the contract's struct, whose cast to `uint128` is the check
-  its constructor performs, and a `Price` does not remember that width.
 - **The two reported invariants are about to become vacuous.** The graph
   still reports on `f64` behind a wire suffix and on a suffix matching its
   primitive. Both are structural once the last suffixed field is typed,

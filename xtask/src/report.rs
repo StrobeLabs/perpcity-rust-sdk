@@ -6,7 +6,24 @@ use rustdoc_types::Id;
 
 use crate::design::{EdgeKind, Graph};
 use crate::index::{Index, Kind};
+use crate::invariants;
 use crate::nodes::Node;
+
+/// One of the report's questions: what it found, and what some node has
+/// already answered by calling it accepted structure.
+fn question(title: &str, questioned: &[String], accepted: &[String]) {
+    println!(
+        "\n{title}: {} questioned, {} accepted",
+        questioned.len(),
+        accepted.len()
+    );
+    if !questioned.is_empty() {
+        println!("  {}", questioned.join(", "));
+    }
+    if !accepted.is_empty() {
+        println!("  accepted: {}", accepted.join(", "));
+    }
+}
 
 /// Print the graph's numbers and the structures worth a second look.
 pub fn print(index: &Index, graph: &Graph, nodes: &[Node]) {
@@ -95,54 +112,67 @@ pub fn print(index: &Index, graph: &Graph, nodes: &[Node]) {
         );
     }
 
-    let islands: Vec<String> = types
-        .iter()
-        .filter(|id| !inn.contains_key(id) && !out.contains_key(id) && !held.contains(id))
-        .map(|id| format!("{} [{}]", name(*id), top(*id)))
-        .collect();
-    println!(
-        "\nIslands, in no signature and no field with another of the crate's types: {}",
-        islands.len()
-    );
-    if !islands.is_empty() {
-        println!("  {}", islands.join(", "));
-    }
+    let answers = invariants::Answers::of(nodes);
+    let sort = |ids: Vec<Id>| -> (Vec<String>, Vec<String>) {
+        let mut questioned = Vec::new();
+        let mut accepted = Vec::new();
+        for id in ids {
+            if answers.accepts(&top(id), &name(id)) {
+                accepted.push(name(id));
+            } else {
+                questioned.push(format!("{} [{}]", name(id), top(id)));
+            }
+        }
+        (questioned, accepted)
+    };
 
-    let dead: Vec<String> = types
-        .iter()
-        .filter(|id| {
-            inn.contains_key(id)
-                && !out.contains_key(id)
-                && !held.contains(id)
-                && !graph
-                    .rows
-                    .iter()
-                    .any(|r| (r.subject == **id || r.companions.contains(id)) && r.public)
-        })
-        .map(|id| format!("{} [{}]", name(*id), top(*id)))
-        .collect();
-    println!(
-        "\nDead ends, produced but consumed by nothing and not on the surface: {}",
-        dead.len()
+    let (q, a) = sort(
+        types
+            .iter()
+            .copied()
+            .filter(|id| !inn.contains_key(id) && !out.contains_key(id) && !held.contains(id))
+            .collect(),
     );
-    if !dead.is_empty() {
-        println!("  {}", dead.join(", "));
-    }
+    question(
+        "Islands, in no signature and no field with another of the crate's types",
+        &q,
+        &a,
+    );
+
+    let (q, a) = sort(
+        types
+            .iter()
+            .copied()
+            .filter(|id| {
+                inn.contains_key(id)
+                    && !out.contains_key(id)
+                    && !held.contains(id)
+                    && !graph
+                        .rows
+                        .iter()
+                        .any(|r| (r.subject == *id || r.companions.contains(id)) && r.public)
+            })
+            .collect(),
+    );
+    question(
+        "Dead ends, produced but consumed by nothing and not on the surface",
+        &q,
+        &a,
+    );
 
     let set: BTreeSet<(Id, Id)> = flows.iter().map(|e| (e.src, e.dst)).collect();
-    let mut cycles = Vec::new();
-    for (a, b) in &set {
-        if a < b && set.contains(&(*b, *a)) {
-            cycles.push(format!("{} <-> {}", name(*a), name(*b)));
+    let (mut q, mut a) = (Vec::new(), Vec::new());
+    for (x, y) in &set {
+        if x < y && set.contains(&(*y, *x)) {
+            let pair = format!("{} <-> {}", name(*x), name(*y));
+            if answers.accepts_pair((&top(*x), &top(*y)), &name(*x), &name(*y)) {
+                a.push(pair);
+            } else {
+                q.push(pair);
+            }
         }
     }
-    println!(
-        "\nTwo-cycles, a conversion that may be mis-homed: {}",
-        cycles.len()
-    );
-    for c in cycles {
-        println!("  {c}");
-    }
+    question("Two-cycles, a conversion that may be mis-homed", &q, &a);
 
     let undocumented: Vec<String> = flows
         .iter()

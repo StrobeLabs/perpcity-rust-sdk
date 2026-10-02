@@ -261,13 +261,20 @@ suffixed field has the primitive its suffix names.
 One more is a ratchet rather than a rule, and runs where there is a base
 to compare with, on every pull request: a structure the report
 questions, an island, a dead end, a two-cycle, a flow between documented
-types that no node names, may exist, but a new one arrives acknowledged.
-The pull request either removes it, names it in a type table, or names
-it in a node's debts, and the design job fails until one of those is
-true. The same ratchet holds a type to its row: when a type's own methods
-or fields change and its row does not, the row is stale by construction,
-and the job says so. What we accept is written down; what we did not
-notice cannot land.
+types that no node names, may exist, but a new one arrives answered. The
+pull request either removes it, names it in a type table, or names it in
+a node's "Accepted structure" or "Debts", and the design job fails until
+one of those is true. Which of the two sections it goes in is itself the
+answer: accepted structure is a shape the report questions and the design
+keeps, with the argument against the question beside it, and a debt is
+work owed. The report settles only the first, so the debts stay a work
+queue and the questioned counts stay a number someone can act on. A type
+is answered by the node that owns it, and a pair by either of theirs, so
+two types sharing a name in two components are two questions. The
+same ratchet holds a type to its row: when a type's own methods or fields
+change and its row does not, the row is stale by construction, and the
+job says so. What we accept is written down; what we did not notice
+cannot land.
 
 Each enforced invariant is proven able to fail. `xtask/tests/fixture/lib.rs`
 is a crate shaped like this one with one planted violation per invariant
@@ -438,11 +445,37 @@ these are the ones every node uses.
 - **Transient**: a failure a retry can fix. The variant says.
 - **Era**: a contract version whose logs are on chain forever.
 
+## Accepted structure
+
+The report asks a question of every island, dead end and two-cycle it
+finds, and each question has a usual conclusion: an island wants
+connecting, a dead end wants a consumer or the surface marker, a cycle
+means two types want to be one. An entry in a node's "Accepted structure"
+is the answer when the shape stays: it names the types, and it says why
+that conclusion does not apply here. An entry that cannot say the second
+half is work owed, and belongs in that node's "Debts" instead. A node has
+the section when it has something to put in it.
+
+Two of these are about the graph rather than any component.
+
+- **The graph is of the public surface, so a public type whose only holder
+  is crate-private shows no edge.** That is the graph documenting what a
+  caller can see, not a gap in it. `contracts::Modules` is the standing
+  instance: the reads hold it whole, inside a view they do not export.
+- **A type on the surface is named as such in a consumer cell**, because a
+  type the layer above consumes has no consumer here by construction. The
+  phrase is the marker, and a type that belongs to the strategy layer and
+  lacks it reads as a dead end.
+
 ## Debts
 
 - `is_transient` classifies some failures by which path wrapped them
   rather than by what they were (SDK #115). The pinned reads classify
   correctly; the bare contract calls do not yet.
+- The graph reads an `&mut` output buffer as an input, so a function that
+  fills a caller's vector appears to consume what it produces. One pair
+  shows it today, `hft::TriggerAction` and `hft::PositionManager`, and the
+  node names it; the fix is in the edge rule, not in the node.
 - The maker-equity port, the deployed-era event shapes and the storage
   slot reads exist to compensate for the deployed contracts. The next era
   exposes settle previews and richer events, and the cutover deletes

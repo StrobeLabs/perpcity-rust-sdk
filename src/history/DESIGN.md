@@ -170,6 +170,14 @@ depends on. That separation is a cost rule, not a convenience.
 - **Lag**: blocks held back from the head so a scan's top is on every
   replica.
 
+## Accepted structure
+
+- **`ChainPoint` goes into `OwnershipLog` and comes back out of it.**
+  It is the coordinate the fold is sorted by: `owner_at` takes one and
+  searches, and `transfers` hands back the point of every change. A
+  sorted index takes its key and returns it, so the cycle is the index
+  relation rather than a conversion with two homes.
+
 ## Debts
 
 - **A tape is one address's logs.** The beacon's prints and the pool's

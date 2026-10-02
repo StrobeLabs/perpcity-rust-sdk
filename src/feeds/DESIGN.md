@@ -135,6 +135,15 @@ pays per refresh instead.
 - **Publish**: replace the shared snapshot with a new block-atomic one.
   **Current**: whether the shared snapshot is recent enough to quote on.
 
+## Accepted structure
+
+- **`LiveTakerMarket` and `PoolSnapshot` flow both ways because the feed
+  is a cell.** A publisher puts a snapshot in and `latest` hands one out;
+  the type is a single watch receiver over one block-consistent snapshot.
+  Holding a value is not converting to it, and the alternative, a feed that
+  publishes some lesser shape, would cost the consistency the snapshot
+  exists for.
+
 ## Debts
 
 - **`LiveTakerMarket` keeps its old name.** It is a live `PoolSnapshot`
