@@ -2,8 +2,8 @@
 
 Up: the [root](../../DESIGN.md). Sideways: [`client`](../client/DESIGN.md)
 fills the snapshots defined here; `contracts` and `storage` are the
-shapes the ports were transcribed from; `types` and `convert` are the
-human surface the f64 twins feed.
+shapes the ports were transcribed from; `convert`, documented with
+[`client`](../client/DESIGN.md), is the boundary the f64 twins cross.
 
 ## Purpose
 
@@ -180,7 +180,7 @@ no snapshot, no exactness claim, f64 out.
 
 | Type | Invariant | Produced by | Consumed by |
 |---|---|---|---|
-| [`BlockContext`](mod.rs#L51) | one header: number, hash, timestamp; what every snapshot carries | [`StateAt::block`](../client/DESIGN.md), the handle's resolved header | every snapshot here carries one, so a caller can pin further reads to its hash: [`PoolSnapshot`](swap.rs#L71), [`MarketCapacity`](capacity.rs#L101), [`Mark`](pricing.rs#L114), [`TakerQuote`](swap.rs#L113), [`MakerMarketSnapshot`](maker_equity.rs#L65), and [`MarketSnapshot`](../types/DESIGN.md) in `types`; [`Mark::advanced`](pricing.rs#L134) advances the EMAs to its timestamp. |
+| [`BlockContext`](mod.rs#L51) | one header: number, hash, timestamp; what every snapshot carries | [`StateAt::block`](../client/DESIGN.md), the handle's resolved header | every snapshot here carries one, so a caller can pin further reads to its hash: [`PoolSnapshot`](swap.rs#L71), [`MarketCapacity`](capacity.rs#L101), [`Mark`](pricing.rs#L114), [`TakerQuote`](swap.rs#L113), [`MakerMarketSnapshot`](maker_equity.rs#L65), and [`MarketSnapshot`](../client/DESIGN.md) in `client`; [`Mark::advanced`](pricing.rs#L134) advances the EMAs to its timestamp. |
 | [`TickRange`](range.rs#L25) | a tick interval `[lower, upper)`: `lower < upper`, both in the V4 domain; private fields, checked at construction and on deserialise | [`TickRange::new`](range.rs#L37), the only door; deserialising runs the same check | [`MakerBand::new`](range.rs#L124), as a band's geometry; [`estimate_liquidity`](liquidity.rs#L32), [`liquidity_for_target_ratio`](liquidity.rs#L73) and [`liquidity_for_capacity`](capacity.rs#L189), which size liquidity for a range and would each re-check two loose ticks without it. The strategy layer's bands, corridors and ladders hold one rather than two ticks, which is the reason it is a type. |
 | [`MakerBand`](range.rs#L115) | a range with liquidity: the shape `makerDetails` stores; the one type for a band wherever it appears | [`MakerBand::new`](range.rs#L124) from a [`TickRange`](range.rs#L25); [`StateAt::maker_band`](../client/DESIGN.md), one position's band at a block | [`band_capacity`](capacity.rs#L170), what the band can back at a pool price; [`band_amounts`](liquidity.rs#L218), the tokens standing in it. The strategy layer's maker views and discovered positions carry one, so a band read from the chain and a band a strategy plans are the same type. |
 | [`PricePair`](pricing.rs#L41) | the contract's `(amm, index)` pair, `uint128` each, spot or EMA; narrowed from X96 with the contract's overflow rule | [`PricePair::try_from_x96`](pricing.rs#L56) from two X96 prices; [`calculate_emas`](pricing.rs#L71), the pair advanced | [`calculate_emas`](pricing.rs#L71), as the stored and the spot pair; [`Mark::advanced`](pricing.rs#L134), as the stored EMAs. The pair is one storage word on chain and advances as one value, so it is one type here. |
@@ -243,8 +243,8 @@ already owns, and nothing reads a clock.
 - To `contracts`: the Solidity each port transcribes, and the ABI structs
   a snapshot's fields are narrowed from. `storage` derives the slots the
   settle's inputs are read from; the math does not know a slot exists.
-- To `types` and `convert`: the f64 twins and the unit conversions live
-  at the surface. `math` produces exact values and offers f64 accessors;
+- To `convert`, which is [`client`](../client/DESIGN.md)'s: the f64 twins
+  and the unit conversions live at the surface. `math` produces exact values and offers f64 accessors;
   `convert` is where a caller's human input becomes a wire unit.
 - Out to the strategy layer: a strategy's band is a `MakerBand`, its
   sizing goes through `estimate_liquidity`, its quoting through

@@ -12,8 +12,8 @@ use rustdoc_types::{
 /// Modules documented apart from the design node that owns them.
 pub fn component_of(top: &str) -> &str {
     match top {
-        "convert" | "constants" => "types",
-        "storage" => "contracts",
+        "convert" => "client",
+        "constants" | "storage" => "contracts",
         other => other,
     }
 }

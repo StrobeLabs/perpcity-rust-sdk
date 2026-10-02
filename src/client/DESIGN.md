@@ -2,7 +2,8 @@
 
 Up: the [root](../../DESIGN.md). Sideways: [`math`](../math/DESIGN.md)
 for the types the reads fill, [`events`](../events/DESIGN.md) for the
-vocabulary the feeds and history speak, and `hft`, `transport`, `errors`
+vocabulary the feeds and history speak, [`units`](../units/DESIGN.md) for
+the wire side of what `convert` crosses, and `hft`, `transport`, `errors`
 and `contracts` for the machinery underneath.
 
 ## Purpose
@@ -13,6 +14,13 @@ what would this action do; and send this, and tell me what happened.
 Every read a strategy makes of a Perp City market and every transaction
 it sends passes through here, so this is where a read's block becomes a
 fact and a send's outcome becomes unambiguous.
+
+Because every call in and out of the chain is here, this is also the
+crate's human surface: the parameters a caller builds, the results a call
+returns, the market's configuration and its live state, each in the units
+a person reasons in, and each defined with the call that speaks it.
+`convert` is the one door between those units and the wire's, and it is
+documented here because this module is its only caller.
 
 It is not where math lives. A read here fills a snapshot type from
 `math` and hands it over; the computation on it is pure and lives there.
@@ -61,6 +69,23 @@ from an unfunded address gets a different answer than the funded sender's
 transaction would. A probe is therefore an `eth_call` from the address
 that will send, at the gas cap the send will use, and its typed reverts
 are the answer: healthy, wrong kind of position, or would succeed.
+
+**The unit boundary is one line thick.** A trade's margin enters as `f64`
+USDC and is scaled to atoms exactly once, in `convert`, at the moment a
+trade builds its call. A price leaves the chain as X96 and becomes `f64`
+once, at the moment a read builds its result. Nothing in between
+converts, so the precision loss is known, bounded and in one place:
+`Q96_PRECISION` is the bound on a price and the 6-decimal scaling is
+exact. A conversion called from inside a computation is the boundary
+leaking, and every conversion refuses what the chain would refuse rather
+than saturating or wrapping into a plausible wrong answer — the two bugs
+that rule has caught were both a silent cast.
+
+**A caller that must not round-trip through `f64` has an exact door.**
+The `Exact*` parameter types carry atoms directly and are the single
+submission path; the human types scale into them. A market maker sizing
+to the atom uses the exact door and never converts, so the boundary is on
+the human path and not on the critical one.
 
 **Batches are one block or nothing.** A read over many positions is one
 multicall per stage, every stage at the handle's block, and a failure is
@@ -204,13 +229,28 @@ send would ask.
 
 | Type | Invariant | Produced by | Consumed by |
 |---|---|---|---|
-| [`ChainReader`](chain.rs#L44) | one chain: one transport, one deployment set, one set of caches shared by everything built over it | [`ChainReader::new`](chain.rs#L91) over an [`HftTransport`](../transport/DESIGN.md) and a [`ChainDeployments`](../types/DESIGN.md); [`ChainReader::arbitrum`](chain.rs#L99) and [`ChainReader::arbitrum_sepolia`](chain.rs#L112) for the known chains | [`ChainReader::market`](market.rs#L30), which is how every market reader is made; [`ChainReader::history`](chain.rs#L174), which hands out the scanning handle; the wallet and index reads; any helper bounded on `AsRef<ChainReader>`. The strategy layer builds one per process, and that sharing is why the caches live here and not on a market. |
-| [`MarketReader`](market.rs#L23) | one market, read now: a `Perp` over a `ChainReader`; every read is independently current; no read takes a block; every read is named for what it returns, so the market it reads is never in the name | [`ChainReader::market`](market.rs#L30) | [`MarketReader::state`](state.rs#L153) and [`MarketReader::state_at`](state.rs#L173), the door to the other tense; [`PerpClient::new`](mod.rs#L232), as the market a signer trades; [`LiveTakerMarket::subscribe`](../feeds/DESIGN.md), as the reader a publisher refreshes through; any helper bounded on `AsRef<MarketReader>`. It is the reader a live cache seeds from and the one a research process holds without a signer, which is why it exists apart from `PerpClient`. |
-| [`StateAt`](state.rs#L68) | one market at one block: the handle resolved one header; every read is pinned to its hash; results carry the block | [`MarketReader::state`](state.rs#L153), at the lagged snapshot block; [`MarketReader::state_at`](state.rs#L173), at a block the caller names | its own reads, which fill the snapshots in `math` and the state types in `types`, and are where the tense rule is enforced; its batches, [`StateAt::positions`](state.rs#L301) and [`StateAt::maker_equities`](maker_equity.rs#L323), which fan one block out over many ids; the strategy layer's block-pinned sources, which hold it behind a trait so a forensic read can be stubbed. |
-| [`RowOutcome`](state.rs#L76) | one id's row in a batch: exactly one per input id, in input order; `Ok(None)` is an id with no row; `Err` is that id's failure and says whether to retry | [`StateAt::positions`](state.rs#L301), one row multicall per chunk | nothing in the crate but the maker-equity batch, which reads its rows through the same driver. The strategy layer's solvency folds, which sweep every id a market ever minted and need an answer for each. |
-| [`PerpClient`](mod.rs#L179) | one signer on one market: a `MarketReader` plus a wallet and a pipeline; the pipeline owns the next nonce. `close_maker` takes the band's depth as [`LUnits`](../units/DESIGN.md) and negates it through the type, which is where a depth past the signed range is refused | [`PerpClient::new`](mod.rs#L232) from a [`MarketReader`](market.rs#L23) and any alloy signer | [`PerpClient::tx`](transactions.rs#L379) for a raw call, and the trades, probes and transfers over it, each a builder plus a decode of the receipt; the [`TxBuilder`](transactions.rs#L40) borrows it for the pipeline and the wallet. The strategy layer holds one per wallet; a helper that only reads should not take it. |
+| [`ChainReader`](chain.rs#L54) | one chain: one transport, one deployment set, one set of caches shared by everything built over it | [`ChainReader::new`](chain.rs#L101) over an [`HftTransport`](../transport/DESIGN.md) and a [`ChainDeployments`](chain.rs#L36); [`ChainReader::arbitrum`](chain.rs#L109) and [`ChainReader::arbitrum_sepolia`](chain.rs#L122) for the known chains | [`ChainReader::market`](market.rs#L30), which is how every market reader is made; [`ChainReader::history`](chain.rs#L184), which hands out the scanning handle; the wallet and index reads; any helper bounded on `AsRef<ChainReader>`. The strategy layer builds one per process, and that sharing is why the caches live here and not on a market. |
+| [`MarketReader`](market.rs#L23) | one market, read now: a `Perp` over a `ChainReader`; every read is independently current; no read takes a block; every read is named for what it returns, so the market it reads is never in the name | [`ChainReader::market`](market.rs#L30) | [`MarketReader::state`](state.rs#L196) and [`MarketReader::state_at`](state.rs#L216), the door to the other tense; [`PerpClient::new`](mod.rs#L238), as the market a signer trades; [`LiveTakerMarket::subscribe`](../feeds/DESIGN.md), as the reader a publisher refreshes through; any helper bounded on `AsRef<MarketReader>`. It is the reader a live cache seeds from and the one a research process holds without a signer, which is why it exists apart from `PerpClient`. |
+| [`StateAt`](state.rs#L68) | one market at one block: the handle resolved one header; every read is pinned to its hash; results carry the block | [`MarketReader::state`](state.rs#L196), at the lagged snapshot block; [`MarketReader::state_at`](state.rs#L216), at a block the caller names | its own reads, which fill the snapshots in `math` and the state types below, and are where the tense rule is enforced; its batches, [`StateAt::positions`](state.rs#L344) and [`StateAt::maker_equities`](maker_equity.rs#L323), which fan one block out over many ids; the strategy layer's block-pinned sources, which hold it behind a trait so a forensic read can be stubbed. |
+| [`RowOutcome`](state.rs#L119) | one id's row in a batch: exactly one per input id, in input order; `Ok(None)` is an id with no row; `Err` is that id's failure and says whether to retry | [`StateAt::positions`](state.rs#L344), one row multicall per chunk | nothing in the crate but the maker-equity batch, which reads its rows through the same driver. The strategy layer's solvency folds, which sweep every id a market ever minted and need an answer for each. |
+| [`PerpClient`](mod.rs#L185) | one signer on one market: a `MarketReader` plus a wallet and a pipeline; the pipeline owns the next nonce. `close_maker` takes the band's depth as [`LUnits`](../units/DESIGN.md) and negates it through the type, which is where a depth past the signed range is refused | [`PerpClient::new`](mod.rs#L238) from a [`MarketReader`](market.rs#L23) and any alloy signer | [`PerpClient::tx`](transactions.rs#L379) for a raw call, and the trades, probes and transfers over it, each a builder plus a decode of the receipt; the [`TxBuilder`](transactions.rs#L40) borrows it for the pipeline and the wallet. The strategy layer holds one per wallet; a helper that only reads should not take it. |
 | [`TxBuilder`](transactions.rs#L40) | one transaction, not yet sent: one nonce, one hash, one typed outcome | [`PerpClient::tx`](transactions.rs#L379) | [`TxBuilder::send`](transactions.rs#L81), the only way out, which drives the pipeline and returns the receipt. Every trade on `PerpClient` goes through it, and the strategy layer uses it directly for a call the trades do not cover. Its shape, parameters first and one `send`, is what makes every failure variant a stage. |
 | [`MakerEquityOutcome`](maker_equity.rs#L60), [`MakerEquityKind`](maker_equity.rs#L69) | one position's result in a batch: one outcome per input id, in input order; `Computed` carries a [`MakerEquityBreakdown`](../math/DESIGN.md); `Failed` carries an error whose transience says whether to retry | [`StateAt::maker_equities`](maker_equity.rs#L323), [`StateAt::maker_equities_at_mark`](maker_equity.rs#L331); [`MarketReader::get_maker_equities`](maker_equity.rs#L262) and [`MarketReader::get_maker_equities_at_mark`](maker_equity.rs#L270) as the conveniences | nothing in the crate. The strategy layer's liquidation scanners and equity audits, which retry the transient failures and act on the rest; the per-position shape exists so one bad row cannot fail the batch, and it is kept so that the next era's settle preview lands under the same name and shape. |
+| [`OpenTakerParams`](trades.rs#L28) | what a caller wants to do, in human units: none beyond field types; scaled once at the call | the caller | [`PerpClient::open_taker`](trades.rs#L270), which scales it once into the exact form. |
+| [`ExactOpenTakerParams`](trades.rs#L40) | the same in atoms: the single submission path; no float round-trip | the caller, sizing to the atom; the human-unit open builds one by scaling, inside `PerpClient::open_taker` rather than as a conversion, which is a debt | [`PerpClient::open_taker_exact`](trades.rs#L288). A market maker that must not round-trip through `f64` builds this one. |
+| [`AdjustTakerParams`](trades.rs#L75) | an adjustment in human units; a close is an adjustment by the whole size | the caller; `PerpClient::close_taker` builds one inside | [`PerpClient::adjust_taker`](trades.rs#L406). |
+| [`ExactAdjustTakerParams`](trades.rs#L89) | the same in atoms; the single submission path | the caller; the human-unit adjustment builds one by scaling inside `PerpClient::adjust_taker` | [`PerpClient::adjust_taker_exact`](trades.rs#L421). |
+| [`OpenMakerParams`](trades.rs#L55) | a band to open: margin in USDC, two ticks, and a depth as [`LUnits`](../units/DESIGN.md) rather than a bare integer | the caller | [`PerpClient::open_maker`](trades.rs#L343). The two loose ticks here are the debt a `TickRange` exists to remove. |
+| [`AdjustMakerParams`](trades.rs#L102) | a maker adjustment, its change of depth an [`LDelta`](../units/DESIGN.md); a close is the negation of the whole liquidity | the caller; `PerpClient::close_maker` builds one inside | [`PerpClient::adjust_maker`](trades.rs#L506). |
+| [`OpenResult`](trades.rs#L124) | what an open did: the hash, the id, the realised deltas from the receipt's event, not the request | [`PerpClient::open_taker_exact`](trades.rs#L288) and [`PerpClient::open_maker`](trades.rs#L343) | nothing in the crate. The strategy layer records what actually filled. |
+| [`AdjustTakerResult`](trades.rs#L142) | what a taker adjustment did, from the receipt | [`PerpClient::adjust_taker_exact`](trades.rs#L421), and [`PerpClient::close_taker`](trades.rs#L485) over it | nothing in the crate. The strategy layer. |
+| [`AdjustMakerResult`](trades.rs#L155) | what a maker adjustment did, from the receipt | [`PerpClient::adjust_maker`](trades.rs#L506), and [`PerpClient::close_maker`](trades.rs#L556) over it | nothing in the crate. The strategy layer. |
+| [`MarketConfig`](queries.rs#L41), [`Bounds`](queries.rs#L67), [`Fees`](queries.rs#L86) | the market's configuration: human units for money, a [`Ratio`](../units/DESIGN.md) for every share and threshold, and the EMA window the contract smooths with. The ratios are the module's own `uint24` rather than a fraction recovered from a float, which is what keeps a liquidation fee *rate* from being passed where the USDC a liquidation settles belongs; the fees and bounds convert to and from the slow cache's entries | [`MarketReader::get_config`](queries.rs#L256); [`MarketReader::get_snapshot`](queries.rs#L446), alongside the snapshot | nothing in the crate. The strategy layer reads it once per market, and advances the snapshot's EMAs by its window. |
+| [`MarginRatios`](state.rs#L97), [`MarginRatioTriple`](state.rs#L79) | the two kinds' margin ratios, each a [`Ratio`](../units/DESIGN.md): init, liquidation, backstop. Stored as the module's integers, so `fraction()` derives the number a person reads and nothing round-trips through a float to recover the `uint24` | [`StateAt::margin_ratios`](state.rs#L527); [`MarketReader::get_margin_ratios`](state.rs#L236) as the convenience | nothing in the crate. The strategy layer's sizing and health checks. |
+| [`MarketSnapshot`](queries.rs#L115) | the market's live state at the lagged snapshot block: pool price, index, the contract's mark, the stored EMAs, funding, open interest; carries its [`BlockContext`](../math/DESIGN.md), so further reads can pin to it | [`MarketReader::get_snapshot`](queries.rs#L446), one multicall and the index, the mark exact then converted once | nothing in the crate. The strategy layer seeds a live cache from it and then follows the feed; the mark and the stored `Emas` are what let that cache keep marking at the contract's price between touches rather than at the pool's. |
+| [`OpenInterest`](queries.rs#L100) | the two sides' draw in perp tokens | [`MarketReader::get_open_interest`](queries.rs#L381) | [`MarketSnapshot`](queries.rs#L115), as a field; the strategy layer's capacity gauges. |
+| [`SolvencyState`](state.rs#L109) | the market's solvency in USDC, at a block | [`StateAt::solvency`](state.rs#L278) | nothing in the crate. The strategy layer's solvency audits. |
+| [`ChainDeployments`](chain.rs#L36) | the addresses a chain shares: collateral and pool manager | the known chains' constants, or the caller for another | [`ChainReader::new`](chain.rs#L101). |
 | `MarketImmutables` (crate-private) | a market's deployment-fixed values: pool id and tick spacing; read once per market, never pinned | the first pinned pool read on a market, then the chain reader's cache | the pool reads, and no caller |
 
 The two right-hand columns are where the type flows. A link under
@@ -234,6 +274,33 @@ and `maker_equities` a `MakerMarketSnapshot` behind its outcomes.
 The client's job is to read the right views at the right block and hand
 the inert result to pure math. No arithmetic on chain values happens
 here beyond unit scaling at the edge.
+
+The human-unit types are defined with the call that speaks them, and
+that is what settles where a type goes. The parameters and results sit in
+`trades.rs` beside the trades that take and return them; the
+configuration and the live snapshot in `queries.rs` beside the now-reads
+that fill them; the margin ratios and solvency in `state.rs` beside the
+pinned reads; `ChainDeployments` in `chain.rs` beside the handle it
+builds. They were a module of their own, `types`, on the promise that
+inert data is a thing a crate has one home for. The promise did not
+hold: it had a carve-out for every type that gained an invariant, every
+importer was already this module, and `Fees` holding a validated
+[`Ratio`](../units/DESIGN.md) made the "no invariant" claim false while
+it was still written down. A type's home is its producer, and a type
+with nothing but fields is not thereby a different kind of thing.
+
+`convert` has no rows at all, because it declares no types: its functions
+are edges. Every read that returns a price calls
+[`price_x96_to_f64`](../convert.rs#L172) once; the trades call
+[`scale_to_6dec`](../convert.rs#L47) once; the balance and solvency reads
+call [`usdc_from_atoms`](../convert.rs#L87); the decoder and the
+maker-equity batch call [`unpack_balance_delta`](../convert.rs#L278). The
+types on either side of that door do have rows: the wire side's in
+[`units`](../units/DESIGN.md), the human side's here, the exact twins in
+[`math`](../math/DESIGN.md).
+
+Every surface type here derives `Serialize` and `Deserialize`, because the
+surface is what gets logged, dashboarded and persisted.
 
 Errors are classified at the read that saw them. A pinned read maps the
 node's "pruned state" answer to `StateUnavailable`, not transient, and
@@ -301,6 +368,9 @@ Two costs in this table are not what they should be and are debts:
 - To `contracts` and `storage`: the bindings the reads call and the slots
   the batches read. Shapes, not policy. The raw storage reads over those
   slots are the handle's, and crate-private.
+- To [`units`](../units/DESIGN.md): the wire side of the boundary. A
+  conversion's exact argument or result is one of those types, never a
+  bare integer, and the exact door carries them unconverted.
 - Out to the strategy layer: every reader a strategy holds is one of
   these three handles; a research source over block-pinned reads is
   `StateAt` behind a trait; a live cache is seeded from
@@ -331,6 +401,12 @@ Two costs in this table are not what they should be and are debts:
 - **Fast layer, slow layer**: the state cache's two TTLs; now-reads of
   prices, funding and balances come from the fast one, fees and bounds
   from the slow one.
+- **Human unit**: USDC, perp tokens, a price, a fraction, a leverage;
+  `f64`, unsuffixed. **Wire unit**: a count of atoms or a fixed-point
+  encoding; a type from [`units`](../units/DESIGN.md), never a bare
+  integer. **Scale**: the 6-decimal conversion; exact.
+- **Exact door**: the `Exact*` parameter types, which skip the conversion.
+  **Precision bound**: the known loss of an X96 to `f64` conversion.
 
 ## Debts
 
@@ -344,6 +420,17 @@ Two costs in this table are not what they should be and are debts:
 - **`get_config` is four separate calls** where `get_snapshot` is one
   batch; the older read predates the batch and has not been folded into
   it.
+- **`MarketConfig::pool_price` sits among configuration.** A market's
+  configuration should not carry a live price; it is there because an
+  older read returned both at once.
+- **`OpenInterest` is in perp tokens while capacity is in atoms.** The two
+  are compared constantly and should share a unit at the surface, with the
+  exact pair in `math`.
+- **The human-unit open scales into its exact twin inside the trade**
+  rather than through a named conversion, so the one place the boundary is
+  crossed implicitly is the place a caller is most likely to read.
+- **`convert` still describes itself against the Zig SDK.** Its rules are
+  its own now.
 - **Transience is by wrapping path for bare calls.** A now-read that
   fails at the transport surfaces as an ABI error the classification does
   not recognise as transient (SDK #115). Pinned reads classify correctly;

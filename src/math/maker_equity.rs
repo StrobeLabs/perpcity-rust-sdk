@@ -327,7 +327,7 @@ impl MakerEquityBreakdown {
 
     /// Whether the contract would liquidate the position now, given the
     /// market's liquidation fee *rate*
-    /// ([`Fees::liquidation_fee`](crate::types::Fees::liquidation_fee)): the
+    /// ([`Fees::liquidation_fee`](crate::Fees::liquidation_fee)): the
     /// negation of
     /// `isHealthy(equity − posVal·liqFee, posVal, liqMarginRatio)`.
     ///

@@ -47,7 +47,7 @@ liquidation. A slot that is wrong fails those, loudly.
 **Units are declared once.** Prices at `2^96`, margin and fees in
 6-decimal USDC, ratio and fee parameters at `1e6`, rates at `1e18` per
 day, the packed `BalanceDelta` with perp then USD. The bindings carry
-the raw integers; the crate's unit rules, in the root and in `types`,
+the raw integers; the crate's unit rules, in the root and in `convert`,
 say what each is.
 
 ## The mental model
@@ -132,7 +132,7 @@ crate passes around. These are the ones where that is the whole answer.
 - **The four call-parameter structs are the ABI's word order and nothing
   else.** `OpenTakerParams`, `OpenMakerParams`, `AdjustTakerParams` and
   `AdjustMakerParams` are assembled inside the send that uses them, from
-  the crate's own twin in [`types`](../types/DESIGN.md), and never travel
+  the crate's own twin in [`client`](../client/DESIGN.md), and never travel
   as a value. The twin is the point: a caller states a trade in human
   units, and the ABI's field order is a detail of the call.
 - **`Taker`, `FeeFund` and `TickInfo` are bound and unread.** The

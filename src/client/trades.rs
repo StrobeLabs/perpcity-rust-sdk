@@ -3,6 +3,7 @@
 use alloy::primitives::{Address, B256, Bytes, I256, U256};
 use alloy::rpc::types::{Log as RpcLog, TransactionReceipt};
 use alloy::sol_types::SolEvent;
+use serde::{Deserialize, Serialize};
 
 use crate::constants::{MAX_TICK, MIN_OPENING_MARGIN, MIN_TICK, TICK_SPACING};
 use crate::contracts::{IERC20, Perp, Position};
@@ -11,14 +12,150 @@ use crate::errors::{ContractError, Result, TransactionError, ValidationError};
 use crate::feeds::{MarketEvent, decode_log};
 use crate::hft::gas::{GasLimits, Urgency};
 use crate::math::tick::{align_tick_down, align_tick_up, price_to_tick};
-use crate::types::{
-    AdjustMakerParams, AdjustMakerResult, AdjustTakerParams, AdjustTakerResult,
-    ExactAdjustTakerParams, ExactOpenTakerParams, OpenMakerParams, OpenResult, OpenTakerParams,
-};
-use crate::units::LUnits;
+use crate::units::{LDelta, LUnits};
 
 use super::market::{Book, validate_fee_recipient};
 use super::{MAX_APPROVAL, PerpClient, i32_to_i24};
+
+// ── Parameters ──────────────────────────────────────────────────────
+
+/// Client-facing parameters for opening a taker (long/short) position.
+///
+/// The SDK converts these to contract types automatically:
+/// - `margin` → scaled to 6 decimals
+/// - `perp_delta` → scaled to 18 decimals (positive = long, negative = short)
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct OpenTakerParams {
+    /// Margin in USDC (e.g. `100.0` for 100 USDC).
+    pub margin: f64,
+    /// Perp token delta: positive = long, negative = short.
+    /// Magnitude is the notional size in perp token units.
+    pub perp_delta: f64,
+    /// Slippage protection: max amount of token1 (USDC) willing to pay. `0` = no limit.
+    pub amt1_limit: u128,
+}
+
+/// Exact wire-unit parameters for latency-sensitive taker opens.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct ExactOpenTakerParams {
+    /// Margin in USDC atoms (six decimals).
+    pub margin: u128,
+    /// Signed perp atoms (six decimals).
+    pub perp_delta: i128,
+    /// Directional token1 limit produced by [`crate::TakerQuote::amt1_limit`].
+    pub amt1_limit: u128,
+}
+
+/// Client-facing parameters for opening a maker (LP) position.
+///
+/// The SDK converts these to contract types automatically:
+/// - `margin` → scaled to 6 decimals
+/// - `price_lower` / `price_upper` → converted to ticks
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct OpenMakerParams {
+    /// Margin in USDC (e.g. `1000.0`).
+    pub margin: f64,
+    /// Lower bound of the price range.
+    pub price_lower: f64,
+    /// Upper bound of the price range.
+    pub price_upper: f64,
+    /// Liquidity amount to provide.
+    pub liquidity: LUnits,
+    /// Maximum amount of token0 willing to deposit.
+    pub max_amt0_in: u128,
+    /// Maximum amount of token1 willing to deposit.
+    pub max_amt1_in: u128,
+}
+
+/// Client-facing parameters for adjusting a taker position.
+///
+/// Combines margin adjustment and notional adjustment in a single call.
+/// To close a position, pass `perp_delta` opposing the position's current delta.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct AdjustTakerParams {
+    /// Position NFT token ID.
+    pub pos_id: U256,
+    /// Margin delta in USDC: positive to deposit, negative to withdraw.
+    pub margin_delta: f64,
+    /// Perp token delta: positive to go more long, negative to go more short.
+    /// Set to zero for margin-only adjustments.
+    pub perp_delta: f64,
+    /// Slippage protection: max amount of token1 (USDC). `0` = no limit.
+    pub amt1_limit: u128,
+}
+
+/// Exact wire-unit parameters for latency-sensitive taker adjustments.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct ExactAdjustTakerParams {
+    /// Position NFT token ID.
+    pub pos_id: U256,
+    /// Signed margin change in USDC atoms.
+    pub margin_delta: i128,
+    /// Signed perp atoms.
+    pub perp_delta: i128,
+    /// Directional token1 limit produced by [`crate::TakerQuote::amt1_limit`].
+    pub amt1_limit: u128,
+}
+
+/// Client-facing parameters for adjusting a maker (LP) position.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct AdjustMakerParams {
+    /// Position NFT token ID.
+    pub pos_id: U256,
+    /// Margin delta in USDC: positive to deposit, negative to withdraw.
+    pub margin_delta: f64,
+    /// Liquidity delta: positive to add, negative to remove.
+    pub liquidity_delta: LDelta,
+    /// Max/min amount of token0 for slippage protection.
+    pub amt0_limit: u128,
+    /// Max/min amount of token1 for slippage protection.
+    pub amt1_limit: u128,
+}
+
+// ── Results ─────────────────────────────────────────────────────────
+
+/// Result of opening a taker or maker position.
+///
+/// `pos_id` is the minted position NFT id. For taker opens, `perp_delta` and
+/// `usd_delta` are the realized swap amounts decoded from the `TakerOpened`
+/// event (signed: positive = received, negative = paid). Maker opens emit no
+/// swap, so both are `0.0`.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct OpenResult {
+    /// Transaction hash.
+    pub tx_hash: B256,
+    /// Minted position NFT token ID.
+    pub pos_id: U256,
+    /// Realized perp-token delta from the open swap (taker only; `0.0` for makers).
+    pub perp_delta: f64,
+    /// Realized USD delta from the open swap (taker only; `0.0` for makers).
+    pub usd_delta: f64,
+}
+
+/// Result of adjusting a taker position (margin, notional, or both).
+///
+/// `perp_delta` and `usd_delta` are the realized swap amounts decoded from the
+/// `TakerAdjusted` event — or `TakerClosed`, when the adjust reverses the full
+/// delta and closes the position (signed: positive = received, negative =
+/// paid). Both are `0.0` for a margin-only adjust, which performs no swap.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct AdjustTakerResult {
+    /// Transaction hash.
+    pub tx_hash: B256,
+    /// Realized perp-token delta from the adjust swap (`0.0` if margin-only).
+    pub perp_delta: f64,
+    /// Realized USD delta from the adjust swap (`0.0` if margin-only).
+    pub usd_delta: f64,
+}
+
+/// Result of adjusting a maker position (margin, liquidity, or both).
+///
+/// Events are parameterless — read position state via view functions if needed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdjustMakerResult {
+    /// Transaction hash.
+    pub tx_hash: B256,
+}
 
 /// Extract the minted token ID from an ERC721 `Transfer(address(0), to, tokenId)` event.
 ///
@@ -712,13 +849,40 @@ impl PerpClient {
 
 #[cfg(test)]
 mod tests {
-    use alloy::primitives::{Address, I256, U256, Uint};
+    use alloy::primitives::{Address, B256, I256, U256, Uint};
 
-    use super::{closes_taker, closing_perp_delta, scale_opening_margin};
+    use super::{
+        AdjustTakerResult, OpenResult, closes_taker, closing_perp_delta, scale_opening_margin,
+    };
     use crate::constants::Q96;
     use crate::contracts::{Perp, Position, SwapResult};
     use crate::convert::pack_balance_delta;
     use crate::events::rpc_log;
+
+    #[test]
+    fn open_result_serde_roundtrip() {
+        let result = OpenResult {
+            tx_hash: B256::ZERO,
+            pos_id: U256::from(42),
+            perp_delta: 0.0681,
+            usd_delta: -500.0,
+        };
+        let json = serde_json::to_string(&result).unwrap();
+        let recovered: OpenResult = serde_json::from_str(&json).unwrap();
+        assert_eq!(result, recovered);
+    }
+
+    #[test]
+    fn adjust_taker_result_serde_roundtrip() {
+        let result = AdjustTakerResult {
+            tx_hash: B256::ZERO,
+            perp_delta: -0.0681,
+            usd_delta: 499.5,
+        };
+        let json = serde_json::to_string(&result).unwrap();
+        let recovered: AdjustTakerResult = serde_json::from_str(&json).unwrap();
+        assert_eq!(result, recovered);
+    }
 
     fn position(perp_atoms: i128, usd_atoms: i128) -> Position {
         Position {
