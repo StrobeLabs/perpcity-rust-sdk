@@ -19,8 +19,10 @@
 //! `amounts_for_liquidity`), a maker's geometry (`TickRange`,
 //! `MakerBand`), taker capacity (`Side`, `Capacity`, `MarketCapacity`,
 //! `band_capacity`, `liquidity_for_capacity`), the
-//! contract's mark (`Mark`, `Emas`, `fair_price`, `fair_price_x96`), and
-//! tick/price conversion (`price_to_tick`, `tick_to_price`, ...).
+//! contract's mark (`Mark`, `Emas`, `fair_price`, `fair_price_f64`), the
+//! units every exact figure is denominated in (`UsdcAtoms`, `UsdcDelta`,
+//! `PerpAtoms`, `PerpDelta`, `Price`, `SqrtPrice`), and tick/price
+//! conversion (`price_to_tick`, `tick_to_price`, ...).
 //!
 //! It re-exports exactly that set, nothing more: lower-level ABI/
 //! contract-interface types (`contracts::*`) and the fine-grained

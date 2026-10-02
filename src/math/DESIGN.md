@@ -152,7 +152,8 @@ is the whole reason the two prices have two names. Everything on the
 left is a valuation the contract performs, and it uses the mark.
 Everything on the right is geometry on the pool's own grid, and it uses
 the pool price. `Mark` is the four inputs at one block;
-`Mark::fair_price_x96` is the price.
+`Mark::fair_price` is the price, exact, and `fair_price_f64` is the lossy
+twin for simulators.
 
 **The swap** (`swap`): what a taker trade does, computed by walking the
 pool's tick map exactly as V4 does, in Q64.96 with V4's rounding, for the
@@ -196,12 +197,15 @@ no snapshot, no exactness claim, f64 out.
 | [`MakerState`](maker_equity.rs#L123), [`TickFunding`](maker_equity.rs#L47) | one position's settle inputs: its band, margin, entry trackers and the funding at its two ticks | the batch's maker rows and the two storage reads on the state handle in `client` | [`AccruedMakerSnapshot::maker_equity`](maker_equity.rs#L513), the settle preview. |
 | [`MakerEquityBreakdown`](maker_equity.rs#L188) | a settle previewed: exact atoms in the contract's units; f64 only in accessors | [`AccruedMakerSnapshot::maker_equity`](maker_equity.rs#L513) | [`MakerEquityKind`](../client/DESIGN.md), as the `Computed` payload of an outcome; the strategy layer's equity audits and liquidation decisions, which key on `is_liquidatable` and the margin ratio. Exact atoms so that a preview can be checked against a real settle to the atom. |
 
-Two conventions carry the exactness claim in the names. A function or
-field suffixed `_x96`, `_x128`, `_atoms` or `_e6` is a wire unit and is
-exact; its unsuffixed twin is f64 and is not. And every port names the
-contract function it transcribes in its doc, with the commit it was
-transcribed from, so that a contract change is a search rather than a
-hunt.
+Two conventions carry the exactness claim. The type is the first: a
+quantity's unit is its type, taken from [`units`](../units/DESIGN.md), and
+the `f64` twin is the one that names itself so — `fair_price_f64` beside
+`fair_price`, `usdc()` beside `atoms()`. Where a quantity has no unit type
+yet, a wire suffix (`_x96`, `_x128`, `_atoms`, `_e6`) stands in and means
+the same thing, exact in the contract's own encoding, which is why those
+suffixes disappear as the types land. And every port names the contract
+function it transcribes in its doc, with the commit it was transcribed
+from, so that a contract change is a search rather than a hunt.
 
 ## Efficiency
 

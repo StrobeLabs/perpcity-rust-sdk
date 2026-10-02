@@ -50,8 +50,14 @@ delta! {
     PerpDelta(i128) as atoms, magnitude PerpAtoms
 }
 
-/// A human amount as a signed count of atoms, truncated toward zero the
-/// way Solidity truncates.
+/// A human amount as a signed count of atoms, with the fractional atom
+/// floored.
+///
+/// Floored, not truncated: a negative amount rounds away from zero, so
+/// `-1.1234567` is `-1_123_457` atoms rather than `-1_123_456`. That is a
+/// choice about a caller's own input, not a transcription of the contract,
+/// which truncates toward zero in its signed division — nothing here feeds
+/// a port, and the behaviour is pinned by a test.
 ///
 /// # Errors
 ///
