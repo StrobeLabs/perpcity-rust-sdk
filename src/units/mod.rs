@@ -158,6 +158,14 @@ macro_rules! delta {
             pub const ZERO: Self = Self(0);
 
             /// From a raw signed count.
+            ///
+            /// The protocol's own quantities are bounded by
+            /// [`ACCOUNTING_TOKEN_SUPPLY`](crate::constants::ACCOUNTING_TOKEN_SUPPLY),
+            /// a hundred-odd times smaller than this primitive's range, and
+            /// that bound is what makes the operators below plain rather
+            /// than checked. A value built here from outside that range is
+            /// outside the type's domain: the operators will wrap on it in
+            /// release and panic in debug, as they would on the primitive.
             pub const fn new($raw: $prim) -> Self {
                 Self($raw)
             }

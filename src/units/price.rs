@@ -65,7 +65,16 @@ impl Price {
                 reason: "Q96 price value must be non-zero".into(),
             });
         }
-        let intermediate = (self.0 * BIGINT_1E6) / Q96;
+        // `U256` multiplication wraps rather than panicking, and a wrapped
+        // product can land small enough to pass the bound below and return a
+        // plausible wrong price. The scaling is checked so that it cannot.
+        let intermediate =
+            self.0
+                .checked_mul(BIGINT_1E6)
+                .ok_or_else(|| ValidationError::Overflow {
+                    context: "Q96 price exceeds safe f64 integer range after scaling".into(),
+                })?
+                / Q96;
         if intermediate > U256::from(MAX_SAFE_F64_INT) {
             return Err(ValidationError::Overflow {
                 context: "Q96 price exceeds safe f64 integer range after scaling".into(),
@@ -210,6 +219,29 @@ mod tests {
 
         let root = SqrtPrice::from_price(4.0).unwrap();
         assert!((root.price().unwrap() - 4.0).abs() < 1e-5);
+    }
+
+    /// A word whose scaling leaves `U256` is refused rather than wrapped.
+    ///
+    /// The value below is chosen so that `word × 1e6` wraps to exactly
+    /// `Q96`: an unchecked multiply answers `Ok(1e-6)` for it, which is a
+    /// plausible price and the wrong one. No pool holds a word this large,
+    /// but a fallible conversion must fail rather than invent a number.
+    #[test]
+    fn a_price_whose_scaling_wraps_is_refused() {
+        let wraps_to_one = U256::from_str_radix(
+            "561475840711746231608895706307127665180506155643691174255492339118708359168",
+            10,
+        )
+        .unwrap();
+        assert!(matches!(
+            Price::from_x96(wraps_to_one).to_f64(),
+            Err(ValidationError::Overflow { .. })
+        ));
+        assert!(matches!(
+            Price::from_x96(U256::MAX).to_f64(),
+            Err(ValidationError::Overflow { .. })
+        ));
     }
 
     /// Zero is not a price, on either type, and neither is a value a
