@@ -21,9 +21,8 @@ use super::{MAX_APPROVAL, PerpClient, i32_to_i24};
 
 /// Client-facing parameters for opening a taker (long/short) position.
 ///
-/// The SDK converts these to contract types automatically:
-/// - `margin` → scaled to 6 decimals
-/// - `perp_delta` → scaled to 18 decimals (positive = long, negative = short)
+/// The SDK scales both to 6 decimals at the call: the perp token is an
+/// `AccountingToken` with six, the same as the USDC margin, not eighteen.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct OpenTakerParams {
     /// Margin in USDC (e.g. `100.0` for 100 USDC).
