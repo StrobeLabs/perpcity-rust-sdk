@@ -730,6 +730,13 @@ mod tests {
                 assert_eq!(swap.usd_delta.atoms(), -100_000_000);
                 assert_eq!(swap.pool_price.x96(), Q96);
                 assert_eq!(swap.total_fee.atoms(), 1_000_000);
+                // The design says the four shares account for the whole
+                // fee. Nothing checked it until the counts could be added.
+                assert_eq!(
+                    swap.lp_fee + swap.protocol_fee + swap.creator_fee + swap.insurance_fee,
+                    swap.total_fee.magnitude(),
+                    "the four shares sum to the total"
+                );
             }
             _ => panic!("expected TakerOpened"),
         }
