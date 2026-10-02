@@ -299,441 +299,66 @@ pub(crate) fn pack_balance_delta(amount0: i128, amount1: i128) -> I256 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::constants::{MAX_SQRT_PRICE_X96, Q96, Q96_PRECISION};
 
-    // ── price_f64_to_x96 ───────────────────────────────────────────
-
-    /// The Q96 conversion is only exact below 2^80: the mantissa trick
-    /// shifts by 48 bits twice, so prices at or past the bound must be
-    /// rejected, and the largest representable prices must still convert.
+    /// The V4 packing: one `int256` word holding two `int128` amounts,
+    /// amount0 in the high half and amount1 in the low. The signs are
+    /// independent, which is the whole reason it is not two fields — a swap
+    /// pays one asset and receives the other, so the two halves of a real
+    /// delta disagree.
+    ///
+    /// This is the one piece of arithmetic `convert` owns; the rest of the
+    /// module is a line each over a unit type, and those types test
+    /// themselves.
     #[test]
-    fn price_f64_to_x96_enforces_the_2_pow_80_bound() {
-        let bound = (1u128 << 80) as f64;
-        assert!(price_f64_to_x96(bound).is_err());
-        assert!(price_f64_to_x96(bound * 2.0).is_err());
-        assert!(price_f64_to_x96(f64::MAX).is_err());
-
-        let just_under = bound * (1.0 - f64::EPSILON);
-        let converted = price_f64_to_x96(just_under).unwrap();
-        assert!(converted > U256::ZERO);
-    }
-
-    // ── scale_to_6dec ──────────────────────────────────────────────
-
-    #[test]
-    fn scale_to_6dec_positive() {
-        assert_eq!(scale_to_6dec(1.5).unwrap(), 1_500_000);
-    }
-
-    #[test]
-    fn scale_to_6dec_zero() {
-        assert_eq!(scale_to_6dec(0.0).unwrap(), 0);
-    }
-
-    #[test]
-    fn scale_to_6dec_negative() {
-        assert_eq!(scale_to_6dec(-2.5).unwrap(), -2_500_000);
-    }
-
-    #[test]
-    fn scale_to_6dec_small_fractional() {
-        // Smallest representable unit: 0.000001 = 1
-        assert_eq!(scale_to_6dec(0.000001).unwrap(), 1);
-    }
-
-    #[test]
-    fn scale_to_6dec_truncates_below_6_decimals() {
-        // 1.1234567 * 1e6 = 1123456.7, floor = 1123456
-        assert_eq!(scale_to_6dec(1.1234567).unwrap(), 1_123_456);
-    }
-
-    #[test]
-    fn scale_to_6dec_negative_truncation_floors_toward_negative_infinity() {
-        // -1.1234567 * 1e6 = -1123456.7, floor = -1123457
-        assert_eq!(scale_to_6dec(-1.1234567).unwrap(), -1_123_457);
-    }
-
-    #[test]
-    fn scale_to_6dec_large_valid_amount() {
-        // 1 billion USDC — should work
-        let result = scale_to_6dec(1_000_000_000.0).unwrap();
-        assert_eq!(result, 1_000_000_000_000_000);
-    }
-
-    #[test]
-    fn scale_to_6dec_overflow_positive() {
-        // 1e16 > 2^53 ≈ 9.007e15, clearly exceeds safe f64 integer range
-        assert!(scale_to_6dec(1e16).is_err());
-    }
-
-    #[test]
-    fn scale_to_6dec_overflow_negative() {
-        assert!(scale_to_6dec(-1e16).is_err());
-    }
-
-    #[test]
-    fn scale_to_6dec_nan() {
-        assert!(scale_to_6dec(f64::NAN).is_err());
-    }
-
-    #[test]
-    fn scale_to_6dec_infinity() {
-        assert!(scale_to_6dec(f64::INFINITY).is_err());
-        assert!(scale_to_6dec(f64::NEG_INFINITY).is_err());
-    }
-
-    // ── scale_from_6dec ────────────────────────────────────────────
-
-    #[test]
-    fn scale_from_6dec_positive() {
-        assert_eq!(scale_from_6dec(1_500_000), 1.5);
-    }
-
-    #[test]
-    fn scale_from_6dec_zero() {
-        assert_eq!(scale_from_6dec(0), 0.0);
-    }
-
-    #[test]
-    fn scale_from_6dec_negative() {
-        assert_eq!(scale_from_6dec(-2_000_000), -2.0);
-    }
-
-    #[test]
-    fn scale_from_6dec_one_unit() {
-        assert_eq!(scale_from_6dec(1), 0.000001);
-    }
-
-    #[test]
-    fn scale_from_6dec_five_usdc() {
-        // 5 USDC = 5_000_000 on-chain
-        assert_eq!(scale_from_6dec(5_000_000), 5.0);
-    }
-
-    // ── scale roundtrip ────────────────────────────────────────────
-
-    #[test]
-    fn scale_6dec_roundtrip_exact() {
-        // Values with at most 6 decimal places roundtrip exactly.
-        for &amount in &[0.0, 1.0, 0.5, 100.123456, -50.0, 999_999.999999] {
-            let scaled = scale_to_6dec(amount).unwrap();
-            let recovered = scale_from_6dec(scaled);
-            assert!(
-                (recovered - amount).abs() < 1e-6,
-                "roundtrip failed for {amount}: got {recovered}"
+    fn a_balance_delta_packs_two_signed_halves() {
+        for (perp, usd) in [
+            (0i128, 0i128),
+            (1, -1),
+            (-1, 1),
+            // A taker going long: perp received, USDC paid.
+            (100_000_000, -100_000_000),
+            // The widths, both ends, both signs.
+            (i128::MAX, i128::MIN),
+            (i128::MIN, i128::MAX),
+        ] {
+            let packed = pack_balance_delta(perp, usd);
+            assert_eq!(
+                unpack_balance_delta(packed),
+                (perp, usd),
+                "({perp}, {usd}) did not survive the round trip"
             );
         }
     }
 
-    /// A ratio from its millionths, for the tests below.
-    fn e6(value: u32) -> Ratio {
-        Ratio::from_e6(value).unwrap()
+    /// The low half does not borrow from the high one. A negative amount1 is
+    /// all ones in its own 128 bits, and reading amount0 must not see them —
+    /// the bug this shape invites is a sign bleeding across the halves.
+    #[test]
+    fn a_negative_low_half_does_not_reach_the_high_one() {
+        let packed = pack_balance_delta(5, -1);
+        assert_eq!(unpack_balance_delta(packed), (5, -1));
+        let packed = pack_balance_delta(-1, 5);
+        assert_eq!(unpack_balance_delta(packed), (-1, 5));
     }
 
-    // ── leverage_to_margin_ratio ───────────────────────────────────
-
+    /// The narrowing door every balance read goes through: it takes whatever
+    /// width the chain returned, and refuses rather than wrapping when the
+    /// value is past what the contracts store an amount in. The message
+    /// names the field, because a bare overflow says nothing about which
+    /// read produced it.
     #[test]
-    fn leverage_1x() {
-        assert_eq!(leverage_to_margin_ratio(1.0).unwrap().e6(), 1_000_000);
-    }
-
-    #[test]
-    fn leverage_2x() {
-        assert_eq!(leverage_to_margin_ratio(2.0).unwrap().e6(), 500_000);
-    }
-
-    #[test]
-    fn leverage_10x() {
-        assert_eq!(leverage_to_margin_ratio(10.0).unwrap().e6(), 100_000);
-    }
-
-    #[test]
-    fn leverage_100x() {
-        assert_eq!(leverage_to_margin_ratio(100.0).unwrap().e6(), 10_000);
-    }
-
-    #[test]
-    fn leverage_fractional_3x() {
-        // 1e6 / 3 = 333333.33... → rounds to 333333
-        assert_eq!(leverage_to_margin_ratio(3.0).unwrap().e6(), 333_333);
-    }
-
-    #[test]
-    fn leverage_zero_rejected() {
-        assert!(leverage_to_margin_ratio(0.0).is_err());
-    }
-
-    #[test]
-    fn leverage_negative_rejected() {
-        assert!(leverage_to_margin_ratio(-5.0).is_err());
-    }
-
-    #[test]
-    fn leverage_nan_rejected() {
-        assert!(leverage_to_margin_ratio(f64::NAN).is_err());
-    }
-
-    #[test]
-    fn leverage_infinity_rejected() {
-        assert!(leverage_to_margin_ratio(f64::INFINITY).is_err());
-    }
-
-    #[test]
-    fn leverage_extremely_large_produces_error() {
-        // 1e6 / 1e12 rounds to 0 → error
-        assert!(leverage_to_margin_ratio(1e12).is_err());
-    }
-
-    // ── margin_ratio_to_leverage ───────────────────────────────────
-
-    #[test]
-    fn margin_ratio_10_percent() {
-        let lev = margin_ratio_to_leverage(e6(100_000)).unwrap();
-        assert!((lev - 10.0).abs() < 1e-10);
-    }
-
-    #[test]
-    fn margin_ratio_100_percent() {
-        let lev = margin_ratio_to_leverage(e6(1_000_000)).unwrap();
-        assert!((lev - 1.0).abs() < 1e-10);
-    }
-
-    #[test]
-    fn margin_ratio_1_percent() {
-        let lev = margin_ratio_to_leverage(e6(10_000)).unwrap();
-        assert!((lev - 100.0).abs() < 1e-10);
-    }
-
-    #[test]
-    fn margin_ratio_zero_rejected() {
-        assert!(margin_ratio_to_leverage(Ratio::ZERO).is_err());
-    }
-
-    // ── leverage ↔ margin_ratio roundtrip ──────────────────────────
-
-    #[test]
-    fn leverage_margin_ratio_roundtrip() {
-        for &lev in &[1.0, 2.0, 5.0, 10.0, 20.0, 50.0, 100.0] {
-            let ratio = leverage_to_margin_ratio(lev).unwrap();
-            let recovered = margin_ratio_to_leverage(ratio).unwrap();
-            assert!(
-                (recovered - lev).abs() < 0.01,
-                "roundtrip failed for {lev}x: ratio={}, recovered={recovered}",
-                ratio.e6()
-            );
-        }
-    }
-
-    // ── price_x96_to_f64 ──────────────────────────────────────────────
-
-    #[test]
-    fn price_x96_q96_gives_1() {
-        let price = price_x96_to_f64(Q96).unwrap();
-        assert!(
-            (price - 1.0).abs() < Q96_PRECISION,
-            "Q96 gave price={price}, expected ≈1.0"
+    fn a_balance_too_wide_to_hold_is_refused_by_name() {
+        assert_eq!(usdc_from_atoms(1_500_000u128, "margin").unwrap(), 1.5);
+        assert_eq!(
+            usdc_from_atoms(U256::from(5_000_000u64), "margin").unwrap(),
+            5.0
         );
-    }
+        assert_eq!(usdc_from_atoms(0u128, "margin").unwrap(), 0.0);
 
-    #[test]
-    fn price_x96_half_q96_gives_0_5() {
-        let price = price_x96_to_f64(Q96 / U256::from(2u64)).unwrap();
+        let err = usdc_from_atoms(U256::MAX, "total margin").unwrap_err();
         assert!(
-            (price - 0.5).abs() < Q96_PRECISION,
-            "Q96/2 gave price={price}, expected ≈0.5"
+            err.to_string().contains("total margin"),
+            "the refusal should name the field: {err}"
         );
-    }
-
-    #[test]
-    fn price_x96_zero_rejected() {
-        assert!(price_x96_to_f64(U256::ZERO).is_err());
-    }
-
-    #[test]
-    fn price_x96_100_q96_gives_100() {
-        let price = price_x96_to_f64(Q96 * U256::from(100u64)).unwrap();
-        assert!(
-            (price - 100.0).abs() < Q96_PRECISION,
-            "100*Q96 gave price={price}, expected ≈100.0"
-        );
-    }
-
-    // ── price_to_sqrt_price_x96 ────────────────────────────────────
-
-    #[test]
-    fn price_1_gives_approx_q96() {
-        let result = price_to_sqrt_price_x96(1.0).unwrap();
-        // sqrt(1) * 2^96 = Q96 exactly. With 6-decimal intermediate,
-        // we expect precision within Q96 / 1e6.
-        let diff = result.abs_diff(Q96);
-        assert!(
-            diff < Q96 / U256::from(1_000_000u64),
-            "price=1.0 gave sqrtPriceX96={result}, expected ≈{Q96}"
-        );
-    }
-
-    #[test]
-    fn price_4_gives_approx_2_times_q96() {
-        // sqrt(4) = 2, so sqrtPriceX96 ≈ 2 * Q96
-        let result = price_to_sqrt_price_x96(4.0).unwrap();
-        let expected = Q96 * U256::from(2u64);
-        let diff = result.abs_diff(expected);
-        assert!(
-            diff < Q96 / U256::from(1_000_000u64),
-            "price=4.0 gave sqrtPriceX96={result}, expected ≈{expected}"
-        );
-    }
-
-    #[test]
-    fn price_0_25_gives_approx_half_q96() {
-        // sqrt(0.25) = 0.5, so sqrtPriceX96 ≈ Q96 / 2
-        let result = price_to_sqrt_price_x96(0.25).unwrap();
-        let expected = Q96 / U256::from(2u64);
-        let diff = result.abs_diff(expected);
-        assert!(
-            diff < Q96 / U256::from(1_000_000u64),
-            "price=0.25 gave sqrtPriceX96={result}, expected ≈{expected}"
-        );
-    }
-
-    #[test]
-    fn price_zero_rejected() {
-        assert!(price_to_sqrt_price_x96(0.0).is_err());
-    }
-
-    #[test]
-    fn price_negative_rejected() {
-        assert!(price_to_sqrt_price_x96(-1.0).is_err());
-    }
-
-    #[test]
-    fn price_too_large_rejected() {
-        assert!(price_to_sqrt_price_x96(1e31).is_err());
-    }
-
-    #[test]
-    fn price_nan_rejected() {
-        assert!(price_to_sqrt_price_x96(f64::NAN).is_err());
-    }
-
-    #[test]
-    fn price_infinity_rejected() {
-        assert!(price_to_sqrt_price_x96(f64::INFINITY).is_err());
-    }
-
-    #[test]
-    fn price_very_small_works() {
-        // 1e-6 is the protocol's minimum starting price.
-        let result = price_to_sqrt_price_x96(1e-6);
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn price_1e6_works() {
-        // 1e6 is the protocol's maximum starting price.
-        let result = price_to_sqrt_price_x96(1e6);
-        assert!(result.is_ok());
-    }
-
-    // ── sqrt_price_x96_to_price ────────────────────────────────────
-
-    #[test]
-    fn sqrt_price_x96_q96_gives_price_1() {
-        let price = sqrt_price_x96_to_price(Q96).unwrap();
-        assert!(
-            (price - 1.0).abs() < Q96_PRECISION,
-            "sqrtPriceX96=Q96 gave price={price}, expected ≈1.0"
-        );
-    }
-
-    #[test]
-    fn sqrt_price_x96_2q96_gives_price_4() {
-        let price = sqrt_price_x96_to_price(Q96 * U256::from(2u64)).unwrap();
-        assert!(
-            (price - 4.0).abs() < Q96_PRECISION,
-            "sqrtPriceX96=2*Q96 gave price={price}, expected ≈4.0"
-        );
-    }
-
-    #[test]
-    fn sqrt_price_x96_zero_rejected() {
-        assert!(sqrt_price_x96_to_price(U256::ZERO).is_err());
-    }
-
-    #[test]
-    fn sqrt_price_x96_protocol_max() {
-        // MAX_SQRT_PRICE_X96 corresponds to price ≈ 1e6.
-        let price = sqrt_price_x96_to_price(MAX_SQRT_PRICE_X96).unwrap();
-        assert!(
-            (price - 1e6).abs() < Q96_PRECISION,
-            "MAX_SQRT_PRICE_X96 gave price={price}, expected ≈1e6"
-        );
-    }
-
-    // ── price ↔ sqrtPriceX96 roundtrip ─────────────────────────────
-
-    #[test]
-    fn price_sqrt_price_x96_roundtrip() {
-        // Test a range of prices. The 6-decimal intermediate means we
-        // lose precision at around 1e-6 relative error.
-        for &price in &[0.01, 0.1, 0.5, 1.0, 2.0, 10.0, 100.0, 500.0, 1e6] {
-            let sqrt_px96 = price_to_sqrt_price_x96(price).unwrap();
-            let recovered = sqrt_price_x96_to_price(sqrt_px96).unwrap();
-            let rel_error = (recovered - price).abs() / price;
-            assert!(
-                rel_error < 0.001,
-                "roundtrip failed for price={price}: recovered={recovered}, \
-                 relative error={rel_error}"
-            );
-        }
-    }
-
-    #[test]
-    fn price_sqrt_price_x96_roundtrip_near_1() {
-        // Prices near 1.0 should roundtrip with very high precision.
-        let price = 1.05;
-        let sqrt_px96 = price_to_sqrt_price_x96(price).unwrap();
-        let recovered = sqrt_price_x96_to_price(sqrt_px96).unwrap();
-        let rel_error = (recovered - price).abs() / price;
-        assert!(
-            rel_error < 0.0001,
-            "price={price}: recovered={recovered}, rel_error={rel_error}"
-        );
-    }
-
-    // ── Combined conversion scenarios ──────────────────────────────
-
-    #[test]
-    fn margin_scale_roundtrip_100_usdc() {
-        let margin_usdc = 100.0;
-        let on_chain = scale_to_6dec(margin_usdc).unwrap();
-        assert_eq!(on_chain, 100_000_000);
-        let back = scale_from_6dec(on_chain);
-        assert_eq!(back, 100.0);
-    }
-
-    #[test]
-    fn leverage_10x_to_ratio_and_back() {
-        let ratio = leverage_to_margin_ratio(10.0).unwrap();
-        assert_eq!(ratio.e6(), 100_000);
-        let lev = margin_ratio_to_leverage(ratio).unwrap();
-        assert!((lev - 10.0).abs() < 1e-10);
-    }
-
-    #[test]
-    fn five_usdc_minimum_margin() {
-        // Protocol minimum: 5 USDC = 5_000_000 on-chain
-        let on_chain = scale_to_6dec(5.0).unwrap();
-        assert_eq!(on_chain, 5_000_000);
-    }
-
-    // ── Overflow protection for sqrtPriceX96 squaring ──────────────
-
-    #[test]
-    fn sqrt_price_x96_huge_value_checked() {
-        // A value close to U256::MAX / 2 should overflow when squared.
-        let huge = U256::MAX / U256::from(2u64);
-        let result = sqrt_price_x96_to_price(huge);
-        assert!(result.is_err(), "should overflow when squaring huge value");
     }
 }
