@@ -18,13 +18,14 @@
 
 use alloy::primitives::{Address, B256, U256};
 use alloy::providers::MulticallError;
+use serde::{Deserialize, Serialize};
 
 use crate::contracts::{IFees, IMarginRatios, Perp, Position};
 use crate::convert::{price_x96_to_f64, scale_from_6dec};
 use crate::errors::{ContractError, PerpCityError, Result, ValidationError};
 use crate::hft::state_cache::{CachedBounds, CachedFees};
+use crate::math::BlockContext;
 use crate::math::pricing::{Emas, Mark, PricePair};
-use crate::types::{Bounds, Fees, MarketConfig, MarketSnapshot, OpenInterest};
 use crate::units::{Price, Ratio};
 
 use super::market::MarketReader;
@@ -33,6 +34,110 @@ use super::{PerpClient, SCALE_F64, i24_to_i32, now_secs, u24_to_u32};
 
 /// Funding/utilization rates are scaled by 1e18 per day on-chain.
 const WAD_F64: f64 = 1e18;
+
+/// A market's configuration: what deployment fixed and what governance
+/// sets, read once per market.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MarketConfig {
+    /// The market's `Perp` contract address (the market identifier).
+    pub perp: Address,
+    /// Tick spacing for the underlying Uniswap V4 pool.
+    pub tick_spacing: i32,
+    /// `EMA_WINDOW()`, in seconds: the time constant the contract smooths
+    /// the pool price and the index with; a deployment immutable, and what
+    /// [`Emas::advanced`] takes.
+    pub ema_window: u64,
+    /// Pool (AMM spot) price in human-readable units (e.g. `1.05`) — not
+    /// the contract's mark, which is the fair price
+    /// ([`crate::math::pricing`]).
+    pub pool_price: f64,
+    /// Beacon contract address.
+    pub beacon: Address,
+    /// Leverage and margin constraints.
+    pub bounds: Bounds,
+    /// Fee structure.
+    pub fees: Fees,
+}
+
+/// Leverage and margin constraints for a perpetual market.
+///
+/// All values are human-readable: leverage as a multiplier (e.g. `10.0`),
+/// margin in USDC (e.g. `5.0`), and ratios as fractions (e.g. `0.005`).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Bounds {
+    /// Minimum margin to open a position, in USDC (e.g. `5.0`).
+    pub min_margin: f64,
+    /// Minimum taker leverage (e.g. `1.0`).
+    pub min_taker_leverage: f64,
+    /// Maximum taker leverage (e.g. `100.0`).
+    pub max_taker_leverage: f64,
+    /// Margin ratio at which taker liquidation occurs.
+    pub liquidation_taker_ratio: Ratio,
+}
+
+/// A market's fee rates, each a share of the thing it is charged on.
+///
+/// The contract holds all four as `uint24` at 1e6, so `1_000` is 0.1%, and
+/// `fraction()` on any of them is the number a person reads. They are
+/// [`Ratio`] rather than `f64` because a liquidation's fee *rate* and the
+/// USDC a liquidation *settles* are both called the liquidation fee, and as
+/// two floats they substituted for each other.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Fees {
+    /// Share paid to the perp creator.
+    pub creator_fee: Ratio,
+    /// Share that goes to the insurance fund.
+    pub insurance_fee: Ratio,
+    /// Share earned by liquidity providers.
+    pub lp_fee: Ratio,
+    /// Share charged on a liquidation, applied to the position's value.
+    pub liquidation_fee: Ratio,
+}
+
+/// Taker open interest for a perp market, in perp tokens (multiply by the
+/// mark price for USD). The contract accumulates `|perp_delta|` per side.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct OpenInterest {
+    /// Total long open interest in perp tokens.
+    pub long_oi: f64,
+    /// Total short open interest in perp tokens.
+    pub short_oi: f64,
+}
+
+/// The market's live state at the lagged snapshot block, in human units.
+///
+/// Pure market state — no configuration. Returned alongside
+/// [`MarketConfig`] from [`MarketReader::get_snapshot`].
+/// What a live cache seeds from before it follows the feed: the prices,
+/// the contract's mark, and the stored EMAs it needs to keep marking
+/// between touches.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct MarketSnapshot {
+    /// The block every field was read at: the lagged snapshot block, with
+    /// its hash, so further reads can pin to it.
+    pub block: BlockContext,
+    /// Pool (AMM spot) price in human-readable units — not a TWAP, and not
+    /// the contract's mark, which is the fair price
+    /// ([`crate::math::pricing`]).
+    pub pool_price: f64,
+    /// Oracle index price from the beacon contract.
+    pub index_price: f64,
+    /// The contract's mark at the block: the fair price of the pool price,
+    /// the index and the EMAs advanced to the block's timestamp, exact in
+    /// X96 and converted once. What every health check, `valPnl` and
+    /// liquidation prices at, so the basis the contract sees is this
+    /// against the index, not the pool price against it.
+    pub mark: f64,
+    /// The stored EMAs as of the market's last touch. A cache that follows
+    /// the feed advances them to now against the prices it holds and marks
+    /// with [`Emas::mark`]; `RatesAndEmasRefreshed` replaces them on every
+    /// touch.
+    pub emas: Emas,
+    /// Daily funding rate (positive = longs pay shorts).
+    pub funding_rate_daily: f64,
+    /// Taker open interest.
+    pub open_interest: OpenInterest,
+}
 
 /// A module address from `modules()`, rejecting the zero address (an
 /// unregistered module) with a typed error naming the interface.

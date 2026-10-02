@@ -7,6 +7,7 @@
 //!
 //! | Module | Purpose |
 //! |---|---|
+//! | [`client`] | The reads and the trades, and the parameters, results, configuration and state they are spoken in |
 //! | [`constants`] | Protocol constants mirrored from on-chain `Constants.sol` |
 //! | [`contracts`] | ABI bindings via Alloy `sol!` — structs, events, errors, functions |
 //! | [`convert`] | Conversions between client f64 values and on-chain representations |
@@ -17,7 +18,6 @@
 //! | [`math`] | Pure math: tick ↔ price, liquidity, positions, EMAs, the deployed fair price, taker swap simulation, maker settle previews |
 //! | [`prelude`] | Everyday public surface, bundled for `use perpcity_sdk::prelude::*;` |
 //! | [`transport`] | Multi-endpoint RPC transport with health-aware routing |
-//! | [`types`] | Client-facing types with human-readable f64 fields |
 //!
 //! ## Quick start
 //!
@@ -50,15 +50,17 @@ pub mod math;
 pub mod prelude;
 pub(crate) mod storage;
 pub mod transport;
-pub mod types;
 pub mod units;
 
 #[doc(inline)]
 pub use client::{
     ARBITRUM_CHAIN_ID, ARBITRUM_POOL_MANAGER, ARBITRUM_SEPOLIA_CHAIN_ID,
     ARBITRUM_SEPOLIA_PERP_FACTORY, ARBITRUM_SEPOLIA_POOL_MANAGER, ARBITRUM_SEPOLIA_USDC,
-    ARBITRUM_USDC, ChainReader, MAX_ROW_BATCH, MakerEquityKind, MakerEquityOutcome, MarketReader,
-    PerpClient, RowOutcome, StateAt, TxBuilder,
+    ARBITRUM_USDC, AdjustMakerParams, AdjustMakerResult, AdjustTakerParams, AdjustTakerResult,
+    Bounds, ChainDeployments, ChainReader, ExactAdjustTakerParams, ExactOpenTakerParams, Fees,
+    MAX_ROW_BATCH, MakerEquityKind, MakerEquityOutcome, MarginRatioTriple, MarginRatios,
+    MarketConfig, MarketReader, MarketSnapshot, OpenInterest, OpenMakerParams, OpenResult,
+    OpenTakerParams, PerpClient, RowOutcome, SolvencyState, StateAt, TxBuilder,
 };
 
 #[doc(inline)]
@@ -82,14 +84,6 @@ pub use hft::gas::{GasLimits, Urgency};
 
 #[doc(inline)]
 pub use transport::{config::TransportConfig, provider::HftTransport};
-
-#[doc(inline)]
-pub use types::{
-    AdjustMakerParams, AdjustMakerResult, AdjustTakerParams, AdjustTakerResult, Bounds,
-    ChainDeployments, ExactAdjustTakerParams, ExactOpenTakerParams, Fees, MarginRatioTriple,
-    MarginRatios, MarketConfig, MarketSnapshot, OpenInterest, OpenMakerParams, OpenResult,
-    OpenTakerParams, SolvencyState,
-};
 
 #[doc(inline)]
 pub use units::{

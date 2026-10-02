@@ -11,6 +11,7 @@ use alloy::providers::{Empty, MulticallBuilder, Provider, RootProvider};
 use alloy::rpc::client::RpcClient;
 use alloy::sol_types::{SolCall, SolValue};
 use alloy::transports::BoxTransport;
+use serde::{Deserialize, Serialize};
 
 use crate::constants::{MULTICALL3, SNAPSHOT_BLOCK_LAG};
 use crate::contracts::{IBeacon, IERC20, IMulticall3};
@@ -21,7 +22,6 @@ use crate::hft::state_cache::{BalanceKey, StateCache, StateCacheConfig};
 use crate::history::History;
 use crate::math::BlockContext;
 use crate::transport::provider::HftTransport;
-use crate::types::ChainDeployments;
 
 use super::queries::MarketImmutables;
 use super::transactions::{classify_simulation_failure, preflight_request};
@@ -30,6 +30,16 @@ use super::{
     ARBITRUM_SEPOLIA_POOL_MANAGER, ARBITRUM_SEPOLIA_USDC, ARBITRUM_USDC, DEFAULT_GAS_TTL_MS,
     DEFAULT_PRIORITY_FEE, now_ms, now_secs,
 };
+
+/// The addresses every market on a chain shares.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChainDeployments {
+    /// The collateral token.
+    pub usdc: Address,
+    /// The Uniswap V4 `PoolManager` every market's pool lives in (see
+    /// `ARBITRUM_POOL_MANAGER` / `ARBITRUM_SEPOLIA_POOL_MANAGER`).
+    pub pool_manager: Address,
+}
 
 /// What every market on a chain shares, and the reads addressed by
 /// something other than a market.
@@ -522,6 +532,17 @@ impl ChainReader {
 mod tests {
     use super::*;
     use crate::client::mock;
+
+    #[test]
+    fn chain_deployments_serde_roundtrip() {
+        let deployments = ChainDeployments {
+            usdc: Address::ZERO,
+            pool_manager: Address::ZERO,
+        };
+        let json = serde_json::to_string(&deployments).unwrap();
+        let recovered: ChainDeployments = serde_json::from_str(&json).unwrap();
+        assert_eq!(deployments, recovered);
+    }
 
     /// Balances are cached per holder: another holder's read is another
     /// RPC, and the first holder's entry survives it.

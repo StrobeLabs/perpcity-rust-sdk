@@ -46,10 +46,17 @@ mod state;
 mod trades;
 mod transactions;
 
-pub use chain::ChainReader;
+pub use chain::{ChainDeployments, ChainReader};
 pub use maker_equity::{MakerEquityKind, MakerEquityOutcome};
 pub use market::MarketReader;
-pub use state::{MAX_ROW_BATCH, RowOutcome, StateAt};
+pub use queries::{Bounds, Fees, MarketConfig, MarketSnapshot, OpenInterest};
+pub use state::{
+    MAX_ROW_BATCH, MarginRatioTriple, MarginRatios, RowOutcome, SolvencyState, StateAt,
+};
+pub use trades::{
+    AdjustMakerParams, AdjustMakerResult, AdjustTakerParams, AdjustTakerResult,
+    ExactAdjustTakerParams, ExactOpenTakerParams, OpenMakerParams, OpenResult, OpenTakerParams,
+};
 pub use transactions::TxBuilder;
 
 use std::sync::Mutex;
@@ -64,7 +71,6 @@ use crate::errors::Result;
 use crate::hft::gas::GasLimitCache;
 use crate::hft::pipeline::{PipelineConfig, TxPipeline};
 use crate::hft::state_cache::{CachedBounds, CachedFees};
-use crate::types::{Bounds, Fees};
 
 // ── Network constants ──────────────────────────────────────────────────
 

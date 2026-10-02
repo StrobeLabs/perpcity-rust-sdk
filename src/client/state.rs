@@ -15,6 +15,7 @@ use alloy::providers::MulticallError;
 use alloy::sol_types::SolCall;
 use alloy::transports::{RpcError, TransportError};
 use futures_util::stream::{self, StreamExt};
+use serde::{Deserialize, Serialize};
 
 use crate::constants::{
     MAX_SWAP_SQRT_PRICE_X96, MAX_TICK, MIN_SWAP_SQRT_PRICE_X96, MIN_TICK, MULTICALL3,
@@ -31,7 +32,6 @@ use crate::math::pricing::{Mark, PricePair};
 use crate::math::range::{MakerBand, TickRange};
 use crate::math::swap::{PoolSnapshot, TickLiquidity, active_liquidity};
 use crate::storage::{v4_tick_bitmap_slot, v4_tick_slot};
-use crate::types::{MarginRatioTriple, MarginRatios, SolvencyState};
 use crate::units::{LDelta, LUnits, PerpAtoms, Price, Ratio, SqrtPrice};
 
 use super::market::MarketReader;
@@ -68,6 +68,49 @@ pub(super) const CHUNK_READ_CONCURRENCY: usize = 4;
 pub struct StateAt {
     market: MarketReader,
     block: BlockContext,
+}
+
+/// One side's margin-ratio thresholds.
+///
+/// Each is the contract's own `uint24` at 1e6, so the integers here are the
+/// module's values rather than a fraction recovered from one; `fraction()`
+/// on any of them is the number a person reads.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct MarginRatioTriple {
+    /// Minimum equity over value to open or increase a position.
+    pub init: Ratio,
+    /// Equity over value below which the position is liquidatable — the
+    /// ratio a position opened now stores as its own.
+    pub liquidation: Ratio,
+    /// Equity over value below which the position can be backstopped.
+    pub backstop: Ratio,
+}
+
+/// The market's `IMarginRatios` module: maker and taker thresholds.
+///
+/// These are the module's CURRENT values, applied to positions opened from
+/// now on; an open position keeps the liquidation ratio stored on it at
+/// open (`positions(id).liqMarginRatio`, surfaced by
+/// [`MakerEquityBreakdown::liquidation_margin_ratio`](crate::MakerEquityBreakdown::liquidation_margin_ratio)).
+/// Read with [`MarketReader::get_margin_ratios`].
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct MarginRatios {
+    /// Maker (LP) thresholds.
+    pub maker: MarginRatioTriple,
+    /// Taker thresholds.
+    pub taker: MarginRatioTriple,
+}
+
+/// The market's own solvency books, in USDC: the contract's `SolvencyState`.
+///
+/// `total_margin` moves only when real USDC enters or leaves, so it is
+/// the honest upper bound on what positions may collectively claim.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+pub struct SolvencyState {
+    /// Insolvency the contract has recognised and booked.
+    pub bad_debt: f64,
+    /// Margin the contract believes it holds.
+    pub total_margin: f64,
 }
 
 /// One id's row in a batched read: every id passed to [`StateAt::positions`]
@@ -810,6 +853,45 @@ mod tests {
     const TIMESTAMP: u64 = 1_700_000_000;
     /// The market's tick spacing in these tests.
     const SPACING: i32 = 30;
+
+    /// The deployed HORMUZ-TRAFFIC module values (2026-09-07): maker
+    /// 1.0 / 0.9 / 0.8, taker 0.1 / 0.05 / 0.02. The ratios are stored as
+    /// the module's own `uint24`, so the fractions are derived and nothing
+    /// round-trips through a float.
+    #[test]
+    fn margin_ratio_triple_holds_the_modules_own_integers() {
+        let triple = |init, liquidation, backstop| MarginRatioTriple {
+            init: Ratio::from_e6(init).unwrap(),
+            liquidation: Ratio::from_e6(liquidation).unwrap(),
+            backstop: Ratio::from_e6(backstop).unwrap(),
+        };
+        let maker = triple(1_000_000, 900_000, 800_000);
+        assert_eq!(
+            (
+                maker.init.fraction(),
+                maker.liquidation.fraction(),
+                maker.backstop.fraction()
+            ),
+            (1.0, 0.9, 0.8)
+        );
+        let taker = triple(100_000, 50_000, 20_000);
+        assert_eq!(
+            (
+                taker.init.fraction(),
+                taker.liquidation.fraction(),
+                taker.backstop.fraction()
+            ),
+            (0.1, 0.05, 0.02)
+        );
+        for e6 in [0u32, 1, 3, 333_333, 999_999, (1 << 24) - 1] {
+            assert_eq!(triple(e6, e6, e6).init.e6(), e6);
+        }
+
+        let ratios = MarginRatios { maker, taker };
+        let json = serde_json::to_string(&ratios).unwrap();
+        let recovered: MarginRatios = serde_json::from_str(&json).unwrap();
+        assert_eq!(ratios, recovered);
+    }
 
     /// A handle pinned to block 92 by name, over a mocked reader.
     async fn state() -> (StateAt, Rpc) {

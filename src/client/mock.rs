@@ -26,11 +26,10 @@ use crate::contracts::{
     Capacity, IMulticall3, Maker, MakerFunding, Modules, OpenInterest, Perp, PoolKey, Position,
     PricePair, Rates, SolvencyState,
 };
-use crate::types::ChainDeployments;
 use crate::{HftTransport, TransportConfig};
 
-use super::PerpClient;
 use super::chain::ChainReader;
+use super::{ChainDeployments, PerpClient};
 
 /// The market the mocked client points at.
 pub(super) const PERP: Address = Address::repeat_byte(0x11);

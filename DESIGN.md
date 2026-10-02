@@ -167,10 +167,10 @@ that carries it, the invariant it holds, and the node that owns it.
 
 | Concept | Type | Invariant | Home |
 |---|---|---|---|
-| A chain | [`ChainReader`](src/client/chain.rs#L44) | one transport, one deployment set, shared caches | [`client`](src/client/DESIGN.md) |
+| A chain | [`ChainReader`](src/client/chain.rs#L54) | one transport, one deployment set, shared caches | [`client`](src/client/DESIGN.md) |
 | A market, now | [`MarketReader`](src/client/market.rs#L23) | one `Perp` over a `ChainReader`; every read is current | [`client`](src/client/DESIGN.md) |
 | A market, at a block | [`StateAt`](src/client/state.rs#L68) | the handle is the block; every read pinned to its hash | [`client`](src/client/DESIGN.md) |
-| A market with a signer | [`PerpClient`](src/client/mod.rs#L179) | a `MarketReader` plus the send pipeline | [`client`](src/client/DESIGN.md) |
+| A market with a signer | [`PerpClient`](src/client/mod.rs#L185) | a `MarketReader` plus the send pipeline | [`client`](src/client/DESIGN.md) |
 | A send | [`TxBuilder`](src/client/transactions.rs#L40) | one transaction, one nonce, one outcome | [`client`](src/client/DESIGN.md) |
 | A tick interval | [`TickRange`](src/math/range.rs#L25) | `lower < upper`, both in the V4 domain, checked at construction | [`math::range`](src/math/range.rs#L1) |
 | A maker's geometry | [`MakerBand`](src/math/range.rs#L115) | a `TickRange` with liquidity | [`math::range`](src/math/range.rs#L1) |
@@ -180,7 +180,7 @@ that carries it, the invariant it holds, and the node that owns it.
 | The pool at a block | [`PoolSnapshot`](src/math/swap.rs#L71) | price, liquidity and a tick map that reconciles with it | [`math::swap`](src/math/swap.rs#L1) |
 | A settle previewed | [`MakerEquityBreakdown`](src/math/maker_equity.rs#L188) | exact atoms, the contract's arithmetic | [`math::maker_equity`](src/math/maker_equity.rs#L1) |
 | A block | [`BlockContext`](src/math/mod.rs#L51) | number, hash, timestamp of one header | [`math`](src/math/DESIGN.md) |
-| An event | [`MarketEvent`](src/events.rs#L127) | the market's vocabulary, human units, either tense | [`events`](src/events/DESIGN.md) |
+| An event | [`MarketEvent`](src/events.rs#L131) | the market's vocabulary, human units, either tense | [`events`](src/events/DESIGN.md) |
 | An event in chain order | [`TapeEvent`](src/history/tape.rs#L56), [`ChainPoint`](src/history/tape.rs#L47) | block and log index | [`history`](src/history/DESIGN.md) |
 | Custody over time | [`OwnershipLog`](src/history/tape.rs#L100) | a fold of transfers; owner at a chain point | [`history`](src/history/DESIGN.md) |
 | A print | [`IndexPrint`](src/history/beacon.rs#L20) | the index at a chain point and time | [`history`](src/history/DESIGN.md) |
@@ -188,7 +188,7 @@ that carries it, the invariant it holds, and the node that owns it.
 | A transport | [`HftTransport`](src/transport/provider.rs#L523) | many endpoints, one provider, reads and writes classified | [`transport`](src/transport/DESIGN.md) |
 | The send path | [`TxPipeline`](src/hft/pipeline.rs#L125), [`NonceManager`](src/hft/nonce.rs#L42) | zero RPC to prepare; the next nonce is owned | [`hft`](src/hft/DESIGN.md) |
 | The chain's shapes | [`contracts`](src/contracts/DESIGN.md), `storage` | bindings match deployed bytecode; slots match the deployed layout | [`contracts`](src/contracts/DESIGN.md) |
-| The human surface | [`types`](src/types/DESIGN.md), [`convert`](src/types/DESIGN.md) | inert data in human units; conversion once, at the edge | [`types`](src/types/DESIGN.md) |
+| The unit boundary | `convert` | a human unit becomes a wire unit once, at the edge | [`client`](src/client/DESIGN.md) |
 
 This table is the index; where each type flows is in the component
 nodes. Each node's type table has the same two right-hand columns,
@@ -334,10 +334,10 @@ The shape first, then the reasons.
        builds on every public type   │
   ┌──────────────────────────────────┼─────────────────────────────────┐
   │                                  ▼                                 │
-  │   ┌────────────┐   fills    ┌──────────┐   consumes      ┌──────┐  │
-  │   │   types    │◄───────────│  client  │────────────────►│ math │  │
-  │   │  convert   │  human     │ handles  │  snapshots in,  │ pure │  │
-  │   └────────────┘  surface   │  sends   │  results out    └──┬───┘  │
+  │   ┌────────────┐   calls    ┌──────────┐   consumes      ┌──────┐  │
+  │   │  convert   │◄───────────│  client  │────────────────►│ math │  │
+  │   │   units    │  once, at  │ handles  │  snapshots in,  │ pure │  │
+  │   └────────────┘  the edge  │  sends   │  results out    └──┬───┘  │
   │                             └─┬──┬───┬─┘                    │      │
   │          history() ┌──────────┘  │   └──────────┐ shapes    │      │
   │                    ▼             ▼              ▼           ▼      │
@@ -400,8 +400,10 @@ exist, and it is the one edge that leaves the repository.
 - **`contracts`** and **`storage`**: the deployed shapes. Bindings, ABI
   locks, slot derivation. Consumed by `client` and `math`; never by a
   strategy directly.
-- **`types`** and **`convert`**: the human surface. Consumed by `client` on
-  the way out and by callers on the way in.
+- **`convert`**: the unit boundary. The one place a human unit becomes a
+  wire unit or a wire unit a human one, called once by `client` on each
+  way. The human-unit types themselves are `client`'s, defined with the
+  call that speaks them.
 - **`units`**: what every number is. Provides one type per unit the market
   is denominated in, the one legal crossing between each dangerous pair,
   and the Solidity-compatible fixed-point arithmetic over those encodings,

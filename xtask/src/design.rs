@@ -424,10 +424,17 @@ fn mechanical(index: &Index, root: &Path) -> Graph {
         if !e.kind.is_type() || !drawn(e) || e.top() == "contracts" {
             continue;
         }
+        // Where the type's own inherent methods are, and nowhere else. Not
+        // its declaration file, since a type with no behaviour calls
+        // nothing and would otherwise inherit every binding its
+        // neighbours use; and not a trait impl's file, since a derive
+        // reports the declaration and a `From` reports the other type's
+        // home.
         let mut seen_files: BTreeSet<String> = BTreeSet::new();
-        seen_files.insert(e.file.clone());
         for m in index.all_methods.get(&e.id).into_iter().flatten() {
-            if let Some((f, _)) = index.location(*m) {
+            if !index.trait_methods.contains(m)
+                && let Some((f, _)) = index.location(*m)
+            {
                 seen_files.insert(f);
             }
         }
