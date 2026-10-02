@@ -197,18 +197,42 @@ impl SqrtPrice {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::constants::Q96_PRECISION;
+    use crate::constants::{MAX_SQRT_PRICE_X96, MIN_SQRT_PRICE_X96, Q96_PRECISION};
 
     /// Q96 encodes one as the scale itself, and the conversions are
-    /// inverses within the documented bound.
+    /// inverses within the documented bound. The table is what the scale
+    /// means: half the word is half the price, a hundred times it is a
+    /// hundred.
     #[test]
     fn a_price_round_trips_through_q96() {
         assert_eq!(Price::from_x96(Q96).to_f64().unwrap(), 1.0);
         let price = Price::try_from(1.5).unwrap();
         assert!((price.to_f64().unwrap() - 1.5).abs() < 1e-9);
+
+        for (word, expected) in [
+            (Q96 / U256::from(2u64), 0.5),
+            (Q96 * U256::from(100u64), 100.0),
+        ] {
+            let read = Price::from_x96(word).to_f64().unwrap();
+            assert!((read - expected).abs() < Q96_PRECISION, "{expected}");
+        }
+    }
+
+    /// The `f64` door is exact only below 2^80: the conversion shifts a
+    /// mantissa by 48 bits twice, so a price at or past the bound is refused
+    /// rather than silently losing the low half.
+    #[test]
+    fn a_price_past_the_mantissa_bound_is_refused() {
+        let bound = (1u128 << 80) as f64;
+        for past in [bound, bound * 2.0, f64::MAX] {
+            assert!(Price::try_from(past).is_err(), "{past}");
+        }
+        assert!(Price::try_from(bound * (1.0 - f64::EPSILON)).is_ok());
     }
 
     /// A price is the square of its root, and the root of one is the scale.
+    /// The table is the squaring: twice the word is four times the price,
+    /// half of it a quarter.
     #[test]
     fn a_root_squares_back_to_its_price() {
         assert_eq!(
@@ -219,6 +243,47 @@ mod tests {
 
         let root = SqrtPrice::from_price(4.0).unwrap();
         assert!((root.price().unwrap() - 4.0).abs() < 1e-5);
+
+        for (word, expected) in [
+            (Q96 * U256::from(2u64), 4.0),
+            (Q96 / U256::from(2u64), 0.25),
+        ] {
+            let read = SqrtPrice::from_x96(word).price().unwrap();
+            assert!((read - expected).abs() < Q96_PRECISION, "{expected}");
+        }
+
+        // The protocol's widest root is a price of 1e6, its largest
+        // starting price; squaring a word near `U256::MAX` leaves the type
+        // rather than wrapping.
+        let widest = SqrtPrice::from_x96(MAX_SQRT_PRICE_X96).price().unwrap();
+        assert!((widest - 1e6).abs() < Q96_PRECISION, "{widest}");
+        assert!(
+            SqrtPrice::from_x96(U256::MAX / U256::from(2u64))
+                .squared()
+                .is_err()
+        );
+    }
+
+    /// A price survives the trip out to a root and back. The intermediate is
+    /// 6-decimal, so the error is relative and widens away from one — which
+    /// is why the protocol's two ends are in the table and the tolerance
+    /// near one is ten times tighter.
+    #[test]
+    fn a_price_survives_the_trip_through_its_root() {
+        // The table starts at 0.01, and that bound is the point: `to_f64`'s
+        // resolution is 1e-6 *absolute*, so a relative tolerance only holds
+        // well above it — 1e-5 comes back as 9e-6, which is 10% out, and
+        // 1e-6 comes back as nothing. SDK #152 tracks it; the floor is
+        // pinned by `the_f64_view_reads_the_protocols_floor_as_zero`.
+        for price in [0.01, 0.1, 0.5, 1.0, 2.0, 10.0, 100.0, 500.0, 1e6] {
+            let root = SqrtPrice::from_price(price).unwrap();
+            let back = root.price().unwrap();
+            let relative = (back - price).abs() / price;
+            assert!(relative < 0.001, "{price} came back as {back}");
+        }
+
+        let near_one = SqrtPrice::from_price(1.05).unwrap().price().unwrap();
+        assert!((near_one - 1.05).abs() / 1.05 < 0.0001, "{near_one}");
     }
 
     /// A word whose scaling leaves `U256` is refused rather than wrapped.
@@ -254,6 +319,33 @@ mod tests {
             assert!(Price::try_from(price).is_err(), "{price}");
             assert!(SqrtPrice::from_price(price).is_err(), "{price}");
         }
+    }
+
+    /// The `f64` view bottoms out *at* the protocol's minimum price rather
+    /// than below it, and returns zero rather than failing.
+    ///
+    /// `to_f64` scales by a million and divides by the scale in integers, so
+    /// a word at `Q96 / 1e6` — which is what `MIN_SQRT_PRICE_X96` squares to,
+    /// the lowest price a market can hold — leaves nothing in the
+    /// intermediate and reads as `0.0`. Note the asymmetry this test exists
+    /// to make visible: the same function *refuses* a zero input word, so it
+    /// will not read a zero price but will happily return one. A consumer
+    /// testing `price > 0.0` concludes a market at its floor has no price.
+    /// Tracked as SDK #152; pinned here so a fix has to change a test.
+    #[test]
+    fn the_f64_view_reads_the_protocols_floor_as_zero() {
+        assert_eq!(
+            SqrtPrice::from_x96(MIN_SQRT_PRICE_X96).price().unwrap(),
+            0.0
+        );
+        assert_eq!(
+            Price::from_x96(Q96 / U256::from(1_000_000u64))
+                .to_f64()
+                .unwrap(),
+            0.0
+        );
+        // And the input it does refuse, for the contrast.
+        assert!(Price::from_x96(U256::ZERO).to_f64().is_err());
     }
 
     /// Prices compare, which is what the swap bounds need of them.

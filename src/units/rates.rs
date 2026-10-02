@@ -286,6 +286,40 @@ mod tests {
         }
     }
 
+    /// Leverage and the margin ratio a position opens under are the same
+    /// fact inverted: 10x is a tenth of its value in margin. The table is
+    /// the contract's own millionths, and 3x is the rounding case — a
+    /// million thirds is 333_333 and a third of that is 3.000003x, which is
+    /// why the roundtrip is to a cent and not to the bit.
+    #[test]
+    fn a_leverage_is_the_ratio_it_opens_under() {
+        for (leverage, e6) in [
+            (1.0, 1_000_000),
+            (2.0, 500_000),
+            (3.0, 333_333),
+            (10.0, 100_000),
+            (100.0, 10_000),
+        ] {
+            let ratio = Ratio::for_leverage(leverage).unwrap();
+            assert_eq!(ratio.e6(), e6, "{leverage}x");
+            assert!(
+                (ratio.leverage().unwrap() - leverage).abs() < 0.01,
+                "{leverage}x did not come back"
+            );
+        }
+        assert!(Ratio::ZERO.leverage().is_err(), "no margin is no leverage");
+    }
+
+    /// A leverage the contract could not store is refused rather than
+    /// clamped: zero and below have no ratio, and 1e12 would round the
+    /// ratio to nothing.
+    #[test]
+    fn a_leverage_outside_the_domain_is_refused() {
+        for bad in [0.0, -5.0, f64::NAN, f64::INFINITY, 1e12] {
+            assert!(Ratio::for_leverage(bad).is_err(), "{bad}");
+        }
+    }
+
     /// The funding rate carries its direction; a utilization rate has none
     /// to carry.
     #[test]

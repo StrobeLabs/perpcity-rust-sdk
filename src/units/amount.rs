@@ -316,6 +316,12 @@ mod tests {
     #[test]
     fn a_fraction_of_an_atom_truncates() {
         assert_eq!(UsdcAtoms::try_from(1.0000019).unwrap().atoms(), 1_000_001);
+        // Floored, so a negative amount rounds *away* from zero rather than
+        // toward it: 1.1234567 keeps 1_123_456 atoms and its negative keeps
+        // 1_123_457. This is the behaviour `atoms_from_f64` documents, and
+        // the direction only a signed amount can show.
+        assert_eq!(UsdcDelta::try_from(1.1234567).unwrap().atoms(), 1_123_456);
+        assert_eq!(UsdcDelta::try_from(-1.1234567).unwrap().atoms(), -1_123_457);
     }
 
     /// A count cannot be negative, and the refusal names the amount.
