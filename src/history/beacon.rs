@@ -1,15 +1,15 @@
 //! A beacon's index series, rebuilt from its `IndexUpdated` logs.
 
-use alloy::primitives::{Address, U256};
+use alloy::primitives::Address;
 use alloy::providers::Provider;
 use alloy::rpc::types::{Filter, Log};
 use alloy::sol_types::SolEvent;
 use serde::{Deserialize, Serialize};
 
 use crate::contracts::IBeacon;
-use crate::convert::price_x96_to_f64;
 use crate::errors::{Result, ValidationError};
 use crate::events::decode_raw;
+use crate::units::Price;
 
 use futures_util::TryStreamExt;
 
@@ -24,8 +24,11 @@ pub struct IndexPrint {
     pub log_index: u64,
     /// Unix timestamp of the block.
     pub timestamp: u64,
-    /// The printed index, Q96 fixed-point, as the beacon emitted it.
-    pub index_x96: U256,
+    /// The printed index, exactly as the beacon emitted it. The same type
+    /// the live [`IndexUpdated`](crate::MarketEvent::IndexUpdated) carries,
+    /// so a fold over an index series does not care which tense it came
+    /// from.
+    pub index: Price,
 }
 
 impl IndexPrint {
@@ -33,10 +36,9 @@ impl IndexPrint {
     ///
     /// # Errors
     ///
-    /// As [`price_x96_to_f64`]: a zero print, or one beyond the safe f64
-    /// range.
-    pub fn index(&self) -> std::result::Result<f64, ValidationError> {
-        price_x96_to_f64(self.index_x96)
+    /// As [`Price::to_f64`]: a zero print, or one beyond the safe f64 range.
+    pub fn index_f64(&self) -> std::result::Result<f64, ValidationError> {
+        self.index.to_f64()
     }
 }
 
@@ -166,7 +168,7 @@ async fn with_timestamps<P: Provider>(provider: &P, logs: &[Log]) -> Result<Vec<
                     let event = decode_raw::<IBeacon::IndexUpdated>(log).ok()?;
                     Some((block, index, event.index))
                 });
-            let (block_number, log_index, index_x96) =
+            let (block_number, log_index, index) =
                 decoded.ok_or_else(|| ValidationError::DecodeFailed {
                     context: format!(
                         "IndexUpdated log from {} in tx {:?}",
@@ -182,7 +184,7 @@ async fn with_timestamps<P: Provider>(provider: &P, logs: &[Log]) -> Result<Vec<
                 block_number,
                 log_index,
                 timestamp,
-                index_x96,
+                index: Price::from_x96(index),
             })
         })
         .collect()

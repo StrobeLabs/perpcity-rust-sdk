@@ -38,9 +38,13 @@ count! {
 delta! {
     /// USDC owed or owing: the signed count a settle computes.
     ///
-    /// Every component of a settle preview is one of these, positive
-    /// toward the position and negative away from it, and they add because
-    /// the protocol's supply bound keeps any sum far inside `i128`.
+    /// Which way positive points is the *field's*, named by the field and
+    /// stated on it — a settle's `funding_owed` is positive when the
+    /// position pays and is subtracted, while its earnings are positive
+    /// when the position receives and are added. The type promises only
+    /// that any sum of these stays far inside `i128`, which the protocol's
+    /// supply bound guarantees; it does not promise they all point the
+    /// same way, so read the field before adding it.
     UsdcDelta(i128) as atoms, magnitude UsdcAtoms
 }
 

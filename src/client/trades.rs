@@ -12,7 +12,7 @@ use crate::errors::{ContractError, Result, TransactionError, ValidationError};
 use crate::feeds::{MarketEvent, decode_log};
 use crate::hft::gas::{GasLimits, Urgency};
 use crate::math::tick::{align_tick_down, align_tick_up, price_to_tick};
-use crate::units::{LDelta, LUnits};
+use crate::units::{LDelta, LUnits, PerpDelta, UsdcDelta};
 
 use super::market::{Book, validate_fee_recipient};
 use super::{MAX_APPROVAL, PerpClient, i32_to_i24};
@@ -118,17 +118,18 @@ pub struct AdjustMakerParams {
 /// `pos_id` is the minted position NFT id. For taker opens, `perp_delta` and
 /// `usd_delta` are the realized swap amounts decoded from the `TakerOpened`
 /// event (signed: positive = received, negative = paid). Maker opens emit no
-/// swap, so both are `0.0`.
+/// swap, so both are zero.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct OpenResult {
     /// Transaction hash.
     pub tx_hash: B256,
     /// Minted position NFT token ID.
     pub pos_id: U256,
-    /// Realized perp-token delta from the open swap (taker only; `0.0` for makers).
-    pub perp_delta: f64,
-    /// Realized USD delta from the open swap (taker only; `0.0` for makers).
-    pub usd_delta: f64,
+    /// Realized perp-token delta from the open swap; zero for makers, which
+    /// emit no swap.
+    pub perp_delta: PerpDelta,
+    /// Realized USDC delta from the open swap; zero for makers.
+    pub usd_delta: UsdcDelta,
 }
 
 /// Result of adjusting a taker position (margin, notional, or both).
@@ -136,15 +137,15 @@ pub struct OpenResult {
 /// `perp_delta` and `usd_delta` are the realized swap amounts decoded from the
 /// `TakerAdjusted` event — or `TakerClosed`, when the adjust reverses the full
 /// delta and closes the position (signed: positive = received, negative =
-/// paid). Both are `0.0` for a margin-only adjust, which performs no swap.
+/// paid). Both are zero for a margin-only adjust, which performs no swap.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct AdjustTakerResult {
     /// Transaction hash.
     pub tx_hash: B256,
-    /// Realized perp-token delta from the adjust swap (`0.0` if margin-only).
-    pub perp_delta: f64,
-    /// Realized USD delta from the adjust swap (`0.0` if margin-only).
-    pub usd_delta: f64,
+    /// Realized perp-token delta from the adjust swap; zero if margin-only.
+    pub perp_delta: PerpDelta,
+    /// Realized USDC delta from the adjust swap; zero if margin-only.
+    pub usd_delta: UsdcDelta,
 }
 
 /// Result of adjusting a maker position (margin, liquidity, or both).
@@ -183,12 +184,12 @@ fn parse_minted_token_id(receipt: &TransactionReceipt) -> std::result::Result<U2
 ///
 /// Reuses the market feed's [`decode_log`] to find the `TakerOpened` /
 /// `TakerAdjusted` / `TakerClosed` event and reads its decoded `SwapInfo`
-/// (already unpacked from the `BalanceDelta` and scaled to f64). Every taker
+/// (already unpacked from the `BalanceDelta`). Every taker
 /// open/adjust/close emits one of these — a margin-only adjust still emits a
 /// `TakerAdjusted` with a zero-delta swap — so on the taker paths `None` means
 /// a decode/ABI failure, which the caller surfaces as an error rather than a
 /// zero fill. (Maker opens emit no taker swap, but they don't call this.)
-fn parse_taker_swap(receipt: &TransactionReceipt) -> Option<(f64, f64)> {
+fn parse_taker_swap(receipt: &TransactionReceipt) -> Option<(PerpDelta, UsdcDelta)> {
     for log in receipt.inner.logs() {
         // An undecodable log is no different here from an unrecognised one:
         // the caller's `ok_or` turns a receipt with no readable swap into
@@ -389,8 +390,8 @@ impl PerpClient {
             tx_hash: receipt.transaction_hash,
             pos_id,
             // Maker opens emit no taker swap (`MakerOpened` carries no deltas).
-            perp_delta: 0.0,
-            usd_delta: 0.0,
+            perp_delta: PerpDelta::ZERO,
+            usd_delta: UsdcDelta::ZERO,
         };
         tracing::debug!(pos_id = %result.pos_id, "maker position opened");
         Ok(result)
@@ -851,7 +852,8 @@ mod tests {
     use alloy::primitives::{Address, B256, I256, U256, Uint};
 
     use super::{
-        AdjustTakerResult, OpenResult, closes_taker, closing_perp_delta, scale_opening_margin,
+        AdjustTakerResult, OpenResult, PerpDelta, UsdcDelta, closes_taker, closing_perp_delta,
+        scale_opening_margin,
     };
     use crate::constants::Q96;
     use crate::contracts::{Perp, Position, SwapResult};
@@ -863,8 +865,8 @@ mod tests {
         let result = OpenResult {
             tx_hash: B256::ZERO,
             pos_id: U256::from(42),
-            perp_delta: 0.0681,
-            usd_delta: -500.0,
+            perp_delta: PerpDelta::new(68_100),
+            usd_delta: UsdcDelta::new(-500_000_000),
         };
         let json = serde_json::to_string(&result).unwrap();
         let recovered: OpenResult = serde_json::from_str(&json).unwrap();
@@ -875,8 +877,8 @@ mod tests {
     fn adjust_taker_result_serde_roundtrip() {
         let result = AdjustTakerResult {
             tx_hash: B256::ZERO,
-            perp_delta: -0.0681,
-            usd_delta: 499.5,
+            perp_delta: PerpDelta::new(-68_100),
+            usd_delta: UsdcDelta::new(499_500_000),
         };
         let json = serde_json::to_string(&result).unwrap();
         let recovered: AdjustTakerResult = serde_json::from_str(&json).unwrap();

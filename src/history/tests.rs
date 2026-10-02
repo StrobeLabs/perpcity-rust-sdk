@@ -18,6 +18,7 @@ use crate::contracts::{IBeacon, IERC20, IPoolManagerState, Perp, SwapResult};
 use crate::convert::pack_balance_delta;
 use crate::errors::{ContractError, PerpCityError, ValidationError};
 use crate::events::MarketEvent;
+use crate::units::Price;
 
 const EMITTER: Address = Address::repeat_byte(0xAA);
 const TOPIC: B256 = B256::repeat_byte(0x11);
@@ -185,7 +186,14 @@ async fn prints_take_log_timestamps_and_read_each_missing_header_once() {
 
     let rows: Vec<_> = prints
         .iter()
-        .map(|p| (p.block_number, p.log_index, p.timestamp, p.index().unwrap()))
+        .map(|p| {
+            (
+                p.block_number,
+                p.log_index,
+                p.timestamp,
+                p.index_f64().unwrap(),
+            )
+        })
         .collect();
     assert_eq!(
         rows,
@@ -223,7 +231,7 @@ async fn a_mainnet_print_decodes_to_its_block_and_value() {
         (print.block_number, print.log_index, print.timestamp),
         (506_249_221, 3, 1_789_687_077)
     );
-    assert!((print.index().unwrap() - 16.928669).abs() < 1e-6);
+    assert!((print.index_f64().unwrap() - 16.928669).abs() < 1e-6);
     assert!(node.header_reads().is_empty());
 }
 
@@ -295,9 +303,9 @@ fn a_zero_print_has_no_float_index() {
         block_number: 1,
         log_index: 0,
         timestamp: 1,
-        index_x96: U256::ZERO,
+        index: Price::from_x96(U256::ZERO),
     };
-    assert!(print.index().is_err());
+    assert!(print.index_f64().is_err());
 }
 
 const USDC: Address = address!("af88d065e77c8cc2239327c5edb3a432268e5831");
@@ -753,7 +761,7 @@ async fn the_tape_replays_a_perps_events_and_skips_what_the_feed_skips() {
     assert!(matches!(
         open.event,
         MarketEvent::TakerOpened { pos_id, swap }
-            if pos_id == U256::from(7) && (swap.perp_delta - 100.0).abs() < 1e-9
+            if pos_id == U256::from(7) && swap.perp_delta.atoms() == 100_000_000
     ));
     // Only the recognized event without a log timestamp cost a header read.
     assert_eq!(node.header_reads(), vec![20]);
