@@ -25,9 +25,8 @@ use crate::convert::{price_x96_to_f64, scale_from_6dec};
 use crate::errors::{ContractError, PerpCityError, Result, ValidationError};
 use crate::hft::state_cache::{CachedBounds, CachedFees};
 use crate::math::BlockContext;
-use crate::math::capacity::Side;
 use crate::math::pricing::{Emas, Mark, PricePair};
-use crate::units::{PerpAtoms, Price, Ratio};
+use crate::units::{PerSide, PerpAtoms, Price, Ratio};
 
 use super::market::MarketReader;
 use super::state::{ema_window_secs, pinned_read_error};
@@ -98,35 +97,11 @@ pub struct Fees {
 /// Taker open interest, per side, as the contract accumulates it: the sum
 /// of `|perp_delta|` over the open positions on that side, in perp atoms.
 /// [`PerpAtoms::value_at`] prices it.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct OpenInterest {
-    /// Open interest held long.
-    pub long: PerpAtoms,
-    /// Open interest held short.
-    pub short: PerpAtoms,
-}
-
-impl OpenInterest {
-    /// The open interest on one side.
-    pub fn on(&self, side: Side) -> PerpAtoms {
-        match side {
-            Side::Long => self.long,
-            Side::Short => self.short,
-        }
-    }
-
-    /// Both sides together: the market's gross taker exposure.
-    pub fn total(&self) -> PerpAtoms {
-        self.long + self.short
-    }
-}
+pub type OpenInterest = PerSide<PerpAtoms>;
 
 impl From<contracts::OpenInterest> for OpenInterest {
     fn from(oi: contracts::OpenInterest) -> Self {
-        Self {
-            long: PerpAtoms::new(oi.long),
-            short: PerpAtoms::new(oi.short),
-        }
+        Self::new(PerpAtoms::new(oi.long), PerpAtoms::new(oi.short))
     }
 }
 
@@ -649,6 +624,7 @@ mod tests {
     use crate::errors::PerpCityError;
     use crate::math::BlockContext;
     use crate::math::pricing::PricePair;
+    use crate::units::Side;
 
     /// The market's tick spacing in these tests.
     const SPACING: i32 = 30;

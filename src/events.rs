@@ -42,8 +42,8 @@
 //!         // The pool price, not the price the contract marks at.
 //!         println!("taker {pos_id} opened at {:?}", swap.pool_price.to_f64());
 //!     }
-//!     Ok(Some(MarketEvent::OpenInterestUpdated { long_oi, short_oi })) => {
-//!         println!("OI now {}/{}", long_oi.atoms(), short_oi.atoms());
+//!     Ok(Some(MarketEvent::OpenInterestUpdated { open_interest })) => {
+//!         println!("OI now {}/{}", open_interest.long.atoms(), open_interest.short.atoms());
 //!     }
 //!     Ok(Some(_)) => {}
 //!     // Not one of ours: an admin, ERC20 or pool-internal log. Skip it.
@@ -66,8 +66,8 @@ use crate::contracts::{IBeacon, IPoolManagerState, Perp, PerpDeployedEvents, Swa
 use crate::convert::unpack_balance_delta;
 use crate::errors::ValidationError;
 use crate::units::{
-    Earnings, Funding, FundingPerSqrtPrice, FundingRate, LDelta, LUnits, PerpAtoms, PerpDelta,
-    Price, UsdcAtoms, UsdcDelta, UtilizationRate,
+    Earnings, Funding, FundingPerSqrtPrice, FundingRate, LDelta, LUnits, PerSide, PerpAtoms,
+    PerpDelta, Price, UsdcAtoms, UsdcDelta, UtilizationRate,
 };
 
 /// An ERC-20 `Transfer` indexes two of its three fields, so topic0 plus two.
@@ -107,10 +107,8 @@ pub struct MakerSettle {
     /// direction as [`MakerEquityBreakdown::funding_owed`](crate::MakerEquityBreakdown::funding_owed),
     /// so it is subtracted from the three below rather than added.
     pub funding: UsdcDelta,
-    /// Long-side utilization fees earned.
-    pub long_util_fees: UsdcAtoms,
-    /// Short-side utilization fees earned.
-    pub short_util_fees: UsdcAtoms,
+    /// Utilization fees earned, per side.
+    pub util_fees: PerSide<UsdcAtoms>,
     /// LP fees earned.
     pub lp_fees: UsdcAtoms,
 }
@@ -125,10 +123,8 @@ pub struct MakerSettle {
 pub struct CumulativesInfo {
     pub funding: Funding,
     pub funding_div_sqrt_p: FundingPerSqrtPrice,
-    pub long_util_payments: Earnings,
-    pub short_util_payments: Earnings,
-    pub long_util_earnings: Earnings,
-    pub short_util_earnings: Earnings,
+    pub util_payments: PerSide<Earnings>,
+    pub util_earnings: PerSide<Earnings>,
 }
 
 /// A decoded market event, every quantity carrying its unit as a type.
@@ -212,14 +208,11 @@ pub enum MarketEvent {
     /// Available taker open-interest capacity supplied by makers, in perp
     /// tokens — the same units the contract checks `OpenInterest` against.
     CapacityUpdated {
-        long: PerpAtoms,
-        short: PerpAtoms,
+        capacity: PerSide<PerpAtoms>,
     },
-    /// Current taker open interest, in perp tokens (multiply by the mark
-    /// price for USD).
+    /// Current taker open interest, per side.
     OpenInterestUpdated {
-        long_oi: PerpAtoms,
-        short_oi: PerpAtoms,
+        open_interest: PerSide<PerpAtoms>,
     },
     /// Cumulative funding/fee trackers were accrued.
     CumulativesAccrued {
@@ -229,10 +222,8 @@ pub enum MarketEvent {
     RatesAndEmasRefreshed {
         /// Daily funding rate (positive = longs pay shorts).
         funding_per_day: FundingRate,
-        /// Long-side utilization fee per day.
-        long_util_fee_per_day: UtilizationRate,
-        /// Short-side utilization fee per day.
-        short_util_fee_per_day: UtilizationRate,
+        /// Utilization fee per day, per side.
+        util_fee_per_day: PerSide<UtilizationRate>,
         /// Unix timestamp of the accrual.
         last_touch: u64,
         /// The *pool* price's EMA — the `ammPrice` leg of the contract's
@@ -450,14 +441,12 @@ pub fn decode_log(log: &Log) -> Result<Option<MarketEvent>, ValidationError> {
     } else if topic0 == Perp::CapacityUpdated::SIGNATURE_HASH {
         let d = decode_raw::<Perp::CapacityUpdated>(log)?;
         Some(MarketEvent::CapacityUpdated {
-            long: PerpAtoms::new(d.cap.long),
-            short: PerpAtoms::new(d.cap.short),
+            capacity: d.cap.into(),
         })
     } else if topic0 == Perp::OpenInterestUpdated::SIGNATURE_HASH {
         let d = decode_raw::<Perp::OpenInterestUpdated>(log)?;
         Some(MarketEvent::OpenInterestUpdated {
-            long_oi: PerpAtoms::new(d.oi.long),
-            short_oi: PerpAtoms::new(d.oi.short),
+            open_interest: d.oi.into(),
         })
     } else if topic0 == Perp::CumulativesAccrued::SIGNATURE_HASH {
         let d = decode_raw::<Perp::CumulativesAccrued>(log)?;
@@ -466,10 +455,14 @@ pub fn decode_log(log: &Log) -> Result<Option<MarketEvent>, ValidationError> {
             cumulatives: CumulativesInfo {
                 funding: Funding::from_x96(c.fundingX96),
                 funding_div_sqrt_p: FundingPerSqrtPrice::from_x96(c.fundingDivSqrtPX96),
-                long_util_payments: Earnings::from_x96(c.longUtilPaymentsX96),
-                short_util_payments: Earnings::from_x96(c.shortUtilPaymentsX96),
-                long_util_earnings: Earnings::from_x96(c.longUtilEarningsX96),
-                short_util_earnings: Earnings::from_x96(c.shortUtilEarningsX96),
+                util_payments: PerSide::new(
+                    Earnings::from_x96(c.longUtilPaymentsX96),
+                    Earnings::from_x96(c.shortUtilPaymentsX96),
+                ),
+                util_earnings: PerSide::new(
+                    Earnings::from_x96(c.longUtilEarningsX96),
+                    Earnings::from_x96(c.shortUtilEarningsX96),
+                ),
             },
         })
     } else if topic0 == Perp::RatesAndEmasRefreshed::SIGNATURE_HASH {
@@ -480,8 +473,10 @@ pub fn decode_log(log: &Log) -> Result<Option<MarketEvent>, ValidationError> {
                 d.rates.fundingPerDay.try_into(),
                 "funding per day",
             )?),
-            long_util_fee_per_day: UtilizationRate::from_wad(d.rates.longUtilFeePerDay),
-            short_util_fee_per_day: UtilizationRate::from_wad(d.rates.shortUtilFeePerDay),
+            util_fee_per_day: PerSide::new(
+                UtilizationRate::from_wad(d.rates.longUtilFeePerDay),
+                UtilizationRate::from_wad(d.rates.shortUtilFeePerDay),
+            ),
             last_touch: d.rates.lastTouch.to::<u64>(),
             pool_price_ema: Price::from_x96(U256::from(d.emas.ammPrice)),
             index_ema: Price::from_x96(U256::from(d.emas.index)),
@@ -620,8 +615,10 @@ fn maker_settle(
 ) -> Result<MakerSettle, ValidationError> {
     Ok(MakerSettle {
         funding: i256_usdc(funding, "settled funding")?,
-        long_util_fees: u256_usdc(long_util_fees, "settled long utilization fees")?,
-        short_util_fees: u256_usdc(short_util_fees, "settled short utilization fees")?,
+        util_fees: PerSide::new(
+            u256_usdc(long_util_fees, "settled long utilization fees")?,
+            u256_usdc(short_util_fees, "settled short utilization fees")?,
+        ),
         lp_fees: u256_usdc(lp_fees, "settled LP fees")?,
     })
 }
@@ -796,9 +793,9 @@ mod tests {
             .unwrap()
             .expect("should decode OpenInterestUpdated")
         {
-            MarketEvent::OpenInterestUpdated { long_oi, short_oi } => {
-                assert_eq!(long_oi.atoms(), 2_000_000);
-                assert_eq!(short_oi.atoms(), 1_000_000);
+            MarketEvent::OpenInterestUpdated { open_interest } => {
+                assert_eq!(open_interest.long.atoms(), 2_000_000);
+                assert_eq!(open_interest.short.atoms(), 1_000_000);
             }
             _ => panic!("expected OpenInterestUpdated"),
         }
@@ -846,8 +843,8 @@ mod tests {
             } => {
                 assert_eq!(pos_id, U256::from(9u64));
                 assert_eq!(settle.funding.atoms(), 2_000_000);
-                assert_eq!(settle.long_util_fees.atoms(), 500_000);
-                assert_eq!(settle.short_util_fees.atoms(), 250_000);
+                assert_eq!(settle.util_fees.long.atoms(), 500_000);
+                assert_eq!(settle.util_fees.short.atoms(), 250_000);
                 assert_eq!(settle.lp_fees.atoms(), 1_500_000);
                 assert_eq!(liquidation_fee.atoms(), 750_000);
                 assert!(is_liquidation);
@@ -970,8 +967,8 @@ mod tests {
                 // The exact atoms the log carried, not an f64 within an
                 // epsilon of them: the whole point of the typed fields.
                 assert_eq!(settle.funding.atoms(), 209_633_223);
-                assert_eq!(settle.long_util_fees.atoms(), 432_735);
-                assert_eq!(settle.short_util_fees.atoms(), 24_630_722);
+                assert_eq!(settle.util_fees.long.atoms(), 432_735);
+                assert_eq!(settle.util_fees.short.atoms(), 24_630_722);
                 assert_eq!(settle.lp_fees.atoms(), 7_722_360);
                 // The liquidation tails: liqFee 0x15696a = 1.403242 USDC.
                 assert_eq!(liquidation_fee.atoms(), 1_403_242);

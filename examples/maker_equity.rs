@@ -74,7 +74,7 @@ async fn main() -> perpcity_sdk::Result<()> {
                     b.equity().usdc(),
                     b.settled_margin().usdc(),
                     b.funding_owed().usdc(),
-                    b.long_util_earnings().usdc() + b.short_util_earnings().usdc(),
+                    b.util_earnings().total().usdc(),
                     b.lp_fees().usdc(),
                     b.unrealized_pnl().usdc(),
                     b.position_value().usdc(),

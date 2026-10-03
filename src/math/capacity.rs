@@ -41,57 +41,15 @@ use crate::math::BlockContext;
 use crate::math::range::{MakerBand, TickRange};
 use crate::math::swap::amount0_delta;
 use crate::units::fixed_point::{Rounding, mul_div};
-use crate::units::{LUnits, PerpAtoms, SqrtPrice};
+use crate::units::{LUnits, PerSide, PerpAtoms, Side, SqrtPrice};
 
-/// A taker direction: a long gains when the price rises, a short when it
-/// falls.
-///
-/// It lives with the capacity math because that is what a side keys: a
-/// band's liquidity above the pool price backs longs and below it backs
-/// shorts, and every side-keyed read is on [`Capacity`] or
-/// [`MarketCapacity`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum Side {
-    /// Long exposure (positive perp delta).
-    Long,
-    /// Short exposure (negative perp delta).
-    Short,
-}
-
-impl std::fmt::Display for Side {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match self {
-            Self::Long => "long",
-            Self::Short => "short",
-        })
-    }
-}
-
-/// Taker capacity per side: the contract's `Capacity` struct.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct Capacity {
-    /// Open interest longs can hold against this capacity.
-    pub long: PerpAtoms,
-    /// Open interest shorts can hold against this capacity.
-    pub short: PerpAtoms,
-}
-
-impl Capacity {
-    /// The capacity on one side.
-    pub fn on(&self, side: Side) -> PerpAtoms {
-        match side {
-            Side::Long => self.long,
-            Side::Short => self.short,
-        }
-    }
-}
+/// Taker capacity per side, as the contract's `Capacity` struct holds it:
+/// the open interest each side can hold against a band or the market.
+pub type Capacity = PerSide<PerpAtoms>;
 
 impl From<contracts::Capacity> for Capacity {
     fn from(cap: contracts::Capacity) -> Self {
-        Self {
-            long: PerpAtoms::new(cap.long),
-            short: PerpAtoms::new(cap.short),
-        }
+        Self::new(PerpAtoms::new(cap.long), PerpAtoms::new(cap.short))
     }
 }
 
@@ -103,21 +61,11 @@ pub struct MarketCapacity {
     pub block: BlockContext,
     /// `capacity()`: the sum of every band's capacity snapshot.
     pub capacity: Capacity,
-    /// `openInterest().long`.
-    pub long_open_interest: PerpAtoms,
-    /// `openInterest().short`.
-    pub short_open_interest: PerpAtoms,
+    /// `openInterest()`: the draw on it.
+    pub open_interest: PerSide<PerpAtoms>,
 }
 
 impl MarketCapacity {
-    /// Taker open interest on one side.
-    pub fn open_interest(&self, side: Side) -> PerpAtoms {
-        match side {
-            Side::Long => self.long_open_interest,
-            Side::Short => self.short_open_interest,
-        }
-    }
-
     /// Open interest `side` can still add before a trade reverts with
     /// `LongUtilizationExceeded` / `ShortUtilizationExceeded`. The contract
     /// reverts only when open interest exceeds capacity, so a trade can
@@ -125,7 +73,7 @@ impl MarketCapacity {
     pub fn headroom(&self, side: Side) -> PerpAtoms {
         self.capacity
             .on(side)
-            .saturating_sub(self.open_interest(side))
+            .saturating_sub(self.open_interest.on(side))
     }
 
     /// Utilization on one side as the Perp passes it to the fees module:
@@ -145,7 +93,7 @@ impl MarketCapacity {
         // would put a number here that reads as 4294% utilization, which is
         // the sentinel this signature exists to avoid.
         mul_div(
-            U256::from(self.open_interest(side).atoms()),
+            U256::from(self.open_interest.on(side).atoms()),
             U256::from(SCALE_1E6),
             U256::from(self.capacity.on(side).atoms()),
             Rounding::TowardZero,
@@ -411,8 +359,7 @@ mod tests {
             long: PerpAtoms::new(60_883_605),
             short: PerpAtoms::new(51_603_209),
         },
-        long_open_interest: PerpAtoms::new(37_772_806),
-        short_open_interest: PerpAtoms::new(42_582_564),
+        open_interest: PerSide::new(PerpAtoms::new(37_772_806), PerpAtoms::new(42_582_564)),
     };
 
     #[test]
@@ -429,7 +376,7 @@ mod tests {
             PerpAtoms::new(9_020_645)
         );
         assert_eq!(
-            HORMUZ_TRAFFIC.open_interest(Side::Short),
+            HORMUZ_TRAFFIC.open_interest.on(Side::Short),
             PerpAtoms::new(42_582_564)
         );
     }
@@ -446,8 +393,7 @@ mod tests {
                 long: PerpAtoms::new(u128::MAX),
                 short: PerpAtoms::new(1),
             },
-            long_open_interest: PerpAtoms::new(u128::MAX),
-            short_open_interest: PerpAtoms::new(u128::MAX),
+            open_interest: PerSide::uniform(PerpAtoms::new(u128::MAX)),
         };
         assert_eq!(full.utilization_e6(Side::Long), Some(SCALE_1E6));
         assert_eq!(full.headroom(Side::Long), PerpAtoms::ZERO);
