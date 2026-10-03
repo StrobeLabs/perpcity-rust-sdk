@@ -5,12 +5,12 @@
 //! produces a number wrong by a squaring. The types keep them apart and
 //! [`SqrtPrice::squared`] is the one way across.
 
-use alloy::primitives::U256;
+use alloy::primitives::{U256, U512};
 
-use crate::constants::Q96;
+use crate::constants::{MAX_SQRT_PRICE_X96, MIN_SQRT_PRICE_X96, Q96, WAD};
 use crate::errors::ValidationError;
 
-use super::{BIGINT_1E6, F64_1E6, MAX_SAFE_F64_INT};
+use super::{BIGINT_1E6, F64_1E6, F64_WAD, Factor, MAX_SAFE_F64_INT, Mult, Share};
 
 /// A price: USDC per unit of the market's token.
 ///
@@ -81,6 +81,54 @@ impl Price {
             });
         }
         Ok(intermediate.as_limbs()[0] as f64 / F64_1E6)
+    }
+}
+
+/// A price scaled by any [`Factor`]: a stop at half the mark, a landing
+/// zone a few percent off the index. Exact in Q96, truncated toward zero;
+/// a negative factor panics, since a price has no sign.
+impl<F: Factor> std::ops::Mul<F> for Price {
+    type Output = Self;
+    fn mul(self, factor: F) -> Self {
+        assert!(
+            !factor.is_negative(),
+            "a price cannot scale by a negative factor"
+        );
+        Self(factor.apply(self.0))
+    }
+}
+
+impl std::ops::Mul<Price> for Share {
+    type Output = Price;
+    fn mul(self, price: Price) -> Price {
+        price * self
+    }
+}
+
+impl std::ops::Mul<Price> for Mult {
+    type Output = Price;
+    fn mul(self, price: Price) -> Price {
+        price * self
+    }
+}
+
+impl std::ops::Mul<Price> for f64 {
+    type Output = Price;
+    fn mul(self, price: Price) -> Price {
+        price * self
+    }
+}
+
+/// One price as a multiple of another: `mark / index` is the number a basis
+/// is one less than. Exact in 256 bits, then one conversion to the `f64` a
+/// strategy reasons in. Panics on a zero divisor, as the primitive does.
+impl std::ops::Div for Price {
+    type Output = f64;
+    fn div(self, rhs: Self) -> f64 {
+        assert!(!rhs.0.is_zero(), "a price ratio against a zero price");
+        let wad = U512::from(self.0) * U512::from(WAD) / U512::from(rhs.0);
+        u128::try_from(wad).expect("a ratio of two protocol prices fits WAD in u128") as f64
+            / F64_WAD
     }
 }
 
@@ -194,9 +242,100 @@ impl SqrtPrice {
     }
 }
 
+impl TryFrom<Price> for SqrtPrice {
+    type Error = ValidationError;
+
+    /// The root of a price, exact: the integer square root of the Q96
+    /// word, the inverse of [`SqrtPrice::squared`]. Floored, so a price
+    /// that was itself floored from a root comes back at most `2^96 / 2r`
+    /// units under that root — nothing relative to the root, but enough
+    /// that a tick boundary can resolve to the tick below, which is why a
+    /// range built from prices aligns to the spacing rather than trusting
+    /// the tick to the unit.
+    ///
+    /// # Errors
+    ///
+    /// [`ValidationError::InvalidPrice`] when the root lies outside the
+    /// protocol's `[MIN_SQRT_PRICE_X96, MAX_SQRT_PRICE_X96]`, which no
+    /// pool can hold.
+    fn try_from(price: Price) -> Result<Self, ValidationError> {
+        let root = (U512::from(price.0) * U512::from(Q96)).root(2);
+        if root < U512::from(MIN_SQRT_PRICE_X96) || root > U512::from(MAX_SQRT_PRICE_X96) {
+            return Err(ValidationError::InvalidPrice {
+                reason: format!("price's root {root} is outside the protocol's bounds"),
+            });
+        }
+        // Inside the protocol's bounds, so inside the low four limbs.
+        let limbs: [u64; 4] = root.as_limbs()[..4]
+            .try_into()
+            .expect("a U512 has at least four limbs");
+        Ok(Self(U256::from_limbs(limbs)))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A price scales by any factor and divides into a plain number, which
+    /// is what a stop and a basis are.
+    #[test]
+    fn a_price_scales_and_divides() {
+        let mark = Price::try_from(100.0).unwrap();
+        let index = Price::try_from(80.0).unwrap();
+        assert_eq!(mark * 0.5, Price::try_from(50.0).unwrap());
+        assert_eq!(0.5 * mark, Price::try_from(50.0).unwrap());
+        assert_eq!(
+            mark * Share::try_from(0.25).unwrap(),
+            Price::try_from(25.0).unwrap()
+        );
+        assert_eq!(
+            mark * Mult::try_from(1.5).unwrap(),
+            Price::try_from(150.0).unwrap()
+        );
+        assert_eq!(mark / index, 1.25);
+        assert_eq!(index / mark, 0.8);
+        assert!(
+            ((mark / index - 1.0) - 0.25).abs() < 1e-12,
+            "the basis is one less"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "negative factor")]
+    fn a_price_has_no_sign_to_flip() {
+        let _ = Price::try_from(1.0).unwrap() * -1.0;
+    }
+
+    /// The root of a price is the inverse of squaring it, exact to the
+    /// floor, and refuses a price no pool can hold.
+    #[test]
+    fn a_root_is_the_inverse_of_squaring() {
+        for root in [
+            MIN_SQRT_PRICE_X96 * U256::from(2u8),
+            Q96,
+            Q96 * U256::from(7u8),
+            MAX_SQRT_PRICE_X96 - U256::from(1u8),
+        ] {
+            let sqrt = SqrtPrice::from_x96(root);
+            let back = SqrtPrice::try_from(sqrt.squared().unwrap()).unwrap();
+            // The floor the square took costs at most 2^96 / 2r root
+            // units, and the second floor one more.
+            assert!(
+                back.x96() <= root,
+                "{root}: came back above, as {}",
+                back.x96()
+            );
+            let lost = root - back.x96();
+            assert!(
+                lost <= U256::from(1u8) || lost * root <= Q96,
+                "{root}: came back as {}",
+                back.x96()
+            );
+        }
+        assert!(SqrtPrice::try_from(Price::from_x96(U256::ZERO)).is_err());
+        assert!(SqrtPrice::try_from(Price::from_x96(U256::MAX)).is_err());
+    }
     use crate::constants::{MAX_SQRT_PRICE_X96, MIN_SQRT_PRICE_X96, Q96_PRECISION};
 
     /// Q96 encodes one as the scale itself, and the conversions are

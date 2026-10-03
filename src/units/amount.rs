@@ -101,12 +101,50 @@ impl UsdcAtoms {
     pub fn usdc(self) -> f64 {
         self.atoms() as f64 / F64_1E6
     }
+
+    /// How many tokens this much USDC buys at `price`: the inverse of
+    /// [`PerpAtoms::value_at`], truncated toward zero.
+    ///
+    /// # Errors
+    ///
+    /// [`ValidationError::InvalidPrice`] when `price` is zero, and
+    /// [`ValidationError::Overflow`] when the quotient does not fit the
+    /// width the contracts hold a balance in.
+    pub fn perp_at(self, price: Price) -> Result<PerpAtoms, ValidationError> {
+        if price.is_zero() {
+            return Err(ValidationError::InvalidPrice {
+                reason: "cannot size tokens at a zero price".into(),
+            });
+        }
+        let atoms = mul_div(
+            U256::from(self.atoms()),
+            Q96,
+            price.x96(),
+            Rounding::TowardZero,
+        )?;
+        Ok(PerpAtoms::new(atoms_from_u256(atoms, "tokens at price")?))
+    }
 }
 
 impl UsdcDelta {
     /// The dollars, for a person: lossy, and exact only below 2^53 atoms.
     pub fn usdc(self) -> f64 {
         self.atoms() as f64 / F64_1E6
+    }
+
+    /// The exposure this much USDC buys at `price`, keeping its sign: the
+    /// inverse of [`PerpDelta::value_at`].
+    ///
+    /// # Errors
+    ///
+    /// As [`UsdcAtoms::perp_at`].
+    pub fn perp_at(self, price: Price) -> Result<PerpDelta, ValidationError> {
+        let magnitude = PerpDelta::from(self.magnitude().perp_at(price)?);
+        Ok(if self.is_negative() {
+            -magnitude
+        } else {
+            magnitude
+        })
     }
 }
 
@@ -263,7 +301,7 @@ impl From<PerpAtoms> for PerpDelta {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::units::Share;
+    use crate::units::{Mult, Share};
 
     /// The two assets' counts add with an operator and sum from an
     /// iterator, because the protocol bounds what a sum of balances can
@@ -326,7 +364,7 @@ mod tests {
 
     /// A factor a count cannot take is a bug and says so.
     #[test]
-    #[should_panic(expected = "finite non-negative factor")]
+    #[should_panic(expected = "negative factor")]
     fn a_count_refuses_a_negative_factor() {
         let _ = UsdcAtoms::new(1) * -0.5;
     }
@@ -352,14 +390,33 @@ mod tests {
     }
 
     /// The valuation is the one crossing between the assets, and it is the
-    /// product of the count and the price.
+    /// product of the count and the price; sizing is its inverse.
     #[test]
     fn tokens_are_valued_at_a_price() {
         let price = Price::try_from(2.0).unwrap();
-        // Two tokens at two dollars is four dollars.
+        // Two tokens at two dollars is four dollars, and four dollars at
+        // two dollars is two tokens.
         assert_eq!(
             PerpAtoms::new(2_000_000).value_at(price).unwrap(),
             UsdcAtoms::new(4_000_000)
+        );
+        assert_eq!(
+            UsdcAtoms::new(4_000_000).perp_at(price).unwrap(),
+            PerpAtoms::new(2_000_000)
+        );
+        assert_eq!(
+            UsdcDelta::new(-4_000_000).perp_at(price).unwrap(),
+            PerpDelta::new(-2_000_000)
+        );
+        assert_eq!(
+            UsdcAtoms::new(3).perp_at(price).unwrap(),
+            PerpAtoms::new(1),
+            "truncated"
+        );
+        assert!(
+            UsdcAtoms::new(1)
+                .perp_at(Price::from_x96(U256::ZERO))
+                .is_err()
         );
         // A short's value keeps its sign.
         assert_eq!(
@@ -409,6 +466,12 @@ mod tests {
             UsdcAtoms::new(100_000_000) * 5.0,
             UsdcAtoms::new(500_000_000)
         );
+        let lev = Mult::try_from(5.0).unwrap();
+        assert_eq!(
+            UsdcAtoms::new(100_000_000) * lev,
+            UsdcAtoms::new(500_000_000)
+        );
+        assert_eq!(lev * PerpDelta::new(-3), PerpDelta::new(-15));
         assert_eq!(0.5 * UsdcAtoms::new(7), UsdcAtoms::new(3));
         assert_eq!(PerpDelta::new(7) * -0.5, PerpDelta::new(-3));
         assert_eq!(

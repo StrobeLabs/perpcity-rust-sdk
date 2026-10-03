@@ -594,7 +594,7 @@ impl MarketReader {
             min_margin: scale_from_6dec(crate::constants::MIN_OPENING_MARGIN as i128),
             // The initial margin ratio is the minimum margin → maximum leverage.
             min_taker_leverage: 1.0,
-            max_taker_leverage: Ratio::from_e6(u24_to_u32(taker.init))?.leverage()?,
+            max_taker_leverage: Ratio::from_e6(u24_to_u32(taker.init))?.leverage()?.factor(),
             liquidation_taker_ratio: Ratio::from_e6(u24_to_u32(taker.liq))?,
         })
     }

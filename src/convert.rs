@@ -23,7 +23,7 @@ use std::fmt;
 use alloy::primitives::{I256, U256};
 
 use crate::errors::ValidationError;
-use crate::units::{Price, Ratio, SqrtPrice, UsdcDelta};
+use crate::units::{Mult, Price, Ratio, SqrtPrice, UsdcDelta};
 
 // ── Scaling: f64 ↔ 6-decimal integers ──────────────────────────────────
 
@@ -119,6 +119,11 @@ where
 /// # Ok::<(), perpcity_sdk::ValidationError>(())
 /// ```
 pub fn leverage_to_margin_ratio(leverage: f64) -> Result<Ratio, ValidationError> {
+    if !leverage.is_finite() || leverage <= 0.0 {
+        return Err(ValidationError::InvalidLeverage {
+            reason: format!("leverage must be a positive finite number, got {leverage}"),
+        });
+    }
     Ratio::for_leverage(leverage)
 }
 
@@ -140,7 +145,7 @@ pub fn leverage_to_margin_ratio(leverage: f64) -> Result<Ratio, ValidationError>
 /// # Ok::<(), perpcity_sdk::ValidationError>(())
 /// ```
 pub fn margin_ratio_to_leverage(margin_ratio: Ratio) -> Result<f64, ValidationError> {
-    margin_ratio.leverage()
+    margin_ratio.leverage().map(Mult::factor)
 }
 
 // ── Q96 fixed-point ↔ f64 ─────────────────────────────────────────────

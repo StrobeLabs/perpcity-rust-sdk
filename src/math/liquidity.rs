@@ -11,7 +11,7 @@ use crate::constants::Q96;
 use crate::errors::ValidationError;
 use crate::math::range::{MakerBand, TickRange};
 use crate::math::swap::{amount0_delta, amount1_delta};
-use crate::units::fixed_point::Rounding;
+use crate::units::fixed_point::{Rounding, mul_div};
 use crate::units::{LUnits, PerpAtoms, SqrtPrice, UsdcAtoms};
 
 /// Estimate the liquidity needed to deploy `usd_amount` of value across
@@ -47,6 +47,28 @@ pub fn estimate_liquidity(range: &TickRange, usd: UsdcAtoms) -> Result<LUnits, V
 
     let numerator = U256::from(usd.atoms()) * Q96;
     LUnits::try_from(numerator / delta)
+}
+
+/// The margin `liquidity` over `range` requires: the inverse of
+/// [`estimate_liquidity`], `L · (√P_hi − √P_lo) / 2^96`, rounded up so
+/// that `estimate_liquidity(margin_for_liquidity(L))` is at least `L`.
+///
+/// # Errors
+///
+/// [`ValidationError::Overflow`] if the figure exceeds the width the
+/// contracts hold a balance in.
+pub fn margin_for_liquidity(
+    range: &TickRange,
+    liquidity: LUnits,
+) -> Result<UsdcAtoms, ValidationError> {
+    let (sqrt_lower, sqrt_upper) = range.sqrt_bounds();
+    let atoms = mul_div(
+        U256::from(liquidity.units()),
+        sqrt_upper.x96() - sqrt_lower.x96(),
+        Q96,
+        Rounding::Up,
+    )?;
+    UsdcAtoms::try_from(atoms)
 }
 
 /// Calculate the liquidity needed for a maker position given a target margin
@@ -228,6 +250,24 @@ pub fn band_amounts(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The margin a depth requires is the inverse of sizing a depth from a
+    /// margin, rounded so the round trip never comes back short.
+    #[test]
+    fn the_margin_for_a_depth_inverts_the_sizing() {
+        let range = TickRange::new(46_020, 46_080).unwrap();
+        for units in [1u128, 1_000, 1_234_567_891_011, 1 << 100] {
+            let depth = LUnits::new(units);
+            let margin = margin_for_liquidity(&range, depth).unwrap();
+            let back = estimate_liquidity(&range, margin).unwrap();
+            assert!(back >= depth, "{units}: {margin:?} sizes only {back:?}");
+            // And one atom less does not reach it.
+            if margin.atoms() > 1 {
+                let less = UsdcAtoms::new(margin.atoms() - 1);
+                assert!(estimate_liquidity(&range, less).unwrap() < depth, "{units}");
+            }
+        }
+    }
     use crate::math::tick::get_sqrt_ratio_at_tick;
 
     fn range(lower: i32, upper: i32) -> TickRange {

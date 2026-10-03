@@ -173,7 +173,7 @@ that carries it, the invariant it holds, and the node that owns it.
 | A market with a signer | [`PerpClient`](src/client/mod.rs#L182) | a `MarketReader` plus the send pipeline | [`client`](src/client/DESIGN.md) |
 | A send | [`TxBuilder`](src/client/transactions.rs#L40) | one transaction, one nonce, one outcome | [`client`](src/client/DESIGN.md) |
 | A tick interval | [`TickRange`](src/math/range.rs#L25) | `lower < upper`, both in the V4 domain, checked at construction | [`math::range`](src/math/range.rs#L1) |
-| A maker's geometry | [`MakerBand`](src/math/range.rs#L115) | a `TickRange` with liquidity | [`math::range`](src/math/range.rs#L1) |
+| A maker's geometry | [`MakerBand`](src/math/range.rs#L140) | a `TickRange` with liquidity | [`math::range`](src/math/range.rs#L1) |
 | The mark's inputs | [`Mark`](src/math/pricing.rs#L114) | pool price, index and EMAs from one block, advanced to it | [`math::pricing`](src/math/pricing.rs#L1) |
 | A price pair | [`PricePair`](src/math/pricing.rs#L41) | the contract's `uint128` pair, spot or EMA | [`math::pricing`](src/math/pricing.rs#L1) |
 | Capacity and its draw | [`MarketCapacity`](src/math/capacity.rs#L59) | capacity and open interest from one block | [`math::capacity`](src/math/capacity.rs#L1) |
