@@ -2,8 +2,9 @@
 //! Arbitrum One factory inside an Anvil fork, read, traded and probed
 //! through the SDK.
 //!
-//! Requires `anvil` (from Foundry) and an Arbitrum One archive endpoint in
-//! `ARBITRUM_FORK_URL` (default: the keyless Tenderly gateway).
+//! Requires `anvil` (from Foundry) and an Arbitrum One endpoint in
+//! `ARBITRUM_FORK_URL` (default: the public sequencer RPC; the fork is at
+//! the head, so no archive is needed).
 //!
 //! ```bash
 //! cargo test --test mainnet_fork -- --ignored --nocapture
@@ -16,6 +17,7 @@ use alloy::primitives::{Address, B256, U256, address, keccak256};
 use alloy::sol;
 use alloy::sol_types::{SolCall, SolValue};
 
+use perpcity_sdk::constants::SNAPSHOT_BLOCK_LAG;
 use perpcity_sdk::contracts::{Modules, Perp, PerpFactory};
 use perpcity_sdk::math::liquidity::estimate_liquidity;
 use perpcity_sdk::math::tick::{align_tick_down, align_tick_up, price_to_tick};
@@ -46,7 +48,7 @@ const ANVIL_KEY: &str = "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7
 
 fn fork_url() -> String {
     std::env::var("ARBITRUM_FORK_URL")
-        .unwrap_or_else(|_| "https://arbitrum.gateway.tenderly.co".to_string())
+        .unwrap_or_else(|_| "https://arb1.arbitrum.io/rpc".to_string())
 }
 
 // ── Anvil process management ──────────────────────────────────────────
@@ -123,6 +125,17 @@ async fn rpc(url: &str, method: &str, params: serde_json::Value) -> serde_json::
         resp["error"]
     );
     resp["result"].clone()
+}
+
+/// Mine past the snapshot lag, so the pinned reads land after the latest
+/// transaction rather than on a block the market did not exist in.
+async fn mine_past_lag(url: &str) {
+    rpc(
+        url,
+        "anvil_mine",
+        serde_json::json!([format!("0x{:x}", SNAPSHOT_BLOCK_LAG + 1)]),
+    )
+    .await;
 }
 
 async fn deal_eth(url: &str, who: Address) {
@@ -235,8 +248,19 @@ async fn create_v022_market(client: &PerpClient, owner: Address, anvil_url: &str
     decoded.0
 }
 
+/// A liquidation probe's answer must be the named contract revert.
+fn expect_revert(label: &str, probe: perpcity_sdk::Result<()>, expected: &str) {
+    match probe.unwrap_err() {
+        PerpCityError::Transaction(TransactionError::SimulationReverted { error_name, .. }) => {
+            println!("{label} probe: {error_name}");
+            assert_eq!(error_name, expected);
+        }
+        other => panic!("{label} probe: expected a typed revert, got {other}"),
+    }
+}
+
 #[tokio::test]
-#[ignore] // Requires `anvil` and an Arbitrum One archive endpoint.
+#[ignore] // Requires `anvil` and an Arbitrum One endpoint.
 async fn v022_market_reads_trades_and_liquidation_probes() {
     let anvil = AnvilInstance::fork().await;
     let signer: alloy::signers::local::PrivateKeySigner = ANVIL_KEY.parse().unwrap();
@@ -257,6 +281,7 @@ async fn v022_market_reads_trades_and_liquidation_probes() {
     let bootstrap = PerpClient::new(chain.market(MODULE_SOURCE), signer.clone());
     let perp = create_v022_market(&bootstrap, address, &anvil.url).await;
     println!("created v0.2.2 market {perp}");
+    mine_past_lag(&anvil.url).await;
     let client = PerpClient::new(chain.market(perp), signer);
     client.sync_nonce().await.unwrap();
     client.chain().refresh_gas().await.unwrap();
@@ -294,6 +319,8 @@ async fn v022_market_reads_trades_and_liquidation_probes() {
         UsdcAtoms::try_from(margin).unwrap(),
     )
     .unwrap();
+    // The fee cache is short-lived by design; refresh it before each send.
+    client.chain().refresh_gas().await.unwrap();
     let maker = client
         .open_maker(
             &OpenMakerParams {
@@ -310,6 +337,17 @@ async fn v022_market_reads_trades_and_liquidation_probes() {
         .unwrap();
     println!("maker {} opened in {}", maker.pos_id, maker.tx_hash);
 
+    // 5. The maker probe dispatches the 3-arg selector: a healthy, idle
+    //    band answers `NotLiquidatable`, never an empty revert. (Once a
+    //    taker draws on it, the whole-band liquidation trips the
+    //    utilization gate first, so it is probed before the taker opens.)
+    expect_revert(
+        "maker",
+        client.simulate_liquidate_maker(maker.pos_id, address).await,
+        "NotLiquidatable",
+    );
+
+    client.chain().refresh_gas().await.unwrap();
     let taker = client
         .open_taker_exact(
             &ExactOpenTakerParams {
@@ -322,8 +360,9 @@ async fn v022_market_reads_trades_and_liquidation_probes() {
         .await
         .unwrap();
     println!("taker {} opened in {}", taker.pos_id, taker.tx_hash);
+    mine_past_lag(&anvil.url).await;
 
-    // 5. The maker-equity batch runs on the hooked pool's storage.
+    // 6. The maker-equity batch runs on the hooked pool's storage.
     let equities = client
         .market()
         .get_maker_equities(&[maker.pos_id])
@@ -334,31 +373,16 @@ async fn v022_market_reads_trades_and_liquidation_probes() {
         other => panic!("expected a computed maker equity, got {other:?}"),
     }
 
-    // 6. Both liquidation probes dispatch the 3-arg selector: a healthy
-    //    position answers `NotLiquidatable`, never an empty revert.
-    for (label, probe) in [
-        (
-            "taker",
-            client.simulate_liquidate_taker(taker.pos_id, address).await,
-        ),
-        (
-            "maker",
-            client.simulate_liquidate_maker(maker.pos_id, address).await,
-        ),
-    ] {
-        match probe.unwrap_err() {
-            PerpCityError::Transaction(TransactionError::SimulationReverted {
-                error_name, ..
-            }) => {
-                println!("{label} probe: {error_name}");
-                assert_eq!(error_name, "NotLiquidatable");
-            }
-            other => panic!("{label} probe: expected a typed revert, got {other}"),
-        }
-    }
+    // 7. The taker probe, the same way.
+    expect_revert(
+        "taker",
+        client.simulate_liquidate_taker(taker.pos_id, address).await,
+        "NotLiquidatable",
+    );
 
-    // 7. A full close mines the untailed `TakerClosed`, which the receipt
+    // 8. A full close mines the untailed `TakerClosed`, which the receipt
     //    reader decodes.
+    client.chain().refresh_gas().await.unwrap();
     let closed = client
         .close_taker(taker.pos_id, Urgency::Normal)
         .await
