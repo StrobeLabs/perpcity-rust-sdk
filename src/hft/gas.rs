@@ -21,7 +21,7 @@ use std::collections::HashMap;
 use alloy::sol_types::SolCall;
 use serde::{Deserialize, Serialize};
 
-use crate::contracts::Perp;
+use crate::contracts::{Perp, PerpV022};
 
 /// 4-byte function selector (first 4 bytes of calldata).
 type Selector = [u8; 4];
@@ -80,12 +80,16 @@ fn estimate_floor(selector: &Selector) -> Option<u64> {
     const ADJUST_MAKER: Selector = Perp::adjustMakerCall::SELECTOR;
     const LIQUIDATE_TAKER: Selector = Perp::liquidateTakerCall::SELECTOR;
     const LIQUIDATE_MAKER: Selector = Perp::liquidateMakerCall::SELECTOR;
+    const LIQUIDATE_TAKER_V022: Selector = PerpV022::liquidateTakerCall::SELECTOR;
+    const LIQUIDATE_MAKER_V022: Selector = PerpV022::liquidateMakerCall::SELECTOR;
 
     match *selector {
         OPEN_TAKER => Some(GasLimits::OPEN_TAKER),
         OPEN_MAKER => Some(GasLimits::OPEN_MAKER),
         ADJUST_TAKER | ADJUST_MAKER => Some(GasLimits::ADJUST_NOTIONAL),
-        LIQUIDATE_TAKER | LIQUIDATE_MAKER => Some(GasLimits::LIQUIDATE),
+        LIQUIDATE_TAKER | LIQUIDATE_MAKER | LIQUIDATE_TAKER_V022 | LIQUIDATE_MAKER_V022 => {
+            Some(GasLimits::LIQUIDATE)
+        }
         _ => None,
     }
 }

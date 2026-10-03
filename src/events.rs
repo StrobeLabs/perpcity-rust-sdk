@@ -62,7 +62,9 @@ use alloy::rpc::types::Log;
 use alloy::sol_types::SolEvent;
 use serde::{Deserialize, Serialize};
 
-use crate::contracts::{IBeacon, IPoolManagerState, Perp, PerpDeployedEvents, SwapResult};
+use crate::contracts::{
+    IBeacon, IPoolManagerState, Perp, PerpDeployedEvents, PerpV022, SwapResult,
+};
 use crate::convert::unpack_balance_delta;
 use crate::errors::ValidationError;
 use crate::units::{
@@ -185,8 +187,11 @@ pub enum MarketEvent {
         funding: UsdcDelta,
         util_fees: UsdcAtoms,
     },
-    /// A taker closed; the deployed event unifies close and liquidation
-    /// (`is_liquidation`, with `liquidation_fee` in USDC).
+    /// A taker closed. Build `58b42b7` unifies close and liquidation in
+    /// the event (`is_liquidation`, with `liquidation_fee` in USDC); a
+    /// `v0.2.2` market emits the close alone and the fee in the
+    /// `TakerLiquidated` that follows, so from it both tails read as a
+    /// voluntary close here.
     TakerClosed {
         pos_id: U256,
         swap: SwapInfo,
@@ -428,6 +433,18 @@ pub fn decode_log(log: &Log) -> Result<Option<MarketEvent>, ValidationError> {
             util_fees: u256_usdc(d.utilFees, "settled utilization fees")?,
             liquidation_fee: u256_usdc(d.liqFee, "settled liquidation fee")?,
             is_liquidation: d.isLiquidation,
+        })
+    } else if topic0 == PerpV022::TakerClosed::SIGNATURE_HASH {
+        // Untailed shape: a v0.2.2 liquidation says so in the
+        // `TakerLiquidated` log after this one, so the tails default here.
+        let d = decode_raw::<PerpV022::TakerClosed>(log)?;
+        Some(MarketEvent::TakerClosed {
+            pos_id: d.posId,
+            swap: swap_info(&d.sr)?,
+            funding: i256_usdc(d.funding, "settled funding")?,
+            util_fees: u256_usdc(d.utilFees, "settled utilization fees")?,
+            liquidation_fee: UsdcAtoms::ZERO,
+            is_liquidation: false,
         })
     } else if topic0 == Perp::TakerLiquidated::SIGNATURE_HASH {
         let d = decode_raw::<Perp::TakerLiquidated>(log)?;
@@ -919,6 +936,53 @@ mod tests {
                 assert_eq!(util_fees.atoms(), 10_000);
                 assert_eq!(liquidation_fee.atoms(), 1_250_000);
                 assert!(is_liquidation);
+            }
+            other => panic!("expected TakerClosed, got {other:?}"),
+        }
+    }
+
+    /// The v0.2.2 `TakerClosed` carries no liquidation tails; it decodes to
+    /// the same variant with both defaulted, as the untailed maker closes do.
+    #[test]
+    fn decode_v022_taker_closed_defaults_the_tails() {
+        let event = PerpV022::TakerClosed {
+            posId: U256::from(9u64),
+            sr: SwapResult {
+                delta: I256::ZERO,
+                ammPrice: U256::from(1u8) << 96,
+                totalFeeAmt: I256::ZERO,
+                lpFeeAmt: U256::ZERO,
+                protocolFeeAmt: U256::ZERO,
+                creatorFeeAmt: U256::ZERO,
+                insuranceFeeAmt: U256::ZERO,
+            },
+            funding: I256::try_from(-7_000i64).unwrap(),
+            utilFees: U256::from(300u64),
+        };
+        let log = rpc_log(&event, Address::ZERO);
+        assert_eq!(
+            log.topic0().copied(),
+            Some(alloy::primitives::b256!(
+                "208f950e4dba30512aa9e643b25c9df8bdb616ee90bbff00f669a5d1d3d452f3"
+            ))
+        );
+        match decode_log(&log)
+            .unwrap()
+            .expect("should decode the v0.2.2 TakerClosed")
+        {
+            MarketEvent::TakerClosed {
+                pos_id,
+                funding,
+                util_fees,
+                liquidation_fee,
+                is_liquidation,
+                ..
+            } => {
+                assert_eq!(pos_id, U256::from(9u64));
+                assert_eq!(funding.atoms(), -7_000);
+                assert_eq!(util_fees.atoms(), 300);
+                assert_eq!(liquidation_fee.atoms(), 0);
+                assert!(!is_liquidation);
             }
             other => panic!("expected TakerClosed, got {other:?}"),
         }

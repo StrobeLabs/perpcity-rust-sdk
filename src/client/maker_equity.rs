@@ -27,7 +27,6 @@ use crate::math::maker_equity::{
     AccrualInputs, AccruedMakerSnapshot, MakerEquityBreakdown, MakerMarketSnapshot, MakerState,
     TickFunding, fee_growth_inside1,
 };
-use crate::math::pricing::PricePair;
 use crate::math::tick::get_sqrt_ratio_at_tick;
 use crate::storage::{
     perp_tick_funding_slots, v4_fee_growth_global1_slot, v4_position_fee_growth_inside1_slot,
@@ -406,8 +405,8 @@ impl StateAt {
     }
 
     /// The market-wide settle inputs at this block, accrued to its
-    /// timestamp: one multicall over the `Perp`, then the beacon's index,
-    /// both pinned here.
+    /// timestamp: one multicall over the `Perp`, then the beacon's index
+    /// and the stored EMAs' word, all pinned here.
     ///
     /// The accrual replay always runs at the contract's mark for the block
     /// — `fairPrice(ammPrice, index, emas)` with the stored EMAs advanced to
@@ -418,11 +417,10 @@ impl StateAt {
     async fn maker_market(&self, mark_override: Option<Price>) -> Result<AccruedMakerSnapshot> {
         let chain = self.market().chain();
         let perp = Perp::new(self.market().perp(), chain.provider());
-        let (modules, pool_state, emas, rates, ema_window, cumls, capacity, oi) = chain
+        let (modules, pool_state, rates, ema_window, cumls, capacity, oi) = chain
             .multicall_at(self.id())
             .add(perp.modules())
             .add(perp.poolState())
-            .add(perp.emas())
             .add(perp.rates())
             .add(perp.EMA_WINDOW())
             .add(perp.cumulatives())
@@ -434,10 +432,6 @@ impl StateAt {
         let views = PerpViews {
             modules,
             pool_state,
-            stored_emas: PricePair {
-                amm: emas.ammPrice,
-                index: emas.index,
-            },
             last_touch: rates.lastTouch.to::<u64>(),
             ema_window: ema_window_secs(ema_window)?,
         };
@@ -1064,9 +1058,10 @@ mod tests {
 
     // ── The whole batch, on one handle ────────────────────────────────
 
-    /// The market-wide answers: the immutables, the eight views in one
+    /// The market-wide answers: the immutables, the seven views in one
     /// multicall at block 92 with every price 1.0 and the market last
-    /// touched at the block's timestamp, then the beacon's index.
+    /// touched at the block's timestamp, then the beacon's index and the
+    /// stored EMAs' word.
     fn market_answers(rpc: &Rpc) {
         let one = x96(1, 0);
         rpc.call::<Perp::POOL_IDCall>(&POOL_ID);
@@ -1079,7 +1074,6 @@ mod tests {
                     sqrtPrice: Uint::from(1u8) << 96,
                     ..mock::pool_state(one)
                 }),
-                returns::<Perp::emasCall>(&mock::emas(one.to::<u128>(), one.to::<u128>())),
                 returns::<Perp::ratesCall>(&Rates {
                     lastTouch: Uint::from(TIMESTAMP),
                     ..mock::rates(0)
@@ -1098,6 +1092,7 @@ mod tests {
             ],
         );
         rpc.call::<IBeacon::indexCall>(&one);
+        rpc.storage(mock::emas_word(one.to::<u128>(), one.to::<u128>()));
     }
 
     /// The two funding words of each of `ticks`, all zero, as one
