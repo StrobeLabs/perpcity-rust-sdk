@@ -1,4 +1,5 @@
-//! The units a market is denominated in, one type each.
+//! The units a market is denominated in, one type each — and the side that
+//! keys every directional quantity, with a pair of anything under it.
 //!
 //! These replace a naming convention. A field used to carry its unit as a
 //! suffix, which made the unit a fact about spelling that nothing checked;
@@ -59,6 +60,7 @@ mod liquidity;
 mod price;
 mod rates;
 mod share;
+mod side;
 
 pub use accumulators::{Earnings, FeeGrowth, Funding, FundingPerSqrtPrice};
 pub use amount::{PerpAtoms, PerpDelta, UsdcAtoms, UsdcDelta};
@@ -66,6 +68,7 @@ pub use liquidity::{LDelta, LUnits};
 pub use price::{Price, SqrtPrice};
 pub use rates::{FundingRate, Ratio, UtilizationRate};
 pub use share::Share;
+pub use side::{PerSide, Side};
 
 /// 10^6 as `f64`: the scale between a human amount and its atoms, and the
 /// 6-decimal intermediate the price conversions keep.

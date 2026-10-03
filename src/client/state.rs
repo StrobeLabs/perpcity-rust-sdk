@@ -32,7 +32,7 @@ use crate::math::pricing::{Mark, PricePair};
 use crate::math::range::{MakerBand, TickRange};
 use crate::math::swap::{PoolSnapshot, TickLiquidity, active_liquidity};
 use crate::storage::{v4_tick_bitmap_slot, v4_tick_slot};
-use crate::units::{LDelta, LUnits, PerpAtoms, Price, Ratio, SqrtPrice};
+use crate::units::{LDelta, LUnits, Price, Ratio, SqrtPrice};
 
 use super::market::MarketReader;
 use super::queries::{MarketImmutables, multicall_error, registered_module};
@@ -504,8 +504,7 @@ impl StateAt {
         Ok(MarketCapacity {
             block: self.block,
             capacity: capacity.into(),
-            long_open_interest: PerpAtoms::new(oi.long),
-            short_open_interest: PerpAtoms::new(oi.short),
+            open_interest: oi.into(),
         })
     }
 
@@ -849,6 +848,7 @@ mod tests {
     use crate::constants::SNAPSHOT_BLOCK_LAG;
     use crate::contracts::{Modules, Rates};
     use crate::math::capacity::Capacity;
+    use crate::units::{PerSide, PerpAtoms};
 
     const TIMESTAMP: u64 = 1_700_000_000;
     /// The market's tick spacing in these tests.
@@ -1431,8 +1431,7 @@ mod tests {
                     long: PerpAtoms::new(10),
                     short: PerpAtoms::new(20),
                 },
-                long_open_interest: PerpAtoms::new(3),
-                short_open_interest: PerpAtoms::new(4),
+                open_interest: PerSide::new(PerpAtoms::new(3), PerpAtoms::new(4)),
             }
         );
         assert!(rpc.is_drained(), "blockNumber, block, one multicall");

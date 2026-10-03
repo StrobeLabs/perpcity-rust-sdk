@@ -88,8 +88,9 @@ pub use transport::{config::TransportConfig, provider::HftTransport};
 
 #[doc(inline)]
 pub use units::{
-    Earnings, FeeGrowth, Funding, FundingPerSqrtPrice, FundingRate, LDelta, LUnits, PerpAtoms,
-    PerpDelta, Price, Ratio, Share, SqrtPrice, UsdcAtoms, UsdcDelta, UtilizationRate,
+    Earnings, FeeGrowth, Funding, FundingPerSqrtPrice, FundingRate, LDelta, LUnits, PerSide,
+    PerpAtoms, PerpDelta, Price, Ratio, Share, Side, SqrtPrice, UsdcAtoms, UsdcDelta,
+    UtilizationRate,
 };
 
 #[doc(inline)]
@@ -114,7 +115,7 @@ pub use math::tick::{
 pub use math::swap::{PoolSnapshot, QuoteConstraints, QuoteLimit, TakerQuote, TickLiquidity};
 
 #[doc(inline)]
-pub use math::capacity::{Capacity, MarketCapacity, Side, band_capacity, liquidity_for_capacity};
+pub use math::capacity::{Capacity, MarketCapacity, band_capacity, liquidity_for_capacity};
 
 #[doc(inline)]
 pub use math::range::{MakerBand, TickRange};

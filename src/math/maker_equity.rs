@@ -40,8 +40,8 @@ use crate::units::fixed_point::{
     Rounding, add_i, add_u, mul_div, s_full_mul_div, sub_i, to_i256, u512_to_u256,
 };
 use crate::units::{
-    Earnings, FeeGrowth, Funding, FundingPerSqrtPrice, FundingRate, LUnits, PerpAtoms, PerpDelta,
-    Price, Ratio, SqrtPrice, UsdcAtoms, UsdcDelta, UtilizationRate,
+    Earnings, FeeGrowth, Funding, FundingPerSqrtPrice, FundingRate, LUnits, PerSide, PerpAtoms,
+    PerpDelta, Price, Ratio, Side, SqrtPrice, UsdcAtoms, UsdcDelta, UtilizationRate,
 };
 
 /// One `TickInfo` from the Perp's tick funding mapping (`s.ticks[tick]`),
@@ -69,10 +69,8 @@ pub struct MakerMarketSnapshot {
     pub funding: Funding,
     /// Cumulative funding divided by sqrt price.
     pub funding_div_sqrt_p: FundingPerSqrtPrice,
-    /// Cumulative long utilization earnings.
-    pub long_util_earnings: Earnings,
-    /// Cumulative short utilization earnings.
-    pub short_util_earnings: Earnings,
+    /// Cumulative utilization earnings, per side.
+    pub util_earnings: PerSide<Earnings>,
     /// Current pool tick.
     pub tick: i32,
     /// The pool's current price.
@@ -94,24 +92,19 @@ pub struct AccrualInputs {
     /// `rates().fundingPerDay`: the daily funding rate, positive when longs
     /// pay shorts.
     pub funding_per_day: FundingRate,
-    /// `rates().longUtilFeePerDay`: the daily long-utilization fee rate.
-    pub long_util_fee_per_day: UtilizationRate,
-    /// `rates().shortUtilFeePerDay`: the daily short-utilization fee rate.
-    pub short_util_fee_per_day: UtilizationRate,
+    /// `rates().longUtilFeePerDay` and `shortUtilFeePerDay`: the daily
+    /// utilization fee rate, per side.
+    pub util_fee_per_day: PerSide<UtilizationRate>,
     /// `rates().lastTouch`: timestamp the cumulatives were last advanced.
     pub last_touch: u64,
     /// Timestamp to accrue to — the snapshot block's timestamp, never a
     /// wall clock (a local clock ahead of the chain fabricates accrual;
     /// one behind erases it).
     pub accrue_to: u64,
-    /// `openInterest().long`.
-    pub oi_long: PerpAtoms,
-    /// `openInterest().short`.
-    pub oi_short: PerpAtoms,
-    /// `capacity().long`.
-    pub cap_long: PerpAtoms,
-    /// `capacity().short`.
-    pub cap_short: PerpAtoms,
+    /// `openInterest()`.
+    pub open_interest: PerSide<PerpAtoms>,
+    /// `capacity()`.
+    pub capacity: PerSide<PerpAtoms>,
 }
 
 /// Per-position inputs: the position row, maker row, its band's tick funding
@@ -144,16 +137,12 @@ pub struct MakerState {
     pub tick_upper: i32,
     /// `makerDetails(id).liquidity`: V4 liquidity in the band.
     pub liquidity: LUnits,
-    /// `makerDetails(id).lastLongUtilEarningsX96`: long utilization
-    /// earnings cumulative at the last settle.
-    pub last_long_util_earnings: Earnings,
-    /// `makerDetails(id).lastShortUtilEarningsX96`: short utilization
-    /// earnings cumulative at the last settle.
-    pub last_short_util_earnings: Earnings,
-    /// `makerDetails(id).capacity.long`.
-    pub cap_long: PerpAtoms,
-    /// `makerDetails(id).capacity.short`.
-    pub cap_short: PerpAtoms,
+    /// `makerDetails(id).lastLongUtilEarningsX96` and
+    /// `lastShortUtilEarningsX96`: the utilization earnings cumulatives at
+    /// the last settle, per side.
+    pub last_util_earnings: PerSide<Earnings>,
+    /// `makerDetails(id).capacity`.
+    pub capacity: PerSide<PerpAtoms>,
     /// `makerDetails(id).lastCumlFunding.belowX96`: below-band funding
     /// cumulative at the last settle.
     pub last_below: Funding,
@@ -188,8 +177,7 @@ pub struct MakerState {
 pub struct MakerEquityBreakdown {
     margin: UsdcDelta,
     funding_owed: UsdcDelta,
-    long_util_earnings: UsdcDelta,
-    short_util_earnings: UsdcDelta,
+    util_earnings: PerSide<UsdcDelta>,
     lp_fees: UsdcDelta,
     unrealized_pnl: UsdcDelta,
     position_value: UsdcAtoms,
@@ -203,8 +191,7 @@ pub struct MakerEquityBreakdown {
 struct RawMakerEquityBreakdown {
     margin: UsdcDelta,
     funding_owed: UsdcDelta,
-    long_util_earnings: UsdcDelta,
-    short_util_earnings: UsdcDelta,
+    util_earnings: PerSide<UsdcDelta>,
     lp_fees: UsdcDelta,
     unrealized_pnl: UsdcDelta,
     position_value: UsdcAtoms,
@@ -227,14 +214,16 @@ impl TryFrom<RawMakerEquityBreakdown> for MakerEquityBreakdown {
         Ok(Self {
             margin: bounded(raw.margin, "deserialized margin")?,
             funding_owed: bounded(raw.funding_owed, "deserialized funding")?,
-            long_util_earnings: bounded(
-                raw.long_util_earnings,
-                "deserialized long utilization earnings",
-            )?,
-            short_util_earnings: bounded(
-                raw.short_util_earnings,
-                "deserialized short utilization earnings",
-            )?,
+            util_earnings: PerSide::new(
+                bounded(
+                    raw.util_earnings.long,
+                    "deserialized long utilization earnings",
+                )?,
+                bounded(
+                    raw.util_earnings.short,
+                    "deserialized short utilization earnings",
+                )?,
+            ),
             lp_fees: bounded(raw.lp_fees, "deserialized LP fees")?,
             unrealized_pnl: bounded(raw.unrealized_pnl, "deserialized unrealized PnL")?,
             // A position value cannot be negative, which its type already
@@ -265,14 +254,10 @@ impl MakerEquityBreakdown {
         self.funding_owed
     }
 
-    /// Accrued utilization earnings, long side.
-    pub fn long_util_earnings(&self) -> UsdcDelta {
-        self.long_util_earnings
-    }
-
-    /// Accrued utilization earnings, short side.
-    pub fn short_util_earnings(&self) -> UsdcDelta {
-        self.short_util_earnings
+    /// Accrued utilization earnings, per side; `total()` is what the
+    /// settle credits.
+    pub fn util_earnings(&self) -> PerSide<UsdcDelta> {
+        self.util_earnings
     }
 
     /// Uncollected V4 LP fees (donated taker fees).
@@ -288,10 +273,7 @@ impl MakerEquityBreakdown {
 
     /// Margin as the contract would settle it now.
     pub fn settled_margin(&self) -> UsdcDelta {
-        self.margin - self.funding_owed
-            + self.long_util_earnings
-            + self.short_util_earnings
-            + self.lp_fees
+        self.margin - self.funding_owed + self.util_earnings.total() + self.lp_fees
     }
 
     /// Settled margin plus inventory PnL — the position's live equity.
@@ -301,7 +283,7 @@ impl MakerEquityBreakdown {
 
     /// What the position earned since its last settle, on its own.
     pub fn accrued_income(&self) -> UsdcDelta {
-        self.long_util_earnings + self.short_util_earnings + self.lp_fees - self.funding_owed
+        self.util_earnings.total() + self.lp_fees - self.funding_owed
     }
 
     /// `posVal`: the band's liquidity value priced at the mark — the
@@ -417,38 +399,26 @@ impl MakerMarketSnapshot {
         )?;
 
         let dt_days_mult_mark = mul_div(dt_days, self.mark.x96(), Q96, Rounding::TowardZero)?;
-        let lu_accrued = mul_div(
-            U256::from(accrual.long_util_fee_per_day.wad()),
-            dt_days_mult_mark,
-            WAD,
-            Rounding::TowardZero,
-        )?;
-        let su_accrued = mul_div(
-            U256::from(accrual.short_util_fee_per_day.wad()),
-            dt_days_mult_mark,
-            WAD,
-            Rounding::TowardZero,
-        )?;
-        if !accrual.cap_long.is_zero() {
-            self.long_util_earnings = self.long_util_earnings.advanced_by(
-                Earnings::from_x96(mul_div(
-                    lu_accrued,
-                    U256::from(accrual.oi_long.atoms()),
-                    U256::from(accrual.cap_long.atoms()),
-                    Rounding::TowardZero,
-                )?),
-                "accrued long utilization cumulative",
+        for side in Side::BOTH {
+            let capacity = accrual.capacity.on(side);
+            if capacity.is_zero() {
+                continue;
+            }
+            let accrued = mul_div(
+                U256::from(accrual.util_fee_per_day.on(side).wad()),
+                dt_days_mult_mark,
+                WAD,
+                Rounding::TowardZero,
             )?;
-        }
-        if !accrual.cap_short.is_zero() {
-            self.short_util_earnings = self.short_util_earnings.advanced_by(
+            let earnings = self.util_earnings.on_mut(side);
+            *earnings = earnings.advanced_by(
                 Earnings::from_x96(mul_div(
-                    su_accrued,
-                    U256::from(accrual.oi_short.atoms()),
-                    U256::from(accrual.cap_short.atoms()),
+                    accrued,
+                    U256::from(accrual.open_interest.on(side).atoms()),
+                    U256::from(capacity.atoms()),
                     Rounding::TowardZero,
                 )?),
-                "accrued short utilization cumulative",
+                "accrued utilization cumulative",
             )?;
         }
         Ok(AccruedMakerSnapshot(self))
@@ -556,30 +526,22 @@ impl AccruedMakerSnapshot {
             "accrued funding",
         )?;
 
-        let long_util = mul_div(
-            U256::from(maker.cap_long.atoms()),
-            self.0
-                .long_util_earnings
-                .since(
-                    maker.last_long_util_earnings,
-                    "long utilization checkpoint ahead of market cumulative",
-                )?
-                .x96(),
-            Q96,
-            Rounding::TowardZero,
-        )?;
-        let short_util = mul_div(
-            U256::from(maker.cap_short.atoms()),
-            self.0
-                .short_util_earnings
-                .since(
-                    maker.last_short_util_earnings,
-                    "short utilization checkpoint ahead of market cumulative",
-                )?
-                .x96(),
-            Q96,
-            Rounding::TowardZero,
-        )?;
+        let util = |side: Side| {
+            mul_div(
+                U256::from(maker.capacity.on(side).atoms()),
+                self.0
+                    .util_earnings
+                    .on(side)
+                    .since(
+                        maker.last_util_earnings.on(side),
+                        "utilization checkpoint ahead of market cumulative",
+                    )?
+                    .x96(),
+                Q96,
+                Rounding::TowardZero,
+            )
+        };
+        let util = PerSide::new(util(Side::Long)?, util(Side::Short)?);
 
         // ── V4 LP fees: liquidity × Δ feeGrowthInside1 / 2^128 ──────────
         let fee_growth_delta = maker
@@ -631,14 +593,16 @@ impl AccruedMakerSnapshot {
                 "margin",
             )?,
             funding_owed: delta(funding, "accrued funding")?,
-            long_util_earnings: delta(
-                to_i256(long_util, "long utilization earnings")?,
-                "long utilization earnings",
-            )?,
-            short_util_earnings: delta(
-                to_i256(short_util, "short utilization earnings")?,
-                "short utilization earnings",
-            )?,
+            util_earnings: PerSide::new(
+                delta(
+                    to_i256(util.long, "long utilization earnings")?,
+                    "long utilization earnings",
+                )?,
+                delta(
+                    to_i256(util.short, "short utilization earnings")?,
+                    "short utilization earnings",
+                )?,
+            ),
             lp_fees: delta(to_i256(lp_fees, "LP fees")?, "LP fees")?,
             unrealized_pnl: delta(unrealized, "unrealized PnL")?,
             // A band's value at the mark is a sum of non-negative legs, so
@@ -775,22 +739,21 @@ mod tests {
             funding_div_sqrt_p: FundingPerSqrtPrice::from_x96(i(
                 "-1332253658657311045256648214058",
             )),
-            long_util_earnings: Earnings::from_x96(u("361206840527920163630096383165")),
-            short_util_earnings: Earnings::from_x96(u("512938731932611361114843741066")),
+            util_earnings: PerSide::new(
+                Earnings::from_x96(u("361206840527920163630096383165")),
+                Earnings::from_x96(u("512938731932611361114843741066")),
+            ),
             tick: 28543,
             sqrt_price: SqrtPrice::from_x96(u("330115084885190701587787251116")),
             mark: Price::from_x96(u("1375470108235016714305503507110")),
         };
         let accrual = AccrualInputs {
             funding_per_day: FundingRate::from_wad(840374978539967329),
-            long_util_fee_per_day: UtilizationRate::from_wad(10000000000000000),
-            short_util_fee_per_day: UtilizationRate::from_wad(10000000000000000),
+            util_fee_per_day: PerSide::uniform(UtilizationRate::from_wad(10000000000000000)),
             last_touch: 1788254416,
             accrue_to: 1788260191,
-            oi_long: PerpAtoms::new(2587247),
-            oi_short: PerpAtoms::new(175795732),
-            cap_long: PerpAtoms::new(303811186),
-            cap_short: PerpAtoms::new(223153047),
+            open_interest: PerSide::new(PerpAtoms::new(2587247), PerpAtoms::new(175795732)),
+            capacity: PerSide::new(PerpAtoms::new(303811186), PerpAtoms::new(223153047)),
         };
         let maker = MakerState {
             margin: UsdcAtoms::new(143730198),
@@ -803,10 +766,11 @@ mod tests {
             tick_lower: 33810,
             tick_upper: 34710,
             liquidity: LUnits::new(570282387),
-            last_long_util_earnings: Earnings::from_x96(u("105980308075601242205274025040")),
-            last_short_util_earnings: Earnings::from_x96(u("79412639757423009537924209956")),
-            cap_long: PerpAtoms::new(134327),
-            cap_short: PerpAtoms::new(4493830),
+            last_util_earnings: PerSide::new(
+                Earnings::from_x96(u("105980308075601242205274025040")),
+                Earnings::from_x96(u("79412639757423009537924209956")),
+            ),
+            capacity: PerSide::new(PerpAtoms::new(134327), PerpAtoms::new(4493830)),
             last_below: Funding::from_x96(i("-10162710870332004796583430787875")),
             last_within: Funding::ZERO,
             last_div_sqrt_within: FundingPerSqrtPrice::ZERO,
@@ -847,11 +811,11 @@ mod tests {
             "funding {}",
             b.funding_owed().atoms()
         );
-        assert_eq!(b.long_util_earnings(), UsdcDelta::new(432_735));
+        assert_eq!(b.util_earnings().long, UsdcDelta::new(432_735));
         assert!(
-            (b.short_util_earnings().atoms() - 24_630_722).abs() <= 10,
+            (b.util_earnings().short.atoms() - 24_630_722).abs() <= 10,
             "short util {}",
-            b.short_util_earnings().atoms()
+            b.util_earnings().short.atoms()
         );
         assert_eq!(
             b.lp_fees(),
@@ -913,8 +877,7 @@ mod tests {
         let healthy = MakerEquityBreakdown {
             margin: UsdcDelta::from(value),
             funding_owed: UsdcDelta::ZERO,
-            long_util_earnings: UsdcDelta::ZERO,
-            short_util_earnings: UsdcDelta::ZERO,
+            util_earnings: PerSide::default(),
             lp_fees: UsdcDelta::ZERO,
             unrealized_pnl: UsdcDelta::ZERO,
             position_value: value,
@@ -963,7 +926,7 @@ mod tests {
             "dt is ~1.6h"
         );
         // Utilization also accrues.
-        assert!(fresh.short_util_earnings() >= stale.short_util_earnings());
+        assert!(fresh.util_earnings().short >= stale.util_earnings().short);
     }
 
     /// A what-if mark applied AFTER the accrual replay changes only the
@@ -983,8 +946,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(what_if.funding_owed(), chain.funding_owed());
-        assert_eq!(what_if.long_util_earnings(), chain.long_util_earnings());
-        assert_eq!(what_if.short_util_earnings(), chain.short_util_earnings());
+        assert_eq!(what_if.util_earnings(), chain.util_earnings());
         assert_eq!(what_if.lp_fees(), chain.lp_fees());
         assert_ne!(
             what_if.unrealized_pnl(),
@@ -1003,8 +965,8 @@ mod tests {
         .maker_equity(&maker)
         .unwrap();
         assert_ne!(
-            accrued_at_doubled.short_util_earnings(),
-            chain.short_util_earnings()
+            accrued_at_doubled.util_earnings().short,
+            chain.util_earnings().short
         );
     }
 
@@ -1066,8 +1028,7 @@ mod tests {
             block: BlockContext::default(),
             funding: f(1000),
             funding_div_sqrt_p: d(500),
-            long_util_earnings: Earnings::ZERO,
-            short_util_earnings: Earnings::ZERO,
+            util_earnings: PerSide::default(),
             tick,
             sqrt_price: SqrtPrice::from_x96(Q96),
             mark: Price::from_x96(Q96),
@@ -1121,8 +1082,8 @@ mod tests {
     fn checkpoint_ahead_of_market_cumulative_is_an_error_not_a_number() {
         let (market, accrual, mut maker) = golden_market_and_maker();
         let market = market.accrued(&accrual).unwrap();
-        maker.last_long_util_earnings =
-            Earnings::from_x96(market.snapshot().long_util_earnings.x96() + U256::from(1u8));
+        maker.last_util_earnings.long =
+            Earnings::from_x96(market.snapshot().util_earnings.long.x96() + U256::from(1u8));
         let err = market.maker_equity(&maker).unwrap_err();
         assert!(matches!(err, ValidationError::Overflow { .. }), "{err}");
     }

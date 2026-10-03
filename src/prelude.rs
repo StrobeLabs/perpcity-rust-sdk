@@ -41,7 +41,7 @@ pub use crate::{
     LiveTakerMarketPublisher, MAX_ROW_BATCH, MakerBand, MakerEquityBreakdown, MakerEquityKind,
     MakerEquityOutcome, MakerMarketSnapshot, MakerState, MarginRatioTriple, MarginRatios, Mark,
     MarketCapacity, MarketConfig, MarketEvent, MarketFeed, MarketReader, MarketSnapshot,
-    OpenInterest, OpenMakerParams, OpenResult, OpenTakerParams, PerpAtoms, PerpCityError,
+    OpenInterest, OpenMakerParams, OpenResult, OpenTakerParams, PerSide, PerpAtoms, PerpCityError,
     PerpClient, PerpDelta, Price, Ratio, Result, RowOutcome, Share, Side, SolvencyState, SqrtPrice,
     StateAt, TickFunding, TickRange, TransactionError, TransportConfig, TxBuilder, Urgency,
     UsdcAtoms, UsdcDelta, UtilizationRate, ValidationError, align_tick_down, align_tick_up,

@@ -34,7 +34,7 @@ use crate::storage::{
     v4_tick_fee_growth_outside1_slot,
 };
 use crate::units::{
-    Earnings, FeeGrowth, Funding, FundingPerSqrtPrice, FundingRate, LUnits, PerpAtoms, PerpDelta,
+    Earnings, FeeGrowth, Funding, FundingPerSqrtPrice, FundingRate, LUnits, PerSide, PerpDelta,
     Price, Ratio, SqrtPrice, UsdcAtoms, UsdcDelta, UtilizationRate,
 };
 
@@ -448,8 +448,10 @@ impl StateAt {
             block,
             funding: Funding::from_x96(cumls.fundingX96),
             funding_div_sqrt_p: FundingPerSqrtPrice::from_x96(cumls.fundingDivSqrtPX96),
-            long_util_earnings: Earnings::from_x96(cumls.longUtilEarningsX96),
-            short_util_earnings: Earnings::from_x96(cumls.shortUtilEarningsX96),
+            util_earnings: PerSide::new(
+                Earnings::from_x96(cumls.longUtilEarningsX96),
+                Earnings::from_x96(cumls.shortUtilEarningsX96),
+            ),
             tick: i24_to_i32(views.pool_state.tick),
             sqrt_price: SqrtPrice::from_x96(views.pool_state.sqrtPrice.to::<U256>()),
             mark: mark.fair_price(),
@@ -458,14 +460,14 @@ impl StateAt {
             funding_per_day: FundingRate::from_wad(
                 i128::try_from(rates.fundingPerDay).expect("int88 always fits i128"),
             ),
-            long_util_fee_per_day: UtilizationRate::from_wad(rates.longUtilFeePerDay),
-            short_util_fee_per_day: UtilizationRate::from_wad(rates.shortUtilFeePerDay),
+            util_fee_per_day: PerSide::new(
+                UtilizationRate::from_wad(rates.longUtilFeePerDay),
+                UtilizationRate::from_wad(rates.shortUtilFeePerDay),
+            ),
             last_touch: views.last_touch,
             accrue_to: block.timestamp,
-            oi_long: PerpAtoms::new(oi.long),
-            oi_short: PerpAtoms::new(oi.short),
-            cap_long: PerpAtoms::new(capacity.long),
-            cap_short: PerpAtoms::new(capacity.short),
+            open_interest: oi.into(),
+            capacity: capacity.into(),
         })?;
         // The what-if mark is applied AFTER the replay: the elapsed accrual
         // happened at the chain's mark, and only the pricing legs are the
@@ -598,14 +600,11 @@ impl StateAt {
                     tick_lower: maker.tick_lower,
                     tick_upper: maker.tick_upper,
                     liquidity: LUnits::new(maker.details.liquidity),
-                    last_long_util_earnings: Earnings::from_x96(
-                        maker.details.lastLongUtilEarningsX96,
+                    last_util_earnings: PerSide::new(
+                        Earnings::from_x96(maker.details.lastLongUtilEarningsX96),
+                        Earnings::from_x96(maker.details.lastShortUtilEarningsX96),
                     ),
-                    last_short_util_earnings: Earnings::from_x96(
-                        maker.details.lastShortUtilEarningsX96,
-                    ),
-                    cap_long: PerpAtoms::new(maker.details.capacity.long),
-                    cap_short: PerpAtoms::new(maker.details.capacity.short),
+                    capacity: maker.details.capacity.clone().into(),
                     last_below: Funding::from_x96(maker.details.lastCumlFunding.belowX96),
                     last_within: Funding::from_x96(maker.details.lastCumlFunding.withinX96),
                     last_div_sqrt_within: FundingPerSqrtPrice::from_x96(

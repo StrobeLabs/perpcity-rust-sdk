@@ -64,11 +64,11 @@ async fn subscribe_and_receive_event() {
                         swap.pool_price.to_f64()
                     );
                 }
-                MarketEvent::OpenInterestUpdated { long_oi, short_oi } => {
+                MarketEvent::OpenInterestUpdated { open_interest } => {
                     println!(
                         "  OpenInterestUpdated — long: {}, short: {}",
-                        long_oi.perp(),
-                        short_oi.perp()
+                        open_interest.long.perp(),
+                        open_interest.short.perp()
                     );
                 }
                 MarketEvent::IndexUpdated { index } => {
