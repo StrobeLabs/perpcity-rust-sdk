@@ -15,11 +15,14 @@
 //! [`LDelta`] has no operators, only methods that can fail, and the
 //! difference from [`UsdcDelta`](super::UsdcDelta) is deliberate.
 
+use std::num::NonZeroUsize;
+
 use alloy::primitives::U256;
 
 use crate::errors::ValidationError;
 
-use super::count;
+use super::fixed_point::scale_i128_by_f64;
+use super::{Share, count};
 
 count! {
     /// Liquidity, in the pool's own units: what `makerDetails` stores for a
@@ -121,6 +124,32 @@ impl LDelta {
         LUnits::new(self.0.unsigned_abs())
     }
 
+    /// In `parts` equal pieces of the same sign that sum to exactly this,
+    /// the remainder's units going one each to the first.
+    pub fn split(self, parts: NonZeroUsize) -> Vec<Self> {
+        let sign = self.0.signum();
+        Share::split_u128(self.0.unsigned_abs(), parts)
+            .into_iter()
+            .map(|piece| Self(sign * piece as i128))
+            .collect()
+    }
+
+    /// In pieces of the same sign by `weights`, which sum to exactly this.
+    ///
+    /// # Errors
+    ///
+    /// [`ValidationError::InvalidShare`] when the weights do not sum to
+    /// [`Share::ONE`].
+    pub fn split_weighted(self, weights: &[Share]) -> Result<Vec<Self>, ValidationError> {
+        let sign = self.0.signum();
+        Share::split_weighted_u128(self.0.unsigned_abs(), weights).map(|pieces| {
+            pieces
+                .into_iter()
+                .map(|piece| Self(sign * piece as i128))
+                .collect()
+        })
+    }
+
     /// The change that undoes this one.
     ///
     /// # Errors
@@ -150,6 +179,38 @@ impl LDelta {
             .ok_or(ValidationError::Overflow {
                 context: context.into(),
             })
+    }
+}
+
+/// This much of it, the magnitude truncated toward zero so the result
+/// keeps the sign and never crosses zero.
+impl std::ops::Mul<Share> for LDelta {
+    type Output = Self;
+    fn mul(self, share: Share) -> Self {
+        Self(share.scale_i128(self.0))
+    }
+}
+
+impl std::ops::Mul<LDelta> for Share {
+    type Output = LDelta;
+    fn mul(self, delta: LDelta) -> LDelta {
+        delta * self
+    }
+}
+
+/// This much of it by a factor the strategy chose; a negative factor flips
+/// the sign. Panics on a factor that is not finite.
+impl std::ops::Mul<f64> for LDelta {
+    type Output = Self;
+    fn mul(self, factor: f64) -> Self {
+        Self(scale_i128_by_f64(self.0, factor))
+    }
+}
+
+impl std::ops::Mul<LDelta> for f64 {
+    type Output = LDelta;
+    fn mul(self, delta: LDelta) -> LDelta {
+        delta * self
     }
 }
 
@@ -222,6 +283,26 @@ mod tests {
             LUnits::new(u128::MAX)
                 .checked_add_signed(LDelta::new(1), "test")
                 .is_err()
+        );
+    }
+
+    /// A depth and its delta take a share the way the asset amounts do:
+    /// truncated toward zero, and a split returns every unit.
+    #[test]
+    fn liquidity_scales_and_splits_by_share() {
+        let half = Share::try_from(0.5).unwrap();
+        assert_eq!(LUnits::new(7) * half, LUnits::new(3));
+        assert_eq!(LDelta::new(-7) * half, LDelta::new(-3));
+        assert_eq!(LUnits::new(7) * 0.5, LUnits::new(3));
+        assert_eq!(LDelta::new(-7) * -0.5, LDelta::new(3));
+        let weights = Share::partition(&[1.0, 1.0]).unwrap();
+        assert_eq!(
+            LDelta::new(-7).split_weighted(&weights).unwrap(),
+            [LDelta::new(-4), LDelta::new(-3)]
+        );
+        assert_eq!(
+            LUnits::new(7).split(std::num::NonZeroUsize::new(2).unwrap()),
+            [LUnits::new(4), LUnits::new(3)]
         );
     }
 

@@ -7,7 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-The changes below break the public API, so the next release is 0.6.0 (a minor bump, as for any breaking change before 1.0).
+The changes below break the public API, so the next release is 0.7.0 (a minor bump, as for any breaking change before 1.0).
+
+### Breaking
+
+- **The exact trade parameters carry the units.** `ExactOpenTakerParams` is `{ margin: UsdcAtoms, perp_delta: PerpDelta, amt1_limit: UsdcAtoms }` and `ExactAdjustTakerParams` is `{ pos_id, margin_delta: UsdcDelta, perp_delta: PerpDelta, amt1_limit: UsdcAtoms }`, where every field was a bare `u128` or `i128`. The exact door exists so a market maker can size to the atom without a float on the path; with primitives on it, the one thing it could not tell you was which asset a figure was, and `TakerQuote::amt1_limit` has returned `UsdcAtoms` since 0.5.0 while the field that takes it did not. The human-unit parameters are unchanged.
+- **`OpenInterest` is the contract's pair of counts.** `{ long: PerpAtoms, short: PerpAtoms }`, with `on(Side)` and `total()`, where it was `{ long_oi: f64, short_oi: f64 }` — the read divided the contract's atoms into a float, and the one consumer that needed the atoms was multiplying back. Open interest is now in the unit the capacity it draws on is counted in, which closes the `client` node's debt that said so, and `PerpAtoms::value_at` is how it becomes dollars.
+- **`UsdcAtoms` → `UsdcDelta` and `PerpAtoms` → `PerpDelta` are `From`, not `TryFrom`.** Widening a count to its signed twin cannot fail for the reason the delta's `+` cannot: the supply bound keeps any count the chain produces far inside `i128`. The checked door was a door onto a case outside the type's domain, and every consumer wrapped it in an `expect`. The narrowings — a delta to a count — stay `TryFrom`, because a negative one is not a count. A `UsdcDelta::try_from(atoms)` still compiles through the blanket impl, with `Infallible` as its error.
+
+### Added
+
+- **`Share`: a fraction the caller chose, and the exact arithmetic of applying it.** `u32` millionths in `[0, 1]`, built from a fraction (`Share::try_from(0.25)`, rounded to the nearest millionth) or from millionths, serialised as the fraction a configuration writes. It is not a `Ratio` — both are millionths, but a `Ratio` is a word the contract stores with a `uint24` domain that exceeds one, and a `Share` is the caller's own, bounded by the whole — so a function that takes one does not take the other. Every count and delta multiplies by one with `*` — and by a plain `f64`, for the literal in a strategy's hand, converted once to WAD and exact from there; both truncate toward zero, the chain's division, in 256 bits — and gains `split(NonZeroUsize)` (equal pieces that sum exactly, the remainder's atoms to the first pieces) and `split_weighted(&[Share])` (largest-remainder, sums exactly, the weights must make the whole); the counts also gain `share_of(whole)`. `Share::partition(&[f64])` turns any weights into shares that sum to exactly `ONE`, so `[1.0, 1.0, 1.0]` is `[333_334, 333_333, 333_333]` rather than a `999_999` that leaves an atom unassigned on every split. `(x as f64 * frac) as u128`, which every strategy wrote for itself and each rounded its own way, now has one home.
+- **`ExactOpenMakerParams` and `PerpClient::open_maker_exact`.** The band as the pool stores it — a `TickRange`, an `LUnits`, the margin and the two deposit caps as the asset counts they are — with no float on the path. `open_maker` now aligns and scales into it and delegates, so the maker side has the single submission path the taker side had; a strategy that already holds a `TickRange` and an `LUnits` no longer converts both back to prices to place a band. The ticks' alignment to the pool's spacing is the one check left to the contract.
+- **`ValidationError::InvalidShare`**, for a share past the whole or weights that do not make one.
+
+## [0.6.0] - 2026-10-03
+
+Breaking throughout, so a minor bump, as for any breaking change before 1.0.
 
 ### Breaking
 

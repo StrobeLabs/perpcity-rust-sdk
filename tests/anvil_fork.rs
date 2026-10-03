@@ -286,7 +286,7 @@ async fn open_and_close_taker_on_fork() {
     println!("Daily funding rate: {funding}");
 
     let oi = client.market().get_open_interest().await.unwrap();
-    println!("OI — long: {}, short: {}", oi.long_oi, oi.short_oi);
+    println!("OI — long: {}, short: {}", oi.long.perp(), oi.short.perp());
 
     // 8. Open a long taker position (10 USDC margin, small perp size).
     //
@@ -531,7 +531,8 @@ async fn perp_snapshot_via_multicall() {
     println!("  funding_rate_daily: {}", snapshot.funding_rate_daily);
     println!(
         "  OI — long: {}, short: {}",
-        snapshot.open_interest.long_oi, snapshot.open_interest.short_oi
+        snapshot.open_interest.long.perp(),
+        snapshot.open_interest.short.perp()
     );
 
     // 5. Verify MarketConfig

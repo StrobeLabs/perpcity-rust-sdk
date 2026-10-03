@@ -5,14 +5,15 @@ use alloy::rpc::types::{Log as RpcLog, TransactionReceipt};
 use alloy::sol_types::SolEvent;
 use serde::{Deserialize, Serialize};
 
-use crate::constants::{MAX_TICK, MIN_OPENING_MARGIN, MIN_TICK, TICK_SPACING};
+use crate::constants::{MIN_OPENING_MARGIN, TICK_SPACING};
 use crate::contracts::{IERC20, Perp, Position};
 use crate::convert::{scale_from_6dec, scale_to_6dec, unpack_balance_delta};
 use crate::errors::{ContractError, Result, TransactionError, ValidationError};
 use crate::feeds::{MarketEvent, decode_log};
 use crate::hft::gas::{GasLimits, Urgency};
+use crate::math::range::TickRange;
 use crate::math::tick::{align_tick_down, align_tick_up, price_to_tick};
-use crate::units::{LDelta, LUnits, PerpDelta, UsdcDelta};
+use crate::units::{LDelta, LUnits, PerpAtoms, PerpDelta, UsdcAtoms, UsdcDelta};
 
 use super::market::{Book, validate_fee_recipient};
 use super::{MAX_APPROVAL, PerpClient, i32_to_i24};
@@ -34,15 +35,17 @@ pub struct OpenTakerParams {
     pub amt1_limit: u128,
 }
 
-/// Exact wire-unit parameters for latency-sensitive taker opens.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+/// A taker open in the chain's own units: the single submission path, with
+/// no float between the caller's figure and the wire.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ExactOpenTakerParams {
-    /// Margin in USDC atoms (six decimals).
-    pub margin: u128,
-    /// Signed perp atoms (six decimals).
-    pub perp_delta: i128,
-    /// Directional token1 limit produced by [`crate::TakerQuote::amt1_limit`].
-    pub amt1_limit: u128,
+    /// Margin to post; at least [`MIN_OPENING_MARGIN`] atoms.
+    pub margin: UsdcAtoms,
+    /// The exposure to take: positive long, negative short.
+    pub perp_delta: PerpDelta,
+    /// Directional USDC limit, as [`TakerQuote::amt1_limit`](crate::TakerQuote::amt1_limit)
+    /// produces it: the most to pay on a buy, the least to receive on a sell.
+    pub amt1_limit: UsdcAtoms,
 }
 
 /// Client-facing parameters for opening a maker (LP) position.
@@ -83,17 +86,36 @@ pub struct AdjustTakerParams {
     pub amt1_limit: u128,
 }
 
-/// Exact wire-unit parameters for latency-sensitive taker adjustments.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+/// A taker adjustment in the chain's own units: the single submission path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ExactAdjustTakerParams {
     /// Position NFT token ID.
     pub pos_id: U256,
-    /// Signed margin change in USDC atoms.
-    pub margin_delta: i128,
-    /// Signed perp atoms.
-    pub perp_delta: i128,
-    /// Directional token1 limit produced by [`crate::TakerQuote::amt1_limit`].
-    pub amt1_limit: u128,
+    /// Margin to deposit (positive) or withdraw (negative).
+    pub margin_delta: UsdcDelta,
+    /// The change in exposure; zero for a margin-only adjustment.
+    pub perp_delta: PerpDelta,
+    /// Directional USDC limit, as [`TakerQuote::amt1_limit`](crate::TakerQuote::amt1_limit)
+    /// produces it.
+    pub amt1_limit: UsdcAtoms,
+}
+
+/// A maker open in the chain's own units: the band as the ticks the pool
+/// stores, the depth to stand in it, and the deposit caps. The single
+/// submission path; [`OpenMakerParams`] is scaled and aligned into one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ExactOpenMakerParams {
+    /// Margin to post; at least [`MIN_OPENING_MARGIN`] atoms.
+    pub margin: UsdcAtoms,
+    /// The band. Its ticks must sit on the pool's spacing, which
+    /// [`TickRange`] does not enforce and the contract does.
+    pub range: TickRange,
+    /// The depth to stand in the band.
+    pub liquidity: LUnits,
+    /// The most of the market's token the open may deposit.
+    pub max_amt0_in: PerpAtoms,
+    /// The most USDC the open may deposit.
+    pub max_amt1_in: UsdcAtoms,
 }
 
 /// Client-facing parameters for adjusting a maker (LP) position.
@@ -226,9 +248,19 @@ fn adjust_taker_result(receipt: &TransactionReceipt) -> Result<AdjustTakerResult
 }
 
 /// The perp delta that closes a position: its on-chain perp amount, reversed.
-fn closing_perp_delta(position: &Position) -> i128 {
+fn closing_perp_delta(position: &Position) -> PerpDelta {
     let (perp_atoms, _usd_atoms) = unpack_balance_delta(position.delta);
-    -perp_atoms
+    PerpDelta::new(-perp_atoms)
+}
+
+/// Refuse a margin below the protocol's opening minimum.
+fn check_opening_margin(margin: UsdcAtoms) -> std::result::Result<(), ValidationError> {
+    if margin.atoms() < u128::from(MIN_OPENING_MARGIN) {
+        return Err(ValidationError::InvalidMargin {
+            reason: format!("margin must be at least {MIN_OPENING_MARGIN} atoms"),
+        });
+    }
+    Ok(())
 }
 
 /// Whether these logs carry the `TakerClosed` event for `pos_id`.
@@ -248,7 +280,7 @@ fn closes_taker(logs: &[RpcLog], pos_id: U256) -> bool {
 ///
 /// Checks the scaled margin parameter against [`MIN_OPENING_MARGIN`] and returns
 /// [`ValidationError::InvalidMargin`] when it is below the protocol minimum.
-fn scale_opening_margin(margin: f64) -> std::result::Result<i128, ValidationError> {
+fn scale_opening_margin(margin: f64) -> std::result::Result<UsdcAtoms, ValidationError> {
     let scaled = scale_to_6dec(margin)?;
     if scaled < i128::from(MIN_OPENING_MARGIN) {
         let minimum = scale_from_6dec(i128::from(MIN_OPENING_MARGIN));
@@ -256,7 +288,8 @@ fn scale_opening_margin(margin: f64) -> std::result::Result<i128, ValidationErro
             reason: format!("margin must be at least {minimum} USDC, got {margin}"),
         });
     }
-    Ok(scaled)
+    // At least the minimum, so the cast to unsigned cannot wrap.
+    Ok(UsdcAtoms::new(scaled as u128))
 }
 
 impl PerpClient {
@@ -273,13 +306,11 @@ impl PerpClient {
         urgency: Urgency,
     ) -> Result<OpenResult> {
         let exact = ExactOpenTakerParams {
-            // scale_opening_margin returns >= MIN_OPENING_MARGIN, so the cast
-            // to unsigned cannot wrap.
-            margin: scale_opening_margin(params.margin)? as u128,
+            margin: scale_opening_margin(params.margin)?,
             // The perp token (V4 `currency0`) is an AccountingToken with 6
             // decimals — the same scaling as USD margin, not 1e18.
-            perp_delta: scale_to_6dec(params.perp_delta)?,
-            amt1_limit: params.amt1_limit,
+            perp_delta: PerpDelta::try_from(params.perp_delta)?,
+            amt1_limit: UsdcAtoms::new(params.amt1_limit),
         };
         self.open_taker_exact(&exact, urgency).await
     }
@@ -290,23 +321,18 @@ impl PerpClient {
         params: &ExactOpenTakerParams,
         urgency: Urgency,
     ) -> Result<OpenResult> {
-        if params.margin < u128::from(MIN_OPENING_MARGIN) {
-            return Err(ValidationError::InvalidMargin {
-                reason: format!("margin must be at least {MIN_OPENING_MARGIN} atoms"),
-            }
-            .into());
-        }
+        check_opening_margin(params.margin)?;
         let wire_params = crate::contracts::OpenTakerParams {
             holder: self.address,
-            margin: params.margin,
-            perpDelta: I256::try_from(params.perp_delta).expect("i128 fits I256"),
-            amt1Limit: U256::from(params.amt1_limit),
+            margin: params.margin.atoms(),
+            perpDelta: I256::try_from(params.perp_delta.atoms()).expect("i128 fits I256"),
+            amt1Limit: U256::from(params.amt1_limit.atoms()),
         };
         let contract = Perp::new(self.market.perp(), self.chain().provider());
 
         tracing::debug!(
-            margin_atoms = params.margin,
-            perp_delta_atoms = params.perp_delta,
+            margin_atoms = params.margin.atoms(),
+            perp_delta_atoms = params.perp_delta.atoms(),
             ?urgency,
             "opening taker position"
         );
@@ -338,40 +364,49 @@ impl PerpClient {
 
     /// Open a maker (LP) position within a price range.
     ///
-    /// Converts `price_lower`/`price_upper` to aligned ticks internally.
-    /// Returns an [`OpenResult`] with the transaction hash and position ID.
+    /// Scales the margin and widens the prices to the ticks on the pool's
+    /// spacing that enclose them, then delegates to
+    /// [`Self::open_maker_exact`], which is the single submission path.
     pub async fn open_maker(
         &self,
         params: &OpenMakerParams,
         urgency: Urgency,
     ) -> Result<OpenResult> {
-        let margin_scaled = scale_opening_margin(params.margin)?;
-
         let tick_lower = align_tick_down(price_to_tick(params.price_lower)?, TICK_SPACING);
         let tick_upper = align_tick_up(price_to_tick(params.price_upper)?, TICK_SPACING);
+        let exact = ExactOpenMakerParams {
+            margin: scale_opening_margin(params.margin)?,
+            range: TickRange::new(tick_lower, tick_upper)?,
+            liquidity: params.liquidity,
+            max_amt0_in: PerpAtoms::new(params.max_amt0_in),
+            max_amt1_in: UsdcAtoms::new(params.max_amt1_in),
+        };
+        self.open_maker_exact(&exact, urgency).await
+    }
 
-        if tick_lower < MIN_TICK || tick_upper > MAX_TICK || tick_lower >= tick_upper {
-            return Err(ValidationError::InvalidTickRange {
-                lower: tick_lower,
-                upper: tick_upper,
-            }
-            .into());
-        }
-
+    /// Open a maker position on a band already expressed as the pool's
+    /// ticks, without converting through floating point.
+    pub async fn open_maker_exact(
+        &self,
+        params: &ExactOpenMakerParams,
+        urgency: Urgency,
+    ) -> Result<OpenResult> {
+        check_opening_margin(params.margin)?;
         let wire_params = crate::contracts::OpenMakerParams {
             holder: self.address,
-            margin: margin_scaled as u128,
-            tickLower: i32_to_i24(tick_lower),
-            tickUpper: i32_to_i24(tick_upper),
+            margin: params.margin.atoms(),
+            tickLower: i32_to_i24(params.range.lower()),
+            tickUpper: i32_to_i24(params.range.upper()),
             liquidity: params.liquidity.units(),
-            maxAmt0In: U256::from(params.max_amt0_in),
-            maxAmt1In: U256::from(params.max_amt1_in),
+            maxAmt0In: U256::from(params.max_amt0_in.atoms()),
+            maxAmt1In: U256::from(params.max_amt1_in.atoms()),
         };
 
         tracing::debug!(
-            margin = params.margin,
-            tick_lower,
-            tick_upper,
+            margin_atoms = params.margin.atoms(),
+            tick_lower = params.range.lower(),
+            tick_upper = params.range.upper(),
+            liquidity = params.liquidity.units(),
             ?urgency,
             "opening maker position"
         );
@@ -410,9 +445,9 @@ impl PerpClient {
     ) -> Result<AdjustTakerResult> {
         let exact = ExactAdjustTakerParams {
             pos_id: params.pos_id,
-            margin_delta: scale_to_6dec(params.margin_delta)?,
-            perp_delta: scale_to_6dec(params.perp_delta)?,
-            amt1_limit: params.amt1_limit,
+            margin_delta: UsdcDelta::try_from(params.margin_delta)?,
+            perp_delta: PerpDelta::try_from(params.perp_delta)?,
+            amt1_limit: UsdcAtoms::new(params.amt1_limit),
         };
         self.adjust_taker_exact(&exact, urgency).await
     }
@@ -435,16 +470,16 @@ impl PerpClient {
     ) -> Result<TransactionReceipt> {
         let wire_params = crate::contracts::AdjustTakerParams {
             posId: params.pos_id,
-            marginDelta: params.margin_delta,
-            perpDelta: I256::try_from(params.perp_delta).expect("i128 fits I256"),
-            amt1Limit: U256::from(params.amt1_limit),
+            marginDelta: params.margin_delta.atoms(),
+            perpDelta: I256::try_from(params.perp_delta.atoms()).expect("i128 fits I256"),
+            amt1Limit: U256::from(params.amt1_limit.atoms()),
         };
         let contract = Perp::new(self.market.perp(), self.chain().provider());
 
         tracing::debug!(
             pos_id = %params.pos_id,
-            margin_delta_atoms = params.margin_delta,
-            perp_delta_atoms = params.perp_delta,
+            margin_delta_atoms = params.margin_delta.atoms(),
+            perp_delta_atoms = params.perp_delta.atoms(),
             ?urgency,
             "adjusting taker position"
         );
@@ -487,9 +522,11 @@ impl PerpClient {
         let perp_delta = closing_perp_delta(&position);
         let params = ExactAdjustTakerParams {
             pos_id,
-            margin_delta: 0,
+            margin_delta: UsdcDelta::ZERO,
             perp_delta,
-            amt1_limit: if perp_delta > 0 { u128::MAX } else { 0 },
+            // Buying back a short pays USDC and takes no cap; selling off a
+            // long receives it and accepts any amount.
+            amt1_limit: UsdcAtoms::new(if perp_delta.atoms() > 0 { u128::MAX } else { 0 }),
         };
         let receipt = self.send_adjust_taker(&params, urgency).await?;
         if !closes_taker(receipt.inner.logs(), pos_id) {
@@ -852,8 +889,8 @@ mod tests {
     use alloy::primitives::{Address, B256, I256, U256, Uint};
 
     use super::{
-        AdjustTakerResult, OpenResult, PerpDelta, UsdcDelta, closes_taker, closing_perp_delta,
-        scale_opening_margin,
+        AdjustTakerResult, OpenResult, PerpDelta, UsdcAtoms, UsdcDelta, closes_taker,
+        closing_perp_delta, scale_opening_margin,
     };
     use crate::constants::Q96;
     use crate::contracts::{Perp, Position, SwapResult};
@@ -932,14 +969,17 @@ mod tests {
     fn the_closing_delta_reverses_the_perp_amount_to_the_atom() {
         assert_eq!(
             closing_perp_delta(&position(85_908_380, -3_998_080_483)),
-            -85_908_380
+            PerpDelta::new(-85_908_380)
         );
         assert_eq!(
             closing_perp_delta(&position(-12_020_548, 797_292_655)),
-            12_020_548
+            PerpDelta::new(12_020_548)
         );
         // What an f64 close one atom long leaves behind: one atom short.
-        assert_eq!(closing_perp_delta(&position(-1, -1_393_793)), 1);
+        assert_eq!(
+            closing_perp_delta(&position(-1, -1_393_793)),
+            PerpDelta::new(1)
+        );
     }
 
     /// A close is only a close when the contract says `TakerClosed` for
@@ -961,7 +1001,13 @@ mod tests {
     #[test]
     fn opening_margin_enforces_protocol_minimum() {
         assert!(scale_opening_margin(4.999_999).is_err());
-        assert_eq!(scale_opening_margin(5.0).unwrap(), 5_000_000);
-        assert_eq!(scale_opening_margin(5.000_001).unwrap(), 5_000_001);
+        assert_eq!(
+            scale_opening_margin(5.0).unwrap(),
+            UsdcAtoms::new(5_000_000)
+        );
+        assert_eq!(
+            scale_opening_margin(5.000_001).unwrap(),
+            UsdcAtoms::new(5_000_001)
+        );
     }
 }

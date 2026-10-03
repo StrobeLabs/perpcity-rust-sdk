@@ -222,16 +222,16 @@ impl TryFrom<U256> for UsdcAtoms {
     }
 }
 
-impl TryFrom<UsdcAtoms> for UsdcDelta {
-    type Error = ValidationError;
-
-    /// A count as a signed count.
-    fn try_from(atoms: UsdcAtoms) -> Result<Self, Self::Error> {
-        i128::try_from(atoms.atoms())
-            .map(Self::new)
-            .map_err(|_| ValidationError::Overflow {
-                context: format!("USDC {} exceeds int128", atoms.atoms()),
-            })
+/// A count as a signed count. Infallible for the reason the delta's
+/// operators are: the supply bound keeps any count the chain produces far
+/// inside `i128`, so a count past it is outside the type's domain already.
+impl From<UsdcAtoms> for UsdcDelta {
+    fn from(atoms: UsdcAtoms) -> Self {
+        debug_assert!(
+            i128::try_from(atoms.atoms()).is_ok(),
+            "USDC count past int128"
+        );
+        Self::new(atoms.atoms() as i128)
     }
 }
 
@@ -248,22 +248,22 @@ impl TryFrom<UsdcDelta> for UsdcAtoms {
     }
 }
 
-impl TryFrom<PerpAtoms> for PerpDelta {
-    type Error = ValidationError;
-
-    /// A count as a signed exposure.
-    fn try_from(atoms: PerpAtoms) -> Result<Self, Self::Error> {
-        i128::try_from(atoms.atoms())
-            .map(Self::new)
-            .map_err(|_| ValidationError::Overflow {
-                context: format!("perp {} exceeds int128", atoms.atoms()),
-            })
+/// A count as a long exposure, for the reason the USDC widening is
+/// infallible.
+impl From<PerpAtoms> for PerpDelta {
+    fn from(atoms: PerpAtoms) -> Self {
+        debug_assert!(
+            i128::try_from(atoms.atoms()).is_ok(),
+            "perp count past int128"
+        );
+        Self::new(atoms.atoms() as i128)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::units::Share;
 
     /// The two assets' counts add with an operator and sum from an
     /// iterator, because the protocol bounds what a sum of balances can
@@ -324,6 +324,13 @@ mod tests {
         assert_eq!(UsdcDelta::try_from(-1.1234567).unwrap().atoms(), -1_123_457);
     }
 
+    /// A factor a count cannot take is a bug and says so.
+    #[test]
+    #[should_panic(expected = "finite non-negative factor")]
+    fn a_count_refuses_a_negative_factor() {
+        let _ = UsdcAtoms::new(1) * -0.5;
+    }
+
     /// A count cannot be negative, and the refusal names the amount.
     #[test]
     fn a_negative_amount_is_not_a_count() {
@@ -371,6 +378,61 @@ mod tests {
         assert_eq!(-b, UsdcDelta::new(10));
         assert_eq!([a, b].into_iter().sum::<UsdcDelta>(), UsdcDelta::new(-3));
         assert_eq!(b.magnitude(), UsdcAtoms::new(10));
+    }
+
+    /// A count widens to its delta without a door to fail at, and narrows
+    /// back only when it is not negative.
+    #[test]
+    fn a_count_widens_freely_and_narrows_checked() {
+        assert_eq!(UsdcDelta::from(UsdcAtoms::new(5)), UsdcDelta::new(5));
+        assert_eq!(PerpDelta::from(PerpAtoms::new(5)), PerpDelta::new(5));
+        assert_eq!(
+            UsdcAtoms::try_from(UsdcDelta::new(5)).unwrap(),
+            UsdcAtoms::new(5)
+        );
+        assert!(UsdcAtoms::try_from(UsdcDelta::new(-5)).is_err());
+    }
+
+    /// An amount multiplies by a share or by a plain factor, once and in
+    /// one direction: truncated toward zero on either sign. A split returns
+    /// every atom.
+    #[test]
+    fn an_amount_scales_and_splits_by_share() {
+        let third = Share::from_e6(333_333).unwrap();
+        assert_eq!(UsdcAtoms::new(10) * third, UsdcAtoms::new(3));
+        assert_eq!(third * UsdcAtoms::new(10), UsdcAtoms::new(3));
+        assert_eq!(UsdcDelta::new(-10) * third, UsdcDelta::new(-3));
+        // The float path: a strategy's literal, converted once and exact
+        // from there. A leverage is a factor past one; a negative factor on
+        // a delta flips its side.
+        assert_eq!(
+            UsdcAtoms::new(100_000_000) * 5.0,
+            UsdcAtoms::new(500_000_000)
+        );
+        assert_eq!(0.5 * UsdcAtoms::new(7), UsdcAtoms::new(3));
+        assert_eq!(PerpDelta::new(7) * -0.5, PerpDelta::new(-3));
+        assert_eq!(
+            UsdcAtoms::new(3) * 0.1,
+            UsdcAtoms::ZERO,
+            "truncated, not rounded"
+        );
+        assert_eq!(
+            UsdcAtoms::new(1).share_of(UsdcAtoms::new(4)),
+            Some(Share::try_from(0.25).unwrap())
+        );
+
+        let three = std::num::NonZeroUsize::new(3).unwrap();
+        assert_eq!(
+            PerpDelta::new(-10).split(three),
+            [PerpDelta::new(-4), PerpDelta::new(-3), PerpDelta::new(-3)]
+        );
+        let weights = Share::partition(&[3.0, 1.0]).unwrap();
+        let pieces = UsdcAtoms::new(1_000_001).split_weighted(&weights).unwrap();
+        assert_eq!(
+            pieces.iter().copied().sum::<UsdcAtoms>(),
+            UsdcAtoms::new(1_000_001)
+        );
+        assert_eq!(pieces, [UsdcAtoms::new(750_001), UsdcAtoms::new(250_000)]);
     }
 
     /// The wire form is the bare number, so a value that was persisted or

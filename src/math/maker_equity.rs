@@ -911,7 +911,7 @@ mod tests {
         // fee leg alone must not flip it.
         let value = b.position_value();
         let healthy = MakerEquityBreakdown {
-            margin: UsdcDelta::try_from(value).unwrap(),
+            margin: UsdcDelta::from(value),
             funding_owed: UsdcDelta::ZERO,
             long_util_earnings: UsdcDelta::ZERO,
             short_util_earnings: UsdcDelta::ZERO,

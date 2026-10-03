@@ -20,17 +20,18 @@ use alloy::primitives::{Address, B256, U256};
 use alloy::providers::MulticallError;
 use serde::{Deserialize, Serialize};
 
-use crate::contracts::{IFees, IMarginRatios, Perp, Position};
+use crate::contracts::{self, IFees, IMarginRatios, Perp, Position};
 use crate::convert::{price_x96_to_f64, scale_from_6dec};
 use crate::errors::{ContractError, PerpCityError, Result, ValidationError};
 use crate::hft::state_cache::{CachedBounds, CachedFees};
 use crate::math::BlockContext;
+use crate::math::capacity::Side;
 use crate::math::pricing::{Emas, Mark, PricePair};
-use crate::units::{Price, Ratio};
+use crate::units::{PerpAtoms, Price, Ratio};
 
 use super::market::MarketReader;
 use super::state::{ema_window_secs, pinned_read_error};
-use super::{PerpClient, SCALE_F64, i24_to_i32, now_secs, u24_to_u32};
+use super::{PerpClient, i24_to_i32, now_secs, u24_to_u32};
 
 /// Funding/utilization rates are scaled by 1e18 per day on-chain.
 const WAD_F64: f64 = 1e18;
@@ -94,14 +95,39 @@ pub struct Fees {
     pub liquidation_fee: Ratio,
 }
 
-/// Taker open interest for a perp market, in perp tokens (multiply by the
-/// mark price for USD). The contract accumulates `|perp_delta|` per side.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+/// Taker open interest, per side, as the contract accumulates it: the sum
+/// of `|perp_delta|` over the open positions on that side, in perp atoms.
+/// [`PerpAtoms::value_at`] prices it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct OpenInterest {
-    /// Total long open interest in perp tokens.
-    pub long_oi: f64,
-    /// Total short open interest in perp tokens.
-    pub short_oi: f64,
+    /// Open interest held long.
+    pub long: PerpAtoms,
+    /// Open interest held short.
+    pub short: PerpAtoms,
+}
+
+impl OpenInterest {
+    /// The open interest on one side.
+    pub fn on(&self, side: Side) -> PerpAtoms {
+        match side {
+            Side::Long => self.long,
+            Side::Short => self.short,
+        }
+    }
+
+    /// Both sides together: the market's gross taker exposure.
+    pub fn total(&self) -> PerpAtoms {
+        self.long + self.short
+    }
+}
+
+impl From<contracts::OpenInterest> for OpenInterest {
+    fn from(oi: contracts::OpenInterest) -> Self {
+        Self {
+            long: PerpAtoms::new(oi.long),
+            short: PerpAtoms::new(oi.short),
+        }
+    }
 }
 
 /// The market's live state at the lagged snapshot block, in human units.
@@ -373,19 +399,14 @@ impl MarketReader {
         Ok(price)
     }
 
-    /// Get taker open interest for the market, in perp tokens.
+    /// Get taker open interest for the market.
     ///
-    /// Reads the latest block. For open interest in atoms at a known
-    /// block, next to the capacity it draws on, use
+    /// Reads the latest block. For open interest at a known block, next to
+    /// the capacity it draws on, use
     /// [`StateAt::capacity`](super::StateAt::capacity).
     pub async fn get_open_interest(&self) -> Result<OpenInterest> {
         let perp = Perp::new(self.perp, self.chain.provider());
-        let oi = perp.openInterest().call().await?;
-
-        Ok(OpenInterest {
-            long_oi: oi.long as f64 / SCALE_F64,
-            short_oi: oi.short as f64 / SCALE_F64,
-        })
+        Ok(perp.openInterest().call().await?.into())
     }
 
     /// Get the current daily funding rate for the market.
@@ -462,10 +483,7 @@ impl MarketReader {
 
         let pool_price = price_x96_to_f64(pool_state.ammPrice)?;
         let funding_rate_daily = funding_per_day_to_f64(rates.fundingPerDay);
-        let open_interest = OpenInterest {
-            long_oi: oi.long as f64 / SCALE_F64,
-            short_oi: oi.short as f64 / SCALE_F64,
-        };
+        let open_interest = OpenInterest::from(oi);
 
         let beacon = registered_module(modules.beacon, "IBeacon")?;
         let index_x96 = self
@@ -882,12 +900,17 @@ mod tests {
 
     /// Open interest is stored in perp atoms (six decimals).
     #[tokio::test]
-    async fn open_interest_scales_atoms_to_perp_tokens() {
+    async fn open_interest_is_the_contracts_pair_of_counts() {
         let (client, rpc) = mock::client();
         rpc.call::<Perp::openInterestCall>(&mock::open_interest(1_500_000, 250_000));
 
         let oi = client.market().get_open_interest().await.unwrap();
-        assert_eq!((oi.long_oi, oi.short_oi), (1.5, 0.25));
+        assert_eq!(
+            (oi.long, oi.short),
+            (PerpAtoms::new(1_500_000), PerpAtoms::new(250_000))
+        );
+        assert_eq!(oi.on(Side::Short), oi.short);
+        assert_eq!(oi.total(), PerpAtoms::new(1_750_000));
         assert!(rpc.is_drained());
     }
 
@@ -1218,8 +1241,8 @@ mod tests {
                 },
                 funding_rate_daily: -0.005,
                 open_interest: OpenInterest {
-                    long_oi: 1.5,
-                    short_oi: 0.25,
+                    long: PerpAtoms::new(1_500_000),
+                    short: PerpAtoms::new(250_000),
                 },
             }
         );

@@ -57,10 +57,11 @@ pub use client::{
     ARBITRUM_CHAIN_ID, ARBITRUM_POOL_MANAGER, ARBITRUM_SEPOLIA_CHAIN_ID,
     ARBITRUM_SEPOLIA_PERP_FACTORY, ARBITRUM_SEPOLIA_POOL_MANAGER, ARBITRUM_SEPOLIA_USDC,
     ARBITRUM_USDC, AdjustMakerParams, AdjustMakerResult, AdjustTakerParams, AdjustTakerResult,
-    Bounds, ChainDeployments, ChainReader, ExactAdjustTakerParams, ExactOpenTakerParams, Fees,
-    MAX_ROW_BATCH, MakerEquityKind, MakerEquityOutcome, MarginRatioTriple, MarginRatios,
-    MarketConfig, MarketReader, MarketSnapshot, OpenInterest, OpenMakerParams, OpenResult,
-    OpenTakerParams, PerpClient, RowOutcome, SolvencyState, StateAt, TxBuilder,
+    Bounds, ChainDeployments, ChainReader, ExactAdjustTakerParams, ExactOpenMakerParams,
+    ExactOpenTakerParams, Fees, MAX_ROW_BATCH, MakerEquityKind, MakerEquityOutcome,
+    MarginRatioTriple, MarginRatios, MarketConfig, MarketReader, MarketSnapshot, OpenInterest,
+    OpenMakerParams, OpenResult, OpenTakerParams, PerpClient, RowOutcome, SolvencyState, StateAt,
+    TxBuilder,
 };
 
 #[doc(inline)]
@@ -88,7 +89,7 @@ pub use transport::{config::TransportConfig, provider::HftTransport};
 #[doc(inline)]
 pub use units::{
     Earnings, FeeGrowth, Funding, FundingPerSqrtPrice, FundingRate, LDelta, LUnits, PerpAtoms,
-    PerpDelta, Price, Ratio, SqrtPrice, UsdcAtoms, UsdcDelta, UtilizationRate,
+    PerpDelta, Price, Ratio, Share, SqrtPrice, UsdcAtoms, UsdcDelta, UtilizationRate,
 };
 
 #[doc(inline)]
