@@ -119,6 +119,11 @@ where
 /// # Ok::<(), perpcity_sdk::ValidationError>(())
 /// ```
 pub fn leverage_to_margin_ratio(leverage: f64) -> Result<Ratio, ValidationError> {
+    if !leverage.is_finite() || leverage <= 0.0 {
+        return Err(ValidationError::InvalidLeverage {
+            reason: format!("leverage must be a positive finite number, got {leverage}"),
+        });
+    }
     Ratio::for_leverage(leverage)
 }
 

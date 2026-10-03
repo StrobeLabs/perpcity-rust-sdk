@@ -14,16 +14,28 @@
 //! by a million, so the integer is exact and the fraction a person reads is
 //! the derived view — the same shape as an amount and its dollars.
 
+use std::time::Duration;
+
+use alloy::primitives::U256;
+
+use crate::constants::WAD;
 use crate::errors::ValidationError;
 
-use super::F64_1E6;
+use super::{BIGINT_1E6, F64_1E6, F64_WAD, Factor, UsdcAtoms, UsdcDelta};
 
 /// The largest value a `uint24` holds, which is the domain of every ratio
 /// the margin and fee modules store.
 const MAX_E6: u32 = (1 << 24) - 1;
 
-/// WAD as `f64`, for the human view of a rate.
-const F64_WAD: f64 = 1e18;
+/// Seconds in the day a rate is quoted per.
+const SECS_PER_DAY: u64 = 86_400;
+
+/// `notional` at a per-day WAD rate over `elapsed`, truncated toward zero.
+fn accrued(wad: u128, elapsed: Duration, notional: UsdcAtoms) -> u128 {
+    let atoms = U256::from(notional.atoms()) * U256::from(wad) * U256::from(elapsed.as_secs())
+        / (WAD * U256::from(SECS_PER_DAY));
+    u128::try_from(atoms).expect("an accrual on a bounded notional fits u128")
+}
 
 /// The funding rate, per day, WAD encoded.
 ///
@@ -118,6 +130,21 @@ impl FundingRate {
     pub fn per_day(self) -> f64 {
         self.0 as f64 / F64_WAD
     }
+
+    /// What `notional` pays at this rate over `elapsed`: positive when a
+    /// long pays, as the rate is. Whole seconds, as the contract accrues;
+    /// truncated toward zero.
+    pub fn over(self, elapsed: Duration, notional: UsdcAtoms) -> UsdcDelta {
+        let magnitude = UsdcDelta::new(
+            i128::try_from(accrued(self.0.unsigned_abs(), elapsed, notional))
+                .expect("an accrual on a bounded notional fits i128"),
+        );
+        if self.is_negative() {
+            -magnitude
+        } else {
+            magnitude
+        }
+    }
 }
 
 impl UtilizationRate {
@@ -144,6 +171,12 @@ impl UtilizationRate {
     /// Lossy, and never arithmetic the chain will check.
     pub fn per_day(self) -> f64 {
         self.0 as f64 / F64_WAD
+    }
+
+    /// What `notional` is charged at this rate over `elapsed`. Whole
+    /// seconds, as the contract accrues; truncated toward zero.
+    pub fn over(self, elapsed: Duration, notional: UsdcAtoms) -> UsdcAtoms {
+        UsdcAtoms::new(accrued(u128::from(self.0), elapsed, notional))
     }
 }
 
@@ -191,26 +224,30 @@ impl Ratio {
     }
 
     /// The initial margin ratio that permits `leverage`, which is its
-    /// reciprocal: `1_000_000 / leverage`.
+    /// reciprocal: `1_000_000 / leverage`, to the nearest millionth. Takes
+    /// any [`Factor`] — a plain `5.0`, a [`Share`](super::Share), or the strategy's own
+    /// leverage type.
     ///
     /// # Errors
     ///
-    /// [`ValidationError::InvalidLeverage`] when `leverage` is not a positive
-    /// finite number or its reciprocal falls outside the ratio's domain.
-    pub fn for_leverage(leverage: f64) -> Result<Self, ValidationError> {
+    /// [`ValidationError::InvalidLeverage`] when `leverage` is zero or
+    /// negative, or its reciprocal falls outside the ratio's domain.
+    pub fn for_leverage(leverage: impl Factor) -> Result<Self, ValidationError> {
         let invalid = |reason: String| ValidationError::InvalidLeverage { reason };
-        if !leverage.is_finite() || leverage <= 0.0 {
+        if leverage.is_negative() {
+            return Err(invalid("leverage must be positive".into()));
+        }
+        let wad = leverage.wad();
+        if wad.is_zero() {
+            return Err(invalid("leverage must be positive".into()));
+        }
+        let e6 = (BIGINT_1E6 * WAD + wad / U256::from(2)) / wad;
+        if e6.is_zero() || e6 > U256::from(MAX_E6) {
             return Err(invalid(format!(
-                "leverage must be a positive finite number, got {leverage}"
+                "a leverage of {wad} WAD implies a margin ratio of {e6} millionths, outside the contract's range"
             )));
         }
-        let e6 = (F64_1E6 / leverage).round();
-        if e6 < 1.0 || e6 > f64::from(MAX_E6) {
-            return Err(invalid(format!(
-                "leverage {leverage} implies a margin ratio of {e6}, outside the contract's range"
-            )));
-        }
-        Self::from_e6(e6 as u32)
+        Self::from_e6(e6.to())
     }
 
     /// The leverage this ratio permits, its reciprocal.
@@ -264,6 +301,7 @@ impl TryFrom<f64> for Ratio {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::units::Share;
 
     /// A ratio is the contract's integer, and the fraction a person reads
     /// round-trips back to it exactly.
@@ -312,12 +350,43 @@ mod tests {
 
     /// A leverage the contract could not store is refused rather than
     /// clamped: zero and below have no ratio, and 1e12 would round the
-    /// ratio to nothing.
+    /// ratio to nothing. A float that is not a number panics here as it
+    /// does on every factor; the human door in `convert` refuses it.
     #[test]
     fn a_leverage_outside_the_domain_is_refused() {
-        for bad in [0.0, -5.0, f64::NAN, f64::INFINITY, 1e12] {
+        for bad in [0.0, -5.0, 1e12] {
             assert!(Ratio::for_leverage(bad).is_err(), "{bad}");
         }
+        assert!(
+            Ratio::for_leverage(Share::ONE).is_ok(),
+            "a factor type is a leverage too"
+        );
+    }
+
+    /// A rate over an interval on a notional is the payment, truncated to
+    /// the atom, with the rate's own sign.
+    #[test]
+    fn a_rate_accrues_over_an_interval() {
+        // 1% per day on 1_000 USDC for half a day is 5 USDC.
+        let rate = FundingRate::from_wad(10_000_000_000_000_000);
+        let notional = UsdcAtoms::new(1_000_000_000);
+        let half_day = Duration::from_secs(43_200);
+        assert_eq!(rate.over(half_day, notional), UsdcDelta::new(5_000_000));
+        assert_eq!(
+            FundingRate::from_wad(-10_000_000_000_000_000).over(half_day, notional),
+            UsdcDelta::new(-5_000_000),
+            "shorts paying is the negative"
+        );
+        assert_eq!(
+            UtilizationRate::from_wad(10_000_000_000_000_000).over(half_day, notional),
+            UsdcAtoms::new(5_000_000)
+        );
+        assert_eq!(rate.over(Duration::ZERO, notional), UsdcDelta::ZERO);
+        // Sub-atom accruals truncate rather than round up.
+        assert_eq!(
+            rate.over(Duration::from_secs(1), UsdcAtoms::new(1)),
+            UsdcDelta::ZERO
+        );
     }
 
     /// The funding rate carries its direction; a utilization rate has none

@@ -9,10 +9,10 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::constants::{MAX_TICK, MIN_TICK};
+use crate::constants::{MAX_TICK, MIN_TICK, Q96, TICK_SPACING};
 use crate::errors::ValidationError;
-use crate::math::tick::get_sqrt_ratio_at_tick;
-use crate::units::{LUnits, SqrtPrice};
+use crate::math::tick::{align_tick_down, align_tick_up, get_sqrt_ratio_at_tick};
+use crate::units::{LUnits, Price, SqrtPrice};
 
 /// A tick interval `[lower, upper)`, valid by construction: `lower <
 /// upper`, both within the V4 domain `[MIN_TICK, MAX_TICK]`.
@@ -39,6 +39,31 @@ impl TickRange {
             return Err(ValidationError::InvalidTickRange { lower, upper });
         }
         Ok(Self { lower, upper })
+    }
+
+    /// The narrowest range on the pool's spacing that encloses
+    /// `[lower, upper]`: the lower price's tick aligned down, the upper's
+    /// aligned up. Two prices a strategy computed — a landing zone either
+    /// side of the index, a corridor around the mark — become the band the
+    /// pool will accept.
+    ///
+    /// # Errors
+    ///
+    /// [`ValidationError::InvalidPrice`] when a price has no tick in the
+    /// pool's domain, and [`ValidationError::InvalidTickRange`] when the
+    /// aligned ticks do not make a range.
+    pub fn between(lower: Price, upper: Price) -> Result<Self, ValidationError> {
+        Self::new(
+            align_tick_down(lower.tick()?, TICK_SPACING),
+            align_tick_up(upper.tick()?, TICK_SPACING),
+        )
+    }
+
+    /// The range's geometric centre, `√(P_lo · P_hi)`: the price at which
+    /// a band's two legs are worth the same, exact in Q96.
+    pub fn geomean(&self) -> Price {
+        let (lo, hi) = self.sqrt_bounds();
+        Price::from_x96(lo.x96() * hi.x96() / Q96)
     }
 
     /// Lower tick bound.
@@ -129,6 +154,41 @@ impl MakerBand {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::units::Share;
+
+    /// Two prices become the narrowest band on the spacing that holds
+    /// them, and the band's centre is the geometric mean of its ends.
+    #[test]
+    fn a_range_is_built_between_two_prices() {
+        let index = Price::at_tick(46_035).unwrap();
+        let zone = Share::try_from(0.01).unwrap();
+        let built = TickRange::between(
+            index * (1.0 - zone.fraction()),
+            index * (1.0 + zone.fraction()),
+        )
+        .unwrap();
+        assert_eq!(built.lower() % TICK_SPACING, 0);
+        assert_eq!(built.upper() % TICK_SPACING, 0);
+        assert!(
+            built.contains(46_035),
+            "{built:?} does not hold the index's tick"
+        );
+        // One percent each way is about 100 ticks each way, then widened to
+        // the spacing: 200 to 260 ticks.
+        assert!((200..=260).contains(&built.width()), "{built:?}");
+        // A price with itself is the one tick on the spacing that holds it.
+        assert_eq!(
+            TickRange::between(index, index).unwrap().width(),
+            TICK_SPACING
+        );
+
+        // Prices are a geometric progression in the tick, so the geometric
+        // mean of a band's ends is the price at its middle tick.
+        let band = range(46_020, 46_080);
+        let centre = band.geomean() / Price::at_tick(46_050).unwrap();
+        assert!((centre - 1.0).abs() < 1e-12, "{centre}");
+        assert!(matches!(band.geomean().tick().unwrap(), 46_049 | 46_050));
+    }
 
     fn range(lower: i32, upper: i32) -> TickRange {
         TickRange::new(lower, upper).unwrap()

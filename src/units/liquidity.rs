@@ -21,8 +21,8 @@ use alloy::primitives::U256;
 
 use crate::errors::ValidationError;
 
-use super::fixed_point::scale_i128_by_f64;
-use super::{Share, count};
+use super::factor::scale_delta;
+use super::{Factor, Share, count};
 
 count! {
     /// Liquidity, in the pool's own units: what `makerDetails` stores for a
@@ -182,12 +182,12 @@ impl LDelta {
     }
 }
 
-/// This much of it, the magnitude truncated toward zero so the result
-/// keeps the sign and never crosses zero.
-impl std::ops::Mul<Share> for LDelta {
+/// This much of it, by any [`Factor`]; the magnitude truncates toward zero,
+/// and a negative factor flips the direction.
+impl<F: Factor> std::ops::Mul<F> for LDelta {
     type Output = Self;
-    fn mul(self, share: Share) -> Self {
-        Self(share.scale_i128(self.0))
+    fn mul(self, factor: F) -> Self {
+        Self(scale_delta(self.0, factor))
     }
 }
 
@@ -195,15 +195,6 @@ impl std::ops::Mul<LDelta> for Share {
     type Output = LDelta;
     fn mul(self, delta: LDelta) -> LDelta {
         delta * self
-    }
-}
-
-/// This much of it by a factor the strategy chose; a negative factor flips
-/// the sign. Panics on a factor that is not finite.
-impl std::ops::Mul<f64> for LDelta {
-    type Output = Self;
-    fn mul(self, factor: f64) -> Self {
-        Self(scale_i128_by_f64(self.0, factor))
     }
 }
 

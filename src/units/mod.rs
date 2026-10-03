@@ -55,6 +55,7 @@ use alloy::primitives::U256;
 
 mod accumulators;
 mod amount;
+mod factor;
 pub(crate) mod fixed_point;
 mod liquidity;
 mod price;
@@ -64,6 +65,7 @@ mod side;
 
 pub use accumulators::{Earnings, FeeGrowth, Funding, FundingPerSqrtPrice};
 pub use amount::{PerpAtoms, PerpDelta, UsdcAtoms, UsdcDelta};
+pub use factor::Factor;
 pub use liquidity::{LDelta, LUnits};
 pub use price::{Price, SqrtPrice};
 pub use rates::{FundingRate, Ratio, UtilizationRate};
@@ -76,6 +78,9 @@ pub(crate) const F64_1E6: f64 = 1_000_000.0;
 
 /// 10^6 as `U256`.
 pub(crate) const BIGINT_1E6: U256 = U256::from_limbs([1_000_000, 0, 0, 0]);
+
+/// WAD as `f64`, for the human view of a rate or a factor.
+pub(crate) const F64_WAD: f64 = 1e18;
 
 /// The largest integer an `f64` holds exactly, 2^53. Past it a value that
 /// travels through `f64` stops being faithful, so the conversions refuse
@@ -173,12 +178,14 @@ macro_rules! count {
             }
         }
 
-        /// This much of it, truncated toward zero as the chain's division
-        /// truncates.
-        impl std::ops::Mul<$crate::units::Share> for $name {
+        /// This much of it, by any [`Factor`]($crate::units::Factor): a
+        /// share, a multiplier, a plain `f64`, or the strategy's own scalar.
+        /// Truncated toward zero; a negative factor panics, since a count
+        /// has no sign to flip.
+        impl<F: $crate::units::Factor> std::ops::Mul<F> for $name {
             type Output = Self;
-            fn mul(self, share: $crate::units::Share) -> Self {
-                Self(share.scale_u128(self.0))
+            fn mul(self, factor: F) -> Self {
+                Self($crate::units::factor::scale_count(self.0, factor))
             }
         }
 
@@ -189,16 +196,6 @@ macro_rules! count {
             }
         }
 
-        /// This much of it by a factor the strategy chose, exact once the
-        /// factor is a number; truncated toward zero. Panics on a factor
-        /// that is not finite and non-negative, as the primitive's `+`
-        /// panics on overflow: a bug, not a market condition.
-        impl std::ops::Mul<f64> for $name {
-            type Output = Self;
-            fn mul(self, factor: f64) -> Self {
-                Self($crate::units::fixed_point::scale_u128_by_f64(self.0, factor))
-            }
-        }
 
         impl std::ops::Mul<$name> for f64 {
             type Output = $name;
@@ -333,12 +330,13 @@ macro_rules! delta {
             }
         }
 
-        /// This much of it, the magnitude truncated toward zero so the
-        /// result keeps the sign and never crosses zero.
-        impl std::ops::Mul<$crate::units::Share> for $name {
+        /// This much of it, by any [`Factor`]($crate::units::Factor); the
+        /// magnitude truncates toward zero, and a negative factor flips the
+        /// side.
+        impl<F: $crate::units::Factor> std::ops::Mul<F> for $name {
             type Output = Self;
-            fn mul(self, share: $crate::units::Share) -> Self {
-                Self(share.scale_i128(self.0))
+            fn mul(self, factor: F) -> Self {
+                Self($crate::units::factor::scale_delta(self.0, factor))
             }
         }
 
@@ -349,14 +347,6 @@ macro_rules! delta {
             }
         }
 
-        /// This much of it by a factor the strategy chose; a negative
-        /// factor flips the sign. Panics on a factor that is not finite.
-        impl std::ops::Mul<f64> for $name {
-            type Output = Self;
-            fn mul(self, factor: f64) -> Self {
-                Self($crate::units::fixed_point::scale_i128_by_f64(self.0, factor))
-            }
-        }
 
         impl std::ops::Mul<$name> for f64 {
             type Output = $name;

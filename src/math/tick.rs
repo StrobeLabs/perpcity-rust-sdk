@@ -7,7 +7,7 @@
 use alloy::primitives::{U256, uint};
 
 use crate::errors::ValidationError;
-use crate::units::SqrtPrice;
+use crate::units::{Price, SqrtPrice};
 
 /// Uniswap V4 absolute tick bounds.
 pub(crate) const UNISWAP_MIN_TICK: i32 = -887_272;
@@ -302,9 +302,57 @@ pub(crate) fn sqrt_price_x96_to_f64_price(sqrt_price_x96: U256) -> Result<f64, V
 
 // ── Tests ──────────────────────────────────────────────────────────────
 
+impl Price {
+    /// The tick this price sits in: the greatest tick whose price is at
+    /// most this one. Exact, through the root, never through `f64`; it
+    /// inherits the one-unit floor of [`SqrtPrice::try_from`].
+    ///
+    /// # Errors
+    ///
+    /// [`ValidationError::InvalidPrice`] when the price has no tick in the
+    /// pool's domain.
+    pub fn tick(self) -> Result<i32, ValidationError> {
+        get_tick_at_sqrt_ratio(SqrtPrice::try_from(self)?)
+    }
+
+    /// The price at `tick`, exact: the tick's root, squared.
+    ///
+    /// # Errors
+    ///
+    /// [`ValidationError::InvalidTickRange`] when `tick` is outside the
+    /// pool's domain.
+    pub fn at_tick(tick: i32) -> Result<Self, ValidationError> {
+        get_sqrt_ratio_at_tick(tick)?.squared()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A price's tick and a tick's price are the exact route between the
+    /// two, never through a float, and agree with the float route where
+    /// the float route is exact.
+    #[test]
+    fn a_price_finds_its_tick_exactly() {
+        for tick in [-46_050, -30, 0, 30, 46_020, 100_020] {
+            let price = Price::at_tick(tick).unwrap();
+            // The floor the root inherits can land one tick low at the
+            // exact boundary, never high, and never more than one.
+            let found = price.tick().unwrap();
+            assert!(
+                found == tick || found == tick - 1,
+                "tick {tick} found {found}"
+            );
+            // Just inside the tick is the tick.
+            assert_eq!((price * 1.000_01).tick().unwrap(), tick, "tick {tick}");
+        }
+        assert_eq!(
+            Price::at_tick(46_020).unwrap().to_f64().unwrap().round(),
+            tick_to_price(46_020).unwrap().round()
+        );
+        assert!(Price::at_tick(UNISWAP_MAX_TICK + 1).is_err());
+    }
     use crate::constants::{self, Q96, TICK_SPACING};
 
     // ── get_sqrt_ratio_at_tick ────────────────────────────────────

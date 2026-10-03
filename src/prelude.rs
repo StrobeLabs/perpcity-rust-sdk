@@ -36,8 +36,8 @@ pub use crate::{
     ARBITRUM_USDC, AccrualInputs, AccruedMakerSnapshot, AdjustMakerParams, AdjustMakerResult,
     AdjustTakerParams, AdjustTakerResult, BlockContext, BlockHeaderFeed, Bounds, Capacity,
     ChainDeployments, ChainReader, ContractError, Earnings, Emas, ExactAdjustTakerParams,
-    ExactOpenMakerParams, ExactOpenTakerParams, FeeGrowth, Fees, Funding, FundingPerSqrtPrice,
-    FundingRate, GasLimits, HftTransport, LDelta, LUnits, LiveTakerMarket,
+    ExactOpenMakerParams, ExactOpenTakerParams, Factor, FeeGrowth, Fees, Funding,
+    FundingPerSqrtPrice, FundingRate, GasLimits, HftTransport, LDelta, LUnits, LiveTakerMarket,
     LiveTakerMarketPublisher, MAX_ROW_BATCH, MakerBand, MakerEquityBreakdown, MakerEquityKind,
     MakerEquityOutcome, MakerMarketSnapshot, MakerState, MarginRatioTriple, MarginRatios, Mark,
     MarketCapacity, MarketConfig, MarketEvent, MarketFeed, MarketReader, MarketSnapshot,
@@ -47,5 +47,5 @@ pub use crate::{
     UsdcAtoms, UsdcDelta, UtilizationRate, ValidationError, align_tick_down, align_tick_up,
     amounts_for_liquidity, band_capacity, decode_log, estimate_liquidity, fair_price,
     fair_price_f64, get_sqrt_ratio_at_tick, get_tick_at_sqrt_ratio, liquidity_for_capacity,
-    liquidity_for_target_ratio, price_to_tick, tick_to_price,
+    liquidity_for_target_ratio, margin_for_liquidity, price_to_tick, tick_to_price,
 };

@@ -138,20 +138,6 @@ impl Share {
         Ok(shares.into_iter().map(Self).collect())
     }
 
-    /// `x` scaled by this share, truncated toward zero as the chain's
-    /// division truncates. In 256 bits, so no `u128` leaves the width.
-    pub(crate) fn scale_u128(self, x: u128) -> u128 {
-        let scaled = U256::from(x) * U256::from(self.0) / BIGINT_1E6;
-        u128::try_from(scaled).expect("a share of a u128 fits a u128")
-    }
-
-    /// `x` scaled by this share, its magnitude truncated toward zero so the
-    /// result never crosses zero.
-    pub(crate) fn scale_i128(self, x: i128) -> i128 {
-        let magnitude = self.scale_u128(x.unsigned_abs()) as i128;
-        if x < 0 { -magnitude } else { magnitude }
-    }
-
     /// `part` as a share of `whole`, to the nearest millionth; `None` when
     /// `whole` is zero or `part` exceeds it.
     pub(crate) fn of_u128(part: u128, whole: u128) -> Option<Self> {
@@ -275,17 +261,6 @@ mod tests {
         assert!(Share::partition(&[0.0, 0.0]).is_err());
         assert!(Share::partition(&[1.0, -1.0]).is_err());
         assert!(Share::partition(&[]).is_err());
-    }
-
-    /// Scaling truncates toward zero on both signs, so a scaled delta never
-    /// crosses zero and a scaled count never rounds up past its share.
-    #[test]
-    fn scaling_truncates_toward_zero() {
-        let third = Share::from_e6(333_333).unwrap();
-        assert_eq!(third.scale_u128(10), 3);
-        assert_eq!(third.scale_i128(-10), -3);
-        assert_eq!(Share::ONE.scale_u128(u128::MAX), u128::MAX);
-        assert_eq!(Share::ZERO.scale_u128(u128::MAX), 0);
     }
 
     /// A part's share of its whole is the nearest millionth, and a part
