@@ -124,8 +124,8 @@ async fn main() -> perpcity_sdk::Result<()> {
     println!("  Daily funding:   {:.6}%", funding * 100.0);
 
     let oi = client.market().get_open_interest().await?;
-    println!("  Long OI:         {:.2} USDC", oi.long_oi);
-    println!("  Short OI:        {:.2} USDC", oi.short_oi);
+    println!("  Long OI:         {:.2} perp", oi.long.perp());
+    println!("  Short OI:        {:.2} perp", oi.short.perp());
 
     let balance = client.get_usdc_balance().await?;
     println!("\n  Wallet USDC:     {balance:.2}");

@@ -30,6 +30,13 @@ pub enum ValidationError {
         reason: String,
     },
 
+    /// A share is more than the whole, or weights do not make one.
+    #[error("invalid share: {reason}")]
+    InvalidShare {
+        /// What was wrong with the share.
+        reason: String,
+    },
+
     /// Tick range violates protocol bounds or spacing.
     #[error("invalid tick range: lower={lower}, upper={upper}")]
     InvalidTickRange {

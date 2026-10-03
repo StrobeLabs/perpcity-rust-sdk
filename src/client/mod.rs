@@ -55,7 +55,8 @@ pub use state::{
 };
 pub use trades::{
     AdjustMakerParams, AdjustMakerResult, AdjustTakerParams, AdjustTakerResult,
-    ExactAdjustTakerParams, ExactOpenTakerParams, OpenMakerParams, OpenResult, OpenTakerParams,
+    ExactAdjustTakerParams, ExactOpenMakerParams, ExactOpenTakerParams, OpenMakerParams,
+    OpenResult, OpenTakerParams,
 };
 pub use transactions::TxBuilder;
 
@@ -66,7 +67,6 @@ use alloy::network::{EthereumWallet, TxSigner};
 use alloy::primitives::{Address, Signature, U256, address};
 use alloy::providers::Provider;
 
-use crate::constants::SCALE_1E6;
 use crate::errors::Result;
 use crate::hft::gas::GasLimitCache;
 use crate::hft::pipeline::{PipelineConfig, TxPipeline};
@@ -123,9 +123,6 @@ const DEFAULT_PRIORITY_FEE: u64 = 10_000_000;
 
 /// Maximum USDC approval amount (2^256 - 1).
 const MAX_APPROVAL: U256 = U256::MAX;
-
-/// SCALE_1E6 as f64, used for converting on-chain fixed-point values.
-const SCALE_F64: f64 = SCALE_1E6 as f64;
 
 // ── From impls for cache ↔ client type bridging ────────────────────────
 

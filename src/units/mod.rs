@@ -57,12 +57,14 @@ pub(crate) mod fixed_point;
 mod liquidity;
 mod price;
 mod rates;
+mod share;
 
 pub use accumulators::{Earnings, FeeGrowth, Funding, FundingPerSqrtPrice};
 pub use amount::{PerpAtoms, PerpDelta, UsdcAtoms, UsdcDelta};
 pub use liquidity::{LDelta, LUnits};
 pub use price::{Price, SqrtPrice};
 pub use rates::{FundingRate, Ratio, UtilizationRate};
+pub use share::Share;
 
 /// 10^6 as `f64`: the scale between a human amount and its atoms, and the
 /// 6-decimal intermediate the price conversions keep.
@@ -134,6 +136,42 @@ macro_rules! count {
             /// up, a shortfall that is covered.
             pub const fn saturating_sub(self, rhs: Self) -> Self {
                 Self(self.0.saturating_sub(rhs.0))
+            }
+
+            /// This much of it, truncated toward zero as the chain's
+            /// division truncates.
+            pub fn scale_by(self, share: $crate::units::Share) -> Self {
+                Self(share.scale_u128(self.0))
+            }
+
+            /// What share of `whole` this is, to the nearest millionth;
+            /// `None` when `whole` is zero or this exceeds it.
+            pub fn share_of(self, whole: Self) -> Option<$crate::units::Share> {
+                $crate::units::Share::of_u128(self.0, whole.0)
+            }
+
+            /// In `parts` equal pieces that sum to exactly this, the
+            /// remainder's atoms going one each to the first pieces.
+            pub fn split(self, parts: std::num::NonZeroUsize) -> Vec<Self> {
+                $crate::units::Share::split_u128(self.0, parts)
+                    .into_iter()
+                    .map(Self)
+                    .collect()
+            }
+
+            /// In pieces by `weights`, which sum to exactly this: each is
+            /// floored and the atoms left over go to the largest remainders.
+            ///
+            /// # Errors
+            ///
+            /// [`ValidationError::InvalidShare`](crate::errors::ValidationError::InvalidShare)
+            /// when the weights do not sum to [`Share::ONE`](crate::units::Share::ONE).
+            pub fn split_weighted(
+                self,
+                weights: &[$crate::units::Share],
+            ) -> Result<Vec<Self>, $crate::errors::ValidationError> {
+                $crate::units::Share::split_weighted_u128(self.0, weights)
+                    .map(|pieces| pieces.into_iter().map(Self).collect())
             }
         }
 
@@ -235,6 +273,38 @@ macro_rules! delta {
             /// How much of it there is, without the sign.
             pub const fn magnitude(self) -> $count {
                 $count::new(self.0.unsigned_abs())
+            }
+
+            /// This much of it, the magnitude truncated toward zero so the
+            /// result keeps the sign and never crosses zero.
+            pub fn scale_by(self, share: $crate::units::Share) -> Self {
+                Self(share.scale_i128(self.0))
+            }
+
+            /// In `parts` equal pieces of the same sign that sum to exactly
+            /// this, the remainder's atoms going one each to the first.
+            pub fn split(self, parts: std::num::NonZeroUsize) -> Vec<Self> {
+                let sign = self.0.signum();
+                $crate::units::Share::split_u128(self.0.unsigned_abs(), parts)
+                    .into_iter()
+                    .map(|piece| Self(sign * piece as $prim))
+                    .collect()
+            }
+
+            /// In pieces of the same sign by `weights`, which sum to exactly
+            /// this.
+            ///
+            /// # Errors
+            ///
+            /// [`ValidationError::InvalidShare`](crate::errors::ValidationError::InvalidShare)
+            /// when the weights do not sum to [`Share::ONE`](crate::units::Share::ONE).
+            pub fn split_weighted(
+                self,
+                weights: &[$crate::units::Share],
+            ) -> Result<Vec<Self>, $crate::errors::ValidationError> {
+                let sign = self.0.signum();
+                $crate::units::Share::split_weighted_u128(self.0.unsigned_abs(), weights)
+                    .map(|pieces| pieces.into_iter().map(|piece| Self(sign * piece as $prim)).collect())
             }
         }
 
