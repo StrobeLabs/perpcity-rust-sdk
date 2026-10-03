@@ -28,11 +28,13 @@ feed and the history never interpret a log themselves.
 
 **Every era's logs are on chain forever.** Calls target the deployed
 contracts, but a scan from a market's deploy block will meet every event
-shape that market ever emitted. So the decoder knows every shape that
-was ever live, and a shape from an earlier era decodes to the same
-variant as its successor with the fields it lacked defaulted. This is the
-one place the deployed-versus-next-era rule bends, and it bends on
-purpose.
+shape that market ever emitted, and a scan over many markets meets both
+live builds. So the decoder knows every shape that was ever live, and a
+shape that lacks a field its sibling carries decodes to the same variant
+with that field defaulted: `v0.2.2`'s `TakerClosed` has no liquidation
+tails, so it reads as a voluntary close and the `TakerLiquidated` after
+it says otherwise. This is the one place the era rule bends, and it bends
+on purpose.
 
 **The vocabulary is exact, and the human view is a method.** A consumer
 used to read `swap.usd_delta` as dollars because the decoder had already
@@ -152,9 +154,10 @@ one kind may.
 ## Edges
 
 - From the [root](../../DESIGN.md): the era rule and the unit boundary.
-- From `contracts`: the ABI shapes, `Perp` for the current era and
-  `PerpDeployedEvents` for the deployed one, locked by the ABI tests.
-  The decoder is the only consumer of the event bindings.
+- From `contracts`: the ABI shapes, `Perp` for the events both live
+  builds share, `PerpDeployedEvents` for build `58b42b7`'s tailed maker
+  closes and `PerpV022` for `v0.2.2`'s untailed taker close, locked by
+  the ABI tests. The decoder is the only consumer of the event bindings.
 - To `feeds`: the live stream hands every log here and forwards what
   comes back. It filters by address and topic; it does not interpret.
 - To [`history`](../history/DESIGN.md): the scan hands every log here

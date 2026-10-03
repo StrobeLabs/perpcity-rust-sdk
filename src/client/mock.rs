@@ -24,7 +24,7 @@ use serde_json::value::RawValue;
 
 use crate::contracts::{
     Capacity, IMulticall3, Maker, MakerFunding, Modules, OpenInterest, Perp, PoolKey, Position,
-    PricePair, Rates, SolvencyState,
+    Rates, SolvencyState,
 };
 use crate::{HftTransport, TransportConfig};
 
@@ -294,12 +294,10 @@ pub(super) fn capacity(long: u128, short: u128) -> Capacity {
     Capacity { long, short }
 }
 
-/// `emas()`: the stored pair, both Q96 narrowed to `uint128`.
-pub(super) fn emas(amm_x96: u128, index_x96: u128) -> PricePair {
-    PricePair {
-        ammPrice: amm_x96,
-        index: index_x96,
-    }
+/// The stored EMA pair as its storage word holds it: `ammPrice` low,
+/// `index` high, both Q96 narrowed to `uint128`.
+pub(super) fn emas_word(amm_x96: u128, index_x96: u128) -> U256 {
+    (U256::from(index_x96) << 128) | U256::from(amm_x96)
 }
 
 /// `modules()` naming the addresses above.
@@ -314,7 +312,7 @@ pub(super) fn modules() -> Modules {
     }
 }
 
-/// `poolKey()` with this tick spacing.
+/// `poolKey()` with this tick spacing, hookless: a build `58b42b7` market.
 pub(super) fn pool_key(tick_spacing: i32) -> PoolKey {
     PoolKey {
         currency0: Address::ZERO,
@@ -322,6 +320,14 @@ pub(super) fn pool_key(tick_spacing: i32) -> PoolKey {
         fee: Uint::ZERO,
         tickSpacing: Signed::try_from(tick_spacing).expect("fits int24"),
         hooks: Address::ZERO,
+    }
+}
+
+/// `poolKey()` with the guard hook set: a `v0.2.2-upgradeable` market.
+pub(super) fn pool_key_hooked(tick_spacing: i32) -> PoolKey {
+    PoolKey {
+        hooks: Address::repeat_byte(0x0a),
+        ..pool_key(tick_spacing)
     }
 }
 

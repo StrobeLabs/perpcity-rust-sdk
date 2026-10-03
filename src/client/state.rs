@@ -21,14 +21,13 @@ use crate::constants::{
     MAX_SWAP_SQRT_PRICE_X96, MAX_TICK, MIN_SWAP_SQRT_PRICE_X96, MIN_TICK, MULTICALL3,
 };
 use crate::contracts::{
-    IBeacon, IERC20, IMarginRatios, IMulticall3, IPoolManagerState, IPriceImpact, Modules, Perp,
-    Position,
+    IERC20, IMarginRatios, IMulticall3, IPoolManagerState, IPriceImpact, Modules, Perp, Position,
 };
 use crate::convert::usdc_from_atoms;
 use crate::errors::{ContractError, PerpCityError, Result, ValidationError};
 use crate::math::BlockContext;
 use crate::math::capacity::MarketCapacity;
-use crate::math::pricing::{Mark, PricePair};
+use crate::math::pricing::Mark;
 use crate::math::range::{MakerBand, TickRange};
 use crate::math::swap::{PoolSnapshot, TickLiquidity, active_liquidity};
 use crate::storage::{v4_tick_bitmap_slot, v4_tick_slot};
@@ -615,13 +614,12 @@ impl StateAt {
     /// multicall at this block.
     async fn perp_views(&self) -> Result<PerpViews> {
         let perp = Perp::new(self.market.perp, self.market.chain.provider());
-        let (modules, pool_state, emas, rates, ema_window) = self
+        let (modules, pool_state, rates, ema_window) = self
             .market
             .chain
             .multicall_at(self.id())
             .add(perp.modules())
             .add(perp.poolState())
-            .add(perp.emas())
             .add(perp.rates())
             .add(perp.EMA_WINDOW())
             .aggregate()
@@ -630,30 +628,27 @@ impl StateAt {
         Ok(PerpViews {
             modules,
             pool_state,
-            stored_emas: PricePair {
-                amm: emas.ammPrice,
-                index: emas.index,
-            },
             last_touch: rates.lastTouch.to::<u64>(),
             ema_window: ema_window_secs(ema_window)?,
         })
     }
 
-    /// The mark from the views: the beacon's `index()` at this block, then
-    /// the stored EMAs advanced to it.
+    /// The mark from the views: the beacon's `index()` and the stored EMAs'
+    /// storage word at this block, read together, then the pair advanced
+    /// to it.
     pub(super) async fn mark_from(&self, views: &PerpViews) -> Result<Mark> {
         let beacon = registered_module(views.modules.beacon, "IBeacon")?;
-        let index = IBeacon::new(beacon, self.market.chain.provider())
-            .index()
-            .block(self.id())
-            .call()
-            .await
-            .map_err(|e| self.read_error(e))?;
+        let chain = &self.market.chain;
+        let (index, stored_emas) = tokio::try_join!(
+            chain.index_x96_at(beacon, self.id()),
+            chain.stored_emas_at(self.market.perp, self.id()),
+        )
+        .map_err(|e| pinned_read_error(e, self.block.number))?;
         Ok(Mark::advanced(
             self.block,
             Price::from_x96(views.pool_state.ammPrice),
             Price::from_x96(index),
-            views.stored_emas,
+            stored_emas,
             views.last_touch,
             views.ema_window,
         )?)
@@ -689,6 +684,7 @@ impl StateAt {
         let MarketImmutables {
             pool_id,
             tick_spacing: spacing,
+            ..
         } = *immutables;
         let chain = &self.market.chain;
         let manager = IPoolManagerState::new(chain.deployments().pool_manager, chain.provider());
@@ -802,8 +798,6 @@ pub(super) struct PerpViews {
     pub(super) modules: Modules,
     /// `poolState()`.
     pub(super) pool_state: Perp::poolStateReturn,
-    /// `emas()`: the stored pair as of `last_touch`.
-    pub(super) stored_emas: PricePair,
     /// `rates().lastTouch`.
     pub(super) last_touch: u64,
     /// `EMA_WINDOW()`, in seconds.
@@ -846,8 +840,9 @@ mod tests {
     use super::*;
     use crate::client::mock::{self, PERP, Rpc, e6, returns, x96};
     use crate::constants::SNAPSHOT_BLOCK_LAG;
-    use crate::contracts::{Modules, Rates};
+    use crate::contracts::{IBeacon, Modules, Rates};
     use crate::math::capacity::Capacity;
+    use crate::math::pricing::PricePair;
     use crate::units::{PerSide, PerpAtoms};
 
     const TIMESTAMP: u64 = 1_700_000_000;
@@ -1119,15 +1114,17 @@ mod tests {
         );
     }
 
-    /// The mark is the views multicall and the beacon's index, both at the
-    /// handle's block; with nothing to advance, the EMAs are the stored
-    /// pair and the fair price of equal inputs is that price.
+    /// The mark is the views multicall, then the beacon's index and the
+    /// EMA slot together, all at the handle's block; with nothing to
+    /// advance, the EMAs are the stored pair and the fair price of equal
+    /// inputs is that price.
     #[tokio::test]
     async fn the_mark_is_one_multicall_and_the_index_at_the_handles_block() {
         let one = x96(1, 0);
         let (state, rpc) = state().await;
         perp_views_answers(&rpc, 92, 0);
         rpc.call::<IBeacon::indexCall>(&one);
+        rpc.storage(mock::emas_word(one.to::<u128>(), one.to::<u128>()));
 
         let mark = state.mark().await.unwrap();
         assert_eq!(mark.block, state.block());
@@ -1143,7 +1140,7 @@ mod tests {
             }
         );
         assert_eq!(mark.fair_price(), Price::from_x96(one));
-        assert!(rpc.is_drained(), "one multicall, one index call");
+        assert!(rpc.is_drained(), "one multicall, the index and the slot");
     }
 
     /// A replica that has the header but not the block a read is pinned
@@ -1455,8 +1452,8 @@ mod tests {
         rpc.call::<Perp::poolKeyCall>(&mock::pool_key(SPACING));
     }
 
-    /// The `Perp` views behind a mark, in one multicall at `block`: pool,
-    /// index and EMAs all 1.0, last touched at [`TOUCHED_AT`].
+    /// The `Perp` views behind a mark, in one multicall at `block`: pool
+    /// price 1.0, last touched at [`TOUCHED_AT`].
     fn perp_views_answers(rpc: &Rpc, block: u64, liquidity: u128) {
         let one = x96(1, 0);
         rpc.aggregate(
@@ -1468,7 +1465,6 @@ mod tests {
                     liquidity,
                     ..mock::pool_state(one)
                 }),
-                returns::<Perp::emasCall>(&mock::emas(one.to::<u128>(), one.to::<u128>())),
                 returns::<Perp::ratesCall>(&Rates {
                     lastTouch: Uint::from(TOUCHED_AT),
                     ..mock::rates(0)
@@ -1492,6 +1488,7 @@ mod tests {
         let hash = rpc.block(100 - SNAPSHOT_BLOCK_LAG, TOUCHED_AT);
         perp_views_answers(rpc, 100 - SNAPSHOT_BLOCK_LAG, liquidity);
         rpc.call::<IBeacon::indexCall>(&one);
+        rpc.storage(mock::emas_word(one.to::<u128>(), one.to::<u128>()));
         rpc.call::<IPriceImpact::sqrtPriceBoundsCall>(&IPriceImpact::sqrtPriceBoundsReturn {
             sqrtMin: one >> 1,
             sqrtMax: one << 1,
