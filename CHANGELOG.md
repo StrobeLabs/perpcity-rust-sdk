@@ -7,7 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-The changes below break the public API, so the next release is 0.7.0 (a minor bump, as for any breaking change before 1.0).
+## [0.7.0] - 2026-10-03
+
+A release about the language a strategy writes in. The units node now opens
+with the sentences the types exist to make true — `band.liquidity * half`,
+`mark * 0.5`, `margin.perp_at(mark)? * leverage`, `mark / index - 1.0` — and
+after this release every one of them compiles. Breaking throughout, so a
+minor bump, as for any breaking change before 1.0.
 
 ### Breaking
 
@@ -419,7 +425,9 @@ and why none of it changes a value on the wire.
 - Examples: quickstart, open_position, open_maker, market_maker, hft_bot
 - Benchmarks: math, HFT pipeline, transport
 
-[Unreleased]: https://github.com/StrobeLabs/perpcity-rust-sdk/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/StrobeLabs/perpcity-rust-sdk/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/StrobeLabs/perpcity-rust-sdk/compare/v0.6.0...v0.7.0
+[0.6.0]: https://github.com/StrobeLabs/perpcity-rust-sdk/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/StrobeLabs/perpcity-rust-sdk/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/StrobeLabs/perpcity-rust-sdk/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/StrobeLabs/perpcity-rust-sdk/compare/v0.2.1...v0.3.0
