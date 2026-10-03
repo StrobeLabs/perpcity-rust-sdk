@@ -1178,7 +1178,6 @@ mod tests {
             [
                 returns::<Perp::modulesCall>(&mock::modules()),
                 returns::<Perp::poolStateCall>(&mock::pool_state(one)),
-                returns::<Perp::emasCall>(&mock::emas(one.to::<u128>(), one.to::<u128>())),
                 returns::<Perp::ratesCall>(&Rates {
                     lastTouch: Uint::from(TOUCHED_AT),
                     ..mock::rates(0)
@@ -1186,6 +1185,7 @@ mod tests {
                 returns::<Perp::EMA_WINDOWCall>(&U256::from(3_600u32)),
             ],
         );
+        rpc.storage(mock::emas_word(one.to::<u128>(), one.to::<u128>()));
         rpc.call::<IBeacon::indexCall>(&one);
 
         let mark = client.market().get_mark().await.unwrap();
@@ -1206,7 +1206,10 @@ mod tests {
             }
         );
         assert_eq!(mark.fair_price_x96(), one);
-        assert!(rpc.is_drained(), "blockNumber, block, multicall, index");
+        assert!(
+            rpc.is_drained(),
+            "blockNumber, block, multicall, emas slot, index"
+        );
     }
 
     /// A perp with no beacon fails by name after the batch, before the
@@ -1226,11 +1229,11 @@ mod tests {
                     ..mock::modules()
                 }),
                 returns::<Perp::poolStateCall>(&mock::pool_state(one)),
-                returns::<Perp::emasCall>(&mock::emas(0, 0)),
                 returns::<Perp::ratesCall>(&mock::rates(0)),
                 returns::<Perp::EMA_WINDOWCall>(&U256::from(3_600u32)),
             ],
         );
+        rpc.storage(mock::emas_word(0, 0));
 
         let err = client.market().get_mark().await.unwrap_err();
         assert!(

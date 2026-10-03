@@ -496,6 +496,16 @@ sol! {
         );
     }
 
+    /// Taker close as emitted by `v0.2.2-upgradeable` perps (the Monday
+    /// 2026-10-05 relaunch markets): `TakerClosed` lost the
+    /// `liqFee`/`isLiquidation` tail, which changes topic0. Liquidation
+    /// data moved to the separate `TakerLiquidated` log that follows it.
+    /// `decode_log` maps this shape onto the same `MarketEvent::TakerClosed`
+    /// with no liquidation tail.
+    interface PerpUpgradeableEvents {
+        event TakerClosed(uint256 posId, SwapResult sr, int256 funding, uint256 utilFees);
+    }
+
     // ═══════════════════════════════════════════════════════════════════
     //  PerpFactory — creates Perp contracts
     // ═══════════════════════════════════════════════════════════════════
@@ -812,6 +822,18 @@ mod abi_lock {
         assert_eq!(
             Perp::TakerLiquidated::SIGNATURE,
             "TakerLiquidated(uint256,uint128,uint256)"
+        );
+        // v0.2.2-upgradeable taker close: no liquidation tail. topic0 from
+        // `cast keccak` of the signature at tag 198559a.
+        assert_eq!(
+            PerpUpgradeableEvents::TakerClosed::SIGNATURE,
+            format!("TakerClosed(uint256,{SWAP_RESULT},int256,uint256)")
+        );
+        assert_eq!(
+            PerpUpgradeableEvents::TakerClosed::SIGNATURE_HASH,
+            alloy::primitives::b256!(
+                "208f950e4dba30512aa9e643b25c9df8bdb616ee90bbff00f669a5d1d3d452f3"
+            )
         );
         // Deployed-era maker closes (pre-#171): topic0 values transcribed
         // from logs emitted by the live Arbitrum perps.

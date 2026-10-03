@@ -10,8 +10,9 @@ use std::collections::BTreeMap;
 
 use alloy::eips::BlockId;
 use alloy::primitives::{Address, B256, U256};
-use alloy::providers::MulticallError;
+use alloy::providers::{MulticallError, Provider};
 use alloy::transports::RpcError;
+use std::future::IntoFuture;
 
 use crate::constants::{MAX_SWAP_SQRT_PRICE_X96, MAX_TICK, MIN_SWAP_SQRT_PRICE_X96, MIN_TICK};
 use crate::contracts::{
@@ -24,7 +25,7 @@ use crate::math::capacity::MarketCapacity;
 use crate::math::pricing::{Mark, PricePair};
 use crate::math::range::{MakerBand, TickRange};
 use crate::math::swap::{PoolSnapshot, TickLiquidity, active_liquidity};
-use crate::storage::{v4_tick_bitmap_slot, v4_tick_slot};
+use crate::storage::{decode_emas_word, perp_emas_slot, v4_tick_bitmap_slot, v4_tick_slot};
 use crate::types::{MarginRatioTriple, MarginRatios, SolvencyState};
 
 use super::market::MarketReader;
@@ -372,28 +373,36 @@ impl StateAt {
     }
 
     /// The `Perp` views a mark and the pool are built from, in one
-    /// multicall at this block.
+    /// multicall at this block, plus the stored EMA pair read raw from
+    /// storage slot 11 at the same block (`v0.2.2-upgradeable` has no
+    /// `emas()` view; both eras share the slot). The two reads run
+    /// concurrently so the round trip count does not change.
     async fn perp_views(&self) -> Result<PerpViews> {
         let perp = Perp::new(self.market.perp, self.market.chain.provider());
-        let (modules, pool_state, emas, rates, ema_window) = self
+        let batch = self
             .market
             .chain
             .multicall_at(self.id())
             .add(perp.modules())
             .add(perp.poolState())
-            .add(perp.emas())
             .add(perp.rates())
-            .add(perp.EMA_WINDOW())
-            .aggregate()
-            .await
-            .map_err(|e| self.multicall_read_error(e))?;
+            .add(perp.EMA_WINDOW());
+        let views = batch.aggregate();
+        let emas_word = self
+            .market
+            .chain
+            .provider()
+            .get_storage_at(self.market.perp, perp_emas_slot())
+            .block_id(self.id())
+            .into_future();
+        let (views, emas_word) = tokio::join!(views, emas_word);
+        let (modules, pool_state, rates, ema_window) =
+            views.map_err(|e| self.multicall_read_error(e))?;
+        let emas_word = emas_word.map_err(|e| pinned_read_error(e.into(), self.block.number))?;
         Ok(PerpViews {
             modules,
             pool_state,
-            stored_emas: PricePair {
-                amm: emas.ammPrice,
-                index: emas.index,
-            },
+            stored_emas: decode_emas_word(emas_word),
             last_touch: rates.lastTouch.to::<u64>(),
             ema_window: ema_window_secs(ema_window)?,
         })
@@ -1022,7 +1031,6 @@ mod tests {
                     liquidity,
                     ..mock::pool_state(one)
                 }),
-                returns::<Perp::emasCall>(&mock::emas(one.to::<u128>(), one.to::<u128>())),
                 returns::<Perp::ratesCall>(&Rates {
                     lastTouch: Uint::from(TOUCHED_AT),
                     ..mock::rates(0)
@@ -1030,6 +1038,7 @@ mod tests {
                 returns::<Perp::EMA_WINDOWCall>(&U256::from(3_600u32)),
             ],
         );
+        rpc.storage(mock::emas_word(one.to::<u128>(), one.to::<u128>()));
     }
 
     /// Everything after the immutables: the lagged block, the views

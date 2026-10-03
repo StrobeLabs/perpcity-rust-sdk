@@ -27,11 +27,11 @@ use crate::math::maker_equity::{
     AccrualInputs, AccruedMakerSnapshot, MakerEquityBreakdown, MakerMarketSnapshot, MakerState,
     TickFunding, fee_growth_inside1,
 };
-use crate::math::pricing::{Mark, PricePair};
+use crate::math::pricing::Mark;
 use crate::math::tick::get_sqrt_ratio_at_tick;
 use crate::storage::{
-    perp_tick_funding_slots, v4_fee_growth_global1_slot, v4_position_fee_growth_inside1_slot,
-    v4_tick_fee_growth_outside1_slot,
+    decode_emas_word, perp_emas_slot, perp_tick_funding_slots, v4_fee_growth_global1_slot,
+    v4_position_fee_growth_inside1_slot, v4_tick_fee_growth_outside1_slot,
 };
 
 use super::market::MarketReader;
@@ -564,22 +564,32 @@ impl MarketReader {
         // ── Market-wide state: one multicall, all-or-nothing ────────
         // (without a consistent market snapshot no position's equity can
         // be computed.)
+        // The stored EMA pair comes from storage slot 11 (no `emas()` view
+        // on `v0.2.2-upgradeable`; both eras share the slot), read
+        // concurrently with the batch at the same pinned block.
         let perp = Perp::new(self.perp, self.chain.provider());
-        let (cumls, rates, pool_state, capacity, oi, pool_id, modules, stored_emas, ema_window) =
-            self.chain
-                .multicall_at(block_id)
-                .add(perp.cumulatives())
-                .add(perp.rates())
-                .add(perp.poolState())
-                .add(perp.capacity())
-                .add(perp.openInterest())
-                .add(perp.POOL_ID())
-                .add(perp.modules())
-                .add(perp.emas())
-                .add(perp.EMA_WINDOW())
-                .aggregate()
-                .await
-                .map_err(multicall_error)?;
+        let batch = self
+            .chain
+            .multicall_at(block_id)
+            .add(perp.cumulatives())
+            .add(perp.rates())
+            .add(perp.poolState())
+            .add(perp.capacity())
+            .add(perp.openInterest())
+            .add(perp.POOL_ID())
+            .add(perp.modules())
+            .add(perp.EMA_WINDOW());
+        let views = batch.aggregate();
+        let emas_word = self
+            .chain
+            .provider()
+            .get_storage_at(self.perp, perp_emas_slot())
+            .block_id(block_id)
+            .into_future();
+        let (views, emas_word) = tokio::join!(views, emas_word);
+        let (cumls, rates, pool_state, capacity, oi, pool_id, modules, ema_window) =
+            views.map_err(multicall_error)?;
+        let stored_emas = decode_emas_word(emas_word?);
 
         let beacon = registered_module(modules.beacon, "IBeacon")?;
         let index = IBeacon::new(beacon, self.chain.provider())
@@ -591,10 +601,7 @@ impl MarketReader {
             block,
             pool_state.ammPrice,
             index,
-            PricePair {
-                amm: stored_emas.ammPrice,
-                index: stored_emas.index,
-            },
+            stored_emas,
             rates.lastTouch.to::<u64>(),
             ema_window_secs(ema_window)?,
         )?;

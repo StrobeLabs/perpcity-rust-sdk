@@ -17,8 +17,18 @@
 
 use alloy::primitives::{Address, B256, I256, U256, keccak256};
 
+use crate::math::pricing::PricePair;
+
 /// `PerpStorage.ticks` mapping slot: storage struct base 3 + field index 3.
 const PERP_TICKS_SLOT: u64 = 6;
+
+/// `PerpStorage.emas` slot: storage struct base 3 + field index 8. One
+/// word holding the `PricePair` struct: `ammPrice` in the low 128 bits,
+/// `index` in the high 128 bits. Read raw because `v0.2.2-upgradeable`
+/// removed the `emas()` view while keeping `s` at the same slots; the
+/// deployed `58b42b7` perps have the same layout, so one read serves
+/// both eras.
+pub(crate) const PERP_EMAS_SLOT: u64 = 11;
 
 /// Offset of `cumlFundingDivSqrtPOppX96` — the second word of the Perp's
 /// two-word `TickInfo` struct — from the struct's base slot.
@@ -58,6 +68,26 @@ pub(crate) fn mapping_slot(key: B256, base: U256) -> U256 {
 pub(crate) fn mapping_slot_signed(key: i32, base: U256) -> U256 {
     let key = I256::unchecked_from(key).into_raw();
     mapping_slot(B256::from(key), base)
+}
+
+/// Slot of the Perp's stored EMA pair.
+pub(crate) fn perp_emas_slot() -> U256 {
+    U256::from(PERP_EMAS_SLOT)
+}
+
+/// The stored EMA pair packed into its storage word: `ammPrice` low,
+/// `index` high, both `uint128`.
+pub(crate) fn decode_emas_word(word: U256) -> PricePair {
+    PricePair {
+        amm: (word & U256::from(u128::MAX)).to::<u128>(),
+        index: word.wrapping_shr(128).to::<u128>(),
+    }
+}
+
+/// The inverse of [`decode_emas_word`], for mocks and tests.
+#[cfg(test)]
+pub(crate) fn encode_emas_word(emas: PricePair) -> U256 {
+    U256::from(emas.index).wrapping_shl(128) | U256::from(emas.amm)
 }
 
 /// Slots of `s.ticks[tick]` (a `TickInfo`) on the Perp contract:
@@ -142,6 +172,22 @@ mod tests {
         let a = v4_position_slot(pool, owner, -60, 60, B256::from(U256::from(1u8)));
         let b = v4_position_slot(pool, owner, -60, 60, B256::from(U256::from(2u8)));
         assert_ne!(a, b);
+    }
+
+    /// HORMUZ (`0x137e…5b17`) slot 11 at Arbitrum One block 510200629,
+    /// read with `eth_getStorageAt`; the pair `emas()` returned at the
+    /// same block on the deployed contract.
+    #[test]
+    fn emas_word_decodes_the_hormuz_slot() {
+        let word = U256::from_str_radix(
+            "000000260932b0391630af1d2acfd3780000002a0de14e947109ae26a0796896",
+            16,
+        )
+        .unwrap();
+        let emas = decode_emas_word(word);
+        assert_eq!(emas.amm, 0x0000002a0de14e947109ae26a0796896u128);
+        assert_eq!(emas.index, 0x000000260932b0391630af1d2acfd378u128);
+        assert_eq!(encode_emas_word(emas), word);
     }
 
     #[test]

@@ -22,7 +22,7 @@ use serde_json::value::RawValue;
 
 use crate::contracts::{
     Capacity, IMulticall3, Maker, MakerFunding, Modules, OpenInterest, Perp, PoolKey, Position,
-    PricePair, Rates, SolvencyState,
+    Rates, SolvencyState,
 };
 use crate::types::ChainDeployments;
 use crate::{HftTransport, TransportConfig};
@@ -271,12 +271,13 @@ pub(super) fn capacity(long: u128, short: u128) -> Capacity {
     Capacity { long, short }
 }
 
-/// `emas()`: the stored pair, both Q96 narrowed to `uint128`.
-pub(super) fn emas(amm_x96: u128, index_x96: u128) -> PricePair {
-    PricePair {
-        ammPrice: amm_x96,
+/// The stored EMA pair as its storage word (slot 11), both Q96 narrowed
+/// to `uint128`: what `eth_getStorageAt` answers.
+pub(super) fn emas_word(amm_x96: u128, index_x96: u128) -> U256 {
+    crate::storage::encode_emas_word(crate::math::pricing::PricePair {
+        amm: amm_x96,
         index: index_x96,
-    }
+    })
 }
 
 /// `modules()` naming the addresses above.

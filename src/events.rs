@@ -55,7 +55,9 @@ use alloy::rpc::types::Log;
 use alloy::sol_types::SolEvent;
 use serde::{Deserialize, Serialize};
 
-use crate::contracts::{IBeacon, IPoolManagerState, Perp, PerpDeployedEvents, SwapResult};
+use crate::contracts::{
+    IBeacon, IPoolManagerState, Perp, PerpDeployedEvents, PerpUpgradeableEvents, SwapResult,
+};
 use crate::convert::{price_x96_to_f64, scale_from_6dec, unpack_balance_delta};
 
 /// Funding/utilization rates are scaled by 1e18 per day on-chain.
@@ -392,6 +394,18 @@ pub fn decode_log(log: &Log) -> Option<MarketEvent> {
             util_fees: u256_usdc(d.utilFees)?,
             liq_fee: u256_usdc(d.liqFee)?,
             is_liquidation: d.isLiquidation,
+        })
+    // v0.2.2-upgradeable taker close: no `liqFee`/`isLiquidation` tail;
+    // a liquidation is told apart by the `TakerLiquidated` log that follows.
+    } else if topic0 == PerpUpgradeableEvents::TakerClosed::SIGNATURE_HASH {
+        let d = decode_raw::<PerpUpgradeableEvents::TakerClosed>(log)?;
+        Some(MarketEvent::TakerClosed {
+            pos_id: d.posId,
+            swap: swap_info(&d.sr)?,
+            funding: i256_usdc(d.funding)?,
+            util_fees: u256_usdc(d.utilFees)?,
+            liq_fee: 0.0,
+            is_liquidation: false,
         })
     } else if topic0 == Perp::TakerLiquidated::SIGNATURE_HASH {
         let d = decode_raw::<Perp::TakerLiquidated>(log)?;
@@ -797,6 +811,50 @@ mod tests {
                 assert!((util_fees - 0.01).abs() < 1e-9);
                 assert!((liq_fee - 1.25).abs() < 1e-9);
                 assert!(is_liquidation);
+            }
+            other => panic!("expected TakerClosed, got {other:?}"),
+        }
+    }
+
+    /// The v0.2.2-upgradeable 4-field shape decodes to the same variant
+    /// with no liquidation tail.
+    #[test]
+    fn decode_upgradeable_taker_closed_has_no_liquidation_tail() {
+        let event = PerpUpgradeableEvents::TakerClosed {
+            posId: U256::from(5u64),
+            sr: SwapResult {
+                delta: pack_balance_delta(-100_000_000, 100_000_000),
+                ammPrice: Q96,
+                totalFeeAmt: I256::ZERO,
+                lpFeeAmt: U256::ZERO,
+                protocolFeeAmt: U256::ZERO,
+                creatorFeeAmt: U256::ZERO,
+                insuranceFeeAmt: U256::ZERO,
+            },
+            funding: I256::try_from(-250_000i64).unwrap(),
+            utilFees: U256::from(10_000u64),
+        };
+        let log = rpc_log(&event, Address::ZERO);
+        assert_eq!(
+            log.topics()[0],
+            alloy::primitives::b256!(
+                "208f950e4dba30512aa9e643b25c9df8bdb616ee90bbff00f669a5d1d3d452f3"
+            )
+        );
+        match decode_log(&log).expect("should decode TakerClosed") {
+            MarketEvent::TakerClosed {
+                pos_id,
+                funding,
+                util_fees,
+                liq_fee,
+                is_liquidation,
+                ..
+            } => {
+                assert_eq!(pos_id, U256::from(5u64));
+                assert!((funding + 0.25).abs() < 1e-9);
+                assert!((util_fees - 0.01).abs() < 1e-9);
+                assert_eq!(liq_fee, 0.0);
+                assert!(!is_liquidation);
             }
             other => panic!("expected TakerClosed, got {other:?}"),
         }
