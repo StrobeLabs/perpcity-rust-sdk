@@ -24,17 +24,28 @@ caller above the client should know one exists.
 branch is ahead of what is deployed, and it will stay ahead until a
 cutover. A binding that follows main calls a selector the deployed
 bytecode does not have and gets an empty revert. So bindings match the
-deployed commit, named in the module doc, and a change to a binding is
+deployed commits, named in the module doc, and a change to a binding is
 verified against a live market first: a selector probe whose typed
 revert proves the function exists. The ABI lock tests then hold the shape:
 selectors from input types, struct fields by name and type, event
 signatures by topic, with the on-chain evidence in a comment.
 
-**Events are the one era exception.** A market's early logs were emitted
-by an earlier version, and they are on chain forever. So the event
-bindings include every shape a live market has emitted,
-`PerpDeployedEvents` where the deployed shape differs from main, and the
-decoder recognises both. Calls do not get this exception.
+**Two builds are live, and a market is one of them for life.** Build
+`58b42b7` markets and `v0.2.2-upgradeable` markets share every view and
+trade selector, so one `Perp` binding reads and trades both. Where they
+differ, the difference is a fact about the market, read once from its
+pool key (only a `v0.2.2` pool carries the guard hook) and kept with the
+other immutables as its `Era`: a liquidation is the 2-arg whole-position
+call on one and the 3-arg call by amount on the other, and the stored
+EMAs are a view on one and a storage slot on both, so the slot is what
+the SDK reads. `PerpV022` holds what only the newer build has. Nothing
+above the client chooses by era; the client does, once per call shape.
+
+**Events are the era exception.** A market's early logs were emitted by
+an earlier version, and they are on chain forever. So the event bindings
+include every shape a live market has emitted, `PerpDeployedEvents` for
+the tailed maker closes of `58b42b7` and `PerpV022::TakerClosed` for the
+untailed taker close of `v0.2.2`, and the decoder recognises each.
 
 **A slot is a layout fact, locked by an outcome.** A storage slot is
 derived by the Solidity mapping rule from a base slot and an offset, and
@@ -69,31 +80,33 @@ sets of base slots, one mapping rule.
 
 | Type | Invariant | Produced by | Consumed by |
 |---|---|---|---|
-| [`Perp`](../contracts.rs#L36), [`PerpDeployedEvents`](../contracts.rs#L36) | the market's binding: matches the deployed commit; every selector, struct and event locked; the deployed era's event shapes decodable alongside | the ABI, through `sol!` | [`StateAt`](../client/DESIGN.md), [`MarketReader`](../client/DESIGN.md) and [`PerpClient`](../client/DESIGN.md), for every call and every batch; [`decode_log`](../events/DESIGN.md), for every event of both eras; the gas floor in `hft`, by selector. Nothing above the client calls it. |
-| [`IBeacon`](../contracts.rs#L36) | the index module's binding: `index` and `IndexUpdated` | the ABI | the index reads on [`ChainReader`](../client/DESIGN.md) and [`StateAt`](../client/DESIGN.md); [`beacon_prints`](../history/DESIGN.md), for the print series; [`decode_log`](../events/DESIGN.md). |
-| [`IFees`](../contracts.rs#L36) | the fee module's views: the fee split and the liquidation fee | the ABI | the fee reads on [`MarketReader`](../client/DESIGN.md), into the slow cache. |
-| [`IMarginRatios`](../contracts.rs#L36) | the margin module's views: the maker's and the taker's triple | the ABI | the margin-ratio reads on [`StateAt`](../client/DESIGN.md) and the bounds read on [`MarketReader`](../client/DESIGN.md). |
-| [`IPriceImpact`](../contracts.rs#L36) | the impact module's view: the sqrt-price bounds a swap may reach | the ABI | the pool read on [`StateAt`](../client/DESIGN.md), which needs the bounds to quote. |
-| [`IFunding`](../contracts.rs#L36), [`IPricing`](../contracts.rs#L36) | the two rule modules the SDK never calls: their computations are ported in `math` | the ABI | nothing. They are bound so a live probe can confirm the deployed selectors, and so a port has the interface it transcribes beside it. |
-| [`IERC20`](../contracts.rs#L36) | the collateral token, and the position NFT's `Transfer` | the ABI | the balance reads on [`ChainReader`](../client/DESIGN.md) and [`StateAt`](../client/DESIGN.md); approvals and transfers on [`PerpClient`](../client/DESIGN.md); [`token_transfers`](../history/DESIGN.md). |
-| [`IPoolManagerState`](../contracts.rs#L36) | `extsload`, the pool's storage read raw | the ABI | the tick map in [`StateAt::pool`](../client/DESIGN.md) and the fee-growth reads in the maker-equity batch on [`MarketReader`](../client/DESIGN.md), at slots `storage` derives. |
-| [`IMulticall3`](../contracts.rs#L36) | the batching primitive, `aggregate3` | the ABI | [`ChainReader::get_balances_batch`](../client/DESIGN.md) and the maker-equity batch on [`MarketReader`](../client/DESIGN.md); the pinned reads batch through alloy's builder instead. |
-| [`PerpFactory`](../contracts.rs#L36) | the factory's binding, for its error selectors | the ABI | [`try_extract_revert`](../errors/DESIGN.md), which names a factory revert; the dormant `PerpCreated` shape is SDK #110. |
-| [`Capacity`](../contracts.rs#L36) | `calcCapacity`'s pair, raw perp atoms | `capacity` and `makerDetails` | [`Capacity`](../math/DESIGN.md) in `math`, by `From`; the accrual inputs and the `CapacityUpdated` event narrow it field by field. |
-| [`OpenInterest`](../contracts.rs#L36) | the two sides' draw, raw | `openInterest` | the surface's `OpenInterest` and the draw leg of `MarketCapacity`, each filled field by field inside a read; see the debts. |
-| [`PricePair`](../contracts.rs#L36) | the `(ammPrice, index)` word, `uint128` each | `emas` and `RatesAndEmasRefreshed` | the pinned reads, which copy it field by field into `math`'s `PricePair`; see the debts. |
-| [`Rates`](../contracts.rs#L36) | funding and utilization rates with the last touch | `rates` | the pinned reads and the maker-equity batch, which take the last touch and the rates out of it field by field; see the debts. |
-| [`Cumulatives`](../contracts.rs#L36) | the accounting trackers | `cumulatives` and `CumulativesAccrued` | the maker-equity batch and the decoder, field by field; see the debts. |
-| [`SolvencyState`](../contracts.rs#L36) | the market's solvency words, raw | `solvencyState` | the solvency read, which scales it into the surface's `SolvencyState`; see the debts. |
-| [`Position`](../contracts.rs#L36), [`Maker`](../contracts.rs#L36), [`MakerFunding`](../contracts.rs#L36), [`TickInfo`](../contracts.rs#L36) | a position's storage: the shared row, the maker's band and capacity, its funding trackers, the per-tick funding words | `positions`, `makerDetails`, and the slots `storage` derives | the band and position reads, which narrow them field by field into a `MakerBand`, a `MakerState` and its `TickFunding`; see the debts. `Position` is also what the position reads on `StateAt` return raw. |
-| [`SwapResult`](../contracts.rs#L36) | a swap's outcome with its four fee legs | the taker events | [`SwapInfo`](../events/DESIGN.md), in human units. |
-| [`Modules`](../contracts.rs#L36), [`PoolKey`](../contracts.rs#L36) | the five rule modules' addresses; the pool's key and tick spacing | `modules` and `poolKey` | the reads, which resolve a module's address before calling it, and the immutables cache. Never a caller's. |
-| [`Taker`](../contracts.rs#L36), [`FeeFund`](../contracts.rs#L36) | bound, unread | the ABI | nothing. They are locked so a struct change on the deployed contract fails a test here. |
+| [`Perp`](../contracts.rs#L41), [`PerpDeployedEvents`](../contracts.rs#L41) | the market's binding: the views, trades and structs both live builds share, the `58b42b7` whole-position liquidations and its tailed `TakerClosed`; every selector, struct and event locked; `PerpDeployedEvents` holds that build's tailed maker closes | the ABI, through `sol!` | [`StateAt`](../client/DESIGN.md), [`MarketReader`](../client/DESIGN.md) and [`PerpClient`](../client/DESIGN.md), for every call and every batch; [`decode_log`](../events/DESIGN.md), for every event of both eras; the gas floor in `hft`, by selector. Nothing above the client calls it. |
+| [`PerpV022`](../contracts.rs#L41) | what only a `v0.2.2-upgradeable` market has: the 3-arg liquidations by amount, the untailed `TakerClosed`, `SurplusRecovered`, `HOOKS`, and the errors of `Errors.sol`'s additions, the guard hook and the ERC-1967 proxy; every selector locked against `cast keccak` | the ABI, through `sol!` | the liquidation calldata on [`MarketReader`](../client/DESIGN.md), when the market's `Era` is the newer build; [`decode_log`](../events/DESIGN.md), for the untailed close; the gas floor in `hft`, by selector; [`try_extract_revert`](../errors/DESIGN.md), which names a `v0.2.2` revert by its selector. |
+| [`IBeacon`](../contracts.rs#L41) | the index module's binding: `index` and `IndexUpdated` | the ABI | the index reads on [`ChainReader`](../client/DESIGN.md) and [`StateAt`](../client/DESIGN.md); [`beacon_prints`](../history/DESIGN.md), for the print series; [`decode_log`](../events/DESIGN.md). |
+| [`IFees`](../contracts.rs#L41) | the fee module's views: the fee split and the liquidation fee | the ABI | the fee reads on [`MarketReader`](../client/DESIGN.md), into the slow cache. |
+| [`IMarginRatios`](../contracts.rs#L41) | the margin module's views: the maker's and the taker's triple | the ABI | the margin-ratio reads on [`StateAt`](../client/DESIGN.md) and the bounds read on [`MarketReader`](../client/DESIGN.md). |
+| [`IPriceImpact`](../contracts.rs#L41) | the impact module's view: the sqrt-price bounds a swap may reach | the ABI | the pool read on [`StateAt`](../client/DESIGN.md), which needs the bounds to quote. |
+| [`IFunding`](../contracts.rs#L41), [`IPricing`](../contracts.rs#L41) | the two rule modules the SDK never calls: their computations are ported in `math` | the ABI | nothing. They are bound so a live probe can confirm the deployed selectors, and so a port has the interface it transcribes beside it. |
+| [`IERC20`](../contracts.rs#L41) | the collateral token, and the position NFT's `Transfer` | the ABI | the balance reads on [`ChainReader`](../client/DESIGN.md) and [`StateAt`](../client/DESIGN.md); approvals and transfers on [`PerpClient`](../client/DESIGN.md); [`token_transfers`](../history/DESIGN.md). |
+| [`IPoolManagerState`](../contracts.rs#L41) | `extsload`, the pool's storage read raw | the ABI | the tick map in [`StateAt::pool`](../client/DESIGN.md) and the fee-growth reads in the maker-equity batch on [`MarketReader`](../client/DESIGN.md), at slots `storage` derives. |
+| [`IMulticall3`](../contracts.rs#L41) | the batching primitive, `aggregate3` | the ABI | [`ChainReader::get_balances_batch`](../client/DESIGN.md) and the maker-equity batch on [`MarketReader`](../client/DESIGN.md); the pinned reads batch through alloy's builder instead. |
+| [`PerpFactory`](../contracts.rs#L41) | the factory's binding, for its error selectors | the ABI | [`try_extract_revert`](../errors/DESIGN.md), which names a factory revert; the dormant `PerpCreated` shape is SDK #110. |
+| [`Capacity`](../contracts.rs#L41) | `calcCapacity`'s pair, raw perp atoms | `capacity` and `makerDetails` | [`Capacity`](../math/DESIGN.md) in `math`, by `From`; the accrual inputs and the `CapacityUpdated` event narrow it field by field. |
+| [`OpenInterest`](../contracts.rs#L41) | the two sides' draw, raw | `openInterest` | the surface's `OpenInterest` and the draw leg of `MarketCapacity`, each filled field by field inside a read; see the debts. |
+| [`PricePair`](../contracts.rs#L41) | the `(ammPrice, index)` word, `uint128` each | `RatesAndEmasRefreshed`, and `emas` on `58b42b7` (bound, no longer called) | the decoder, field by field into `math`'s `PricePair`; see the debts. |
+| [`Rates`](../contracts.rs#L41) | funding and utilization rates with the last touch | `rates` | the pinned reads and the maker-equity batch, which take the last touch and the rates out of it field by field; see the debts. |
+| [`Cumulatives`](../contracts.rs#L41) | the accounting trackers | `cumulatives` and `CumulativesAccrued` | the maker-equity batch and the decoder, field by field; see the debts. |
+| [`SolvencyState`](../contracts.rs#L41) | the market's solvency words, raw | `solvencyState` | the solvency read, which scales it into the surface's `SolvencyState`; see the debts. |
+| [`Position`](../contracts.rs#L41), [`Maker`](../contracts.rs#L41), [`MakerFunding`](../contracts.rs#L41), [`TickInfo`](../contracts.rs#L41) | a position's storage: the shared row, the maker's band and capacity, its funding trackers, the per-tick funding words | `positions`, `makerDetails`, and the slots `storage` derives | the band and position reads, which narrow them field by field into a `MakerBand`, a `MakerState` and its `TickFunding`; see the debts. `Position` is also what the position reads on `StateAt` return raw. |
+| [`SwapResult`](../contracts.rs#L41) | a swap's outcome with its four fee legs | the taker events | [`SwapInfo`](../events/DESIGN.md), in human units. |
+| [`Modules`](../contracts.rs#L41), [`PoolKey`](../contracts.rs#L41) | the five rule modules' addresses; the pool's key and tick spacing | `modules` and `poolKey` | the reads, which resolve a module's address before calling it, and the immutables cache. Never a caller's. |
+| [`Taker`](../contracts.rs#L41), [`FeeFund`](../contracts.rs#L41) | bound, unread | the ABI | nothing. They are locked so a struct change on the deployed contract fails a test here. |
 | `abi_lock` (tests) | selectors, struct shapes and event topics as deployed, with evidence | the on-chain evidence beside each | CI. |
-| `storage::*_slot` (crate-private) | slot derivation: the Solidity mapping rule over transcribed base slots; locked by the reads' golden outcomes | the deployed layouts | the tick map in the pool read and the fee-growth and tick-funding reads in the maker-equity batch. |
+| `storage::*_slot` (crate-private) | slot derivation: the Solidity mapping rule over transcribed base slots; locked by the reads' golden outcomes | the deployed layouts, the same on both builds for every slot read here | the tick map in the pool read and the fee-growth and tick-funding reads in the maker-equity batch. |
+| `storage::stored_emas` (crate-private) | the stored EMA pair from its one storage word, `ammPrice` low and `index` high; locked by a golden word from a live market beside its `emas()` answer | `eth_getStorageAt` on slot 11, in [`ChainReader`](../client/DESIGN.md) | the mark on [`StateAt`](../client/DESIGN.md) and the snapshot on [`MarketReader`](../client/DESIGN.md), in place of the `emas()` view `v0.2.2` lacks. |
 
-The module doc names the deployed commit and lists what main has that
-the chain does not. That list is the cutover's checklist.
+The module doc names both deployed commits and lists what main has that
+neither chain build does. That list is the cutover's checklist.
 
 ## Edges
 
@@ -112,9 +125,10 @@ the chain does not. That list is the cutover's checklist.
 ## Terminology
 
 - **Binding**: a Rust type or function generated from an ABI.
-- **Deployed**: the commit whose bytecode is live; the only thing calls
-  target.
-- **Era**: a contract version; **deployed era**, **next era**.
+- **Deployed**: a commit whose bytecode is live; the only thing calls
+  target. Two are: **build `58b42b7`** and **`v0.2.2-upgradeable`**.
+- **Era**: a contract version. A market's era is read from its pool key
+  and never changes; **next era** is the contracts repository's main.
 - **ABI lock**: the tests that pin selectors, struct shapes and event
   topics with on-chain evidence.
 - **Selector probe**: a call whose typed revert proves the selector
@@ -148,10 +162,11 @@ crate passes around. These are the ones where that is the whole answer.
   turns it into [`SwapInfo`](../events/DESIGN.md), once, for the three
   taker events. The conversion is the decoder's and belongs with it, so
   the graph of the public surface shows none of it.
-- **The `Perp` interface follows main for events and the chain for
-  calls.** That is the era rule working. It means the interface is not one
-  era's shape, and a reader has to know which events are live; the module
-  doc's list is where they find out.
+- **The `Perp` interface is the shared surface plus `58b42b7`'s own.**
+  Its liquidations, `emas()` and `TakerClosed` are the older build's, and
+  `PerpV022` carries the newer build's counterparts rather than the
+  interface being split in two: every market answers the shared part, and
+  the client picks the rest by `Era` in one place per call shape.
 
 ## Debts
 
@@ -162,8 +177,12 @@ crate passes around. These are the ones where that is the whole answer.
   `PoolKey` are copied field by field inside the reads that use them. As
   `From` and `TryFrom` impls those edges would be typed, checked and
   drawn, and the unit checks of #124 would have one place to live.
-- **The `Maker` struct carries `capacity` on the deployed era and not on
-  main.** The cutover's checklist starts here.
+- **The `Maker` struct carries `capacity` on both deployed builds and not
+  on main.** The cutover's checklist starts here.
+- **`Perp::emas` is bound and never called.** It exists on `58b42b7` and
+  is locked there; the slot read replaced it so one path serves both
+  builds. Removing the binding would break the public surface for no
+  gain, so it stays until the cutover.
 - **`Position` is on the surface and its row does not say so.** The
   position reads on [`StateAt`](../client/DESIGN.md) hand it back raw, so
   the strategy layer consumes it; inside the crate only two private

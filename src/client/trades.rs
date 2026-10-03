@@ -693,8 +693,10 @@ impl PerpClient {
             .await
     }
 
-    /// Liquidate an unhealthy maker position (always the full position on
-    /// the deployed contracts). The liquidation fee goes to `fee_recipient`.
+    /// Liquidate an unhealthy maker position, whole, with the call the
+    /// market's era takes (see
+    /// [`MarketReader::simulate_liquidate_maker`](super::MarketReader::simulate_liquidate_maker)).
+    /// The liquidation fee goes to `fee_recipient`.
     ///
     /// Safe to call directly in the liquidation race — no prior
     /// [`Self::simulate_liquidate_maker`] needed: every send preflights at
@@ -738,8 +740,8 @@ impl PerpClient {
             .await
     }
 
-    /// Liquidate an unhealthy taker position (always the full position on
-    /// the deployed contracts). The liquidation fee goes to `fee_recipient`.
+    /// Liquidate an unhealthy taker position, whole, with the call the
+    /// market's era takes. The liquidation fee goes to `fee_recipient`.
     ///
     /// Safe to call directly in the race, exactly like
     /// [`Self::liquidate_maker`]: the send preflights at the pinned
@@ -767,7 +769,10 @@ impl PerpClient {
         urgency: Urgency,
     ) -> Result<TransactionReceipt> {
         validate_fee_recipient(fee_recipient)?;
-        let calldata = book.liquidation_calldata(pos_id, fee_recipient);
+        let calldata = self
+            .market
+            .liquidation_calldata(book, pos_id, fee_recipient)
+            .await?;
 
         tracing::debug!(
             pos_id = %pos_id,

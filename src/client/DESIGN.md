@@ -253,7 +253,8 @@ send would ask.
 | [`OpenInterest`](queries.rs#L99) | the two sides' draw as the contract accumulates it: a [`PerSide`](../units/DESIGN.md) of [`PerpAtoms`](../units/DESIGN.md), the same shape and unit as the capacity it draws on, so the two compare without a conversion; `on` reads a side and `total` the market | [`MarketReader::get_open_interest`](queries.rs#L395), from the contract's own pair | [`MarketSnapshot`](queries.rs#L116), as a field; the strategy layer's capacity gauges, which price it at a mark through `PerpAtoms::value_at`. |
 | [`SolvencyState`](state.rs#L109) | the market's solvency in USDC, at a block | [`StateAt::solvency`](state.rs#L278) | nothing in the crate. The strategy layer's solvency audits. |
 | [`ChainDeployments`](chain.rs#L36) | the addresses a chain shares: collateral and pool manager | the known chains' constants, or the caller for another | [`ChainReader::new`](chain.rs#L101). |
-| `MarketImmutables` (crate-private) | a market's deployment-fixed values: pool id and tick spacing; read once per market, never pinned | the first pinned pool read on a market, then the chain reader's cache | the pool reads, and no caller |
+| `MarketImmutables` (crate-private) | a market's deployment-fixed values: pool id, tick spacing and its `Era`; read once per market, never pinned | the first pinned pool read or liquidation call on a market, then the chain reader's cache | the pool reads and the liquidation calldata, and no caller |
+| `Era` (crate-private) | which live contract build a market runs, `Legacy` (`58b42b7`) or `Upgradeable` (`v0.2.2`), from whether its pool key names a hook; fixed for the market's life | `MarketImmutables`, from `poolKey` | the liquidation calldata on `MarketReader`, which picks the 2-arg whole-position call or the 3-arg call by amount; nothing above the client sees it |
 
 The two right-hand columns are where the type flows. A link under
 *Produced by* is the function that makes one, or the type it is built
@@ -419,6 +420,12 @@ Two costs in this table are not what they should be and are debts:
 - **The liquidation twins are keyed by an enum called `Book`.** It names
   which kind of position a liquidation targets, and "book" is retired
   vocabulary; it should be a position kind.
+- **A `v0.2.2` liquidation reads the position's size at the head**, then
+  sends the 3-arg call with it; the two are not one block, so a size the
+  chain moves in between reverts `MaxAmtExceeded`. The contract takes an
+  amount and offers no "whole" sentinel, so the read is the price of the
+  shared call shape; a pinned pair would cost a header round trip on the
+  liquidation path.
 - **`get_config` is four separate calls** where `get_snapshot` is one
   batch; the older read predates the batch and has not been folded into
   it.

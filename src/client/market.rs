@@ -3,11 +3,13 @@
 use alloy::primitives::{Address, Bytes, U256};
 use alloy::sol_types::SolCall;
 
-use crate::contracts::Perp;
-use crate::errors::{Result, ValidationError};
+use crate::contracts::{Perp, PerpV022};
+use crate::convert::unpack_balance_delta;
+use crate::errors::{ContractError, Result, ValidationError};
 use crate::hft::gas::GasLimits;
 
 use super::chain::ChainReader;
+use super::queries::Era;
 
 /// One market's reads: the `Perp` contract and the chain reader it lives
 /// on.
@@ -78,12 +80,17 @@ impl MarketReader {
     /// is.
     ///
     /// `from` is what the contract sees as `msg.sender`, and it matters: on
-    /// the deployed contracts a liquidation whose margin was consumed by
-    /// bad debt charges the sender the shortfall, so a probe from an
-    /// unfunded address reverts `TransferFromFailed` where the funded,
-    /// approved sender's transaction would succeed. Probe from the address
-    /// that will send. The simulation is capped at
-    /// [`GasLimits::LIQUIDATE`], exactly like the send.
+    /// build `58b42b7` a liquidation whose margin was consumed by bad debt
+    /// charges the sender the shortfall, so a probe from an unfunded
+    /// address reverts `TransferFromFailed` where the funded, approved
+    /// sender's transaction would succeed. Probe from the address that will
+    /// send. The simulation is capped at [`GasLimits::LIQUIDATE`], exactly
+    /// like the send.
+    ///
+    /// The call is the market's era's: the 2-arg whole-position form on
+    /// `58b42b7`, the 3-arg form with the position's whole size on `v0.2.2`,
+    /// which costs one `makerDetails` read first. A position whose
+    /// liquidity is already zero is [`ContractError::PositionNotFound`].
     pub async fn simulate_liquidate_maker(
         &self,
         from: Address,
@@ -98,7 +105,8 @@ impl MarketReader {
     /// `eth_call` from `from` — the batch/scanner probe for the taker book.
     ///
     /// Identical semantics to [`Self::simulate_liquidate_maker`], including
-    /// what `from` means, except the "wrong book" revert here is
+    /// what `from` means and the era's call shape (the size read here is
+    /// `positions`), except the "wrong book" revert is
     /// `Perp::NonTakerPosition`.
     pub async fn simulate_liquidate_taker(
         &self,
@@ -121,11 +129,53 @@ impl MarketReader {
         fee_recipient: Address,
     ) -> Result<()> {
         validate_fee_recipient(fee_recipient)?;
-        let calldata = book.liquidation_calldata(pos_id, fee_recipient);
+        let calldata = self
+            .liquidation_calldata(book, pos_id, fee_recipient)
+            .await?;
         self.chain
             .preflight_call(from, self.perp, &calldata, 0, Some(GasLimits::LIQUIDATE))
             .await?;
         Ok(())
+    }
+
+    /// The calldata that liquidates `pos_id` whole on this market's era.
+    ///
+    /// Build `58b42b7` takes the id and the recipient. `v0.2.2` takes an
+    /// amount too, so the position's whole size is read now, at the head:
+    /// the perp amount from `positions` for a taker, the liquidity from
+    /// `makerDetails` for a maker. A size the chain moves between this read
+    /// and the send reverts `MaxAmtExceeded`, one block wide at most; a zero
+    /// size is a position that is gone or not of this book.
+    pub(super) async fn liquidation_calldata(
+        &self,
+        book: Book,
+        pos_id: U256,
+        fee_recipient: Address,
+    ) -> Result<Bytes> {
+        match self.immutables().await?.era {
+            Era::Legacy => Ok(book.whole_calldata(pos_id, fee_recipient)),
+            Era::Upgradeable => {
+                let amount = self.liquidation_size(book, pos_id).await?;
+                Ok(book.amount_calldata(pos_id, fee_recipient, amount))
+            }
+        }
+    }
+
+    /// The whole size of `pos_id` in the units the era's liquidation takes.
+    async fn liquidation_size(&self, book: Book, pos_id: U256) -> Result<u128> {
+        let perp = Perp::new(self.perp, self.chain.provider());
+        let size = match book {
+            Book::Taker => {
+                let position = perp.positions(pos_id).call().await?;
+                let (perp_atoms, _usd) = unpack_balance_delta(position.delta);
+                perp_atoms.unsigned_abs()
+            }
+            Book::Maker => perp.makerDetails(pos_id).call().await?.liquidity,
+        };
+        if size == 0 {
+            return Err(ContractError::PositionNotFound { pos_id }.into());
+        }
+        Ok(size)
     }
 }
 
@@ -138,7 +188,8 @@ pub(super) enum Book {
 }
 
 impl Book {
-    pub(super) fn liquidation_calldata(self, pos_id: U256, fee_recipient: Address) -> Bytes {
+    /// Build `58b42b7`'s call: the whole position, no amount.
+    fn whole_calldata(self, pos_id: U256, fee_recipient: Address) -> Bytes {
         match self {
             Self::Maker => Perp::liquidateMakerCall {
                 posId: pos_id,
@@ -149,6 +200,27 @@ impl Book {
             Self::Taker => Perp::liquidateTakerCall {
                 posId: pos_id,
                 liquidationFeeRecipient: fee_recipient,
+            }
+            .abi_encode()
+            .into(),
+        }
+    }
+
+    /// `v0.2.2`'s call: `amount` of the position, liquidity for a maker
+    /// and perp atoms for a taker.
+    fn amount_calldata(self, pos_id: U256, fee_recipient: Address, amount: u128) -> Bytes {
+        match self {
+            Self::Maker => PerpV022::liquidateMakerCall {
+                posId: pos_id,
+                liquidationFeeRecipient: fee_recipient,
+                liquidityAmount: amount,
+            }
+            .abi_encode()
+            .into(),
+            Self::Taker => PerpV022::liquidateTakerCall {
+                posId: pos_id,
+                liquidationFeeRecipient: fee_recipient,
+                perpAmount: amount,
             }
             .abi_encode()
             .into(),
@@ -177,4 +249,124 @@ pub(super) fn validate_fee_recipient(
         });
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use alloy::primitives::{Address, B256, U256};
+    use alloy::sol_types::SolCall;
+
+    use super::*;
+    use crate::client::mock;
+    use crate::contracts::{Maker, Position};
+    use crate::convert::pack_balance_delta;
+    use crate::errors::PerpCityError;
+
+    const POOL_ID: B256 = B256::repeat_byte(0x99);
+    const RECIPIENT: Address = Address::repeat_byte(0x44);
+
+    /// A build `58b42b7` market: the whole-position call, and no read
+    /// beyond the immutables.
+    #[tokio::test]
+    async fn legacy_market_liquidates_whole_with_the_2_arg_call() {
+        let (client, rpc) = mock::client();
+        rpc.call::<Perp::POOL_IDCall>(&POOL_ID);
+        rpc.call::<Perp::poolKeyCall>(&mock::pool_key(30));
+
+        let calldata = client
+            .market()
+            .liquidation_calldata(Book::Taker, U256::from(7u8), RECIPIENT)
+            .await
+            .unwrap();
+        assert_eq!(
+            calldata,
+            Bytes::from(
+                Perp::liquidateTakerCall {
+                    posId: U256::from(7u8),
+                    liquidationFeeRecipient: RECIPIENT,
+                }
+                .abi_encode()
+            )
+        );
+        assert!(rpc.is_drained(), "POOL_ID, poolKey");
+    }
+
+    /// A `v0.2.2` market: the position's whole size read first, then the
+    /// 3-arg call. A short taker's amount is its perp delta's magnitude.
+    #[tokio::test]
+    async fn upgradeable_market_reads_the_size_then_liquidates_by_amount() {
+        let (client, rpc) = mock::client();
+        rpc.call::<Perp::POOL_IDCall>(&POOL_ID);
+        rpc.call::<Perp::poolKeyCall>(&mock::pool_key_hooked(30));
+        rpc.call::<Perp::positionsCall>(&Position {
+            delta: pack_balance_delta(-2_500_000, 3_000_000),
+            ..mock::position(1_000_000)
+        });
+
+        let calldata = client
+            .market()
+            .liquidation_calldata(Book::Taker, U256::from(7u8), RECIPIENT)
+            .await
+            .unwrap();
+        assert_eq!(
+            calldata,
+            Bytes::from(
+                PerpV022::liquidateTakerCall {
+                    posId: U256::from(7u8),
+                    liquidationFeeRecipient: RECIPIENT,
+                    perpAmount: 2_500_000,
+                }
+                .abi_encode()
+            )
+        );
+        assert!(rpc.is_drained(), "POOL_ID, poolKey, positions");
+
+        // The era is cached; a maker's size is its liquidity.
+        rpc.call::<Perp::makerDetailsCall>(&Maker {
+            liquidity: 9_000_000_000,
+            ..mock::maker(-60, 60, 0)
+        });
+        let calldata = client
+            .market()
+            .liquidation_calldata(Book::Maker, U256::from(8u8), RECIPIENT)
+            .await
+            .unwrap();
+        assert_eq!(
+            calldata,
+            Bytes::from(
+                PerpV022::liquidateMakerCall {
+                    posId: U256::from(8u8),
+                    liquidationFeeRecipient: RECIPIENT,
+                    liquidityAmount: 9_000_000_000,
+                }
+                .abi_encode()
+            )
+        );
+        assert!(rpc.is_drained(), "makerDetails only");
+    }
+
+    /// A zero size on a `v0.2.2` market is a position that is gone or not
+    /// of this book: named, not sent to revert `ZeroLiquidity`.
+    #[tokio::test]
+    async fn upgradeable_market_names_a_vanished_position() {
+        let (client, rpc) = mock::client();
+        rpc.call::<Perp::POOL_IDCall>(&POOL_ID);
+        rpc.call::<Perp::poolKeyCall>(&mock::pool_key_hooked(30));
+        rpc.call::<Perp::makerDetailsCall>(&mock::maker(-60, 60, 0));
+
+        let err = client
+            .market()
+            .liquidation_calldata(Book::Maker, U256::from(8u8), RECIPIENT)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                PerpCityError::Contract(ContractError::PositionNotFound { pos_id })
+                    if pos_id == U256::from(8u8)
+            ),
+            "{err}"
+        );
+        assert!(rpc.is_drained());
+    }
 }

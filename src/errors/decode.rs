@@ -2,13 +2,13 @@
 //!
 //! Maps 4-byte error selectors from the PerpCity contracts to human-readable
 //! names. The selector values are taken from the generated `sol!` bindings
-//! (`Perp` / `PerpFactory` error types), so they cannot drift from the frozen
-//! `Errors.sol`. The standard Solidity `Error(string)` and `Panic(uint256)`
-//! selectors are included as well.
+//! (`Perp`, `PerpV022` and `PerpFactory` error types), so they cannot drift
+//! from the contracts' `Errors.sol`. The standard Solidity `Error(string)`
+//! and `Panic(uint256)` selectors are included as well.
 
 use alloy::sol_types::SolError;
 
-use crate::contracts::{Perp, PerpFactory};
+use crate::contracts::{Perp, PerpFactory, PerpV022};
 
 /// `Error(string)` — the standard Solidity revert-string selector.
 const ERROR_STRING_SELECTOR: [u8; 4] = [0x08, 0xc3, 0x79, 0xa0];
@@ -65,6 +65,50 @@ fn name_for_selector(selector: [u8; 4]) -> Option<&'static str> {
             "StartingPriceTooHigh",
         ),
         (PerpFactory::EmaWindowTooLow::SELECTOR, "EmaWindowTooLow"),
+        (
+            PerpFactory::InvalidPerpImplementation::SELECTOR,
+            "InvalidPerpImplementation",
+        ),
+        (PerpFactory::NotProtocolOwner::SELECTOR, "NotProtocolOwner"),
+        // v0.2.2-upgradeable: Errors.sol additions, the guard hook, the proxy.
+        (PerpV022::NoSurplus::SELECTOR, "NoSurplus"),
+        (PerpV022::ZeroAddress::SELECTOR, "ZeroAddress"),
+        (
+            PerpV022::UnauthorizedPoolAction::SELECTOR,
+            "UnauthorizedPoolAction",
+        ),
+        (
+            PerpV022::ERC1967InvalidImplementation::SELECTOR,
+            "ERC1967InvalidImplementation",
+        ),
+        (PerpV022::ERC1967NonPayable::SELECTOR, "ERC1967NonPayable"),
+        (
+            PerpV022::UUPSUnauthorizedCallContext::SELECTOR,
+            "UUPSUnauthorizedCallContext",
+        ),
+        (
+            PerpV022::UUPSUnsupportedProxiableUUID::SELECTOR,
+            "UUPSUnsupportedProxiableUUID",
+        ),
+        (
+            PerpV022::InvalidInitialization::SELECTOR,
+            "InvalidInitialization",
+        ),
+        // Solady ERC721, inherited by both builds.
+        (Perp::TokenDoesNotExist::SELECTOR, "TokenDoesNotExist"),
+        (Perp::NotOwnerNorApproved::SELECTOR, "NotOwnerNorApproved"),
+        (
+            Perp::TransferToZeroAddress::SELECTOR,
+            "TransferToZeroAddress",
+        ),
+        (
+            Perp::TransferFromIncorrectOwner::SELECTOR,
+            "TransferFromIncorrectOwner",
+        ),
+        (
+            Perp::TransferToNonERC721ReceiverImplementer::SELECTOR,
+            "TransferToNonERC721ReceiverImplementer",
+        ),
         // Solady SafeTransferLib (used throughout the contracts for USDC moves).
         ([0x79, 0x39, 0xf4, 0x24], "TransferFromFailed"),
         ([0x90, 0xb8, 0xec, 0x18], "TransferFailed"),
@@ -184,6 +228,15 @@ mod tests {
         let (name, _) =
             decode_revert_data(&sel_hex(PerpFactory::StartingPriceTooLow::SELECTOR)).unwrap();
         assert_eq!(name, "StartingPriceTooLow");
+
+        let (name, _) = decode_revert_data("0xb7cc5070").unwrap();
+        assert_eq!(name, "UnauthorizedPoolAction");
+        let (name, _) = decode_revert_data("0xc0ef17d3").unwrap();
+        assert_eq!(name, "NoSurplus");
+        let (name, _) = decode_revert_data("0xa457695f").unwrap();
+        assert_eq!(name, "InvalidPerpImplementation");
+        let (name, _) = decode_revert_data("0xceea21b6").unwrap();
+        assert_eq!(name, "TokenDoesNotExist");
     }
 
     #[test]

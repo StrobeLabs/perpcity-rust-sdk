@@ -49,8 +49,10 @@ failure that could mean "sent" is reported as a hash to look up, never as
 **The chain is the deployed one.** Bindings match deployed bytecode, not
 the contracts repository's head. When they disagree the chain wins and the
 fix goes in the binding, locked by an ABI test with the on-chain evidence
-beside it. Events are the one exception, since logs from an earlier era
-are on chain forever and must stay decodable.
+beside it. Two builds are deployed, and a market's build is a fact read
+once from its pool key; where the two differ the client chooses by it.
+Events are the one exception, since logs from an earlier era are on chain
+forever and must stay decodable.
 
 **A read has a block.** A value from the chain is a fact about one block,
 and two values that must agree must come from the same one. The crate
@@ -155,10 +157,12 @@ then poll for the receipt. Each stage has its own failure variants, and
 the nonce manager's job is to make the account's next nonce a fact the
 pipeline owns rather than a race with the node.
 
-**Eras.** The deployed contracts are one era; the contracts repository's
-main branch is the next. Calls target only what is deployed. Events from
-every era that emitted them stay decodable. A cutover replaces the era
-wholesale and deletes the compensation the earlier era needed.
+**Eras.** Two deployed builds are live, `58b42b7` and
+`v0.2.2-upgradeable`, and a market is one of them for life; the contracts
+repository's main branch is the next. Calls target only what is deployed,
+by the market's era where the builds differ. Events from every era that
+emitted them stay decodable. A cutover replaces the eras wholesale and
+deletes the compensation they needed.
 
 ## The type system
 
@@ -448,7 +452,8 @@ these are the ones every node uses.
 - **Feed, tape**: the two tenses of events. A **print** is a beacon
   update; a **chain point** is a block and log index.
 - **Transient**: a failure a retry can fix. The variant says.
-- **Era**: a contract version whose logs are on chain forever.
+- **Era**: a contract version whose logs are on chain forever; a market's
+  era is the build it was created on.
 
 ## Accepted structure
 
