@@ -324,6 +324,13 @@ mod tests {
         assert_eq!(UsdcDelta::try_from(-1.1234567).unwrap().atoms(), -1_123_457);
     }
 
+    /// A factor a count cannot take is a bug and says so.
+    #[test]
+    #[should_panic(expected = "finite non-negative factor")]
+    fn a_count_refuses_a_negative_factor() {
+        let _ = UsdcAtoms::new(1) * -0.5;
+    }
+
     /// A count cannot be negative, and the refusal names the amount.
     #[test]
     fn a_negative_amount_is_not_a_count() {
@@ -386,13 +393,29 @@ mod tests {
         assert!(UsdcAtoms::try_from(UsdcDelta::new(-5)).is_err());
     }
 
-    /// A share of an amount is taken once, in one direction: truncated
-    /// toward zero on either sign, and a split returns every atom.
+    /// An amount multiplies by a share or by a plain factor, once and in
+    /// one direction: truncated toward zero on either sign. A split returns
+    /// every atom.
     #[test]
     fn an_amount_scales_and_splits_by_share() {
         let third = Share::from_e6(333_333).unwrap();
-        assert_eq!(UsdcAtoms::new(10).scale_by(third), UsdcAtoms::new(3));
-        assert_eq!(UsdcDelta::new(-10).scale_by(third), UsdcDelta::new(-3));
+        assert_eq!(UsdcAtoms::new(10) * third, UsdcAtoms::new(3));
+        assert_eq!(third * UsdcAtoms::new(10), UsdcAtoms::new(3));
+        assert_eq!(UsdcDelta::new(-10) * third, UsdcDelta::new(-3));
+        // The float path: a strategy's literal, converted once and exact
+        // from there. A leverage is a factor past one; a negative factor on
+        // a delta flips its side.
+        assert_eq!(
+            UsdcAtoms::new(100_000_000) * 5.0,
+            UsdcAtoms::new(500_000_000)
+        );
+        assert_eq!(0.5 * UsdcAtoms::new(7), UsdcAtoms::new(3));
+        assert_eq!(PerpDelta::new(7) * -0.5, PerpDelta::new(-3));
+        assert_eq!(
+            UsdcAtoms::new(3) * 0.1,
+            UsdcAtoms::ZERO,
+            "truncated, not rounded"
+        );
         assert_eq!(
             UsdcAtoms::new(1).share_of(UsdcAtoms::new(4)),
             Some(Share::try_from(0.25).unwrap())

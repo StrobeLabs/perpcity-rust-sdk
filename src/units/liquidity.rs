@@ -21,6 +21,7 @@ use alloy::primitives::U256;
 
 use crate::errors::ValidationError;
 
+use super::fixed_point::scale_i128_by_f64;
 use super::{Share, count};
 
 count! {
@@ -123,12 +124,6 @@ impl LDelta {
         LUnits::new(self.0.unsigned_abs())
     }
 
-    /// This much of it, the magnitude truncated toward zero so the result
-    /// keeps the sign and never crosses zero.
-    pub fn scale_by(self, share: Share) -> Self {
-        Self(share.scale_i128(self.0))
-    }
-
     /// In `parts` equal pieces of the same sign that sum to exactly this,
     /// the remainder's units going one each to the first.
     pub fn split(self, parts: NonZeroUsize) -> Vec<Self> {
@@ -184,6 +179,38 @@ impl LDelta {
             .ok_or(ValidationError::Overflow {
                 context: context.into(),
             })
+    }
+}
+
+/// This much of it, the magnitude truncated toward zero so the result
+/// keeps the sign and never crosses zero.
+impl std::ops::Mul<Share> for LDelta {
+    type Output = Self;
+    fn mul(self, share: Share) -> Self {
+        Self(share.scale_i128(self.0))
+    }
+}
+
+impl std::ops::Mul<LDelta> for Share {
+    type Output = LDelta;
+    fn mul(self, delta: LDelta) -> LDelta {
+        delta * self
+    }
+}
+
+/// This much of it by a factor the strategy chose; a negative factor flips
+/// the sign. Panics on a factor that is not finite.
+impl std::ops::Mul<f64> for LDelta {
+    type Output = Self;
+    fn mul(self, factor: f64) -> Self {
+        Self(scale_i128_by_f64(self.0, factor))
+    }
+}
+
+impl std::ops::Mul<LDelta> for f64 {
+    type Output = LDelta;
+    fn mul(self, delta: LDelta) -> LDelta {
+        delta * self
     }
 }
 
@@ -264,8 +291,10 @@ mod tests {
     #[test]
     fn liquidity_scales_and_splits_by_share() {
         let half = Share::try_from(0.5).unwrap();
-        assert_eq!(LUnits::new(7).scale_by(half), LUnits::new(3));
-        assert_eq!(LDelta::new(-7).scale_by(half), LDelta::new(-3));
+        assert_eq!(LUnits::new(7) * half, LUnits::new(3));
+        assert_eq!(LDelta::new(-7) * half, LDelta::new(-3));
+        assert_eq!(LUnits::new(7) * 0.5, LUnits::new(3));
+        assert_eq!(LDelta::new(-7) * -0.5, LDelta::new(3));
         let weights = Share::partition(&[1.0, 1.0]).unwrap();
         assert_eq!(
             LDelta::new(-7).split_weighted(&weights).unwrap(),

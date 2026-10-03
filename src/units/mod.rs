@@ -27,8 +27,9 @@
 //! `BalanceDelta` and in a position's `delta`.
 //!
 //! Each type carries only the operations its quantity admits: two amounts
-//! of one asset add, an amount and a price multiply into an amount of the
-//! other asset, and amounts of different assets do not combine at all. The
+//! of one asset add, any amount scales by a fraction with `*`, an amount
+//! and a price multiply into an amount of the other asset, and amounts of
+//! different assets do not combine at all. The
 //! ported contract math takes these types at its boundary and destructures
 //! to primitives inside, so every port stays a line-by-line transcription
 //! of the Solidity it is checked against.
@@ -138,12 +139,6 @@ macro_rules! count {
                 Self(self.0.saturating_sub(rhs.0))
             }
 
-            /// This much of it, truncated toward zero as the chain's
-            /// division truncates.
-            pub fn scale_by(self, share: $crate::units::Share) -> Self {
-                Self(share.scale_u128(self.0))
-            }
-
             /// What share of `whole` this is, to the nearest millionth;
             /// `None` when `whole` is zero or this exceeds it.
             pub fn share_of(self, whole: Self) -> Option<$crate::units::Share> {
@@ -175,6 +170,39 @@ macro_rules! count {
             }
         }
 
+        /// This much of it, truncated toward zero as the chain's division
+        /// truncates.
+        impl std::ops::Mul<$crate::units::Share> for $name {
+            type Output = Self;
+            fn mul(self, share: $crate::units::Share) -> Self {
+                Self(share.scale_u128(self.0))
+            }
+        }
+
+        impl std::ops::Mul<$name> for $crate::units::Share {
+            type Output = $name;
+            fn mul(self, count: $name) -> $name {
+                count * self
+            }
+        }
+
+        /// This much of it by a factor the strategy chose, exact once the
+        /// factor is a number; truncated toward zero. Panics on a factor
+        /// that is not finite and non-negative, as the primitive's `+`
+        /// panics on overflow: a bug, not a market condition.
+        impl std::ops::Mul<f64> for $name {
+            type Output = Self;
+            fn mul(self, factor: f64) -> Self {
+                Self($crate::units::fixed_point::scale_u128_by_f64(self.0, factor))
+            }
+        }
+
+        impl std::ops::Mul<$name> for f64 {
+            type Output = $name;
+            fn mul(self, count: $name) -> $name {
+                count * self
+            }
+        }
     };
 }
 
@@ -275,12 +303,6 @@ macro_rules! delta {
                 $count::new(self.0.unsigned_abs())
             }
 
-            /// This much of it, the magnitude truncated toward zero so the
-            /// result keeps the sign and never crosses zero.
-            pub fn scale_by(self, share: $crate::units::Share) -> Self {
-                Self(share.scale_i128(self.0))
-            }
-
             /// In `parts` equal pieces of the same sign that sum to exactly
             /// this, the remainder's atoms going one each to the first.
             pub fn split(self, parts: std::num::NonZeroUsize) -> Vec<Self> {
@@ -305,6 +327,38 @@ macro_rules! delta {
                 let sign = self.0.signum();
                 $crate::units::Share::split_weighted_u128(self.0.unsigned_abs(), weights)
                     .map(|pieces| pieces.into_iter().map(|piece| Self(sign * piece as $prim)).collect())
+            }
+        }
+
+        /// This much of it, the magnitude truncated toward zero so the
+        /// result keeps the sign and never crosses zero.
+        impl std::ops::Mul<$crate::units::Share> for $name {
+            type Output = Self;
+            fn mul(self, share: $crate::units::Share) -> Self {
+                Self(share.scale_i128(self.0))
+            }
+        }
+
+        impl std::ops::Mul<$name> for $crate::units::Share {
+            type Output = $name;
+            fn mul(self, delta: $name) -> $name {
+                delta * self
+            }
+        }
+
+        /// This much of it by a factor the strategy chose; a negative
+        /// factor flips the sign. Panics on a factor that is not finite.
+        impl std::ops::Mul<f64> for $name {
+            type Output = Self;
+            fn mul(self, factor: f64) -> Self {
+                Self($crate::units::fixed_point::scale_i128_by_f64(self.0, factor))
+            }
+        }
+
+        impl std::ops::Mul<$name> for f64 {
+            type Output = $name;
+            fn mul(self, delta: $name) -> $name {
+                delta * self
             }
         }
 

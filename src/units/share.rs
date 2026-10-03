@@ -5,7 +5,7 @@
 //! where floats leak back into exact arithmetic — `(depth as f64 * 0.25)
 //! as u128` is the shape every call site reaches for, and it rounds
 //! differently at every site. [`Share`] is the fraction as a millionth, and
-//! the scaling methods on the counts and deltas take it, so the truncation
+//! every count and delta multiplies by one with `*`, so the truncation
 //! happens once, in one direction, in one place.
 //!
 //! It is not a [`Ratio`](super::Ratio), though both are `u32` millionths on

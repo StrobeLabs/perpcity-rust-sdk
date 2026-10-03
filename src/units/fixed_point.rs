@@ -10,7 +10,44 @@
 
 use alloy::primitives::{I256, U256, U512, uint};
 
+use crate::constants::WAD;
 use crate::errors::ValidationError;
+
+/// `x` scaled by a float factor: the factor is taken to WAD once, which
+/// holds every digit an `f64` has, and the product is exact in 256 bits
+/// and truncated toward zero.
+///
+/// # Panics
+///
+/// On a factor that is not a finite non-negative number, or a product past
+/// `u128`. Both are a caller's arithmetic error rather than a state the
+/// chain can produce, as an overflowing `+` is on the primitive.
+pub(crate) fn scale_u128_by_f64(x: u128, factor: f64) -> u128 {
+    assert!(
+        factor.is_finite() && factor >= 0.0,
+        "a count scales by a finite non-negative factor, not {factor}"
+    );
+    let wad = (factor * 1e18).round();
+    assert!(wad <= u128::MAX as f64, "factor {factor} is past the width");
+    let scaled = U256::from(x) * U256::from(wad as u128) / WAD;
+    u128::try_from(scaled).expect("the scaled count left u128")
+}
+
+/// `x` scaled by a float factor, the magnitude as [`scale_u128_by_f64`]
+/// and the sign the product's own, so a negative factor flips it.
+///
+/// # Panics
+///
+/// As [`scale_u128_by_f64`], with a negative factor allowed.
+pub(crate) fn scale_i128_by_f64(x: i128, factor: f64) -> i128 {
+    let magnitude = scale_u128_by_f64(x.unsigned_abs(), factor.abs());
+    let magnitude = i128::try_from(magnitude).expect("the scaled delta left i128");
+    if (x < 0) != (factor < 0.0) {
+        -magnitude
+    } else {
+        magnitude
+    }
+}
 
 /// Solady's `expWad` power-of-two reassembly scale.
 const EXP_SCALE: U256 = uint!(3822833074963236453042738258902158003155416615667_U256);
