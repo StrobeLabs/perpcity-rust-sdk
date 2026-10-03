@@ -21,7 +21,7 @@ use alloy::primitives::U256;
 use crate::constants::WAD;
 use crate::errors::ValidationError;
 
-use super::{BIGINT_1E6, F64_1E6, F64_WAD, Factor, Mult, UsdcAtoms, UsdcDelta};
+use super::{BIGINT_1E6, F64_1E6, F64_WAD, Factor, UsdcAtoms, UsdcDelta};
 
 /// The largest value a `uint24` holds, which is the domain of every ratio
 /// the margin and fee modules store.
@@ -225,7 +225,7 @@ impl Ratio {
 
     /// The initial margin ratio that permits `leverage`, which is its
     /// reciprocal: `1_000_000 / leverage`, to the nearest millionth. Takes
-    /// any [`Factor`] — a plain `5.0`, a [`Mult`], or the strategy's own
+    /// any [`Factor`] — a plain `5.0`, a [`Share`](super::Share), or the strategy's own
     /// leverage type.
     ///
     /// # Errors
@@ -250,13 +250,13 @@ impl Ratio {
         Self::from_e6(e6.to())
     }
 
-    /// The leverage this ratio permits, its reciprocal, exact in WAD.
+    /// The leverage this ratio permits, its reciprocal.
     ///
     /// # Errors
     ///
     /// [`ValidationError::InvalidMarginRatio`] when the ratio is zero, which
     /// permits no finite leverage.
-    pub fn leverage(self) -> Result<Mult, ValidationError> {
+    pub fn leverage(self) -> Result<f64, ValidationError> {
         if self.is_zero() {
             return Err(ValidationError::InvalidMarginRatio {
                 value: 0,
@@ -264,8 +264,7 @@ impl Ratio {
                 max: MAX_E6,
             });
         }
-        let wad = BIGINT_1E6 * WAD / U256::from(self.0);
-        Ok(Mult::from_wad(wad.to()))
+        Ok(F64_1E6 / f64::from(self.0))
     }
 }
 
@@ -302,6 +301,7 @@ impl TryFrom<f64> for Ratio {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::units::Share;
 
     /// A ratio is the contract's integer, and the fraction a person reads
     /// round-trips back to it exactly.
@@ -341,7 +341,7 @@ mod tests {
             let ratio = Ratio::for_leverage(leverage).unwrap();
             assert_eq!(ratio.e6(), e6, "{leverage}x");
             assert!(
-                (ratio.leverage().unwrap().factor() - leverage).abs() < 0.01,
+                (ratio.leverage().unwrap() - leverage).abs() < 0.01,
                 "{leverage}x did not come back"
             );
         }
@@ -358,7 +358,7 @@ mod tests {
             assert!(Ratio::for_leverage(bad).is_err(), "{bad}");
         }
         assert!(
-            Ratio::for_leverage(Mult::ONE).is_ok(),
+            Ratio::for_leverage(Share::ONE).is_ok(),
             "a factor type is a leverage too"
         );
     }

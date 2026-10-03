@@ -1,7 +1,7 @@
 //! What a quantity is multiplied by.
 //!
 //! Every count, delta and price scales with `*`, and the thing on the right
-//! is a [`Factor`]: the SDK's own [`Share`] and [`Mult`], a plain `f64` for
+//! is a [`Factor`]: the SDK's own [`Share`], a plain `f64` for
 //! the literal in a strategy's hand, or a type the strategy defines for
 //! itself — a `Leverage`, a `Skew` — whose invariant lives in its own
 //! constructor and which multiplies the SDK's quantities directly. The
@@ -13,7 +13,6 @@ use alloy::primitives::U256;
 
 use crate::constants::WAD;
 
-use super::mult::Mult;
 use super::share::Share;
 
 /// A dimensionless factor applied to a quantity.
@@ -93,12 +92,6 @@ impl Factor for Share {
     }
 }
 
-impl Factor for Mult {
-    fn apply(self, x: U256) -> U256 {
-        x * U256::from(self.wad()) / WAD
-    }
-}
-
 /// `x` scaled by `factor`, narrowed back to the count's width.
 ///
 /// # Panics
@@ -136,7 +129,6 @@ mod tests {
         let x = U256::from(1_000u64);
         assert_eq!(0.25.apply(x), U256::from(250u64));
         assert_eq!(Share::try_from(0.25).unwrap().apply(x), U256::from(250u64));
-        assert_eq!(Mult::try_from(0.25).unwrap().apply(x), U256::from(250u64));
         assert_eq!(2.5.wad(), U256::from(2_500_000_000_000_000_000u128));
         assert_eq!(Share::ONE.wad(), WAD);
     }

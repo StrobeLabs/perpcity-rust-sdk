@@ -154,7 +154,7 @@ impl MakerBand {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::units::{Mult, Share};
+    use crate::units::Share;
 
     /// Two prices become the narrowest band on the spacing that holds
     /// them, and the band's centre is the geometric mean of its ends.
@@ -162,8 +162,11 @@ mod tests {
     fn a_range_is_built_between_two_prices() {
         let index = Price::at_tick(46_035).unwrap();
         let zone = Share::try_from(0.01).unwrap();
-        let built = TickRange::between(index * Mult::one_minus(zone), index * Mult::one_plus(zone))
-            .unwrap();
+        let built = TickRange::between(
+            index * (1.0 - zone.fraction()),
+            index * (1.0 + zone.fraction()),
+        )
+        .unwrap();
         assert_eq!(built.lower() % TICK_SPACING, 0);
         assert_eq!(built.upper() % TICK_SPACING, 0);
         assert!(

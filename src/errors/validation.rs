@@ -30,13 +30,6 @@ pub enum ValidationError {
         reason: String,
     },
 
-    /// A factor is negative, not a number, or past the WAD width.
-    #[error("invalid multiplier: {reason}")]
-    InvalidMultiplier {
-        /// What was wrong with the factor.
-        reason: String,
-    },
-
     /// A share is more than the whole, or weights do not make one.
     #[error("invalid share: {reason}")]
     InvalidShare {

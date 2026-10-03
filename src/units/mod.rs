@@ -58,7 +58,6 @@ mod amount;
 mod factor;
 pub(crate) mod fixed_point;
 mod liquidity;
-mod mult;
 mod price;
 mod rates;
 mod share;
@@ -68,7 +67,6 @@ pub use accumulators::{Earnings, FeeGrowth, Funding, FundingPerSqrtPrice};
 pub use amount::{PerpAtoms, PerpDelta, UsdcAtoms, UsdcDelta};
 pub use factor::Factor;
 pub use liquidity::{LDelta, LUnits};
-pub use mult::Mult;
 pub use price::{Price, SqrtPrice};
 pub use rates::{FundingRate, Ratio, UtilizationRate};
 pub use share::Share;
@@ -198,12 +196,6 @@ macro_rules! count {
             }
         }
 
-        impl std::ops::Mul<$name> for $crate::units::Mult {
-            type Output = $name;
-            fn mul(self, count: $name) -> $name {
-                count * self
-            }
-        }
 
         impl std::ops::Mul<$name> for f64 {
             type Output = $name;
@@ -355,12 +347,6 @@ macro_rules! delta {
             }
         }
 
-        impl std::ops::Mul<$name> for $crate::units::Mult {
-            type Output = $name;
-            fn mul(self, delta: $name) -> $name {
-                delta * self
-            }
-        }
 
         impl std::ops::Mul<$name> for f64 {
             type Output = $name;

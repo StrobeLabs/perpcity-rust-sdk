@@ -301,7 +301,7 @@ impl From<PerpAtoms> for PerpDelta {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::units::{Mult, Share};
+    use crate::units::Share;
 
     /// The two assets' counts add with an operator and sum from an
     /// iterator, because the protocol bounds what a sum of balances can
@@ -466,12 +466,7 @@ mod tests {
             UsdcAtoms::new(100_000_000) * 5.0,
             UsdcAtoms::new(500_000_000)
         );
-        let lev = Mult::try_from(5.0).unwrap();
-        assert_eq!(
-            UsdcAtoms::new(100_000_000) * lev,
-            UsdcAtoms::new(500_000_000)
-        );
-        assert_eq!(lev * PerpDelta::new(-3), PerpDelta::new(-15));
+        assert_eq!(5.0 * PerpDelta::new(-3), PerpDelta::new(-15));
         assert_eq!(0.5 * UsdcAtoms::new(7), UsdcAtoms::new(3));
         assert_eq!(PerpDelta::new(7) * -0.5, PerpDelta::new(-3));
         assert_eq!(

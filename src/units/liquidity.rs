@@ -22,7 +22,7 @@ use alloy::primitives::U256;
 use crate::errors::ValidationError;
 
 use super::factor::scale_delta;
-use super::{Factor, Mult, Share, count};
+use super::{Factor, Share, count};
 
 count! {
     /// Liquidity, in the pool's own units: what `makerDetails` stores for a
@@ -192,13 +192,6 @@ impl<F: Factor> std::ops::Mul<F> for LDelta {
 }
 
 impl std::ops::Mul<LDelta> for Share {
-    type Output = LDelta;
-    fn mul(self, delta: LDelta) -> LDelta {
-        delta * self
-    }
-}
-
-impl std::ops::Mul<LDelta> for Mult {
     type Output = LDelta;
     fn mul(self, delta: LDelta) -> LDelta {
         delta * self

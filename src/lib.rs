@@ -88,7 +88,7 @@ pub use transport::{config::TransportConfig, provider::HftTransport};
 
 #[doc(inline)]
 pub use units::{
-    Earnings, Factor, FeeGrowth, Funding, FundingPerSqrtPrice, FundingRate, LDelta, LUnits, Mult,
+    Earnings, Factor, FeeGrowth, Funding, FundingPerSqrtPrice, FundingRate, LDelta, LUnits,
     PerSide, PerpAtoms, PerpDelta, Price, Ratio, Share, Side, SqrtPrice, UsdcAtoms, UsdcDelta,
     UtilizationRate,
 };

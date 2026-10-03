@@ -10,7 +10,7 @@ use alloy::primitives::{U256, U512};
 use crate::constants::{MAX_SQRT_PRICE_X96, MIN_SQRT_PRICE_X96, Q96, WAD};
 use crate::errors::ValidationError;
 
-use super::{BIGINT_1E6, F64_1E6, F64_WAD, Factor, MAX_SAFE_F64_INT, Mult, Share};
+use super::{BIGINT_1E6, F64_1E6, F64_WAD, Factor, MAX_SAFE_F64_INT, Share};
 
 /// A price: USDC per unit of the market's token.
 ///
@@ -99,13 +99,6 @@ impl<F: Factor> std::ops::Mul<F> for Price {
 }
 
 impl std::ops::Mul<Price> for Share {
-    type Output = Price;
-    fn mul(self, price: Price) -> Price {
-        price * self
-    }
-}
-
-impl std::ops::Mul<Price> for Mult {
     type Output = Price;
     fn mul(self, price: Price) -> Price {
         price * self
@@ -289,10 +282,7 @@ mod tests {
             mark * Share::try_from(0.25).unwrap(),
             Price::try_from(25.0).unwrap()
         );
-        assert_eq!(
-            mark * Mult::try_from(1.5).unwrap(),
-            Price::try_from(150.0).unwrap()
-        );
+        assert_eq!(mark * 1.5, Price::try_from(150.0).unwrap());
         assert_eq!(mark / index, 1.25);
         assert_eq!(index / mark, 0.8);
         assert!(

@@ -40,7 +40,7 @@ pub use crate::{
     FundingPerSqrtPrice, FundingRate, GasLimits, HftTransport, LDelta, LUnits, LiveTakerMarket,
     LiveTakerMarketPublisher, MAX_ROW_BATCH, MakerBand, MakerEquityBreakdown, MakerEquityKind,
     MakerEquityOutcome, MakerMarketSnapshot, MakerState, MarginRatioTriple, MarginRatios, Mark,
-    MarketCapacity, MarketConfig, MarketEvent, MarketFeed, MarketReader, MarketSnapshot, Mult,
+    MarketCapacity, MarketConfig, MarketEvent, MarketFeed, MarketReader, MarketSnapshot,
     OpenInterest, OpenMakerParams, OpenResult, OpenTakerParams, PerSide, PerpAtoms, PerpCityError,
     PerpClient, PerpDelta, Price, Ratio, Result, RowOutcome, Share, Side, SolvencyState, SqrtPrice,
     StateAt, TickFunding, TickRange, TransactionError, TransportConfig, TxBuilder, Urgency,
