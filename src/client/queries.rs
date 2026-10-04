@@ -186,12 +186,10 @@ pub(super) fn multicall_error(e: MulticallError) -> PerpCityError {
 }
 
 /// Which contract build a market runs. The two live builds share every
-/// view and trade selector; they differ in how a liquidation is called, in
-/// what a close event carries, and in when a swap's fees leave the margin
-/// total relative to the events around them, and the SDK picks by era
-/// where it must. Read it with [`MarketReader::era`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum Era {
+/// view and trade selector; they differ in how a liquidation is called and
+/// in what a close event carries, and the SDK picks by era where it must.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Era {
     /// Build `58b42b7`: whole-position 2-arg liquidations, tailed close
     /// events, a hookless pool.
     Legacy,
@@ -274,16 +272,6 @@ impl MarketReader {
             .unwrap()
             .insert(self.perp, immutables);
         Ok(immutables)
-    }
-
-    /// Which contract build this market runs, read once from its pool key:
-    /// only a `v0.2.2` pool carries the guard hook.
-    ///
-    /// # Errors
-    ///
-    /// The transport error from the first read; cached after it.
-    pub async fn era(&self) -> Result<Era> {
-        Ok(self.immutables().await?.era)
     }
 
     /// The three addresses this market's tape is read from

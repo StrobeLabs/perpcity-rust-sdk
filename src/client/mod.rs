@@ -49,7 +49,7 @@ mod transactions;
 pub use chain::{ChainDeployments, ChainReader};
 pub use maker_equity::{MakerEquityKind, MakerEquityOutcome};
 pub use market::MarketReader;
-pub use queries::{Bounds, Era, Fees, MarketConfig, MarketSnapshot, OpenInterest};
+pub use queries::{Bounds, Fees, MarketConfig, MarketSnapshot, OpenInterest};
 pub use state::{
     MAX_ROW_BATCH, MarginRatioTriple, MarginRatios, RowOutcome, SolvencyState, StateAt,
 };

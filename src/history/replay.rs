@@ -16,7 +16,7 @@
 
 use alloy::primitives::{Address, B256};
 
-use crate::client::{Era, OpenInterest, SolvencyState};
+use crate::client::{OpenInterest, SolvencyState};
 use crate::errors::ValidationError;
 use crate::events::{CumulativesInfo, MarketEvent, ModuleKind};
 use crate::math::BlockContext;
@@ -38,9 +38,8 @@ use super::tape::{ChainPoint, OwnershipLog, TapeEvent};
 pub struct Gaps {
     /// Moves of `totalMargin` no event carries, since the last
     /// `MarginTransferred`: a donation adds the debt it repaid, a bad-debt
-    /// booking adds the insurance it consumed, a swap's fees leave it on a
-    /// build the fold was not told, and on `v0.2.2` a swap while debt
-    /// stands removes less than its gross fees by what repaid the debt.
+    /// booking adds the insurance it consumed, and a swap while debt stands
+    /// removes less than its gross fees by what repaid the debt.
     pub total_margin_unemitted: u32,
     /// Swaps that paid an insurance fee while bad debt stood, since the
     /// last event that stated the debt. The fee repays debt first, and no
@@ -56,17 +55,15 @@ pub struct Gaps {
 /// [`BlockContext`], so a rebuilt snapshot compares equal to a pinned read
 /// at that block.
 ///
-/// The one place the fold must know the market's [`Era`] is the margin
-/// total: every taker swap removes its protocol, creator and insurance fees
-/// from `totalMargin` with no event, and whether the `MarginTransferred` of
-/// the same transaction was emitted before or after that removal depends on
-/// the build and the path. A fold told the era applies the build's rule and
-/// is exact while no debt stands; a fold not told it counts every such
-/// swap as a silence instead.
+/// One rule here is the live build's rather than the vocabulary's: every
+/// taker swap removes its protocol, creator and insurance fees from
+/// `totalMargin` with no event, and whether the `MarginTransferred` of the
+/// same transaction was emitted before or after that removal is the path's.
+/// The fold applies `v0.2.2`'s order and is exact while no debt stands; the
+/// next build emits the total on that path and the rule goes with it.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Replay {
     perp: Address,
-    era: Option<Era>,
     events: u64,
     last: Option<(ChainPoint, BlockContext)>,
     pool_price: Option<Price>,
@@ -100,15 +97,18 @@ pub struct Replay {
 }
 
 impl Replay {
-    /// The market before its first event, on the build `era` names. What is
-    /// zero before any event is zero and stated: no capacity, no open
-    /// interest, no margin, no debt. What only the factory's creation log
-    /// carries — the modules, the first price, the first EMAs — is unknown
-    /// until the market's own events state it.
-    pub fn from_genesis(perp: Address, era: Era) -> Self {
+    /// The market before its first event. What is zero before any event is
+    /// zero and stated: no capacity, no open interest, no margin, no debt.
+    /// What only the factory's creation log carries — the modules, the
+    /// first price, the first EMAs — is unknown until the market's own
+    /// events state it.
+    ///
+    /// A fold over a segment that is not the market's start is
+    /// [`Fold::fold`], whose totals are unknown until the segment states
+    /// them.
+    pub fn from_genesis(perp: Address) -> Self {
         Self {
             perp,
-            era: Some(era),
             capacity: Some(PerSide::default()),
             open_interest: Some(PerSide::default()),
             total_margin_stated: Some(UsdcAtoms::ZERO),
@@ -117,22 +117,6 @@ impl Replay {
             stated_bad_debt: true,
             ..Self::default()
         }
-    }
-
-    /// A fold over a segment that is not the market's start, on the build
-    /// `era` names: every total is unknown until the segment states it.
-    /// [`Fold::fold`] is the same without the era, and counts every swap's
-    /// fee removal as a silence.
-    pub fn segment(era: Era) -> Self {
-        Self {
-            era: Some(era),
-            ..Self::default()
-        }
-    }
-
-    /// The build this fold applies the rules of, if it was told.
-    pub fn era(&self) -> Option<Era> {
-        self.era
     }
 
     /// The market this is a replay of.
@@ -260,45 +244,34 @@ impl Replay {
     /// total, is what lets the count itself combine across segments.
     pub fn gaps(&self) -> Gaps {
         let debt_stands = self.bad_debt.is_some_and(|debt| !debt.is_zero());
-        // On `v0.2.2` a swap while debt stands removes its credited fees,
-        // the gross less what repaid the debt; the fold removed the gross.
-        let fees_overstated = debt_stands && self.era == Some(Era::Upgradeable);
+        // A swap while debt stands removes its credited fees, the gross less
+        // what repaid the debt; the fold removed the gross. The same swaps
+        // are the debt's silence, so one count serves both.
+        let silent_swaps = if debt_stands {
+            self.insurance_swaps_since_debt_stated
+        } else {
+            0
+        };
         Gaps {
-            total_margin_unemitted: self.total_margin_unemitted
-                + if fees_overstated {
-                    self.insurance_swaps_since_debt_stated
-                } else {
-                    0
-                },
-            bad_debt_unemitted: if debt_stands {
-                self.insurance_swaps_since_debt_stated
-            } else {
-                0
-            },
+            total_margin_unemitted: self.total_margin_unemitted + silent_swaps,
+            bad_debt_unemitted: silent_swaps,
         }
     }
 
     /// Whether this taker event's swap fees left the margin total after the
     /// transaction's `MarginTransferred`, so the fold must remove them, or
-    /// before it, so the stated total already has them out. `None` when the
-    /// fold was not told the build.
-    fn swap_fees_removed_after_statement(&self, event: &TapeEvent) -> Option<bool> {
-        let preceded_by_withdrawal = matches!(
+    /// before it, so the stated total already has them out. An open
+    /// transfers its deposit, then removes; an adjust transfers a deposit
+    /// before the removal and a withdrawal after it; a liquidation transfers
+    /// its fee after the close event, so nothing preceded.
+    fn swap_fees_removed_after_statement(&self, event: &TapeEvent) -> bool {
+        if matches!(event.event, MarketEvent::TakerOpened { .. }) {
+            return true;
+        }
+        !matches!(
             self.margin_transfer_in_tx,
             Some((tx, nonpositive)) if tx == event.tx_hash && nonpositive
-        );
-        Some(match (self.era?, &event.event) {
-            // Both builds: the deposit is transferred, then the fees leave.
-            (_, MarketEvent::TakerOpened { .. }) => true,
-            // `58b42b7` removes the fees before it transfers margin, on every
-            // adjust, close and liquidation, so the statement already has
-            // them out.
-            (Era::Legacy, _) => false,
-            // `v0.2.2` transfers a deposit before removing the fees and a
-            // withdrawal after; a liquidation transfers its fee after the
-            // close event, so nothing preceded.
-            (Era::Upgradeable, _) => !preceded_by_withdrawal,
-        })
+        )
     }
 }
 
@@ -342,12 +315,8 @@ impl Fold for Replay {
                 // margin total with no event; the LP fee stays, it is the
                 // makers'.
                 let removed = swap.protocol_fee + swap.creator_fee + swap.insurance_fee;
-                if !removed.is_zero() {
-                    match self.swap_fees_removed_after_statement(event) {
-                        Some(true) => self.fees_removed_since_stated += removed,
-                        Some(false) => {}
-                        None => self.total_margin_unemitted += 1,
-                    }
+                if !removed.is_zero() && self.swap_fees_removed_after_statement(event) {
+                    self.fees_removed_since_stated += removed;
                 }
             }
             MarketEvent::CapacityUpdated { capacity } => self.capacity = Some(capacity),
@@ -428,7 +397,6 @@ impl Fold for Replay {
         if self.perp.is_zero() {
             self.perp = later.perp;
         }
-        self.era = later.era.or(self.era);
         self.events += later.events;
         self.last = later.last.or(self.last);
         self.margin_transfer_in_tx = later.margin_transfer_in_tx.or(self.margin_transfer_in_tx);
@@ -494,9 +462,9 @@ mod tests {
         }
     }
 
-    /// The fixture tape folded as a `58b42b7` market from its genesis.
-    fn legacy(tape: &[TapeEvent]) -> Replay {
-        let mut market = Replay::from_genesis(Address::ZERO, Era::Legacy);
+    /// The fixture tape folded as a market from its genesis.
+    fn genesis(tape: &[TapeEvent]) -> Replay {
+        let mut market = Replay::from_genesis(Address::ZERO);
         for row in tape {
             market.apply(row);
         }
@@ -621,7 +589,7 @@ mod tests {
     #[test]
     fn the_totals_are_the_last_stated_and_the_snapshots_carry_the_callers_block() {
         let tape = tape();
-        let market = legacy(&tape);
+        let market = genesis(&tape);
         let last = block_of(tape.last().unwrap());
 
         assert_eq!(market.applied(), 10);
@@ -658,7 +626,7 @@ mod tests {
     #[test]
     fn the_mark_is_the_emas_advanced_to_the_callers_block() {
         let tape = tape();
-        let market = legacy(&tape);
+        let market = genesis(&tape);
         let at = BlockContext {
             number: 20,
             hash: B256::with_last_byte(20),
@@ -689,8 +657,9 @@ mod tests {
     }
 
     /// A donation or a booking moves the margin total silently; a swap's
-    /// insurance fee repays debt silently. Each counts until the next
-    /// statement, and a statement clears it.
+    /// insurance fee while debt stands repays debt silently and removes
+    /// less than its gross fees. Each counts until the next statement, and
+    /// a statement clears it.
     #[test]
     fn silences_are_counted_until_the_next_statement() {
         let mut tape = tape();
@@ -712,13 +681,14 @@ mod tests {
                 swap: swap(price(44), 10_000),
             },
         ));
-        let market = legacy(&tape);
+        let market = genesis(&tape);
         assert_eq!(
             market.gaps(),
             Gaps {
-                total_margin_unemitted: 1,
+                total_margin_unemitted: 2,
                 bad_debt_unemitted: 1,
-            }
+            },
+            "the donation, and the swap's fees net of what repaid the debt"
         );
         assert_eq!(
             market.solvency().unwrap().bad_debt,
@@ -742,7 +712,7 @@ mod tests {
                 total_margin: UsdcAtoms::new(90_505_000),
             },
         ));
-        let market = legacy(&tape);
+        let market = genesis(&tape);
         assert_eq!(market.gaps(), Gaps::default());
 
         // A swap while no debt stands repays nothing, so it is no silence.
@@ -764,7 +734,7 @@ mod tests {
                 swap: swap(price(45), 10_000),
             },
         ));
-        assert_eq!(legacy(&clear).gaps().bad_debt_unemitted, 0);
+        assert_eq!(genesis(&clear).gaps().bad_debt_unemitted, 0);
     }
 
     /// The fold of the whole tape equals the combination of the folds of
@@ -815,7 +785,7 @@ mod tests {
     #[test]
     fn genesis_states_the_zeros_and_leaves_the_creation_log_unknown() {
         let perp = Address::repeat_byte(0xF0);
-        let empty = Replay::from_genesis(perp, Era::Legacy);
+        let empty = Replay::from_genesis(perp);
         assert_eq!(empty.perp(), perp);
         assert_eq!(
             empty.solvency(),
@@ -845,7 +815,7 @@ mod tests {
             .filter(|row| !matches!(row.event, MarketEvent::BadDebtAccounted { .. }))
             .copied()
             .collect();
-        let mut from_genesis = Replay::from_genesis(perp, Era::Legacy);
+        let mut from_genesis = Replay::from_genesis(perp);
         for row in &debt_free {
             from_genesis.apply(row);
         }
@@ -864,12 +834,12 @@ mod tests {
 
         // Genesis then a segment is genesis over the whole.
         for cut in 0..=tape.len() {
-            let mut left = Replay::from_genesis(perp, Era::Legacy);
+            let mut left = Replay::from_genesis(perp);
             for row in &tape[..cut] {
                 left.apply(row);
             }
             left.combine(Replay::fold(&tape[cut..]));
-            let mut whole = Replay::from_genesis(perp, Era::Legacy);
+            let mut whole = Replay::from_genesis(perp);
             for row in &tape {
                 whole.apply(row);
             }
@@ -891,9 +861,9 @@ mod tests {
 
     /// A swap's protocol, creator and insurance fees (30,000 here) leave
     /// the margin total with no event, and when they leave relative to the
-    /// transaction's `MarginTransferred` is the build's and the path's.
+    /// transaction's `MarginTransferred` is the path's.
     #[test]
-    fn swap_fees_leave_the_margin_total_as_each_build_orders_them() {
+    fn swap_fees_leave_the_margin_total_as_the_build_orders_them() {
         let open = |tx| {
             vec![
                 with_tx(
@@ -913,19 +883,13 @@ mod tests {
                 ),
             ]
         };
-        // Both builds transfer the deposit first, then remove the fees.
-        for era in [Era::Legacy, Era::Upgradeable] {
-            let mut market = Replay::from_genesis(Address::ZERO, era);
-            for r in &open(1) {
-                market.apply(r);
-            }
-            assert_eq!(
-                market.solvency().unwrap().total_margin,
-                UsdcAtoms::new(999_970_000),
-                "{era:?} open"
-            );
-            assert_eq!(market.gaps(), Gaps::default());
-        }
+        // An open transfers the deposit first, then removes the fees.
+        let opened = genesis(&open(1));
+        assert_eq!(
+            opened.solvency().unwrap().total_margin,
+            UsdcAtoms::new(999_970_000)
+        );
+        assert_eq!(opened.gaps(), Gaps::default());
 
         let adjust_with = |delta: i128, tx| {
             vec![
@@ -945,44 +909,29 @@ mod tests {
                 ),
             ]
         };
-        // `58b42b7` removes the fees before every transfer: the stated total
-        // already has them out, whatever the delta's sign.
-        for delta in [50_000_000, -50_000_000, 0] {
-            let mut market = Replay::from_genesis(Address::ZERO, Era::Legacy);
-            for r in open(1).iter().chain(&adjust_with(delta, 2)) {
-                market.apply(r);
-            }
-            assert_eq!(
-                market.solvency().unwrap().total_margin,
-                UsdcAtoms::new(500_000_000),
-                "legacy adjust with delta {delta}"
-            );
-        }
-        // `v0.2.2` transfers a deposit before the removal, a withdrawal
+        // An adjust transfers a deposit before the removal, a withdrawal
         // after it.
-        let mut deposit = Replay::from_genesis(Address::ZERO, Era::Upgradeable);
-        for r in open(1).iter().chain(&adjust_with(50_000_000, 2)) {
-            deposit.apply(r);
-        }
+        let with_deposit: Vec<TapeEvent> = open(1)
+            .into_iter()
+            .chain(adjust_with(50_000_000, 2))
+            .collect();
         assert_eq!(
-            deposit.solvency().unwrap().total_margin,
+            genesis(&with_deposit).solvency().unwrap().total_margin,
             UsdcAtoms::new(499_970_000)
         );
         for delta in [-50_000_000, 0] {
-            let mut withdrawal = Replay::from_genesis(Address::ZERO, Era::Upgradeable);
-            for r in open(1).iter().chain(&adjust_with(delta, 2)) {
-                withdrawal.apply(r);
-            }
+            let with_withdrawal: Vec<TapeEvent> =
+                open(1).into_iter().chain(adjust_with(delta, 2)).collect();
             assert_eq!(
-                withdrawal.solvency().unwrap().total_margin,
+                genesis(&with_withdrawal).solvency().unwrap().total_margin,
                 UsdcAtoms::new(500_000_000),
-                "upgradeable adjust with delta {delta}"
+                "adjust with delta {delta}"
             );
         }
 
-        // A `v0.2.2` liquidation closes before it transfers the fee, so the
-        // fees leave after no statement and the transfer that follows
-        // restates the total.
+        // A liquidation closes before it transfers the fee, so the fees
+        // leave after no statement and the transfer that follows restates
+        // the total.
         let liquidation = vec![
             with_tx(
                 row(
@@ -1012,8 +961,8 @@ mod tests {
                 3,
             ),
         ];
-        let mut liquidated = Replay::from_genesis(Address::ZERO, Era::Upgradeable);
-        for r in open(1).iter().chain(&liquidation) {
+        let mut liquidated = genesis(&open(1));
+        for r in &liquidation {
             liquidated.apply(r);
         }
         assert_eq!(
@@ -1030,17 +979,12 @@ mod tests {
             UsdcAtoms::new(997_940_000)
         );
 
-        // A fold not told the build removes nothing and counts the silence;
-        // a segment told it removes as the build does.
-        let blind = Replay::fold(&open(1));
-        assert_eq!(blind.gaps().total_margin_unemitted, 1);
-        let mut told = Replay::segment(Era::Legacy);
-        for r in &open(1) {
-            told.apply(r);
-        }
-        assert_eq!(told.gaps().total_margin_unemitted, 0);
+        // A segment fold removes the same fees from the total it was told,
+        // and invents no debt it was never told.
+        let segment = Replay::fold(&open(1));
+        assert_eq!(segment.gaps(), Gaps::default());
         assert_eq!(
-            told.solvency(),
+            segment.solvency(),
             None,
             "a segment never told the debt does not invent it"
         );

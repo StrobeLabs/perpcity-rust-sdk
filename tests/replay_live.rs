@@ -66,9 +66,7 @@ async fn a_replayed_market_equals_the_read_at_the_same_block() {
         history.stats().undecodable
     );
     assert_eq!(history.stats().undecodable, 0, "the tape has a gap");
-    let era = market.era().await.unwrap();
-    println!("{perp} runs {era:?}");
-    let mut replay = Replay::from_genesis(perp, era);
+    let mut replay = Replay::from_genesis(perp);
     for row in &tape {
         replay.apply(row);
     }
