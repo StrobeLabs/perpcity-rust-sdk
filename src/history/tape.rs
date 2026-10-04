@@ -7,15 +7,18 @@
 //! does not recognize (ERC-721 approvals, admin events) are skipped, as
 //! the live feed skips them.
 //!
-//! The tape covers what the perp itself emits. That includes
+//! [`market_events`] covers what the perp itself emits. That includes
 //! [`MarketEvent::PositionTransferred`] — the position NFT's mint, burn
 //! and mid-life transfers — so who held a position at a given block is a
 //! fold of the tape: [`OwnershipLog`]. Trade events name a position id
 //! and never a wallet, so that fold is how a market's activity is
-//! attributed to the addresses behind it. The tape does not include
-//! [`MarketEvent::IndexUpdated`] (the beacon's address — see
-//! [`beacon_prints`](super::beacon_prints)) or
-//! [`MarketEvent::ModifyLiquidity`] (the PoolManager's address).
+//! attributed to the addresses behind it. A market's state has two more
+//! sources, at other addresses: its index, [`MarketEvent::IndexUpdated`]
+//! from the beacon, and its book, [`MarketEvent::ModifyLiquidity`] from
+//! the PoolManager, which logs every perp pool's liquidity change under
+//! the pool's id. [`market_tape`] reads all three in one chain order, so a
+//! fold that rebuilds the market from its events has everything the chain
+//! said about it; [`market_events`] stays the one-address scan.
 //!
 //! Chain order has two sources: within one response, every production
 //! client returns `eth_getLogs` results by block then log index; across
@@ -28,8 +31,10 @@ use std::collections::BTreeMap;
 use alloy::primitives::{Address, B256, U256};
 use alloy::providers::Provider;
 use alloy::rpc::types::{Filter, Log};
+use alloy::sol_types::SolEvent;
 use serde::{Deserialize, Serialize};
 
+use crate::contracts::IPoolManagerState;
 use crate::errors::{Result, ValidationError};
 use crate::events::{MarketEvent, decode_log};
 
@@ -56,6 +61,9 @@ pub struct ChainPoint {
 pub struct TapeEvent {
     /// Block the event landed in.
     pub block_number: u64,
+    /// Hash of that block, so a state rebuilt from the tape carries the
+    /// same block identity a pinned read does.
+    pub block_hash: B256,
     /// Position of the event's log in its block.
     pub log_index: u64,
     /// Unix timestamp of the block.
@@ -74,6 +82,61 @@ impl TapeEvent {
             log_index: self.log_index,
         }
     }
+
+    /// `event`, decoded from `log`, stamped with the log's mined position
+    /// and `timestamp`: the one constructor both tenses use, so a feed's
+    /// event and a scan's are the same row.
+    ///
+    /// # Errors
+    ///
+    /// [`ValidationError::DecodeFailed`] for a log without a mined
+    /// position — a pending log, which neither tense should hand here.
+    pub(crate) fn stamped(
+        log: &Log,
+        event: MarketEvent,
+        timestamp: u64,
+    ) -> std::result::Result<Self, ValidationError> {
+        let position = log
+            .block_number
+            .zip(log.block_hash)
+            .zip(log.log_index)
+            .zip(log.transaction_hash);
+        let (((block_number, block_hash), log_index), tx_hash) =
+            position.ok_or_else(|| ValidationError::DecodeFailed {
+                context: format!(
+                    "market event log from {} in tx {:?} has no mined position",
+                    log.address(),
+                    log.transaction_hash
+                ),
+            })?;
+        Ok(Self {
+            block_number,
+            block_hash,
+            log_index,
+            timestamp,
+            tx_hash,
+            event,
+        })
+    }
+}
+
+/// The three addresses a market's tape is read from.
+///
+/// A market's events come from its own contract; its index from the
+/// beacon it is configured with; its book from the shared PoolManager,
+/// which logs every pool's liquidity under the pool's id. The client knows
+/// all three ([`MarketReader::tape_addresses`](crate::MarketReader::tape_addresses));
+/// the handle only needs to be told.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct TapeAddresses {
+    /// The market.
+    pub perp: Address,
+    /// The beacon the market reads its index from.
+    pub beacon: Address,
+    /// The chain's PoolManager.
+    pub pool_manager: Address,
+    /// The market's pool, as the PoolManager keys it.
+    pub pool_id: B256,
 }
 
 /// Who held each of a market's positions, over time: the custody
@@ -219,6 +282,58 @@ pub(super) async fn market_events_with<P: Provider>(
     tape_rows(provider, decode_known(logs, widths)).await
 }
 
+/// Everything the chain said about a market in blocks
+/// `from_block..=to_block`, in one chain order: the perp's own events, the
+/// beacon's prints and the PoolManager's liquidity changes for the market's
+/// pool.
+///
+/// One range walk serves all three. The perp and the beacon share a filter
+/// by address; the PoolManager is every pool on the chain, so its filter
+/// names `ModifyLiquidity` and the pool id it indexes by. The two scans
+/// share the learned width, and the rows are merged on chain point.
+///
+/// # Errors
+///
+/// As [`market_events`]; a zero address in `addresses` is
+/// [`ValidationError::InvalidConfig`].
+pub async fn market_tape<P: Provider>(
+    provider: &P,
+    addresses: TapeAddresses,
+    from_block: u64,
+    to_block: u64,
+) -> Result<Vec<TapeEvent>> {
+    market_tape_with(
+        provider,
+        addresses,
+        from_block,
+        to_block,
+        &SharedWidths::new(),
+        1,
+    )
+    .await
+}
+
+/// [`market_tape`] over a caller-held width search, with up to `in_flight`
+/// window requests outstanding per scan.
+pub(super) async fn market_tape_with<P: Provider>(
+    provider: &P,
+    addresses: TapeAddresses,
+    from_block: u64,
+    to_block: u64,
+    widths: &SharedWidths,
+    in_flight: usize,
+) -> Result<Vec<TapeEvent>> {
+    let (market, book) = tape_filters(addresses)?;
+    let (market_logs, book_logs) = futures_util::try_join!(
+        scan_all(provider, &market, from_block, to_block, widths, in_flight),
+        scan_all(provider, &book, from_block, to_block, widths, in_flight),
+    )?;
+    let mut decoded = decode_known(market_logs, widths);
+    decoded.extend(decode_known(book_logs, widths));
+    decoded.sort_by_key(|(log, _)| (log.block_number, log.log_index));
+    tape_rows(provider, decoded).await
+}
+
 /// The newest `limit` market events `perp` emitted in blocks
 /// `from_block..=to_block`, oldest first.
 ///
@@ -286,6 +401,36 @@ fn perp_filter(perp: Address) -> std::result::Result<Filter, ValidationError> {
     Ok(Filter::new().address(perp))
 }
 
+/// The market's two filters: the perp and its beacon by address; the
+/// PoolManager by the liquidity event and the pool id it indexes by.
+fn tape_filters(
+    addresses: TapeAddresses,
+) -> std::result::Result<(Filter, Filter), ValidationError> {
+    let TapeAddresses {
+        perp,
+        beacon,
+        pool_manager,
+        pool_id,
+    } = addresses;
+    for (address, what) in [
+        (perp, "perp"),
+        (beacon, "beacon"),
+        (pool_manager, "pool manager"),
+    ] {
+        if address.is_zero() {
+            return Err(ValidationError::InvalidConfig {
+                reason: format!("{what} address is zero"),
+            });
+        }
+    }
+    let market = Filter::new().address(vec![perp, beacon]);
+    let book = Filter::new()
+        .address(pool_manager)
+        .event_signature(IPoolManagerState::ModifyLiquidity::SIGNATURE_HASH)
+        .topic1(pool_id);
+    Ok((market, book))
+}
+
 /// Decodes the logs this vocabulary recognizes, each kept with its log.
 ///
 /// A log of another vocabulary is skipped, which is what a filter on one
@@ -328,29 +473,21 @@ async fn tape_rows<P: Provider>(
     decoded
         .into_iter()
         .map(|(log, event)| {
-            let position = log
-                .block_number
-                .zip(log.log_index)
-                .zip(log.transaction_hash);
-            let ((block_number, log_index), tx_hash) =
-                position.ok_or_else(|| ValidationError::DecodeFailed {
-                    context: format!(
-                        "market event log from {} in tx {:?}",
-                        log.address(),
-                        log.transaction_hash
-                    ),
-                })?;
-            let timestamp = match log.block_timestamp {
-                Some(timestamp) => timestamp,
-                None => headers[&block_number],
+            let timestamp = match (log.block_timestamp, log.block_number) {
+                (Some(timestamp), _) => timestamp,
+                (None, Some(number)) => headers[&number],
+                (None, None) => {
+                    return Err(ValidationError::DecodeFailed {
+                        context: format!(
+                            "market event log from {} in tx {:?} has no mined position",
+                            log.address(),
+                            log.transaction_hash
+                        ),
+                    }
+                    .into());
+                }
             };
-            Ok(TapeEvent {
-                block_number,
-                log_index,
-                timestamp,
-                tx_hash,
-                event,
-            })
+            Ok(TapeEvent::stamped(&log, event, timestamp)?)
         })
         .collect()
 }

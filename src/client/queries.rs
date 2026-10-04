@@ -24,6 +24,7 @@ use crate::contracts::{self, IFees, IMarginRatios, Perp, Position};
 use crate::convert::{price_x96_to_f64, scale_from_6dec};
 use crate::errors::{ContractError, PerpCityError, Result, ValidationError};
 use crate::hft::state_cache::{CachedBounds, CachedFees};
+use crate::history::TapeAddresses;
 use crate::math::BlockContext;
 use crate::math::pricing::{Emas, Mark};
 use crate::units::{PerSide, PerpAtoms, Price, Ratio};
@@ -271,6 +272,33 @@ impl MarketReader {
             .unwrap()
             .insert(self.perp, immutables);
         Ok(immutables)
+    }
+
+    /// The three addresses this market's tape is read from
+    /// ([`History::market_tape`](crate::history::History::market_tape)):
+    /// the perp, the beacon it is configured with now, and the chain's
+    /// PoolManager with this market's pool id.
+    ///
+    /// The beacon is governance's to change, so this is the beacon at the
+    /// time of the call; a tape read from the market's genesis carries
+    /// every `SetBeacon` and a fold learns the earlier ones from it.
+    ///
+    /// # Errors
+    ///
+    /// [`ContractError::ModuleNotRegistered`] when the perp has no beacon;
+    /// the transport error from either read.
+    pub async fn tape_addresses(&self) -> Result<TapeAddresses> {
+        let perp = Perp::new(self.perp, self.chain.provider());
+        let (modules, immutables) = tokio::try_join!(
+            async { perp.modules().call().await.map_err(PerpCityError::from) },
+            self.immutables(),
+        )?;
+        Ok(TapeAddresses {
+            perp: self.perp,
+            beacon: registered_module(modules.beacon, "IBeacon")?,
+            pool_manager: self.chain.deployments().pool_manager,
+            pool_id: immutables.pool_id,
+        })
     }
 
     /// [`StateAt::mark`](super::StateAt::mark) at the lagged snapshot
