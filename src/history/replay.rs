@@ -42,19 +42,27 @@ pub use self::positions::{PositionKind, PositionState, Positions};
 use self::seed::Seed;
 use self::solvency::Solvency;
 use super::History;
-use super::fold::{Fold, Latest};
+use super::fold::{Fold, Latest, Sequenced};
 use super::tape::{ChainPoint, OwnershipLog, TapeAddresses, TapeEvent};
 
-/// How many times a figure may have moved without an event saying so,
-/// since the last event that stated it. A reading with a nonzero gap is
-/// forensic, not a decision's input.
-///
-/// All of these count silences in the live contract builds: the next build
-/// emits what repaid the debt on every swap, the margin total on every path
-/// that moves it, and a position's margin, size and band on every event
-/// that changes them, and these go with it.
+/// What the fold does not know, in three kinds, each with its own cure. A
+/// reading with a nonzero gap is forensic, not a decision's input.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Gaps {
+    /// What the contract moved without saying so. Cured by the cutover.
+    pub silences: Silences,
+    /// What the fold's start did not supply. Cured by a seed.
+    pub unknowns: Unknowns,
+    /// What the driver did wrong. Cured by [`Replay::catch_up`].
+    pub faults: Faults,
+}
+
+/// How many times a figure may have moved without an event saying so,
+/// since the last event that stated it. Both are the live contract builds':
+/// the next build emits what repaid the debt on every swap and the margin
+/// total on every path that moves it, and these go with it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Silences {
     /// Moves of `totalMargin` no event carries, since the last
     /// `MarginTransferred`: a donation adds the debt it repaid, a bad-debt
     /// booking adds the insurance it consumed, and a swap while debt stands
@@ -64,6 +72,13 @@ pub struct Gaps {
     /// last event that stated the debt. The fee repays debt first, and no
     /// event on the live builds carries the amount.
     pub bad_debt_unemitted: u32,
+}
+
+/// Positions standing on a figure the fold was never told: a fold from a
+/// segment knows what moved and not where anything stands, and no live
+/// event carries margin. A seed supplies all three.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Unknowns {
     /// Open positions whose level the fold does not know: the open unseen
     /// and no read to supply it, so their size or band is what moved since,
     /// not where they stand. Includes `taker_size_unknown`.
@@ -71,10 +86,14 @@ pub struct Gaps {
     /// Open takers whose size no event stated: first seen mid-life, or
     /// converted from a maker, whose inventory the live builds never emit.
     pub taker_size_unknown: u32,
-    /// Open positions whose margin the fold does not know: no live event
-    /// carries margin, so this is every position a read did not supply and
-    /// every one an event has touched since the read.
+    /// Open positions whose margin the fold does not know: every position a
+    /// read did not supply, and every one an event has touched since.
     pub margin_unknown: u32,
+}
+
+/// What the driver did that the fold would not take.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Faults {
     /// Events refused for arriving at or before the fold's point: a driver
     /// out of order, a duplicate, or a seed's own block delivered again.
     /// Nothing refused is applied; a consumer that sees the count rise heals
@@ -105,8 +124,15 @@ pub struct Gaps {
 pub struct Replay {
     perp: Address,
     events: u64,
-    last: Latest<(ChainPoint, BlockContext)>,
-    refused: u32,
+    /// The block of the last event applied, or the seed's.
+    block: Latest<BlockContext>,
+    market: Sequenced<Market>,
+}
+
+/// The eight folds the market is composed of; `Replay` keeps them behind
+/// the chain-order guard.
+#[derive(Debug, Clone, Default, PartialEq)]
+struct Market {
     prices: Prices,
     rates: Rates,
     utilization: Utilization,
@@ -117,7 +143,35 @@ pub struct Replay {
     custody: OwnershipLog,
 }
 
+impl Fold for Market {
+    fn apply(&mut self, event: &TapeEvent) {
+        self.prices.apply(event);
+        self.rates.apply(event);
+        self.utilization.apply(event);
+        self.solvency.apply(event);
+        self.modules.apply(event);
+        self.pool.apply(event);
+        self.positions.apply(event);
+        self.custody.apply(event);
+    }
+
+    fn combine(&mut self, later: Self) {
+        self.prices.combine(later.prices);
+        self.rates.combine(later.rates);
+        self.utilization.combine(later.utilization);
+        self.solvency.combine(later.solvency);
+        self.modules.combine(later.modules);
+        self.pool.combine(later.pool);
+        self.positions.combine(later.positions);
+        self.custody.combine(later.custody);
+    }
+}
+
 impl Replay {
+    fn market(&self) -> &Market {
+        self.market.inner()
+    }
+
     /// The market before its first event. What is zero before any event is
     /// zero and stated: no capacity, no open interest, no margin, no debt,
     /// no liquidity at any tick. What only the factory's creation log
@@ -130,10 +184,14 @@ impl Replay {
     pub fn from_genesis(perp: Address) -> Self {
         Self {
             perp,
-            utilization: Utilization::genesis(),
-            solvency: Solvency::genesis(),
-            pool: Pool::genesis(),
-            ..Self::default()
+            events: 0,
+            block: Latest::default(),
+            market: Sequenced::new(Market {
+                utilization: Utilization::genesis(),
+                solvency: Solvency::genesis(),
+                pool: Pool::genesis(),
+                ..Market::default()
+            }),
         }
     }
 
@@ -146,7 +204,7 @@ impl Replay {
     /// The fold stands at the end of the block, so the first event it takes
     /// is the next block's; a feed that started earlier delivers the block's
     /// own events again and they are refused, counted on
-    /// [`Gaps::refused`].
+    /// [`Faults::refused`].
     ///
     /// # Errors
     ///
@@ -161,11 +219,7 @@ impl Replay {
             block: seed.block.number,
             log_index: u64::MAX,
         };
-        Ok(Self {
-            perp: seed.perp,
-            events: 0,
-            last: Latest::stated((end_of_block, seed.block)),
-            refused: 0,
+        let market = Market {
             prices: Prices::seeded(seed.pool_price, seed.index, seed.emas),
             rates: Rates::seeded(seed.rates, seed.cumulatives),
             utilization: Utilization::seeded(seed.capacity),
@@ -174,6 +228,12 @@ impl Replay {
             pool: Pool::seeded(seed.ticks, seed.tick)?,
             positions: Positions::seeded(seed.pool_price, seed.positions),
             custody: OwnershipLog::default(),
+        };
+        Ok(Self {
+            perp: seed.perp,
+            events: 0,
+            block: Latest::stated(seed.block),
+            market: Sequenced::standing_at(market, end_of_block),
         })
     }
 
@@ -226,56 +286,57 @@ impl Replay {
         self.events
     }
 
-    /// Where the fold stands: the last event's chain point.
+    /// Where the fold stands: the last event's chain point, or the end of
+    /// the seed's block.
     pub fn point(&self) -> Option<ChainPoint> {
-        self.last.get().map(|(point, _)| point)
+        self.market.point()
     }
 
-    /// The block of the last event applied.
+    /// The block of the last event applied, or the seed's.
     pub fn block(&self) -> Option<BlockContext> {
-        self.last.get().map(|(_, block)| block)
+        self.block.get()
     }
 
     /// The pool price after the last swap.
     pub fn pool_price(&self) -> Option<Price> {
-        self.prices.pool.get()
+        self.market().prices.pool.get()
     }
 
     /// The beacon's last print.
     pub fn index(&self) -> Option<Price> {
-        self.prices.index.get()
+        self.market().prices.index.get()
     }
 
     /// The stored EMA pair and the touch it is current as of, as the last
     /// `RatesAndEmasRefreshed` left them.
     pub fn emas(&self) -> Option<Emas> {
-        self.prices.emas.get()
+        self.market().prices.emas.get()
     }
 
     /// The funding rate the last touch set.
     pub fn funding_per_day(&self) -> Option<FundingRate> {
-        self.rates.funding_per_day.get()
+        self.market().rates.funding_per_day.get()
     }
 
     /// The utilization fee rates the last touch set, per side.
     pub fn util_fee_per_day(&self) -> Option<PerSide<UtilizationRate>> {
-        self.rates.util_fee_per_day.get()
+        self.market().rates.util_fee_per_day.get()
     }
 
     /// The market's accumulators at the last accrual.
     pub fn cumulatives(&self) -> Option<CumulativesInfo> {
-        self.rates.cumulatives.get()
+        self.market().rates.cumulatives.get()
     }
 
     /// Taker open interest, per side.
     pub fn open_interest(&self) -> Option<OpenInterest> {
-        self.utilization.open_interest.get()
+        self.market().utilization.open_interest.get()
     }
 
     /// Capacity and its draw at `block`, as [`StateAt::capacity`](crate::StateAt::capacity)
     /// reads them; `None` until both have been stated.
     pub fn capacity_at(&self, block: BlockContext) -> Option<MarketCapacity> {
-        self.utilization.at(block)
+        self.market().utilization.at(block)
     }
 
     /// What the contract marks from at `block`, as [`StateAt::mark`](crate::StateAt::mark)
@@ -291,134 +352,103 @@ impl Replay {
         block: BlockContext,
         ema_window: u64,
     ) -> StdResult<Option<Mark>, ValidationError> {
-        self.prices.mark_at(block, ema_window)
+        self.market().prices.mark_at(block, ema_window)
     }
 
     /// The solvency books: the debt as last stated, the margin total as
     /// last stated less the swap fees the build removed since. `None` until
     /// both have been stated. Read [`Self::gaps`] beside it.
     pub fn solvency(&self) -> Option<SolvencyState> {
-        self.solvency.state()
+        self.market().solvency.state()
     }
 
     /// The module of `kind` in force, once a `ModuleSet` has named one.
     pub fn module(&self, kind: ModuleKind) -> Option<Address> {
-        self.modules.get(kind)
+        self.market().modules.get(kind)
     }
 
     /// Who held each position when: the custody fold, taken in the same
     /// pass.
     pub fn custody(&self) -> &OwnershipLog {
-        &self.custody
+        &self.market().custody
     }
 
     /// Every position the tape mentioned: takers sized by their swaps,
     /// makers by their liquidity changes.
     pub fn positions(&self) -> &Positions {
-        &self.positions
+        &self.market().positions
     }
 
     /// One position, if the tape mentioned it.
     pub fn position(&self, pos_id: U256) -> Option<&PositionState> {
-        self.positions.get(pos_id)
+        self.positions().get(pos_id)
     }
 
     /// The pool's tick, as [`StateAt::pool`](crate::StateAt::pool) reads
     /// it: where the last swap that moved it left it. `None` until a swap
     /// has moved it, since the pool's first tick is the factory's to say.
     pub fn pool_tick(&self) -> Option<i32> {
-        self.pool.tick.get()
+        self.market().pool.tick.get()
     }
 
     /// Liquidity at every initialized tick, as `PoolSnapshot::ticks` reads
     /// it. `None` for a fold that did not start at genesis: a segment knows
     /// what changed, not what stands.
     pub fn pool_ticks(&self) -> Option<BTreeMap<i32, TickLiquidity>> {
-        self.pool.ticks()
+        self.market().pool.ticks()
     }
 
     /// Liquidity active at the pool's tick, as `PoolSnapshot::liquidity`
     /// reads it: the net of every initialized tick at or below it. `None`
     /// until the tick is known, or for a fold that did not start at genesis.
     pub fn pool_liquidity(&self) -> Option<LUnits> {
-        self.pool.liquidity()
+        self.market().pool.liquidity()
     }
 
-    /// What may have moved without an event saying so, and what stands on
-    /// a figure no event stated. Both are decided at the read, from the
-    /// latest totals and the positions, so the counts combine like the rest.
+    /// What the fold does not know, in three kinds with three cures. All
+    /// decided at the read, from the latest totals and the positions, so the
+    /// counts combine like the rest.
     pub fn gaps(&self) -> Gaps {
-        let silences = self.solvency.silences();
-        let mut gaps = Gaps {
-            total_margin_unemitted: silences.total_margin_unemitted,
-            bad_debt_unemitted: silences.bad_debt_unemitted,
-            refused: self.refused,
-            ..Gaps::default()
-        };
-        for (_, position) in self.positions.open() {
-            gaps.margin_unknown += u32::from(position.margin().is_none());
-            gaps.partial_positions += u32::from(!position.level_known());
+        let market = self.market();
+        let mut unknowns = Unknowns::default();
+        for (_, position) in market.positions.open() {
+            unknowns.margin_unknown += u32::from(position.margin().is_none());
+            unknowns.partial_positions += u32::from(!position.level_known());
             if let PositionKind::Taker { sized: false, .. } = position.kind() {
-                gaps.taker_size_unknown += 1;
+                unknowns.taker_size_unknown += 1;
             }
         }
-        gaps
+        Gaps {
+            silences: market.solvency.silences(),
+            unknowns,
+            faults: Faults {
+                refused: self.market.refused(),
+            },
+        }
     }
 }
 
 impl Fold for Replay {
-    /// An event at or before the fold's point is refused, never applied:
-    /// chain order is the one assumption every sum here rests on, and a
-    /// driver that breaks it is counted rather than trusted.
+    /// Every event goes through the chain-order guard: one at or before the
+    /// fold's point is refused and counted, never applied.
     fn apply(&mut self, event: &TapeEvent) {
-        let point = event.point();
-        if self.last.get().is_some_and(|(last, _)| point <= last) {
-            self.refused += 1;
-            return;
-        }
-        self.last.set((
-            point,
-            BlockContext {
+        if self.market.accept(event) {
+            self.events += 1;
+            self.block.set(BlockContext {
                 number: event.block_number,
                 hash: event.block_hash,
                 timestamp: event.timestamp,
-            },
-        ));
-        self.events += 1;
-
-        self.prices.apply(event);
-        self.rates.apply(event);
-        self.utilization.apply(event);
-        self.solvency.apply(event);
-        self.modules.apply(event);
-        self.pool.apply(event);
-        self.positions.apply(event);
-        self.custody.apply(event);
+            });
+        }
     }
 
     fn combine(&mut self, later: Self) {
-        debug_assert!(
-            self.last
-                .get()
-                .zip(later.last.get())
-                .is_none_or(|((a, _), (b, _))| a < b),
-            "segments combined out of order"
-        );
         if self.perp.is_zero() {
             self.perp = later.perp;
         }
         self.events += later.events;
-        self.refused += later.refused;
-        self.last.combine(later.last);
-
-        self.prices.combine(later.prices);
-        self.rates.combine(later.rates);
-        self.utilization.combine(later.utilization);
-        self.solvency.combine(later.solvency);
-        self.modules.combine(later.modules);
-        self.pool.combine(later.pool);
-        self.positions.combine(later.positions);
-        self.custody.combine(later.custody);
+        self.block.combine(later.block);
+        self.market.combine(later.market);
     }
 }
 
@@ -614,7 +644,10 @@ mod tests {
         assert_eq!(
             market.gaps(),
             Gaps {
-                margin_unknown: 1,
+                unknowns: Unknowns {
+                    margin_unknown: 1,
+                    ..Unknowns::default()
+                },
                 ..Gaps::default()
             },
             "every total was restated; one taker stands, with the margin no event carries"
@@ -683,10 +716,15 @@ mod tests {
         assert_eq!(
             market.gaps(),
             Gaps {
-                total_margin_unemitted: 2,
-                bad_debt_unemitted: 1,
-                margin_unknown: 2,
-                ..Gaps::default()
+                silences: Silences {
+                    total_margin_unemitted: 2,
+                    bad_debt_unemitted: 1,
+                },
+                unknowns: Unknowns {
+                    margin_unknown: 2,
+                    ..Unknowns::default()
+                },
+                faults: Faults::default(),
             },
             "the donation, and the swap's fees net of what repaid the debt; two takers stand"
         );
@@ -716,7 +754,10 @@ mod tests {
         assert_eq!(
             market.gaps(),
             Gaps {
-                margin_unknown: 2,
+                unknowns: Unknowns {
+                    margin_unknown: 2,
+                    ..Unknowns::default()
+                },
                 ..Gaps::default()
             }
         );
@@ -740,7 +781,7 @@ mod tests {
                 swap: swap(price(45), 10_000),
             },
         ));
-        assert_eq!(genesis(&clear).gaps().bad_debt_unemitted, 0);
+        assert_eq!(genesis(&clear).gaps().silences.bad_debt_unemitted, 0);
     }
 
     /// The fold of the whole tape equals the combination of the folds of
@@ -896,7 +937,10 @@ mod tests {
             UsdcAtoms::new(999_970_000)
         );
         let one_taker = Gaps {
-            margin_unknown: 1,
+            unknowns: Unknowns {
+                margin_unknown: 1,
+                ..Unknowns::default()
+            },
             ..Gaps::default()
         };
         assert_eq!(opened.gaps(), one_taker);
@@ -1207,13 +1251,13 @@ mod tests {
         assert!(taker.is_open());
         assert_eq!(converted.pool_ticks(), Some(BTreeMap::new()));
         assert_eq!(converted.pool_liquidity(), Some(LUnits::ZERO));
-        assert_eq!(converted.gaps().taker_size_unknown, 1);
+        assert_eq!(converted.gaps().unknowns.taker_size_unknown, 1);
 
         // Closed as a taker.
         let closed = genesis(&tape[..12]);
         let taker = closed.position(U256::from(2)).unwrap();
         assert_eq!(taker.closed(), Some(tape[11].point()));
-        assert_eq!(closed.gaps().taker_size_unknown, 0);
+        assert_eq!(closed.gaps().unknowns.taker_size_unknown, 0);
     }
 
     /// A taker's size is the sum of its swaps' perp deltas; each dedicated
@@ -1247,7 +1291,7 @@ mod tests {
         assert_eq!(taker.liquidations(), 2);
         assert_eq!(taker.closed(), Some(tape[12].point()));
         assert_eq!(whole.positions().open().count(), 0);
-        assert_eq!(whole.gaps().margin_unknown, 0);
+        assert_eq!(whole.gaps().unknowns.margin_unknown, 0);
 
         // The retired build's shape says it in the close's tail instead.
         let tailed = genesis(&[
@@ -1312,9 +1356,11 @@ mod tests {
         assert_eq!(
             segment.gaps(),
             Gaps {
-                partial_positions: 2,
-                taker_size_unknown: 1,
-                margin_unknown: 2,
+                unknowns: Unknowns {
+                    partial_positions: 2,
+                    taker_size_unknown: 1,
+                    margin_unknown: 2,
+                },
                 ..Gaps::default()
             }
         );
@@ -1430,9 +1476,13 @@ mod tests {
 
         let mut seeded = Replay::from_seed(seed).unwrap();
         assert_eq!(seeded.block(), Some(at));
-        assert_eq!(seeded.gaps().margin_unknown, 0, "a seed knows every margin");
         assert_eq!(
-            seeded.gaps().partial_positions,
+            seeded.gaps().unknowns.margin_unknown,
+            0,
+            "a seed knows every margin"
+        );
+        assert_eq!(
+            seeded.gaps().unknowns.partial_positions,
             0,
             "a seed knows every level"
         );
@@ -1481,7 +1531,7 @@ mod tests {
         let taker = seeded.position(U256::from(1)).unwrap();
         assert_eq!(taker.margin(), Some(UsdcAtoms::new(1_000_001)));
         assert_eq!(taker.last(), None, "no event has touched it since the read");
-        assert_eq!(seeded.gaps().margin_unknown, 0);
+        assert_eq!(seeded.gaps().unknowns.margin_unknown, 0);
 
         // The maker trims its band: its margin moved, the taker's did not.
         seeded.apply(&tape[cut]);
@@ -1495,7 +1545,7 @@ mod tests {
             seeded.position(U256::from(1)).unwrap().margin(),
             Some(UsdcAtoms::new(1_000_001))
         );
-        assert_eq!(seeded.gaps().margin_unknown, 1);
+        assert_eq!(seeded.gaps().unknowns.margin_unknown, 1);
     }
 
     /// An event at or before the fold's point is refused and counted, never
@@ -1509,7 +1559,7 @@ mod tests {
 
         market.apply(&tape[2]);
         market.apply(&tape[0]);
-        assert_eq!(market.gaps().refused, 2);
+        assert_eq!(market.gaps().faults.refused, 2);
         assert_eq!(market.applied(), before.applied());
         assert_eq!(market.point(), before.point());
         assert_eq!(market.positions(), before.positions());
@@ -1526,12 +1576,12 @@ mod tests {
         let _ = prefix;
         seeded.apply(&tape[2]);
         assert_eq!(
-            seeded.gaps().refused,
+            seeded.gaps().faults.refused,
             1,
             "the seed's block, delivered again"
         );
         seeded.apply(&tape[3]);
-        assert_eq!(seeded.gaps().refused, 1);
+        assert_eq!(seeded.gaps().faults.refused, 1);
         assert_eq!(seeded.applied(), 1);
     }
 }

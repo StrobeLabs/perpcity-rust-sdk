@@ -17,7 +17,7 @@
 
 use std::ops::AddAssign;
 
-use super::tape::TapeEvent;
+use super::tape::{ChainPoint, TapeEvent};
 
 /// A deterministic fold over a market's events in chain order.
 ///
@@ -41,6 +41,93 @@ pub trait Fold: Default {
             fold.apply(event);
         }
         fold
+    }
+}
+
+/// A fold behind the chain-order guard: an event at or before the last
+/// point applied is refused and counted, never handed on. Chain order is
+/// the one assumption every sum in a fold rests on, and a driver that
+/// breaks it is counted rather than trusted, in release builds as in
+/// debug. Wrap any fold a driver feeds directly; `Replay` is one inside.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Sequenced<F> {
+    inner: F,
+    last: Latest<ChainPoint>,
+    refused: u32,
+}
+
+impl<F: Fold> Sequenced<F> {
+    /// `inner` with nothing applied yet: the first event is taken whatever
+    /// its point.
+    pub fn new(inner: F) -> Self {
+        Self {
+            inner,
+            last: Latest::default(),
+            refused: 0,
+        }
+    }
+
+    /// `inner` standing at `point`, as a fold seeded from the reads at a
+    /// block does: events at or before it are already in and are refused.
+    pub fn standing_at(inner: F, point: ChainPoint) -> Self {
+        Self {
+            inner,
+            last: Latest::stated(point),
+            refused: 0,
+        }
+    }
+
+    /// Apply `event` if it is after the last point applied; whether it was.
+    pub fn accept(&mut self, event: &TapeEvent) -> bool {
+        let point = event.point();
+        if self.last.get().is_some_and(|last| point <= last) {
+            self.refused += 1;
+            return false;
+        }
+        self.last.set(point);
+        self.inner.apply(event);
+        true
+    }
+
+    /// Where the fold stands: the last event's chain point.
+    pub fn point(&self) -> Option<ChainPoint> {
+        self.last.get()
+    }
+
+    /// Events refused for arriving at or before the fold's point.
+    pub fn refused(&self) -> u32 {
+        self.refused
+    }
+
+    /// The fold behind the guard.
+    pub fn inner(&self) -> &F {
+        &self.inner
+    }
+
+    /// The fold behind the guard, the guard dropped.
+    pub fn into_inner(self) -> F {
+        self.inner
+    }
+}
+
+impl<F: Fold> Fold for Sequenced<F> {
+    fn apply(&mut self, event: &TapeEvent) {
+        self.accept(event);
+    }
+
+    /// Segments combine in order; a segment that starts at or before this
+    /// one's point is a programming error, not data, and is asserted.
+    fn combine(&mut self, later: Self) {
+        debug_assert!(
+            self.last
+                .get()
+                .zip(later.last.get())
+                .is_none_or(|(a, b)| a < b),
+            "segments combined out of order"
+        );
+        self.inner.combine(later.inner);
+        self.last.combine(later.last);
+        self.refused += later.refused;
     }
 }
 

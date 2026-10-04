@@ -70,8 +70,10 @@ pub mod test_support;
 mod tests;
 
 pub use beacon::{IndexPrint, beacon_prints, latest_beacon_prints};
-pub use fold::{First, Fold, Latest, Stated};
-pub use replay::{Gaps, PositionKind, PositionState, Positions, Replay};
+pub use fold::{First, Fold, Latest, Sequenced, Stated};
+pub use replay::{
+    Faults, Gaps, PositionKind, PositionState, Positions, Replay, Silences, Unknowns,
+};
 pub use scan::{ScanStats, get_logs_chunked};
 pub use tape::{
     ChainPoint, OwnershipLog, TapeAddresses, TapeEvent, latest_market_events, market_events,

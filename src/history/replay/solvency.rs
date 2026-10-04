@@ -20,6 +20,7 @@ use crate::units::UsdcAtoms;
 
 use super::super::fold::{Fold, Latest, Stated};
 use super::super::tape::TapeEvent;
+use super::Silences;
 
 /// What moved the margin total since it was last stated.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -36,13 +37,6 @@ impl AddAssign for MarginSince {
         self.fees_removed += rhs.fees_removed;
         self.unemitted += rhs.unemitted;
     }
-}
-
-/// The silences the books carry, as [`Gaps`](super::Gaps) reports them.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(super) struct Silences {
-    pub(super) total_margin_unemitted: u32,
-    pub(super) bad_debt_unemitted: u32,
 }
 
 /// The margin total and the bad debt, folded from the events that state

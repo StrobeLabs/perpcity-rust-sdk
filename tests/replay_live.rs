@@ -85,9 +85,9 @@ async fn a_replayed_market_equals_the_read_at_the_same_block() {
     let seed_block = tip - SEED_LAG;
     let earlier = market.state_at(seed_block).await.unwrap();
     let mut seeded = Replay::seeded(&earlier).await.unwrap();
-    let seeded_gaps = seeded.gaps();
-    assert_eq!(seeded_gaps.margin_unknown, 0, "a seed knows every margin");
-    assert_eq!(seeded_gaps.partial_positions, 0, "a seed knows every level");
+    let unknowns = seeded.gaps().unknowns;
+    assert_eq!(unknowns.margin_unknown, 0, "a seed knows every margin");
+    assert_eq!(unknowns.partial_positions, 0, "a seed knows every level");
     let applied = seeded
         .catch_up(history, addresses, Some(tip))
         .await
@@ -96,7 +96,7 @@ async fn a_replayed_market_equals_the_read_at_the_same_block() {
         "seeded at {seed_block}, {} positions, caught up {applied} events to {tip}",
         seeded.positions().len()
     );
-    assert_eq!(seeded.gaps().refused, 0, "the tail is in order");
+    assert_eq!(seeded.gaps().faults.refused, 0, "the tail is in order");
     agrees(&seeded, &state, config.ema_window).await;
     println!("the seeded replay agrees with the read at block {tip}");
 }
@@ -130,7 +130,7 @@ async fn agrees(replay: &Replay, state: &StateAt, ema_window: u64) {
         "solvency read {solvency:?}, replayed {:?}, gaps {gaps:?}",
         replay.solvency()
     );
-    if gaps.total_margin_unemitted == 0 && gaps.bad_debt_unemitted == 0 {
+    if gaps.silences == Default::default() {
         assert_eq!(replay.solvency(), Some(solvency), "the solvency books");
     } else {
         // The tape says the books moved without an event; the read is the
