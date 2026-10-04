@@ -84,6 +84,28 @@ impl Price {
     }
 }
 
+/// The price as a person reads it, for logs and reports. A price with no
+/// reading ([`Price::to_f64`]), or one so small the reading is zero, shows
+/// its Q96 word with an `x96` suffix instead.
+impl std::fmt::Display for Price {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.to_f64() {
+            Ok(price) if price > 0.0 => std::fmt::Display::fmt(&price, f),
+            Ok(_) | Err(_) => write!(f, "{}x96", self.0),
+        }
+    }
+}
+
+/// The root's price as a person reads it; see [`Price`]'s `Display`.
+impl std::fmt::Display for SqrtPrice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.price() {
+            Ok(price) if price > 0.0 => std::fmt::Display::fmt(&price, f),
+            Ok(_) | Err(_) => write!(f, "{}x96", self.0),
+        }
+    }
+}
+
 /// A price scaled by any [`Factor`]: a stop at half the mark, a landing
 /// zone a few percent off the index. Exact in Q96, truncated toward zero;
 /// a negative factor panics, since a price has no sign.
@@ -269,6 +291,27 @@ impl TryFrom<Price> for SqrtPrice {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A price displays as its human reading, with the formatter's
+    /// precision, and a price with no reading shows its word.
+    #[test]
+    fn a_price_displays_as_a_person_reads_it() {
+        let price = Price::try_from(1.5).unwrap();
+        assert_eq!(format!("{price}"), "1.5");
+        assert_eq!(format!("{price:.2}"), "1.50");
+        // The root is floored, so its price reads a hair under.
+        assert_eq!(
+            format!("{:.4}", SqrtPrice::try_from(price).unwrap()),
+            "1.5000"
+        );
+        assert_eq!(format!("{}", Price::from_x96(U256::ZERO)), "0x96");
+        // The protocol's floor reads as zero, which is not a price a person
+        // should be shown; the word is.
+        let floor = Price::from_x96(Q96 / U256::from(1_000_000u64));
+        assert_eq!(format!("{floor}"), format!("{}x96", floor.x96()));
+        let root = SqrtPrice::from_x96(MIN_SQRT_PRICE_X96);
+        assert_eq!(format!("{root}"), format!("{}x96", MIN_SQRT_PRICE_X96));
+    }
 
     /// A price scales by any factor and divides into a plain number, which
     /// is what a stop and a basis are.

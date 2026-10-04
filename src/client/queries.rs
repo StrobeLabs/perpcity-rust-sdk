@@ -47,10 +47,9 @@ pub struct MarketConfig {
     /// the pool price and the index with; a deployment immutable, and what
     /// [`Emas::advanced`] takes.
     pub ema_window: u64,
-    /// Pool (AMM spot) price in human-readable units (e.g. `1.05`) — not
-    /// the contract's mark, which is the fair price
-    /// ([`crate::math::pricing`]).
-    pub pool_price: f64,
+    /// The pool's (AMM spot) price at the read — not the contract's mark,
+    /// which is the fair price ([`crate::math::pricing`]).
+    pub pool_price: Price,
     /// Beacon contract address.
     pub beacon: Address,
     /// Leverage and margin constraints.
@@ -105,30 +104,30 @@ impl From<contracts::OpenInterest> for OpenInterest {
     }
 }
 
-/// The market's live state at the lagged snapshot block, in human units.
+/// The market's live state at the lagged snapshot block, in the chain's
+/// units.
 ///
 /// Pure market state — no configuration. Returned alongside
 /// [`MarketConfig`] from [`MarketReader::get_snapshot`].
 /// What a live cache seeds from before it follows the feed: the prices,
 /// the contract's mark, and the stored EMAs it needs to keep marking
-/// between touches.
+/// between touches, each the same type the events then carry.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct MarketSnapshot {
     /// The block every field was read at: the lagged snapshot block, with
     /// its hash, so further reads can pin to it.
     pub block: BlockContext,
-    /// Pool (AMM spot) price in human-readable units — not a TWAP, and not
-    /// the contract's mark, which is the fair price
-    /// ([`crate::math::pricing`]).
-    pub pool_price: f64,
-    /// Oracle index price from the beacon contract.
-    pub index_price: f64,
+    /// The pool's (AMM spot) price — not a TWAP, and not the contract's
+    /// mark, which is the fair price ([`crate::math::pricing`]).
+    pub pool_price: Price,
+    /// The beacon's index.
+    pub index_price: Price,
     /// The contract's mark at the block: the fair price of the pool price,
-    /// the index and the EMAs advanced to the block's timestamp, exact in
-    /// X96 and converted once. What every health check, `valPnl` and
-    /// liquidation prices at, so the basis the contract sees is this
-    /// against the index, not the pool price against it.
-    pub mark: f64,
+    /// the index and the EMAs advanced to the block's timestamp, exact.
+    /// What every health check, `valPnl` and liquidation prices at, so the
+    /// basis the contract sees is this against the index, not the pool
+    /// price against it.
+    pub mark: Price,
     /// The stored EMAs as of the market's last touch. A cache that follows
     /// the feed advances them to now against the prices it holds and marks
     /// with [`Emas::mark`]; `RatesAndEmasRefreshed` replaces them on every
@@ -138,6 +137,20 @@ pub struct MarketSnapshot {
     pub funding_rate_daily: f64,
     /// Taker open interest.
     pub open_interest: OpenInterest,
+}
+
+/// A price from a chain word, refusing zero: no market has a zero price, so
+/// one is a read of an uninitialised pool or beacon, and it must not reach
+/// a cache that would mark from it.
+fn read_price(x96: U256, what: &str) -> Result<Price> {
+    let price = Price::from_x96(x96);
+    if price.is_zero() {
+        return Err(ValidationError::InvalidPrice {
+            reason: format!("{what} read as zero"),
+        }
+        .into());
+    }
+    Ok(price)
 }
 
 /// A module address from `modules()`, rejecting the zero address (an
@@ -261,7 +274,7 @@ impl MarketReader {
         let pool_key = perp.poolKey().call().await?;
         let pool_state = perp.poolState().call().await?;
         let ema_window = ema_window_secs(perp.EMA_WINDOW().call().await?)?;
-        let pool_price = price_x96_to_f64(pool_state.ammPrice)?;
+        let pool_price = read_price(pool_state.ammPrice, "pool price")?;
 
         let fees = self.get_or_fetch_fees(modules.fees).await?;
         let bounds = self.get_or_fetch_bounds(modules.marginRatios).await?;
@@ -456,7 +469,7 @@ impl MarketReader {
             .await
             .map_err(|e| pinned_read_error(multicall_error(e), block.number))?;
 
-        let pool_price = price_x96_to_f64(pool_state.ammPrice)?;
+        let pool_price = read_price(pool_state.ammPrice, "pool price")?;
         let funding_rate_daily = funding_per_day_to_f64(rates.fundingPerDay);
         let open_interest = OpenInterest::from(oi);
 
@@ -466,11 +479,10 @@ impl MarketReader {
             .index_x96_at(beacon, id)
             .await
             .map_err(|e| pinned_read_error(e, block.number))?;
-        let index_price = price_x96_to_f64(index_x96)?;
+        let index_price = read_price(index_x96, "index")?;
 
-        // The mark exactly as the contract would set it at this block, then
-        // one conversion; the stored pair goes out as it is so a cache can
-        // advance it itself.
+        // The mark exactly as the contract would set it at this block; the
+        // stored pair goes out as it is so a cache can advance it itself.
         let last_touch = rates.lastTouch.to::<u64>();
         let ema_window = ema_window_secs(ema_window)?;
         let stored_emas = PricePair {
@@ -479,18 +491,14 @@ impl MarketReader {
         };
         let mark = Mark::advanced(
             block,
-            Price::from_x96(pool_state.ammPrice),
-            Price::from_x96(index_x96),
+            pool_price,
+            index_price,
             stored_emas,
             last_touch,
             ema_window,
-        )?;
-        let mark = mark.fair_price().to_f64()?;
-        let emas = Emas {
-            amm_price: price_x96_to_f64(U256::from(stored_emas.amm))?,
-            index: price_x96_to_f64(U256::from(stored_emas.index))?,
-            last_touch,
-        };
+        )?
+        .fair_price();
+        let emas = Emas::stored(stored_emas, last_touch);
 
         // Fees/bounds (from cache or chain).
         let fees = self.get_or_fetch_fees(modules.fees).await?;
@@ -984,6 +992,26 @@ mod tests {
         rpc.call::<Perp::EMA_WINDOWCall>(&U256::from(3_600u32));
     }
 
+    /// A pool whose price reads as zero is uninitialised, not a market at
+    /// price zero: the read refuses it rather than seeding a cache with it.
+    #[tokio::test]
+    async fn a_zero_pool_price_is_an_invalid_price() {
+        let (client, rpc) = mock::client();
+        rpc.call::<Perp::modulesCall>(&mock::modules());
+        rpc.call::<Perp::poolKeyCall>(&mock::pool_key(SPACING));
+        rpc.call::<Perp::poolStateCall>(&mock::pool_state(U256::ZERO));
+        rpc.call::<Perp::EMA_WINDOWCall>(&U256::from(3_600u32));
+
+        let err = client.market().get_config().await.unwrap_err();
+        assert!(
+            matches!(
+                err,
+                PerpCityError::Validation(ValidationError::InvalidPrice { .. })
+            ),
+            "{err}"
+        );
+    }
+
     /// The config read asks the `Perp` for its modules, then asks the
     /// modules it named: seven RPCs, decoded into fractions.
     #[tokio::test]
@@ -1000,7 +1028,7 @@ mod tests {
                 perp: mock::PERP,
                 tick_spacing: SPACING,
                 ema_window: 3_600,
-                pool_price: 1.5,
+                pool_price: Price::from_x96(x96(3, 1)),
                 beacon: BEACON,
                 bounds: expected_bounds(),
                 fees: expected_fees(),
@@ -1192,12 +1220,13 @@ mod tests {
                 perp: mock::PERP,
                 tick_spacing: SPACING,
                 ema_window: 3_600,
-                pool_price: 1.5,
+                pool_price: Price::from_x96(x96(3, 1)),
                 beacon: BEACON,
                 bounds: expected_bounds(),
                 fees: expected_fees(),
             }
         );
+        let one = Price::from_x96(x96(1, 0));
         assert_eq!(
             snapshot,
             MarketSnapshot {
@@ -1206,13 +1235,13 @@ mod tests {
                     hash,
                     timestamp: SNAPSHOT_TIME,
                 },
-                pool_price: 1.5,
-                index_price: 1.25,
+                pool_price: Price::from_x96(x96(3, 1)),
+                index_price: Price::from_x96(x96(5, 2)),
                 // fair(1.5, 1.25, 1.0, 1.0) = (1.5 + (1.25 + 1.0 − 1.0)) / 2.
-                mark: 1.375,
+                mark: Price::from_x96(x96(11, 3)),
                 emas: Emas {
-                    amm_price: 1.0,
-                    index: 1.0,
+                    amm_price: one,
+                    index: one,
                     last_touch: SNAPSHOT_TIME,
                 },
                 funding_rate_daily: -0.005,

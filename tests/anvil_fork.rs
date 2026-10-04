@@ -538,15 +538,21 @@ async fn perp_snapshot_via_multicall() {
     // 5. Verify MarketConfig
     assert_eq!(config.perp, PERP);
     assert!(config.tick_spacing > 0, "tick_spacing should be positive");
-    assert!(config.pool_price > 0.0, "pool price should be positive");
+    assert!(
+        !config.pool_price.is_zero(),
+        "pool price should be positive"
+    );
     assert_ne!(config.beacon, Address::ZERO, "beacon should not be zero");
 
     // 6. Verify MarketSnapshot
     assert!(
-        snapshot.pool_price > 0.0,
+        !snapshot.pool_price.is_zero(),
         "snapshot pool price should be positive"
     );
-    assert!(snapshot.index_price > 0.0, "index price should be positive");
+    assert!(
+        !snapshot.index_price.is_zero(),
+        "index price should be positive"
+    );
     // Funding rate can be positive or negative, just check it's finite
     assert!(
         snapshot.funding_rate_daily.is_finite(),
@@ -554,17 +560,15 @@ async fn perp_snapshot_via_multicall() {
     );
 
     // 7. Cross-check: the snapshot's pool price should match the config's
-    assert!(
-        (snapshot.pool_price - config.pool_price).abs() < 0.0001,
-        "snapshot pool price ({}) should match the config's ({})",
-        snapshot.pool_price,
-        config.pool_price,
+    assert_eq!(
+        snapshot.pool_price, config.pool_price,
+        "snapshot pool price should match the config's"
     );
 
     // 8. Cross-check: individual methods should match multicall results
     let pool_price_individual = client.market().get_pool_price().await.unwrap();
     assert!(
-        (snapshot.pool_price - pool_price_individual).abs() < 0.01,
+        (snapshot.pool_price.to_f64().unwrap() - pool_price_individual).abs() < 0.01,
         "multicall pool price ({}) should match individual ({})",
         snapshot.pool_price,
         pool_price_individual,

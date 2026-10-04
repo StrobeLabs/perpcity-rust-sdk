@@ -160,47 +160,76 @@ impl Mark {
     }
 }
 
-/// The stored EMA pair in human units, with the touch it was stored at:
-/// what `emas()` and `rates().lastTouch` hold, and what the
-/// `RatesAndEmasRefreshed` event carries. The f64 twin of a [`PricePair`]
-/// at a `last_touch`, for a live cache that follows the feed and must mark
-/// between touches.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+/// The stored EMA pair with the touch it was stored at: what `emas()` and
+/// `rates().lastTouch` hold, and what the `RatesAndEmasRefreshed` event
+/// carries. A [`PricePair`] that knows when it is current, for a live
+/// cache that follows the feed and must mark between touches.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Emas {
     /// The pool-price EMA.
-    pub amm_price: f64,
+    pub amm_price: Price,
     /// The index EMA.
-    pub index: f64,
+    pub index: Price,
     /// Unix timestamp the pair is current as of: the market's last touch.
     pub last_touch: u64,
 }
 
 impl Emas {
-    /// The pair advanced to `timestamp` against the spot prices, as the
-    /// contract would advance it on a touch then: each EMA decays toward
-    /// its spot by `exp(−Δt / ema_window)`, and the result is current as of
-    /// `timestamp`. The f64 twin of [`calculate_emas`]. Unchanged when
-    /// `timestamp` is not after `last_touch`; a zero window with time to
-    /// cross, which the contract would revert on, reads as no smoothing.
-    #[must_use]
-    pub fn advanced(self, pool_price: f64, index: f64, timestamp: u64, ema_window: u64) -> Self {
-        if timestamp <= self.last_touch {
-            return self;
-        }
-        let dt = (timestamp - self.last_touch) as f64;
-        let alpha = (-dt / ema_window as f64).exp();
+    /// The pair at `last_touch`, from the contract's stored words.
+    pub fn stored(pair: PricePair, last_touch: u64) -> Self {
         Self {
-            amm_price: self.amm_price * alpha + pool_price * (1.0 - alpha),
-            index: self.index * alpha + index * (1.0 - alpha),
-            last_touch: timestamp,
+            amm_price: Price::from_x96(U256::from(pair.amm)),
+            index: Price::from_x96(U256::from(pair.index)),
+            last_touch,
         }
     }
 
-    /// The contract's mark at `timestamp`: [`fair_price_f64`] of the spot
+    /// The pair as the contract stores it, `uint128` each.
+    ///
+    /// # Errors
+    ///
+    /// [`ValidationError::Overflow`] when a price exceeds `uint128`.
+    pub fn pair(&self) -> Result<PricePair, ValidationError> {
+        PricePair::try_from_x96(self.amm_price.x96(), self.index.x96())
+    }
+
+    /// The pair advanced to `timestamp` against the spot prices, exactly
+    /// as the contract would advance it on a touch then
+    /// ([`calculate_emas`]), and current as of `timestamp`. Unchanged when
+    /// `timestamp` is not after `last_touch`.
+    ///
+    /// # Errors
+    ///
+    /// [`ValidationError::Overflow`] when a price exceeds `uint128`, and
+    /// [`ValidationError::InvalidConfig`] on a zero EMA window with time to
+    /// advance across.
+    pub fn advanced(
+        self,
+        pool_price: Price,
+        index: Price,
+        timestamp: u64,
+        ema_window: u64,
+    ) -> Result<Self, ValidationError> {
+        let spot = PricePair::try_from_x96(pool_price.x96(), index.x96())?;
+        let emas = calculate_emas(self.pair()?, spot, self.last_touch, timestamp, ema_window)?;
+        Ok(Self::stored(emas, timestamp.max(self.last_touch)))
+    }
+
+    /// The contract's mark at `timestamp`: [`fair_price`] of the spot
     /// prices and this pair advanced to it.
-    pub fn mark(self, pool_price: f64, index: f64, timestamp: u64, ema_window: u64) -> f64 {
-        let emas = self.advanced(pool_price, index, timestamp, ema_window);
-        fair_price_f64(pool_price, index, emas.amm_price, emas.index)
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::advanced`].
+    pub fn mark(
+        self,
+        pool_price: Price,
+        index: Price,
+        timestamp: u64,
+        ema_window: u64,
+    ) -> Result<Price, ValidationError> {
+        let emas = self.advanced(pool_price, index, timestamp, ema_window)?;
+        Ok(fair_price(pool_price, index, emas.amm_price, emas.index))
     }
 }
 
@@ -293,57 +322,53 @@ mod tests {
         );
     }
 
-    /// The f64 advance reproduces the exact one on the same live accrue
-    /// to the six decimals [`Price::to_f64`] keeps (prices near 42, so
-    /// within a few millionths), and the mark it gives is the fair price
-    /// of the exact result to the same precision.
+    /// The stored pair advances to the live accrue's result exactly, and
+    /// its mark is the fair price of that result.
     #[test]
-    fn the_f64_advance_agrees_with_the_exact_one() {
-        let (amm_x96, index_x96) = (
-            uint!(3333452930552967749837079299470_U256),
-            uint!(3248354663084837841335301963776_U256),
+    fn the_stored_pair_advances_as_the_contract_did() {
+        let (amm, index) = (
+            p(uint!(3333452930552967749837079299470_U256)),
+            p(uint!(3248354663084837841335301963776_U256)),
         );
         let stored = Emas {
-            amm_price: f(uint!(3320491901781519017281026778664_U256)),
-            index: f(uint!(3084589206424849219740478559607_U256)),
+            amm_price: p(uint!(3320491901781519017281026778664_U256)),
+            index: p(uint!(3084589206424849219740478559607_U256)),
             last_touch: 1790734324,
         };
 
-        let emas = stored.advanced(f(amm_x96), f(index_x96), 1790734624, 3600);
-        let close = |a: f64, b: f64| (a - b).abs() < 1e-5;
-        assert!(
-            close(
-                emas.amm_price,
-                f(uint!(3321528208423946384037633669774_U256))
-            ),
-            "{}",
-            emas.amm_price
+        let emas = stored.advanced(amm, index, 1790734624, 3600).unwrap();
+        assert_eq!(
+            emas,
+            Emas {
+                amm_price: p(uint!(3321528208423946384037633669774_U256)),
+                index: p(uint!(3097683169375594803637957648468_U256)),
+                last_touch: 1790734624,
+            }
         );
-        assert!(
-            close(emas.index, f(uint!(3097683169375594803637957648468_U256))),
-            "{}",
-            emas.index
+        assert_eq!(
+            stored.mark(amm, index, 1790734624, 3600).unwrap(),
+            p(uint!(3402826316343078585786028642276_U256))
         );
-        assert_eq!(emas.last_touch, 1790734624);
-        assert!(close(
-            stored.mark(f(amm_x96), f(index_x96), 1790734624, 3600),
-            f(uint!(3402826316343078585786028642276_U256))
-        ));
     }
 
     /// With no time since the last touch the stored pair stands, and the
     /// mark is the fair price of the spots and that pair.
     #[test]
-    fn an_f64_pair_with_nothing_to_advance_stands() {
+    fn a_pair_with_nothing_to_advance_stands() {
+        let one = Price::try_from(1.0).unwrap();
+        let (spot, index) = (
+            Price::try_from(1.5).unwrap(),
+            Price::try_from(1.25).unwrap(),
+        );
         let stored = Emas {
-            amm_price: 1.0,
-            index: 1.0,
+            amm_price: one,
+            index: one,
             last_touch: 10,
         };
-        assert_eq!(stored.advanced(1.5, 1.25, 10, 3_600), stored);
+        assert_eq!(stored.advanced(spot, index, 10, 3_600).unwrap(), stored);
         assert_eq!(
-            stored.mark(1.5, 1.25, 10, 3_600),
-            fair_price_f64(1.5, 1.25, 1.0, 1.0)
+            stored.mark(spot, index, 10, 3_600).unwrap(),
+            fair_price(spot, index, one, one)
         );
     }
 

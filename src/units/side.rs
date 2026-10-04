@@ -36,6 +36,12 @@ impl Side {
         }
     }
 
+    /// `Long` when `long` holds, else `Short`: the side a boolean judgement
+    /// — buy or sell, mark below the index or above — names.
+    pub const fn long_if(long: bool) -> Self {
+        if long { Self::Long } else { Self::Short }
+    }
+
     /// `+1` for long, `-1` for short: the direction as a factor, for tick
     /// offsets and the like.
     pub const fn sign(self) -> i32 {
@@ -158,6 +164,13 @@ impl<T> PerSide<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A judgement names a side.
+    #[test]
+    fn a_judgement_names_a_side() {
+        assert_eq!(Side::long_if(true), Side::Long);
+        assert_eq!(Side::long_if(false), Side::Short);
+    }
 
     /// A side is the sign of an exposure, and each is the other's opposite.
     #[test]
