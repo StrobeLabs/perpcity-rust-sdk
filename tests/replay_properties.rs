@@ -5,10 +5,11 @@
 
 use alloy::primitives::{Address, B256, U256};
 use perpcity_sdk::constants::Q96;
-use perpcity_sdk::events::{MarketEvent, ModuleKind, SwapInfo};
+use perpcity_sdk::events::{MakerSettle, MarketEvent, ModuleKind, SwapInfo};
 use perpcity_sdk::history::{Fold, Replay, TapeEvent};
 use perpcity_sdk::{
-    FundingRate, PerSide, PerpAtoms, PerpDelta, Price, UsdcAtoms, UsdcDelta, UtilizationRate,
+    FundingRate, LDelta, LUnits, PerSide, PerpAtoms, PerpDelta, Price, UsdcAtoms, UsdcDelta,
+    UtilizationRate,
 };
 use proptest::prelude::*;
 
@@ -20,22 +21,107 @@ fn per_side(long: u128, short: u128) -> PerSide<PerpAtoms> {
     PerSide::new(PerpAtoms::new(long), PerpAtoms::new(short))
 }
 
-/// One of the events the market-level fold reads, with the values a market
-/// could emit.
+fn swap(perp_delta: i128, p: u64, fee: u128) -> SwapInfo {
+    SwapInfo {
+        perp_delta: PerpDelta::new(perp_delta),
+        usd_delta: UsdcDelta::new(-(p as i128) * perp_delta / 1_000),
+        pool_price: price(p),
+        total_fee: UsdcDelta::new(fee as i128 * 4),
+        lp_fee: UsdcAtoms::new(fee),
+        protocol_fee: UsdcAtoms::new(fee),
+        creator_fee: UsdcAtoms::new(fee),
+        insurance_fee: UsdcAtoms::new(fee),
+    }
+}
+
+fn settle(fee: u128) -> MakerSettle {
+    MakerSettle {
+        funding: UsdcDelta::new(fee as i128),
+        util_fees: PerSide::new(UsdcAtoms::new(fee), UsdcAtoms::ZERO),
+        lp_fees: UsdcAtoms::new(fee),
+    }
+}
+
+/// A position id from a small pool, so each position sees many events.
+fn pos_id() -> impl Strategy<Value = U256> {
+    (1u64..50).prop_map(U256::from)
+}
+
+/// One of the events the fold reads, with the values a market could emit:
+/// the market's totals, the positions' lives, and the pool's book.
 fn event() -> impl Strategy<Value = MarketEvent> {
     prop_oneof![
-        (1u64..1_000, 0u128..1_000_000).prop_map(|(p, fee)| MarketEvent::TakerOpened {
-            pos_id: U256::from(p),
-            swap: SwapInfo {
-                perp_delta: PerpDelta::new(1_000_000),
-                usd_delta: UsdcDelta::new(-(p as i128) * 1_000_000),
-                pool_price: price(p),
-                total_fee: UsdcDelta::new(fee as i128 * 4),
-                lp_fee: UsdcAtoms::new(fee),
-                protocol_fee: UsdcAtoms::new(fee),
-                creator_fee: UsdcAtoms::new(fee),
-                insurance_fee: UsdcAtoms::new(fee),
-            },
+        (pos_id(), 1u64..1_000, 0u128..1_000_000).prop_map(|(pos_id, p, fee)| {
+            MarketEvent::TakerOpened {
+                pos_id,
+                swap: swap(1_000_000, p, fee),
+            }
+        }),
+        (pos_id(), -2_000_000i128..2_000_000, 1u64..1_000).prop_map(|(pos_id, d, p)| {
+            MarketEvent::TakerAdjusted {
+                pos_id,
+                swap: swap(d, p, 0),
+                funding: UsdcDelta::ZERO,
+                util_fees: UsdcAtoms::ZERO,
+            }
+        }),
+        (
+            pos_id(),
+            -2_000_000i128..2_000_000,
+            1u64..1_000,
+            any::<bool>()
+        )
+            .prop_map(|(pos_id, d, p, liquidated)| MarketEvent::TakerClosed {
+                pos_id,
+                swap: swap(d, p, 0),
+                funding: UsdcDelta::ZERO,
+                util_fees: UsdcAtoms::ZERO,
+                liquidation_fee: UsdcAtoms::ZERO,
+                is_liquidation: liquidated,
+            }),
+        (pos_id(), 1u128..1_000_000).prop_map(|(pos_id, amount)| MarketEvent::TakerLiquidated {
+            pos_id,
+            perp_amount: PerpAtoms::new(amount),
+            liquidation_fee: UsdcAtoms::new(1),
+        }),
+        (pos_id(), -10i32..10, 1i32..10, -1_000i128..1_000).prop_map(
+            |(pos_id, lower, width, delta)| MarketEvent::ModifyLiquidity {
+                pool_id: B256::with_last_byte(7),
+                sender: Address::ZERO,
+                tick_lower: lower * 60,
+                tick_upper: (lower + width) * 60,
+                liquidity_delta: LDelta::new(delta),
+                salt: B256::from(pos_id),
+            }
+        ),
+        pos_id().prop_map(|pos_id| MarketEvent::MakerOpened { pos_id }),
+        (pos_id(), 0u128..1_000).prop_map(|(pos_id, fee)| MarketEvent::MakerAdjusted {
+            pos_id,
+            settle: settle(fee),
+        }),
+        (pos_id(), any::<bool>()).prop_map(|(pos_id, liquidated)| MarketEvent::MakerConverted {
+            pos_id,
+            settle: settle(0),
+            liquidation_fee: UsdcAtoms::ZERO,
+            is_liquidation: liquidated,
+        }),
+        (pos_id(), any::<bool>()).prop_map(|(pos_id, liquidated)| MarketEvent::MakerClosed {
+            pos_id,
+            settle: settle(0),
+            liquidation_fee: UsdcAtoms::ZERO,
+            is_liquidation: liquidated,
+        }),
+        (pos_id(), 1u128..1_000).prop_map(|(pos_id, amount)| MarketEvent::MakerLiquidated {
+            pos_id,
+            liquidity_amount: LUnits::new(amount),
+            liquidation_fee: UsdcAtoms::new(1),
+        }),
+        (-600i32..600, -600i32..600, any::<bool>()).prop_map(|(from, to, zero_for_one)| {
+            MarketEvent::TicksCrossed {
+                starting_tick: from,
+                ending_tick: to,
+                zero_for_one,
+            }
         }),
         (0u128..1_000_000, 0u128..1_000_000).prop_map(|(l, s)| MarketEvent::CapacityUpdated {
             capacity: per_side(l, s),

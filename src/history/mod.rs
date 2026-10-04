@@ -58,6 +58,7 @@
 
 mod beacon;
 mod fold;
+mod positions;
 mod replay;
 pub(crate) mod scan;
 mod tape;
@@ -71,6 +72,7 @@ mod tests;
 
 pub use beacon::{IndexPrint, beacon_prints, latest_beacon_prints};
 pub use fold::Fold;
+pub use positions::{PositionKind, PositionState, Positions};
 pub use replay::{Gaps, Replay};
 pub use scan::{ScanStats, get_logs_chunked};
 pub use tape::{

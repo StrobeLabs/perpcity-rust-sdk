@@ -19,8 +19,9 @@
 
 use std::env;
 
-use alloy::primitives::Address;
-use perpcity_sdk::history::{Fold, Replay};
+use alloy::primitives::{Address, U256};
+use perpcity_sdk::convert::unpack_balance_delta;
+use perpcity_sdk::history::{Fold, PositionKind, Replay};
 use perpcity_sdk::{ChainReader, HftTransport, TransportConfig};
 
 /// The first block of the deployed-era factory: every live market's tape
@@ -114,6 +115,83 @@ async fn a_replayed_market_equals_the_read_at_the_same_block() {
     assert!(
         (replay.custody().len() as u64) < minted,
         "custody knows at most the positions minted"
+    );
+
+    // Every position minted: the fold's view against the row the contract
+    // holds. A taker's size is its row's `amount0`; a maker's band is
+    // `makerDetails`; a closed position has no row.
+    let ids: Vec<U256> = (1..minted).map(U256::from).collect();
+    let (mut takers, mut makers, mut closed, mut unknown) = (0, 0, 0, 0);
+    for outcome in state.positions(&ids).await {
+        let pos_id = outcome.pos_id;
+        let read = outcome.row.unwrap();
+        let folded = replay
+            .position(pos_id)
+            .unwrap_or_else(|| panic!("position {pos_id} was minted but is not on the tape"));
+        let Some(row) = read else {
+            assert!(
+                !folded.is_open(),
+                "position {pos_id} is open in the fold, gone on chain"
+            );
+            closed += 1;
+            continue;
+        };
+        assert!(
+            folded.is_open(),
+            "position {pos_id} is closed in the fold, held on chain"
+        );
+        match folded.kind() {
+            PositionKind::Taker { .. } => match folded.taker_size() {
+                Some(size) => {
+                    let (perp, _) = unpack_balance_delta(row.delta);
+                    assert_eq!(size.atoms(), perp, "position {pos_id}'s size");
+                    takers += 1;
+                }
+                None => unknown += 1,
+            },
+            PositionKind::Maker { .. } => {
+                let band = state.maker_band(pos_id).await.unwrap();
+                assert_eq!(folded.maker_band(), band, "position {pos_id}'s band");
+                makers += 1;
+            }
+            PositionKind::Unknown => {
+                panic!("position {pos_id} is of unknown kind on a tape from genesis")
+            }
+        }
+    }
+    println!(
+        "positions: {takers} takers sized, {makers} makers banded, {unknown} takers of unknown size, {closed} closed"
+    );
+
+    // The pool's book: every initialized tick's liquidity, the tick, the
+    // active liquidity, and the price as the root's floored square.
+    let pool = state.pool().await.unwrap();
+    assert_eq!(
+        replay.pool_ticks(),
+        Some(pool.ticks.clone()),
+        "the tick map"
+    );
+    assert_eq!(
+        pool.sqrt_price.squared().unwrap(),
+        replay.pool_price().unwrap(),
+        "the pool price"
+    );
+    match replay.pool_tick() {
+        Some(tick) => {
+            assert_eq!(tick, pool.tick, "the pool tick");
+            assert_eq!(
+                replay.pool_liquidity(),
+                Some(pool.liquidity),
+                "active liquidity"
+            );
+        }
+        None => println!("no swap has moved the tick; the pool's first tick is the factory's"),
+    }
+    println!(
+        "book: {} ticks, tick {}, liquidity {}",
+        pool.ticks.len(),
+        pool.tick,
+        pool.liquidity
     );
     println!("replay agrees with the read at block {}", block.number);
 }

@@ -11,10 +11,13 @@
 //! comparison is the test this type exists to pass.
 //!
 //! What the tape cannot carry is counted, never guessed: [`Gaps`] says how
-//! many times a figure may have moved without an event saying so, and a
-//! consumer gates on it.
+//! many times a figure may have moved without an event saying so, and how
+//! many positions stand on a figure no event stated, and a consumer gates
+//! on it.
 
-use alloy::primitives::{Address, B256};
+use std::collections::BTreeMap;
+
+use alloy::primitives::{Address, B256, U256};
 
 use crate::client::{OpenInterest, SolvencyState};
 use crate::errors::ValidationError;
@@ -22,18 +25,21 @@ use crate::events::{CumulativesInfo, MarketEvent, ModuleKind};
 use crate::math::BlockContext;
 use crate::math::capacity::{Capacity, MarketCapacity};
 use crate::math::pricing::{Emas, Mark};
-use crate::units::{FundingRate, PerSide, Price, UsdcAtoms, UtilizationRate};
+use crate::math::swap::TickLiquidity;
+use crate::units::{FundingRate, LDelta, LUnits, PerSide, Price, UsdcAtoms, UtilizationRate};
 
 use super::fold::Fold;
+use super::positions::{PositionKind, PositionState, Positions};
 use super::tape::{ChainPoint, OwnershipLog, TapeEvent};
 
 /// How many times a figure may have moved without an event saying so,
 /// since the last event that stated it. A reading with a nonzero gap is
 /// forensic, not a decision's input.
 ///
-/// Both count silences in the live contract builds: the next build emits
-/// what repaid the debt on every swap and the margin total on every path
-/// that moves it, and these go with it.
+/// All of these count silences in the live contract builds: the next build
+/// emits what repaid the debt on every swap, the margin total on every path
+/// that moves it, and a position's margin, size and band on every event
+/// that changes them, and these go with it.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Gaps {
     /// Moves of `totalMargin` no event carries, since the last
@@ -45,6 +51,15 @@ pub struct Gaps {
     /// last event that stated the debt. The fee repays debt first, and no
     /// event on the live builds carries the amount.
     pub bad_debt_unemitted: u32,
+    /// Open positions whose open the fold did not see, so their size or
+    /// band is what moved since, not where they stand.
+    pub partial_positions: u32,
+    /// Open takers whose size no event stated: first seen mid-life, or
+    /// converted from a maker, whose inventory the live builds never emit.
+    pub taker_size_unknown: u32,
+    /// Open positions whose margin the tape never carried, which on the
+    /// live builds is every one of them.
+    pub margin_unknown: u32,
 }
 
 /// A market rebuilt from its tape.
@@ -84,6 +99,15 @@ pub struct Replay {
     bad_debt: Option<UsdcAtoms>,
     modules: [Option<Address>; 6],
     custody: OwnershipLog,
+    positions: Positions,
+    /// Net and gross liquidity at each initialized tick, signed sums of the
+    /// PoolManager's changes; a segment without the opens sums negative.
+    pool_ticks: BTreeMap<i32, (i128, i128)>,
+    /// The pool's tick after the last swap that moved it.
+    pool_tick: Option<i32>,
+    /// Whether the tick map has every change since the pool's first, which
+    /// only a fold from genesis has.
+    book_whole: bool,
     /// Moves of the total no event carried, since it was last stated.
     total_margin_unemitted: u32,
     /// Swaps with an insurance fee since the last event that stated the
@@ -98,14 +122,14 @@ pub struct Replay {
 
 impl Replay {
     /// The market before its first event. What is zero before any event is
-    /// zero and stated: no capacity, no open interest, no margin, no debt.
-    /// What only the factory's creation log carries — the modules, the
-    /// first price, the first EMAs — is unknown until the market's own
-    /// events state it.
+    /// zero and stated: no capacity, no open interest, no margin, no debt,
+    /// no liquidity at any tick. What only the factory's creation log
+    /// carries — the modules, the first price and tick, the first EMAs — is
+    /// unknown until the market's own events state it.
     ///
     /// A fold over a segment that is not the market's start is
     /// [`Fold::fold`], whose totals are unknown until the segment states
-    /// them.
+    /// them and whose book is never whole.
     pub fn from_genesis(perp: Address) -> Self {
         Self {
             perp,
@@ -113,6 +137,7 @@ impl Replay {
             open_interest: Some(PerSide::default()),
             total_margin_stated: Some(UsdcAtoms::ZERO),
             bad_debt: Some(UsdcAtoms::ZERO),
+            book_whole: true,
             stated_total_margin: true,
             stated_bad_debt: true,
             ..Self::default()
@@ -236,12 +261,69 @@ impl Replay {
         &self.custody
     }
 
-    /// What may have moved without an event saying so.
+    /// Every position the tape mentioned: takers sized by their swaps,
+    /// makers by their liquidity changes.
+    pub fn positions(&self) -> &Positions {
+        &self.positions
+    }
+
+    /// One position, if the tape mentioned it.
+    pub fn position(&self, pos_id: U256) -> Option<&PositionState> {
+        self.positions.get(pos_id)
+    }
+
+    /// The pool's tick, as [`StateAt::pool`](crate::StateAt::pool) reads
+    /// it: where the last swap that moved it left it. `None` until a swap
+    /// has moved it, since the pool's first tick is the factory's to say.
+    pub fn pool_tick(&self) -> Option<i32> {
+        self.pool_tick
+    }
+
+    /// Liquidity at every initialized tick, as `PoolSnapshot::ticks` reads
+    /// it. `None` for a fold that did not start at genesis: a segment knows
+    /// what changed, not what stands.
+    pub fn pool_ticks(&self) -> Option<BTreeMap<i32, TickLiquidity>> {
+        if !self.book_whole {
+            return None;
+        }
+        self.pool_ticks
+            .iter()
+            .map(|(&tick, &(net, gross))| {
+                let gross = u128::try_from(gross).ok()?;
+                Some((
+                    tick,
+                    TickLiquidity {
+                        gross: LUnits::new(gross),
+                        net: LDelta::new(net),
+                    },
+                ))
+            })
+            .collect()
+    }
+
+    /// Liquidity active at the pool's tick, as `PoolSnapshot::liquidity`
+    /// reads it: the net of every initialized tick at or below it. `None`
+    /// until the tick is known or when the book is not whole.
+    pub fn pool_liquidity(&self) -> Option<LUnits> {
+        if !self.book_whole {
+            return None;
+        }
+        let tick = self.pool_tick?;
+        let active = self
+            .pool_ticks
+            .range(..=tick)
+            .fold(0i128, |active, (_, &(net, _))| active.wrapping_add(net));
+        u128::try_from(active).ok().map(LUnits::new)
+    }
+
+    /// What may have moved without an event saying so, and what stands on
+    /// a figure no event stated.
     ///
     /// A swap's insurance fee repays debt only while debt stands, so the
     /// swaps counted since the debt was last stated are a silence only when
     /// that statement was nonzero. Deciding that here, from the latest
-    /// total, is what lets the count itself combine across segments.
+    /// total, is what lets the count itself combine across segments; the
+    /// position counts are read off the positions for the same reason.
     pub fn gaps(&self) -> Gaps {
         let debt_stands = self.bad_debt.is_some_and(|debt| !debt.is_zero());
         // A swap while debt stands removes its credited fees, the gross less
@@ -252,10 +334,19 @@ impl Replay {
         } else {
             0
         };
-        Gaps {
+        let mut gaps = Gaps {
             total_margin_unemitted: self.total_margin_unemitted + silent_swaps,
             bad_debt_unemitted: silent_swaps,
+            ..Gaps::default()
+        };
+        for (_, position) in self.positions.open() {
+            gaps.margin_unknown += 1;
+            gaps.partial_positions += u32::from(position.opened().is_none());
+            if let PositionKind::Taker { sized: false, .. } = position.kind() {
+                gaps.taker_size_unknown += 1;
+            }
         }
+        gaps
     }
 
     /// Whether this taker event's swap fees left the margin total after the
@@ -372,6 +463,27 @@ impl Fold for Replay {
                 self.modules[module_index(module)] = Some(address);
             }
             MarketEvent::PositionTransferred { .. } => self.custody.apply(event),
+            MarketEvent::TicksCrossed { ending_tick, .. } => self.pool_tick = Some(ending_tick),
+            MarketEvent::ModifyLiquidity {
+                tick_lower,
+                tick_upper,
+                liquidity_delta,
+                ..
+            } => {
+                // The lower tick gains the change as net and gross, the
+                // upper loses it as net and gains it as gross: V4's own
+                // bookkeeping, as signed sums so a segment can hold removals
+                // it never saw the adds of.
+                let delta = liquidity_delta.units();
+                tick_changed(&mut self.pool_ticks, tick_lower, delta, delta);
+                tick_changed(
+                    &mut self.pool_ticks,
+                    tick_upper,
+                    delta.wrapping_neg(),
+                    delta,
+                );
+            }
+            MarketEvent::TickInitialized { .. } | MarketEvent::TickDeleted { .. } => {}
             MarketEvent::MakerOpened { .. }
             | MarketEvent::MakerAdjusted { .. }
             | MarketEvent::MakerConverted { .. }
@@ -379,12 +491,9 @@ impl Fold for Replay {
             | MarketEvent::MakerLiquidated { .. }
             | MarketEvent::MakerBackstopped { .. }
             | MarketEvent::TakerLiquidated { .. }
-            | MarketEvent::TakerBackstopped { .. }
-            | MarketEvent::TicksCrossed { .. }
-            | MarketEvent::TickInitialized { .. }
-            | MarketEvent::TickDeleted { .. }
-            | MarketEvent::ModifyLiquidity { .. } => {}
+            | MarketEvent::TakerBackstopped { .. } => {}
         }
+        self.positions.apply(event, self.pool_price);
     }
 
     fn combine(&mut self, later: Self) {
@@ -400,6 +509,9 @@ impl Fold for Replay {
         self.events += later.events;
         self.last = later.last.or(self.last);
         self.margin_transfer_in_tx = later.margin_transfer_in_tx.or(self.margin_transfer_in_tx);
+        // An open in the later segment before any swap of its own was
+        // classified at this segment's last price.
+        self.positions.combine(later.positions, self.pool_price);
         self.pool_price = later.pool_price.or(self.pool_price);
         self.index = later.index.or(self.index);
         self.emas = later.emas.or(self.emas);
@@ -413,6 +525,10 @@ impl Fold for Replay {
             *mine = theirs.or(*mine);
         }
         self.custody.combine(later.custody);
+        self.pool_tick = later.pool_tick.or(self.pool_tick);
+        for (tick, (net, gross)) in later.pool_ticks {
+            tick_changed(&mut self.pool_ticks, tick, net, gross);
+        }
         // A later segment that stated a total replaces the count of
         // silences before it; one that did not adds its own.
         if later.stated_total_margin {
@@ -441,14 +557,26 @@ impl Replay {
     }
 }
 
+/// Add `net` and `gross` to a tick's sums, dropping the tick when both
+/// return to zero, as the pool drops a tick no liquidity references.
+fn tick_changed(ticks: &mut BTreeMap<i32, (i128, i128)>, tick: i32, net: i128, gross: i128) {
+    let entry = ticks.entry(tick).or_insert((0, 0));
+    entry.0 = entry.0.wrapping_add(net);
+    entry.1 = entry.1.wrapping_add(gross);
+    if *entry == (0, 0) {
+        ticks.remove(&tick);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use alloy::primitives::{B256, U256};
 
     use super::*;
     use crate::constants::Q96;
-    use crate::events::SwapInfo;
+    use crate::events::{MakerSettle, SwapInfo};
     use crate::math::pricing::calculate_emas;
+    use crate::math::range::{MakerBand, TickRange};
     use crate::units::{PerpAtoms, PerpDelta, UsdcDelta};
 
     fn row(block: u64, log_index: u64, event: MarketEvent) -> TapeEvent {
@@ -620,7 +748,14 @@ mod tests {
             market.custody().latest_owner(U256::from(1)),
             Some(Address::repeat_byte(0x0A))
         );
-        assert_eq!(market.gaps(), Gaps::default(), "every total was restated");
+        assert_eq!(
+            market.gaps(),
+            Gaps {
+                margin_unknown: 1,
+                ..Gaps::default()
+            },
+            "every total was restated; one taker stands, with the margin no event carries"
+        );
     }
 
     #[test]
@@ -687,8 +822,10 @@ mod tests {
             Gaps {
                 total_margin_unemitted: 2,
                 bad_debt_unemitted: 1,
+                margin_unknown: 2,
+                ..Gaps::default()
             },
-            "the donation, and the swap's fees net of what repaid the debt"
+            "the donation, and the swap's fees net of what repaid the debt; two takers stand"
         );
         assert_eq!(
             market.solvency().unwrap().bad_debt,
@@ -713,7 +850,13 @@ mod tests {
             },
         ));
         let market = genesis(&tape);
-        assert_eq!(market.gaps(), Gaps::default());
+        assert_eq!(
+            market.gaps(),
+            Gaps {
+                margin_unknown: 2,
+                ..Gaps::default()
+            }
+        );
 
         // A swap while no debt stands repays nothing, so it is no silence.
         let mut clear = tape.clone();
@@ -889,7 +1032,11 @@ mod tests {
             opened.solvency().unwrap().total_margin,
             UsdcAtoms::new(999_970_000)
         );
-        assert_eq!(opened.gaps(), Gaps::default());
+        let one_taker = Gaps {
+            margin_unknown: 1,
+            ..Gaps::default()
+        };
+        assert_eq!(opened.gaps(), one_taker);
 
         let adjust_with = |delta: i128, tx| {
             vec![
@@ -982,11 +1129,344 @@ mod tests {
         // A segment fold removes the same fees from the total it was told,
         // and invents no debt it was never told.
         let segment = Replay::fold(&open(1));
-        assert_eq!(segment.gaps(), Gaps::default());
+        assert_eq!(segment.gaps(), one_taker);
         assert_eq!(
             segment.solvency(),
             None,
             "a segment never told the debt does not invent it"
         );
+    }
+
+    fn settle() -> MakerSettle {
+        MakerSettle {
+            funding: UsdcDelta::new(1_000),
+            util_fees: PerSide::new(UsdcAtoms::new(10), UsdcAtoms::new(20)),
+            lp_fees: UsdcAtoms::new(30),
+        }
+    }
+
+    fn sized_swap(perp_delta: i128, pool_price: Price) -> SwapInfo {
+        SwapInfo {
+            perp_delta: PerpDelta::new(perp_delta),
+            ..swap(pool_price, 0)
+        }
+    }
+
+    fn modify(pos: u64, lower: i32, upper: i32, delta: i128) -> MarketEvent {
+        MarketEvent::ModifyLiquidity {
+            pool_id: B256::with_last_byte(7),
+            sender: Address::ZERO,
+            tick_lower: lower,
+            tick_upper: upper,
+            liquidity_delta: LDelta::new(delta),
+            salt: B256::from(U256::from(pos)),
+        }
+    }
+
+    fn tick(gross: u128, net: i128) -> TickLiquidity {
+        TickLiquidity {
+            gross: LUnits::new(gross),
+            net: LDelta::new(net),
+        }
+    }
+
+    /// Two positions' lives: taker 1 opens, adds, is liquidated in part and
+    /// then whole; maker 2 deposits a band, trims it, and is converted when
+    /// the rest is pulled, then closes as the taker it became.
+    fn lifecycle() -> Vec<TapeEvent> {
+        vec![
+            row(
+                20,
+                0,
+                MarketEvent::TakerOpened {
+                    pos_id: U256::from(1),
+                    swap: sized_swap(1_000_000, price(43)),
+                },
+            ),
+            row(21, 0, modify(2, -600, 600, 1_000)),
+            row(
+                21,
+                1,
+                MarketEvent::MakerOpened {
+                    pos_id: U256::from(2),
+                },
+            ),
+            row(
+                22,
+                0,
+                MarketEvent::TicksCrossed {
+                    starting_tick: 0,
+                    ending_tick: 10,
+                    zero_for_one: false,
+                },
+            ),
+            row(
+                22,
+                1,
+                MarketEvent::TakerAdjusted {
+                    pos_id: U256::from(1),
+                    swap: sized_swap(500_000, price(44)),
+                    funding: UsdcDelta::ZERO,
+                    util_fees: UsdcAtoms::ZERO,
+                },
+            ),
+            row(23, 0, modify(2, -600, 600, -400)),
+            row(
+                23,
+                1,
+                MarketEvent::MakerAdjusted {
+                    pos_id: U256::from(2),
+                    settle: settle(),
+                },
+            ),
+            row(
+                24,
+                0,
+                MarketEvent::TakerAdjusted {
+                    pos_id: U256::from(1),
+                    swap: sized_swap(-300_000, price(44)),
+                    funding: UsdcDelta::ZERO,
+                    util_fees: UsdcAtoms::ZERO,
+                },
+            ),
+            row(
+                24,
+                1,
+                MarketEvent::TakerLiquidated {
+                    pos_id: U256::from(1),
+                    perp_amount: PerpAtoms::new(300_000),
+                    liquidation_fee: UsdcAtoms::new(1_000),
+                },
+            ),
+            row(25, 0, modify(2, -600, 600, -600)),
+            row(
+                25,
+                1,
+                MarketEvent::MakerConverted {
+                    pos_id: U256::from(2),
+                    settle: settle(),
+                    liquidation_fee: UsdcAtoms::ZERO,
+                    is_liquidation: false,
+                },
+            ),
+            row(
+                26,
+                0,
+                MarketEvent::TakerClosed {
+                    pos_id: U256::from(2),
+                    swap: sized_swap(-700, price(45)),
+                    funding: UsdcDelta::ZERO,
+                    util_fees: UsdcAtoms::ZERO,
+                    liquidation_fee: UsdcAtoms::ZERO,
+                    is_liquidation: false,
+                },
+            ),
+            row(
+                26,
+                1,
+                MarketEvent::TakerClosed {
+                    pos_id: U256::from(1),
+                    swap: sized_swap(-1_200_000, price(45)),
+                    funding: UsdcDelta::ZERO,
+                    util_fees: UsdcAtoms::ZERO,
+                    liquidation_fee: UsdcAtoms::ZERO,
+                    is_liquidation: false,
+                },
+            ),
+            row(
+                26,
+                2,
+                MarketEvent::TakerLiquidated {
+                    pos_id: U256::from(1),
+                    perp_amount: PerpAtoms::new(1_200_000),
+                    liquidation_fee: UsdcAtoms::new(4_000),
+                },
+            ),
+        ]
+    }
+
+    /// A maker's band is the range its first liquidity change named and
+    /// the sum of the changes since; the pool's book is the same changes
+    /// summed per tick, and its liquidity the net at or below the tick.
+    #[test]
+    fn a_makers_band_and_the_pools_book_are_the_sum_of_liquidity_changes() {
+        let tape = lifecycle();
+        let band = |lower, upper, liquidity| {
+            MakerBand::new(
+                TickRange::new(lower, upper).unwrap(),
+                LUnits::new(liquidity),
+            )
+        };
+
+        // Deposited: the band stands, at the price of the swap before it.
+        let deposited = genesis(&tape[..3]);
+        let maker = deposited.position(U256::from(2)).unwrap();
+        assert_eq!(maker.maker_band(), Some(band(-600, 600, 1_000)));
+        assert_eq!(maker.deposit_pool_price(), Some(price(43)));
+        assert_eq!(maker.opened(), Some(tape[2].point()));
+        assert_eq!(
+            deposited.pool_ticks(),
+            Some(BTreeMap::from([
+                (-600, tick(1_000, 1_000)),
+                (600, tick(1_000, -1_000))
+            ]))
+        );
+        assert_eq!(
+            deposited.pool_tick(),
+            None,
+            "no swap has moved the tick, and the first tick is the factory's"
+        );
+        assert_eq!(deposited.pool_liquidity(), None);
+
+        // A swap moves the tick into the band; the band's liquidity is active.
+        let crossed = genesis(&tape[..5]);
+        assert_eq!(crossed.pool_tick(), Some(10));
+        assert_eq!(crossed.pool_liquidity(), Some(LUnits::new(1_000)));
+
+        // Trimmed.
+        let trimmed = genesis(&tape[..7]);
+        assert_eq!(
+            trimmed.position(U256::from(2)).unwrap().maker_band(),
+            Some(band(-600, 600, 600))
+        );
+        assert_eq!(trimmed.pool_liquidity(), Some(LUnits::new(600)));
+
+        // Pulled and converted: the band is gone, the book is empty, and
+        // the position is a taker of a size no event carries.
+        let converted = genesis(&tape[..11]);
+        let taker = converted.position(U256::from(2)).unwrap();
+        assert_eq!(taker.maker_band(), None);
+        assert_eq!(taker.taker_size(), None);
+        assert!(matches!(
+            taker.kind(),
+            PositionKind::Taker { sized: false, .. }
+        ));
+        assert!(taker.is_open());
+        assert_eq!(converted.pool_ticks(), Some(BTreeMap::new()));
+        assert_eq!(converted.pool_liquidity(), Some(LUnits::ZERO));
+        assert_eq!(converted.gaps().taker_size_unknown, 1);
+
+        // Closed as a taker.
+        let closed = genesis(&tape[..12]);
+        let taker = closed.position(U256::from(2)).unwrap();
+        assert_eq!(taker.closed(), Some(tape[11].point()));
+        assert_eq!(closed.gaps().taker_size_unknown, 0);
+    }
+
+    /// A taker's size is the sum of its swaps' perp deltas; each dedicated
+    /// liquidation event, and each tailed close, counts one liquidation.
+    #[test]
+    fn a_taker_is_sized_by_its_swaps_and_its_liquidations_are_counted() {
+        let tape = lifecycle();
+        let one = U256::from(1);
+
+        let opened = genesis(&tape[..1]);
+        let taker = opened.position(one).unwrap();
+        assert_eq!(taker.taker_size(), Some(PerpDelta::new(1_000_000)));
+        assert_eq!(taker.opened(), Some(tape[0].point()));
+        assert_eq!(taker.liquidations(), 0);
+
+        let added = genesis(&tape[..5]);
+        assert_eq!(
+            added.position(one).unwrap().taker_size(),
+            Some(PerpDelta::new(1_500_000))
+        );
+
+        let partly = genesis(&tape[..9]);
+        let taker = partly.position(one).unwrap();
+        assert_eq!(taker.taker_size(), Some(PerpDelta::new(1_200_000)));
+        assert_eq!(taker.liquidations(), 1);
+        assert!(taker.is_open());
+
+        let whole = genesis(&tape);
+        let taker = whole.position(one).unwrap();
+        assert_eq!(taker.taker_size(), Some(PerpDelta::ZERO));
+        assert_eq!(taker.liquidations(), 2);
+        assert_eq!(taker.closed(), Some(tape[12].point()));
+        assert_eq!(whole.positions().open().count(), 0);
+        assert_eq!(whole.gaps().margin_unknown, 0);
+
+        // The retired build's shape says it in the close's tail instead.
+        let tailed = genesis(&[
+            tape[0],
+            row(
+                21,
+                0,
+                MarketEvent::TakerClosed {
+                    pos_id: one,
+                    swap: sized_swap(-1_000_000, price(44)),
+                    funding: UsdcDelta::ZERO,
+                    util_fees: UsdcAtoms::ZERO,
+                    liquidation_fee: UsdcAtoms::new(500),
+                    is_liquidation: true,
+                },
+            ),
+        ]);
+        assert_eq!(tailed.position(one).unwrap().liquidations(), 1);
+    }
+
+    /// A segment that starts mid-life knows what moved and not where a
+    /// position stands, and says so: no size, no band, no book, and the
+    /// positions counted as partial.
+    #[test]
+    fn a_segment_knows_what_moved_and_not_where_positions_stand() {
+        let tape = lifecycle();
+        let segment = Replay::fold(&tape[3..9]);
+
+        let taker = segment.position(U256::from(1)).unwrap();
+        assert_eq!(taker.opened(), None);
+        assert_eq!(taker.taker_size(), None);
+        assert_eq!(
+            taker.kind(),
+            PositionKind::Taker {
+                moved: PerpDelta::new(200_000),
+                sized: false,
+            }
+        );
+        assert_eq!(taker.liquidations(), 1);
+
+        let maker = segment.position(U256::from(2)).unwrap();
+        assert_eq!(maker.opened(), None);
+        assert_eq!(maker.maker_band(), None, "the level is unknown");
+        assert_eq!(maker.deposit_pool_price(), None);
+        assert_eq!(
+            maker.kind(),
+            PositionKind::Maker {
+                range: Some(TickRange::new(-600, 600).unwrap()),
+                liquidity: LDelta::new(-400),
+                deposit_pool_price: None,
+            }
+        );
+
+        assert_eq!(segment.pool_ticks(), None, "a segment's book is not whole");
+        assert_eq!(segment.pool_liquidity(), None);
+        assert_eq!(segment.pool_tick(), Some(10));
+        assert_eq!(
+            segment.gaps(),
+            Gaps {
+                partial_positions: 2,
+                taker_size_unknown: 1,
+                margin_unknown: 2,
+                ..Gaps::default()
+            }
+        );
+    }
+
+    /// The combine law over positions and the book, at every cut, from
+    /// genesis and as segments.
+    #[test]
+    fn positions_and_the_book_combine_at_every_cut() {
+        let tape = lifecycle();
+        let whole = genesis(&tape);
+        let segments = Replay::fold(&tape);
+        for cut in 0..=tape.len() {
+            let mut from_genesis = genesis(&tape[..cut]);
+            from_genesis.combine(Replay::fold(&tape[cut..]));
+            assert_eq!(from_genesis, whole, "genesis cut at {cut}");
+
+            let mut left = Replay::fold(&tape[..cut]);
+            left.combine(Replay::fold(&tape[cut..]));
+            assert_eq!(left, segments, "segment cut at {cut}");
+        }
     }
 }
