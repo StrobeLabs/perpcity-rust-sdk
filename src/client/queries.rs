@@ -139,6 +139,20 @@ pub struct MarketSnapshot {
     pub open_interest: OpenInterest,
 }
 
+/// A price from a chain word, refusing zero: no market has a zero price, so
+/// one is a read of an uninitialised pool or beacon, and it must not reach
+/// a cache that would mark from it.
+fn read_price(x96: U256, what: &str) -> Result<Price> {
+    let price = Price::from_x96(x96);
+    if price.is_zero() {
+        return Err(ValidationError::InvalidPrice {
+            reason: format!("{what} read as zero"),
+        }
+        .into());
+    }
+    Ok(price)
+}
+
 /// A module address from `modules()`, rejecting the zero address (an
 /// unregistered module) with a typed error naming the interface.
 pub(super) fn registered_module(addr: Address, module: &str) -> Result<Address> {
@@ -260,7 +274,7 @@ impl MarketReader {
         let pool_key = perp.poolKey().call().await?;
         let pool_state = perp.poolState().call().await?;
         let ema_window = ema_window_secs(perp.EMA_WINDOW().call().await?)?;
-        let pool_price = Price::from_x96(pool_state.ammPrice);
+        let pool_price = read_price(pool_state.ammPrice, "pool price")?;
 
         let fees = self.get_or_fetch_fees(modules.fees).await?;
         let bounds = self.get_or_fetch_bounds(modules.marginRatios).await?;
@@ -455,7 +469,7 @@ impl MarketReader {
             .await
             .map_err(|e| pinned_read_error(multicall_error(e), block.number))?;
 
-        let pool_price = Price::from_x96(pool_state.ammPrice);
+        let pool_price = read_price(pool_state.ammPrice, "pool price")?;
         let funding_rate_daily = funding_per_day_to_f64(rates.fundingPerDay);
         let open_interest = OpenInterest::from(oi);
 
@@ -465,7 +479,7 @@ impl MarketReader {
             .index_x96_at(beacon, id)
             .await
             .map_err(|e| pinned_read_error(e, block.number))?;
-        let index_price = Price::from_x96(index_x96);
+        let index_price = read_price(index_x96, "index")?;
 
         // The mark exactly as the contract would set it at this block; the
         // stored pair goes out as it is so a cache can advance it itself.
@@ -978,6 +992,26 @@ mod tests {
         rpc.call::<Perp::EMA_WINDOWCall>(&U256::from(3_600u32));
     }
 
+    /// A pool whose price reads as zero is uninitialised, not a market at
+    /// price zero: the read refuses it rather than seeding a cache with it.
+    #[tokio::test]
+    async fn a_zero_pool_price_is_an_invalid_price() {
+        let (client, rpc) = mock::client();
+        rpc.call::<Perp::modulesCall>(&mock::modules());
+        rpc.call::<Perp::poolKeyCall>(&mock::pool_key(SPACING));
+        rpc.call::<Perp::poolStateCall>(&mock::pool_state(U256::ZERO));
+        rpc.call::<Perp::EMA_WINDOWCall>(&U256::from(3_600u32));
+
+        let err = client.market().get_config().await.unwrap_err();
+        assert!(
+            matches!(
+                err,
+                PerpCityError::Validation(ValidationError::InvalidPrice { .. })
+            ),
+            "{err}"
+        );
+    }
+
     /// The config read asks the `Perp` for its modules, then asks the
     /// modules it named: seven RPCs, decoded into fractions.
     #[tokio::test]
@@ -1204,7 +1238,7 @@ mod tests {
                 pool_price: Price::from_x96(x96(3, 1)),
                 index_price: Price::from_x96(x96(5, 2)),
                 // fair(1.5, 1.25, 1.0, 1.0) = (1.5 + (1.25 + 1.0 − 1.0)) / 2.
-                mark: Price::try_from(1.375).unwrap(),
+                mark: Price::from_x96(x96(11, 3)),
                 emas: Emas {
                     amm_price: one,
                     index: one,

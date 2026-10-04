@@ -7,9 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-The first consumer of 0.7.0 wrote its orders in the language and found the
-three places the chain's own values still arrived as floats. Breaking, so
-a minor bump when released.
+The changes below break the public API, so the next release is 0.8.0 (a minor bump, as for any breaking change before 1.0). The first consumer of 0.7.0 wrote its orders in the language and found the three places the chain's own values still arrived as floats.
 
 ### Breaking
 
