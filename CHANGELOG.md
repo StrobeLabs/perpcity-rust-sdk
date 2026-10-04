@@ -11,7 +11,7 @@ The changes below break the public API, so the next release is 0.9.0 (a minor bu
 
 ### Breaking
 
-- **`TryFrom<f64>` for the amounts rounds to the nearest atom** (was floored). The door is for a number a person wrote or a strategy computed, and most decimals have no binary representation: `0.29` arrives as `0.28999999999999998`, so the floor made it `289_999` atoms, an order a strategy did not mean to send. Rounding reads every decimal of six places or fewer to the atom it names, at any magnitude the `f64` holds exactly; a seventh place rounds to the nearer atom, away from zero on the half. Only an input with more than six places can observe the change.
+- **`TryFrom<f64>` for the amounts rounds to the nearest atom** (was floored). The door is for a number a person wrote or a strategy computed, and most decimals have no binary representation: `0.29` arrives as `0.28999999999999998`, so the floor made it `289_999` atoms, an order a strategy did not mean to send. Rounding reads every decimal of six places or fewer to the atom it names, at any magnitude the `f64` holds exactly; a seventh place rounds to the nearer atom, away from zero on the half. Two kinds of input see the change: a decimal of six places or fewer whose binary form sat just under it, which the floor read an atom low and which now reads exactly, and an input with more than six places, which now rounds to the nearest atom where it floored.
 
 ### Added
 
