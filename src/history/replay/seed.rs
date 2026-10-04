@@ -20,26 +20,26 @@ use crate::units::{LDelta, PerpDelta, Price, UsdcAtoms};
 
 /// Every figure the fold holds, as the reads returned it at one block.
 #[derive(Clone)]
-pub(crate) struct Seed {
-    pub(crate) perp: Address,
-    pub(crate) block: BlockContext,
-    pub(crate) pool_price: Price,
-    pub(crate) index: Price,
-    pub(crate) emas: Emas,
-    pub(crate) rates: MarketRates,
-    pub(crate) cumulatives: CumulativesInfo,
-    pub(crate) capacity: MarketCapacity,
-    pub(crate) solvency: SolvencyState,
-    pub(crate) modules: Modules,
-    pub(crate) ticks: BTreeMap<i32, TickLiquidity>,
-    pub(crate) tick: i32,
-    pub(crate) positions: Vec<(U256, SeedPosition)>,
+pub(super) struct Seed {
+    pub(super) perp: Address,
+    pub(super) block: BlockContext,
+    pub(super) pool_price: Price,
+    pub(super) index: Price,
+    pub(super) emas: Emas,
+    pub(super) rates: MarketRates,
+    pub(super) cumulatives: CumulativesInfo,
+    pub(super) capacity: MarketCapacity,
+    pub(super) solvency: SolvencyState,
+    pub(super) modules: Modules,
+    pub(super) ticks: BTreeMap<i32, TickLiquidity>,
+    pub(super) tick: i32,
+    pub(super) positions: Vec<(U256, SeedPosition)>,
 }
 
 /// One position as its rows describe it: the kind from which row holds
 /// it, the level from the row, and the margin, which only a read carries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum SeedPosition {
+pub(super) enum SeedPosition {
     Taker {
         size: PerpDelta,
         margin: UsdcAtoms,
@@ -64,7 +64,7 @@ impl Seed {
     ///
     /// Any read's error, or [`ValidationError::Overflow`] if a band's
     /// liquidity does not fit the signed sum the fold keeps.
-    pub(crate) async fn read(state: &StateAt) -> Result<Self> {
+    pub(super) async fn read(state: &StateAt) -> Result<Self> {
         let (mark, emas, rates, cumulatives, capacity, solvency, modules, pool, minted) = tokio::try_join!(
             state.mark(),
             state.emas(),

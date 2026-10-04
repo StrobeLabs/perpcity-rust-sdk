@@ -70,7 +70,7 @@ pub mod test_support;
 mod tests;
 
 pub use beacon::{IndexPrint, beacon_prints, latest_beacon_prints};
-pub use fold::Fold;
+pub use fold::{First, Fold, Latest, Stated};
 pub use replay::{Gaps, PositionKind, PositionState, Positions, Replay};
 pub use scan::{ScanStats, get_logs_chunked};
 pub use tape::{

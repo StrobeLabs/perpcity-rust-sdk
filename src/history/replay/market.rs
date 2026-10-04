@@ -20,9 +20,9 @@ use super::super::tape::TapeEvent;
 /// beacon's last print, and the stored EMAs as the last touch left them.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub(super) struct Prices {
-    pool: Latest<Price>,
-    index: Latest<Price>,
-    emas: Latest<Emas>,
+    pub(super) pool: Latest<Price>,
+    pub(super) index: Latest<Price>,
+    pub(super) emas: Latest<Emas>,
 }
 
 impl Prices {
@@ -35,18 +35,6 @@ impl Prices {
         }
     }
 
-    pub(super) fn pool(&self) -> Option<Price> {
-        self.pool.get()
-    }
-
-    pub(super) fn index(&self) -> Option<Price> {
-        self.index.get()
-    }
-
-    pub(super) fn emas(&self) -> Option<Emas> {
-        self.emas.get()
-    }
-
     /// The mark at `block`, with the EMAs advanced to its timestamp over
     /// `ema_window`; `None` until a swap, a print and a touch have been seen.
     pub(super) fn mark_at(
@@ -54,7 +42,9 @@ impl Prices {
         block: BlockContext,
         ema_window: u64,
     ) -> Result<Option<Mark>, ValidationError> {
-        let (Some(pool), Some(index), Some(emas)) = (self.pool(), self.index(), self.emas()) else {
+        let (Some(pool), Some(index), Some(emas)) =
+            (self.pool.get(), self.index.get(), self.emas.get())
+        else {
             return Ok(None);
         };
         Mark::advanced(
@@ -101,9 +91,9 @@ impl Fold for Prices {
 /// accumulators at the last accrual.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub(super) struct Rates {
-    funding_per_day: Latest<FundingRate>,
-    util_fee_per_day: Latest<PerSide<UtilizationRate>>,
-    cumulatives: Latest<CumulativesInfo>,
+    pub(super) funding_per_day: Latest<FundingRate>,
+    pub(super) util_fee_per_day: Latest<PerSide<UtilizationRate>>,
+    pub(super) cumulatives: Latest<CumulativesInfo>,
 }
 
 impl Rates {
@@ -114,18 +104,6 @@ impl Rates {
             util_fee_per_day: Latest::stated(rates.util_fee_per_day),
             cumulatives: Latest::stated(cumulatives),
         }
-    }
-
-    pub(super) fn funding_per_day(&self) -> Option<FundingRate> {
-        self.funding_per_day.get()
-    }
-
-    pub(super) fn util_fee_per_day(&self) -> Option<PerSide<UtilizationRate>> {
-        self.util_fee_per_day.get()
-    }
-
-    pub(super) fn cumulatives(&self) -> Option<CumulativesInfo> {
-        self.cumulatives.get()
     }
 }
 
@@ -156,8 +134,8 @@ impl Fold for Rates {
 /// emits whole and both zero before a market's first event.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub(super) struct Utilization {
-    capacity: Latest<Capacity>,
-    open_interest: Latest<OpenInterest>,
+    pub(super) capacity: Latest<Capacity>,
+    pub(super) open_interest: Latest<OpenInterest>,
 }
 
 impl Utilization {
@@ -175,10 +153,6 @@ impl Utilization {
             capacity: Latest::stated(read.capacity),
             open_interest: Latest::stated(read.open_interest),
         }
-    }
-
-    pub(super) fn open_interest(&self) -> Option<OpenInterest> {
-        self.open_interest.get()
     }
 
     /// Both at `block`, as the capacity read returns them.

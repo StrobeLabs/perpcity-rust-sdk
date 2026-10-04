@@ -238,38 +238,38 @@ impl Replay {
 
     /// The pool price after the last swap.
     pub fn pool_price(&self) -> Option<Price> {
-        self.prices.pool()
+        self.prices.pool.get()
     }
 
     /// The beacon's last print.
     pub fn index(&self) -> Option<Price> {
-        self.prices.index()
+        self.prices.index.get()
     }
 
     /// The stored EMA pair and the touch it is current as of, as the last
     /// `RatesAndEmasRefreshed` left them.
     pub fn emas(&self) -> Option<Emas> {
-        self.prices.emas()
+        self.prices.emas.get()
     }
 
     /// The funding rate the last touch set.
     pub fn funding_per_day(&self) -> Option<FundingRate> {
-        self.rates.funding_per_day()
+        self.rates.funding_per_day.get()
     }
 
     /// The utilization fee rates the last touch set, per side.
     pub fn util_fee_per_day(&self) -> Option<PerSide<UtilizationRate>> {
-        self.rates.util_fee_per_day()
+        self.rates.util_fee_per_day.get()
     }
 
     /// The market's accumulators at the last accrual.
     pub fn cumulatives(&self) -> Option<CumulativesInfo> {
-        self.rates.cumulatives()
+        self.rates.cumulatives.get()
     }
 
     /// Taker open interest, per side.
     pub fn open_interest(&self) -> Option<OpenInterest> {
-        self.utilization.open_interest()
+        self.utilization.open_interest.get()
     }
 
     /// Capacity and its draw at `block`, as [`StateAt::capacity`](crate::StateAt::capacity)
@@ -327,7 +327,7 @@ impl Replay {
     /// it: where the last swap that moved it left it. `None` until a swap
     /// has moved it, since the pool's first tick is the factory's to say.
     pub fn pool_tick(&self) -> Option<i32> {
-        self.pool.tick()
+        self.pool.tick.get()
     }
 
     /// Liquidity at every initialized tick, as `PoolSnapshot::ticks` reads

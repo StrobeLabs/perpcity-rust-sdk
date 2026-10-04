@@ -18,60 +18,8 @@ use crate::client::SolvencyState;
 use crate::events::MarketEvent;
 use crate::units::UsdcAtoms;
 
-use super::super::fold::{Fold, Latest};
+use super::super::fold::{Fold, Latest, Stated};
 use super::super::tape::TapeEvent;
-
-/// A total the contract states outright, with what accrued since the
-/// statement. A later statement replaces both; a segment without one adds
-/// its accruals to the one before.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Stated<T, S> {
-    value: Option<T>,
-    /// Whether this segment holds a statement, which decides how `since`
-    /// combines.
-    stated: bool,
-    since: S,
-}
-
-impl<T, S: Default> Default for Stated<T, S> {
-    fn default() -> Self {
-        Self {
-            value: None,
-            stated: false,
-            since: S::default(),
-        }
-    }
-}
-
-impl<T: Copy, S: Default + AddAssign> Stated<T, S> {
-    /// A total stated with nothing accrued since: zero before the market's
-    /// first event, or what a read returned.
-    fn with(value: T) -> Self {
-        Self {
-            value: Some(value),
-            stated: true,
-            since: S::default(),
-        }
-    }
-
-    fn state(&mut self, value: T) {
-        self.value = Some(value);
-        self.stated = true;
-        self.since = S::default();
-    }
-
-    fn value(&self) -> Option<T> {
-        self.value
-    }
-
-    fn combine(&mut self, later: Self) {
-        if later.stated {
-            *self = later;
-        } else {
-            self.since += later.since;
-        }
-    }
-}
 
 /// What moved the margin total since it was last stated.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]

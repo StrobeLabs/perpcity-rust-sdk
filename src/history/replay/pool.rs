@@ -43,7 +43,9 @@ impl TickSums {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(super) struct Pool {
     ticks: BTreeMap<i32, TickSums>,
-    tick: Latest<i32>,
+    /// The pool's tick, where the last swap that moved it left it; unknown
+    /// until one has, since the first tick is the factory's to say.
+    pub(super) tick: Latest<i32>,
     /// Whether the map is whole: every change since the pool's first is in,
     /// because the fold started at genesis or from the pool read.
     whole: bool,
@@ -94,12 +96,6 @@ impl Pool {
         })
     }
 
-    /// The pool's tick, where the last swap that moved it left it. `None`
-    /// until a swap has, since the first tick is the factory's to say.
-    pub(super) fn tick(&self) -> Option<i32> {
-        self.tick.get()
-    }
-
     /// Liquidity at every initialized tick, as the pool read returns it.
     /// `None` for a fold that did not start at genesis: a segment knows what
     /// changed, not what stands.
@@ -128,7 +124,7 @@ impl Pool {
         if !self.whole {
             return None;
         }
-        let tick = self.tick()?;
+        let tick = self.tick.get()?;
         let active = self
             .ticks
             .range(..=tick)
