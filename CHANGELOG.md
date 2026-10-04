@@ -7,7 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-The changes below break the public API, so the next release is 0.8.0 (a minor bump, as for any breaking change before 1.0). The first consumer of 0.7.0 wrote its orders in the language and found the three places the chain's own values still arrived as floats.
+## [0.8.0] - 2026-10-03
+
+The release the first consumer of the language asked for. It wrote its
+orders in 0.7.0's types and found the three places the chain's own values
+still arrived as floats: the market snapshot a cache seeds from, the stored
+EMAs it marks with, and the maker side's missing exact door. Breaking, so a
+minor bump, as for any breaking change before 1.0.
 
 ### Breaking
 
@@ -439,7 +445,8 @@ and why none of it changes a value on the wire.
 - Examples: quickstart, open_position, open_maker, market_maker, hft_bot
 - Benchmarks: math, HFT pipeline, transport
 
-[Unreleased]: https://github.com/StrobeLabs/perpcity-rust-sdk/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/StrobeLabs/perpcity-rust-sdk/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/StrobeLabs/perpcity-rust-sdk/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/StrobeLabs/perpcity-rust-sdk/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/StrobeLabs/perpcity-rust-sdk/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/StrobeLabs/perpcity-rust-sdk/compare/v0.4.0...v0.5.0
