@@ -7,7 +7,7 @@ use rustdoc_types::{Id, ItemEnum, Type};
 
 use crate::design::Graph;
 use crate::index::{Index, Kind, component_of, result_error};
-use crate::nodes::Node;
+use crate::nodes::{self, Node};
 use crate::summary::Summary;
 
 /// The enforced invariants, each as the opening of its sentence in the
@@ -88,10 +88,12 @@ fn section_of(text: &str, heading: &str) -> String {
 /// either; the report counts only the first as settled, so the debts stay
 /// a work queue.
 pub struct Answers {
-    /// Each node's accepted-structure section, by component.
+    /// Each node's accepted-structure section, by node name.
     accepted: BTreeMap<String, String>,
-    /// Each node's debts, by component.
+    /// Each node's debts, by node name.
     debts: BTreeMap<String, String>,
+    /// The nodes, for deciding which one owns a type.
+    nodes: Vec<Node>,
 }
 
 impl Answers {
@@ -105,6 +107,21 @@ impl Answers {
                 .iter()
                 .map(|n| (n.name.clone(), debts_section(&n.text)))
                 .collect(),
+            nodes: nodes.to_vec(),
+        }
+    }
+
+    /// The node a type path belongs to: the deepest node over its module,
+    /// the top-level component's when none is nested, `""` for the root.
+    fn owner(&self, path: &str) -> String {
+        let segs: Vec<String> = path.split("::").map(str::to_string).collect();
+        let module = &segs[..segs.len().saturating_sub(1)];
+        match nodes::owner(&self.nodes, module) {
+            Some(n) => n.name.clone(),
+            None => module
+                .first()
+                .map(|top| component_of(top).to_string())
+                .unwrap_or_default(),
         }
     }
 
@@ -168,13 +185,23 @@ impl Answers {
     }
 }
 
-/// The component a type path belongs to, as a node names it; `""`, the
-/// root node, for a type at the crate root.
-fn owner_of(path: &str) -> &str {
-    match path.split_once("::") {
-        Some((top, _)) => component_of(top),
-        None => "",
-    }
+/// A row longer than this, across its three cells, teaches instead of
+/// stating; the teaching belongs in the node's prose.
+pub const ROW_WORDS: usize = 100;
+
+/// A node longer than this is two nodes, or carries what rustdoc should;
+/// the root, the crate's overview, is measured but not held to it.
+pub const NODE_LINES: usize = 300;
+
+/// How many rows and nodes stand over the length limits.
+pub fn lengths(head: &Summary) -> String {
+    let rows = head.row_words.values().filter(|w| **w > ROW_WORDS).count();
+    let nodes = head
+        .node_lines
+        .values()
+        .filter(|l| **l > NODE_LINES)
+        .count();
+    format!("{rows} rows over {ROW_WORDS} words, {nodes} nodes over {NODE_LINES} lines")
 }
 
 /// The ratchet: a structure the report questions may exist, but a new one
@@ -186,21 +213,21 @@ pub fn ratchet(base: &Summary, head: &Summary, nodes: &[Node], problems: &mut Ve
     let answers = Answers::of(nodes);
     let short = |p: &String| p.rsplit("::").next().unwrap_or(p).to_string();
     for t in head.islands.difference(&base.islands) {
-        if !answers.names(owner_of(t), &short(t)) {
+        if !answers.names(&answers.owner(t), &short(t)) {
             problems.push(format!(
                 "ratchet: {t} became an island, in no signature and no field with another of the crate's types; name it in its node's accepted structure or debts, or connect it"
             ));
         }
     }
     for t in head.dead_ends.difference(&base.dead_ends) {
-        if !answers.names(owner_of(t), &short(t)) {
+        if !answers.names(&answers.owner(t), &short(t)) {
             problems.push(format!(
                 "ratchet: {t} became a dead end, produced but consumed by nothing; name it in its node's accepted structure or debts, consume it, or mark it as the strategy layer's"
             ));
         }
     }
     for (a, b) in head.two_cycles.difference(&base.two_cycles) {
-        if !answers.names_pair((owner_of(a), owner_of(b)), &short(a), &short(b)) {
+        if !answers.names_pair((&answers.owner(a), &answers.owner(b)), &short(a), &short(b)) {
             problems.push(format!(
                 "ratchet: {a} and {b} now flow both ways; name the pair in one of their nodes' accepted structure or debts, or move the conversion to one side"
             ));
@@ -228,6 +255,24 @@ pub fn ratchet(base: &Summary, head: &Summary, nodes: &[Node], problems: &mut Ve
         if changed && row_same {
             problems.push(format!(
                 "ratchet: {t}'s own methods or fields changed and its row in the design node did not; say what changed in its Invariant, Produced by or Consumed by"
+            ));
+        }
+    }
+    // A row states; the node's prose teaches. A new or changed row is held
+    // to a length, and a node over its length may not grow.
+    for (t, words) in &head.row_words {
+        if *words > ROW_WORDS && head.rows.get(t) != base.rows.get(t) {
+            problems.push(format!(
+                "ratchet: the row for {t} is {words} words, over {ROW_WORDS}; state the invariant, the producer and the consumer in a sentence or two each, and teach in the node's prose"
+            ));
+        }
+    }
+    // The root is the crate's overview and carries the invariants; it is
+    // measured but not held to the length.
+    for (node, lines) in head.node_lines.iter().filter(|(n, _)| !n.is_empty()) {
+        if *lines > NODE_LINES && base.node_lines.get(node).is_some_and(|b| lines > b) {
+            problems.push(format!(
+                "ratchet: the {node} node is {lines} lines, over {NODE_LINES}, and grew; cut it, or give a submodule its own node"
             ));
         }
     }

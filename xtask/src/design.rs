@@ -131,8 +131,9 @@ pub fn run(opts: Options) -> Result<bool> {
     let mut problems: Vec<String> = Vec::new();
 
     if opts.fmt {
+        let all = nodes.clone();
         for node in &mut nodes {
-            let rewritten = canonical_links(node, &index, &root);
+            let rewritten = canonical_links(node, &all, &index, &root);
             if rewritten != node.text {
                 fs::write(&node.path, &rewritten)?;
                 node.text = rewritten;
@@ -156,7 +157,7 @@ pub fn run(opts: Options) -> Result<bool> {
     }
     if let Some(base_ref) = &opts.diff {
         let base = at_ref(&root, base_ref)?;
-        let head = Summary::of(&index, &graph);
+        let head = Summary::of(&index, &graph).with_nodes(&nodes);
         let mut out = summary::diff(&base, &head, base_ref);
         let mut ratchet = Vec::new();
         invariants::ratchet(&base, &head, &nodes, &mut ratchet);
@@ -192,15 +193,17 @@ pub fn run(opts: Options) -> Result<bool> {
 
     if problems.is_empty() {
         if opts.check {
+            let head = Summary::of(&index, &graph).with_nodes(&nodes);
             println!(
-                "design: {} types, {} edges, {} of them designed; every claim matches a signature, every invariant holds",
+                "design: {} types, {} edges, {} of them designed; every claim matches a signature, every invariant holds; {}",
                 graph
                     .nodes
                     .iter()
                     .filter(|id| index.entries.get(id).is_some_and(|e| e.kind.is_type()))
                     .count(),
                 graph.flows().count(),
-                graph.designed_count(&index)
+                graph.designed_count(&index),
+                invariants::lengths(&head)
             );
         }
         return Ok(true);
@@ -248,13 +251,15 @@ fn at_ref(root: &Path, git_ref: &str) -> Result<Summary> {
         let mut graph = mechanical(&index, &dir);
         // A base without nodes, or with nodes the tool cannot read, still
         // has a mechanical graph to diff against.
+        let mut summary = Summary::of(&index, &graph);
         if let Ok(nodes) = nodes::discover(&dir) {
             let mut ignored = Vec::new();
             if let Err(e) = annotate(&mut graph, &nodes, &index, &dir, &mut ignored) {
                 eprintln!("note: the base's nodes were not read: {e:#}");
             }
+            summary = Summary::of(&index, &graph).with_nodes(&nodes);
         }
-        Ok(Summary::of(&index, &graph))
+        Ok(summary)
     })();
     // The extracted tree goes; the base's target directory stays as the
     // cache for the next diff.
@@ -673,7 +678,7 @@ pub fn resolve(link: &Link, node: &Node, index: &Index) -> Result<Ref, String> {
         let own: Vec<Id> = cands
             .iter()
             .copied()
-            .filter(|id| index.entries[id].top() == node.name)
+            .filter(|id| index.entries[id].top() == node.component())
             .collect();
         if !own.is_empty() {
             cands = own;
@@ -705,7 +710,7 @@ pub fn resolve(link: &Link, node: &Node, index: &Index) -> Result<Ref, String> {
         && cands
             .iter()
             .all(|id| index.entries[id].kind != Kind::Function)
-        && let Some((owner, m)) = index.member_in(&node.name, name)
+        && let Some((owner, m)) = index.member_in(node.component(), name)
     {
         return Ok(Ref {
             item: owner,
@@ -1011,7 +1016,7 @@ fn describe_output(sig: &Signature, index: &Index) -> String {
 /// Rewrite every link's target to its canonical file: the item's source
 /// for the node's own types and for the Type column, the owning design
 /// node for another component's items.
-fn canonical_links(node: &Node, index: &Index, root: &Path) -> String {
+fn canonical_links(node: &Node, nodes: &[Node], index: &Index, root: &Path) -> String {
     let table = nodes::table(node).ok();
     let type_column: HashSet<(usize, usize)> = table
         .iter()
@@ -1036,16 +1041,21 @@ fn canonical_links(node: &Node, index: &Index, root: &Path) -> String {
         let e = &index.entries[&r.item];
         let component = e.component();
         let is_component = e.kind == Kind::Module && e.module.is_empty();
+        // The node that owns the item: the deepest node over its module,
+        // the top-level component when none is nested.
+        let owner = nodes::owner(nodes, &e.module)
+            .map(|n| n.name.as_str())
+            .unwrap_or(component);
         let target = if is_component {
             node_link(&dir, component)
-        } else if type_column.contains(&l.span) || component == node.name || node.is_root() {
+        } else if type_column.contains(&l.span) || owner == node.name || node.is_root() {
             let (file, line) = r
                 .member
                 .and_then(|m| index.location(m))
                 .unwrap_or((e.file.clone(), e.line));
             source_link(&dir, &file, line)
         } else {
-            node_link(&dir, component)
+            node_link(&dir, owner)
         };
         edits.push((l.span, format!("[`{}`]({target})", l.text)));
     }

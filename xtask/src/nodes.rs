@@ -8,7 +8,8 @@ use anyhow::{Context, Result, bail};
 /// One `DESIGN.md`.
 #[derive(Debug, Clone)]
 pub struct Node {
-    /// The component's name, `""` for the root.
+    /// The node's name: its directory below `src`, `history` or
+    /// `history/replay`; `""` for the root.
     pub name: String,
     pub path: PathBuf,
     pub text: String,
@@ -22,6 +23,36 @@ impl Node {
     pub fn is_root(&self) -> bool {
         self.name.is_empty()
     }
+
+    /// The top-level module the node sits in: `history` for both `history`
+    /// and `history/replay`.
+    pub fn component(&self) -> &str {
+        self.name.split('/').next().unwrap_or("")
+    }
+
+    /// The module path the node documents, as segments.
+    pub fn segments(&self) -> Vec<&str> {
+        self.name.split('/').filter(|s| !s.is_empty()).collect()
+    }
+
+    /// Whether this node documents the module at `module` or one of its
+    /// ancestors.
+    pub fn covers(&self, module: &[String]) -> bool {
+        let segs = self.segments();
+        !segs.is_empty()
+            && module.len() >= segs.len()
+            && segs.iter().zip(module).all(|(a, b)| a == b)
+    }
+}
+
+/// The node that owns a module: the deepest one whose path is a prefix of
+/// `module`, so a type in `history::replay` belongs to the replay node when
+/// one exists and to the history node otherwise.
+pub fn owner<'a>(nodes: &'a [Node], module: &[String]) -> Option<&'a Node> {
+    nodes
+        .iter()
+        .filter(|n| n.covers(module))
+        .max_by_key(|n| n.segments().len())
 }
 
 /// A markdown link with code text: `[`text`](target)` or `[`text`]`.
@@ -52,28 +83,51 @@ pub struct Table {
     pub rows: Vec<Row>,
 }
 
-/// The root node and every `src/*/DESIGN.md`, in path order.
+/// The root node and every `DESIGN.md` under `src`, nested modules
+/// included, in path order. A nested node is named by its path below
+/// `src`, so `src/history/replay/DESIGN.md` is the node `history/replay`.
 pub fn discover(root: &Path) -> Result<Vec<Node>> {
     let mut nodes = vec![Node {
         name: String::new(),
         path: root.join("DESIGN.md"),
         text: fs::read_to_string(root.join("DESIGN.md")).context("reading DESIGN.md")?,
     }];
-    let mut dirs: Vec<PathBuf> = fs::read_dir(root.join("src"))?
-        .filter_map(|e| e.ok().map(|e| e.path()))
-        .filter(|p| p.join("DESIGN.md").is_file())
-        .collect();
+    let src = root.join("src");
+    let mut dirs = Vec::new();
+    collect(&src, &mut dirs)?;
     dirs.sort();
     for dir in dirs {
         let path = dir.join("DESIGN.md");
+        let name = dir
+            .strip_prefix(&src)
+            .unwrap_or(&dir)
+            .components()
+            .map(|c| c.as_os_str().to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+            .join("/");
         nodes.push(Node {
-            name: dir.file_name().unwrap().to_string_lossy().into_owned(),
+            name,
             text: fs::read_to_string(&path)
                 .with_context(|| format!("reading {}", path.display()))?,
             path,
         });
     }
     Ok(nodes)
+}
+
+/// Every directory under `dir`, itself excluded, that holds a `DESIGN.md`.
+fn collect(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
+    for entry in fs::read_dir(dir).with_context(|| format!("reading {}", dir.display()))? {
+        let path = entry?.path();
+        if !path.is_dir() {
+            continue;
+        }
+        if path.join("DESIGN.md").is_file() {
+            out.push(path.clone());
+        }
+        collect(&path, out)?;
+    }
+    Ok(())
 }
 
 /// Every code-text link in the file, in order.

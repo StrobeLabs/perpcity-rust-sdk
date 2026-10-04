@@ -8,6 +8,7 @@ use rustdoc_types::Id;
 use crate::design::{EdgeKind, Graph};
 use crate::index::Index;
 use crate::invariants::type_name;
+use crate::nodes::Node;
 
 /// A pair of type paths, source then destination.
 pub type Pair = (String, String);
@@ -45,6 +46,12 @@ pub struct Summary {
     /// Each documented type's row, as written: invariant, produced by and
     /// consumed by.
     pub rows: BTreeMap<String, String>,
+    /// Each documented type's row length in words, the measure a row is
+    /// held to.
+    pub row_words: BTreeMap<String, usize>,
+    /// Each node's length in lines, by node name; empty when the summary
+    /// was built without nodes.
+    pub node_lines: BTreeMap<String, usize>,
 }
 
 impl Summary {
@@ -168,11 +175,22 @@ impl Summary {
             // A companion shares its subject's row, so a change to the
             // companion's shape is held to the same row.
             let text = format!("{}|{}|{}", r.invariant, r.produced, r.consumed);
+            let words = text.split_whitespace().count();
             for id in std::iter::once(r.subject).chain(r.companions.iter().copied()) {
                 s.rows.insert(path(id), text.clone());
+                s.row_words.insert(path(id), words);
             }
         }
         s
+    }
+
+    /// With each node's length recorded.
+    pub fn with_nodes(mut self, nodes: &[Node]) -> Self {
+        self.node_lines = nodes
+            .iter()
+            .map(|n| (n.name.clone(), n.text.lines().count()))
+            .collect();
+        self
     }
 
     /// The number of function nodes drawn is not a property of the types,
