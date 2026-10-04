@@ -75,15 +75,12 @@ a live one over the stamped feed, and a parallel one over segments cut at
 block boundaries. `OwnershipLog` folds the position NFT's transfers into
 custody over time, so `owner_at(pos, point)` answers who held a position
 when an event happened, which is the attribution a measurement wants, and
-`latest_owner` answers the naive question for compatibility. `Replay`
-is a composition of folds, one per concern — the mark's inputs, the
-touch's rates, capacity and open interest, the solvency books, the modules
-in force, the pool's liquidity by tick, the positions, custody — each
-producing the same types the pinned reads return, so a market rebuilt from
-its tape is compared to a market read from storage with `==`; what the tape
-cannot carry it counts in `Gaps` rather than guessing. Research's
-economics and reconciliation are further folds over the same tape, and
-they live above this crate because they apply a perspective.
+`latest_owner` answers the naive question for compatibility. `Replay` is
+the market rebuilt from its events in the types the pinned reads return,
+so the two compare with `==`; it has its own node,
+[history/replay](replay/DESIGN.md). Research's economics and
+reconciliation are further folds over the same tape, and they live above
+this crate because they apply a perspective.
 
 `History` is the handle that owns the learned width, the block lag, the
 in-flight bound and the telemetry, so that a long-lived scanner meters
@@ -99,12 +96,9 @@ state.
 | [`TapeEvent`](tape.rs#L63) | a [`MarketEvent`](../events/DESIGN.md) at a chain point: the same vocabulary as the feed, plus its position, its block's hash and timestamp, and its transaction. The block hash is what lets a state rebuilt from the tape carry the same block identity a pinned read carries, so the two can be compared rather than approximately agreed; the transaction is what lets a fold pair the logs of one call. Both tenses build it through one constructor, so a feed's row and a scan's are the same row, though the feed does not yet carry the tape's whole event set | [`History::market_tape`](mod.rs#L282), [`History::market_events`](mod.rs#L259) and [`History::latest_market_events`](mod.rs#L305), and their handle-less twins; [`MarketFeed::next_stamped`](../feeds/DESIGN.md), the present tense of the same row over the perp and beacon | [`OwnershipLog::fold`](tape.rs#L198). The strategy layer's economics, classification and series are folds over a slice of these; every fold that depends on order can assert it. |
 | [`TapeAddresses`](tape.rs#L133) | the three addresses a market's record is spread across: its own contract, the beacon it reads, and the chain's PoolManager keyed by its pool id. The PoolManager is every pool on the chain, so it is filtered by the liquidity event and the pool id it indexes, never by address alone | [`MarketReader::tape_addresses`](../client/DESIGN.md), which knows all three; or a caller that does | [`History::market_tape`](mod.rs#L282) and [`market_tape`](tape.rs#L316). |
 | [`Fold`](fold.rs#L28) | the one contract every fold over a tape shares: `apply` one event, `combine` the fold of the segment after, and the law `fold(a ++ b) == combine(fold(a), fold(b))` at any cut between blocks, which makes a fold of any prefix a checkpoint and lets segments fold on separate cores. An implementation allocates nothing on the common path of `apply` | the two folds here implement it, and the strategy layer's interpreters implement the same trait rather than a sibling | nothing takes it: a trait with one open verb, like `Factor` in `units`. `OwnershipLog` and `Replay` are the crate's instances, and the strategy layer's folds are the rest, so that one contract serves both repositories and the sweep that cuts a tape into segments is written once. |
-| [`Latest`](fold.rs#L138), [`First`](fold.rs#L173), [`Stated`](fold.rs#L213) | the three shapes a fold's state takes, each with the `combine` its law needs and nothing else: a total the contract emits whole, where the later segment's wins; a value fixed by its first occurrence, where the earlier's wins; and a total stated outright with what accrued since it, where a later statement replaces both and a segment without one adds its accruals. Public so a fold written above the crate takes the same shapes rather than hand-writing the merges, which is where the replay's own law breaks were | `Default` for the unknown, `Latest::stated` and `Stated::with` for a value a read supplies, `set` and `state` as the events arrive | every component fold of `Replay`, and the strategy layer's folds. A fold whose fields are these has a `combine` that is one line per field and a law that is local to each. |
-| [`Sequenced`](fold.rs#L53) | a fold behind the chain-order guard: an event at or before the last point applied is refused and counted, never handed on, in release builds as in debug. Chain order is the one assumption every sum in a fold rests on, and before this the guard was a debug assertion in one fold; now it is a type any fold is wrapped in, so `Positions`, `OwnershipLog` and a fold written above the crate are guarded the same way `Replay` is | [`Sequenced::new`](fold.rs#L62) over any fold; [`Sequenced::standing_at`](fold.rs#L72) for a fold seeded at a block, which refuses that block's own events as already in | `Replay`, which is one inside and reads `refused` into its gaps; the strategy layer's drivers, which wrap the fold they feed. |
-| [`OwnershipLog`](tape.rs#L165) | custody over time: a fold of transfers in chain order; owner at a point, not merely latest. The first instance of [`Fold`](fold.rs#L28): `apply` appends a transfer, `combine` appends a later segment's timelines | [`OwnershipLog::fold`](tape.rs#L198) over the tape, the trait's fold kept inherent so it is reachable without the import | [`Replay`](replay.rs#L124), which folds it in the same pass. The strategy layer's attribution, which asks who held a position when a trade happened, not who holds it now. |
-| [`Replay`](replay.rs#L124) | a market rebuilt from its events: every quantity a total the contract emitted (the latest wins), a sum of its deltas, or a first occurrence, so the fold combines across segments. Its accessors return the read types — [`MarketCapacity`](../math/DESIGN.md), [`Mark`](../math/DESIGN.md), [`Emas`](../math/DESIGN.md), [`SolvencyState`](../client/DESIGN.md), [`OpenInterest`](../client/DESIGN.md) — and the ones whose read carries a block take the caller's [`BlockContext`](../math/DESIGN.md), so a rebuilt snapshot equals a pinned read at that block or the fold is wrong; that equality is the test the type exists to pass, run against a live market. From genesis the totals that are zero before any event — capacity, open interest, the books — are zero, while what only the factory's creation log carries — the modules, the first price, the first EMAs — is unknown until the market's own events state it. The margin total is the last `MarginTransferred` less the swap fees removed since, the one rule here that is the live build's rather than the vocabulary's: the removal is silent, and whether it came before or after the transaction's statement is the path's — a deposit is transferred before it, a withdrawal after, a liquidation's fee after the close event — so the fold reads the statement's sign and transaction to know which. Beside the totals it holds every position the tape mentioned, as [`Positions`](replay/positions.rs#L367), and the pool's liquidity: the tick map as signed sums of the PoolManager's changes per initialized tick, the tick from the last `TicksCrossed`, which carries the pool's own tick after the swap, and the active liquidity as the net at or below it, each what `PoolSnapshot` reads. The root itself is not rebuilt, since the emitted pool price is its floored square; the read's root squared equals the fold's price. The type is a struct of folds, one per concern, each a `Fold` with its own `combine`, so the law is local to each and `Replay::combine` only composes them. Chain order is the one assumption every sum rests on, so an event at or before the fold's point is refused and counted, never applied, in release builds as in debug | [`Replay::from_genesis`](replay.rs#L184) for a market before its first event; [`Replay::seeded`](replay.rs#L213) from the reads on a [`StateAt`](../client/DESIGN.md), every total stated, the tick map whole, every position's level and margin known, standing at the end of the read's block; the trait's `fold` for a segment, whose totals are unknown until stated and whose tick map is never whole. From any start, `apply` over the tape's rows or the stamped feed's, or `Replay::catch_up`, which scans the `History` from the block after the fold's and applies it | nothing in the crate. The strategy layer's monitor runs it on every market it watches, catching up from the lagged head; its live cache seeds from a read and catches up or follows the feed; its backtests drive it with an engine's events. |
-| [`Positions`](replay/positions.rs#L367), [`PositionState`](replay/positions.rs#L109), [`PositionKind`](replay/positions.rs#L22) | every position the tape mentioned, by id, and what the tape said about each: a taker's size as the sum of its swaps' perp deltas, which is the row's `amount0`; a maker's band as the range its first liquidity change named and the sum of the changes since, which is `makerDetails`; the pool price at the open, which a deposit's capacity was classified at; the open, the close, the last touch, and the liquidations that landed on it, whether a dedicated event or the close's tail says so; and the margin a read supplied, until an event touches the position, since no live event carries margin. Every field is a sum, a first occurrence or a latest, so a segment that did not see a position's open knows what moved and not where it stands, and the accessors say so: `level_known` is whether the fold knows where it stands, from the open it saw or the read that seeded it; `taker_size` and `maker_band` are `None` until it does; a maker converted to a taker has a size no live event carries; and a position a segment met only through a liquidation or a backstop is of `Unknown` kind rather than a guessed one, which is what lets two segments' answers merge into the whole's | folded by [`Replay`](replay.rs#L124) in the same pass as the totals; the map is read through [`Replay::positions`](replay.rs#L378), one position through `Replay::position` | the strategy layer's live cache, whose own position fold this replaces, and its economics folds, which take the lifecycle from here and the settlements from the events. A `MakerBand` here and one read from chain are the same type, so the two are compared with `==`. |
-| [`Gaps`](replay.rs#L51), [`Silences`](replay.rs#L65), [`Unknowns`](replay.rs#L81), [`Faults`](replay.rs#L96) | what the fold does not know, in three kinds with three cures, so a consumer knows which lever to pull. `Silences`: how many times a figure may have moved without an event saying so, since the last event that stated it — donations and bookings that move the margin total silently, swaps whose insurance fee repaid debt silently; the live builds', cured by the cutover. `Unknowns`: how many positions stand on a figure the fold was never told — their level, from no open and no read; their size, unemitted; their margin, which no event carries; cured by a seed. `Faults`: how many events the fold refused for arriving at or before its point; cured by `catch_up`. Counted, never guessed, and decided from the latest total and the positions at the read so the counts combine across segments | [`Replay::gaps`](replay.rs#L411) | nothing in the crate: the strategy layer's gate, one alarm per part at its own severity. A reading with a nonzero gap is forensic, not a decision's input, and the pinned read is its check. The silences shrink with the next build, which emits what repaid the debt on every swap, the margin total on every path, and a position's margin, size and band on every event that changes them. |
+| [`Latest`](fold.rs#L138), [`First`](fold.rs#L173), [`Stated`](fold.rs#L213) | the three shapes a fold's state takes, each with the `combine` its law needs and nothing else: a total the contract emits whole, where the later segment wins; a value fixed by its first occurrence, where the earlier wins; a total stated outright with what accrued since, where a later statement replaces both | `Default` for the unknown; `Latest::stated` and `Stated::with` for a value a read supplies; `set` and `state` as events arrive | every component fold of `Replay`, and the strategy layer's folds: a fold built from these has a one-line `combine` per field and a law local to each. |
+| [`Sequenced`](fold.rs#L53) | a fold behind the chain-order guard: an event at or before the last point applied is refused and counted, never handed on, in release builds as in debug. Chain order is the one assumption every sum in a fold rests on | [`Sequenced::new`](fold.rs#L62) over any fold; [`Sequenced::standing_at`](fold.rs#L72) for a fold seeded at a block, which refuses that block's own events as already in | `Replay`, which is one inside; the strategy layer's drivers, which wrap the fold they feed. |
+| [`OwnershipLog`](tape.rs#L165) | custody over time: a fold of transfers in chain order; owner at a point, not merely latest. The first instance of [`Fold`](fold.rs#L28): `apply` appends a transfer, `combine` appends a later segment's timelines | [`OwnershipLog::fold`](tape.rs#L198) over the tape, the trait's fold kept inherent so it is reachable without the import | [`Replay`](replay/DESIGN.md), which folds it in the same pass. The strategy layer's attribution, which asks who held a position when a trade happened, not who holds it now. |
 | [`IndexPrint`](beacon.rs#L20) | one beacon update: index, chain point and timestamp. The index is a [`Price`](../units/DESIGN.md), the same type the live `IndexUpdated` carries, so a fold over an index series cannot tell which tense produced its samples; `index_f64` is the lossy view and the field was `index_x96` when it was a bare word | [`History::beacon_prints`](mod.rs#L212) and [`History::latest_beacon_prints`](mod.rs#L235) | nothing in the crate. The strategy layer's index series and estimator bootstrap; it keeps the chain point so a print can be joined to the fills after it. |
 | [`TokenTransfer`](transfers.rs#L18) | one ERC-20 transfer between the address sets asked for; the sets are topic filters, not post-filters | [`History::token_transfers`](mod.rs#L322) | nothing in the crate. The strategy layer's fleet derivation and treasury ledger. |
 | [`FakeNode`](test_support.rs#L68), [`Mode`](test_support.rs#L29) | an in-memory node that serves `eth_getLogs` under a chosen cap and answers as a provider would: accept, decline a too-wide range, or fail; behind the `test-utils` feature | [`FakeNode::new`](test_support.rs#L81) from a set of logs and a span cap | every scan test in the crate, through the provider it hands out. The strategy layer's research tests scan against it too, which is why it is a feature and not a test module. |
@@ -222,60 +216,11 @@ depends on. That separation is a cost rule, not a convenience.
   the chain, is filtered by the liquidity event's signature and the pool
   id it indexes. The two scans share the learned width and their rows
   merge on chain point. One filter would either miss the pool's liquidity
-  or pull every pool's on the chain; this was SDK #101, and the consumer
-  that decided its shape is a fold that rebuilds a market from its events.
-  The PoolManager filter is compensation for the live builds, whose maker
-  events carry no geometry: the next contracts emit a band's range,
-  liquidity and every change to it on the perp's own events, so the pool's
-  liquidity becomes a fold of one address and the second filter goes with
-  the cutover.
-
-- **The replay's snapshots are the reads' types, with the caller's block.**
-  `Replay::capacity_at` produces a `MarketCapacity`, `Replay::mark_at` a
-  `Mark`, `Replay::emas` an `Emas`, `Replay::solvency` a `SolvencyState`,
-  `Replay::open_interest` an `OpenInterest`, `Replay::cumulatives` a
-  `CumulativesInfo`, and `Replay::funding_per_day` and
-  `Replay::util_fee_per_day` the two rates as a `FundingRate` and a
-  `PerSide` of `UtilizationRate`, every one a type `StateAt`, `MarketReader`
-  or the decoder also produces, so every snapshot type now has two
-  producers. That is the point: the two must agree at a block, and `==` is
-  how they are compared. The block on a
-  snapshot is the caller's because the fold's last event may be blocks
-  before the read, and the mark advances the EMAs to the block it is asked
-  for; a fold that stamped its own block would compare unequal for the
-  wrong reason. The same holds one level down: `PositionState::taker_size`
-  is a `PerpDelta`, the row's `amount0`; `PositionState::deposit_pool_price`
-  a `Price`, the one the swap event carries; `Replay::pool_liquidity` an
-  `LUnits`, the pool's own unit; so a position or a tick map rebuilt here
-  is set against its read with `==` too.
-
-- **Three starts, one driver.** `Replay::from_genesis` is the market before
-  its first event; `Replay::seeded` takes a `StateAt` and reads every
-  figure the fold holds at that block, so a fold starts where the reads
-  stand and the two producers of each snapshot type meet in one value; the
-  trait's `fold` is a segment. `Replay::catch_up` takes the `History` and
-  the market's `TapeAddresses` and applies the tape from the block after
-  the fold's to the lagged head, which is how a fold follows a market by
-  polling and how one heals after a feed dropped or refused events. The
-  seed stands at the end of its block, so an event of that block delivered
-  again is refused rather than counted twice; a seeded fold continued over
-  the tape equals the fold from genesis on every read-shaped question,
-  which the fixture and the live run both check.
-
-- **The pool's liquidity is a fold of the PoolManager's changes, and three
-  of its parts are compensation.** `Replay::maker_band` on a position comes from
-  `ModifyLiquidity` joined to the maker by its salt, which the live builds
-  set to the position id; `Replay::pool_ticks` is the same changes summed
-  per tick; the deposit price is the fold's own pool price at the
-  `MakerOpened`; and a liquidation is paired with the adjust, convert or
-  close before it in the same transaction by the dedicated event that
-  follows. The audited build emits a band's range, liquidity and mark on
-  `MakerOpened` and every change on the maker's own events, and names
-  liquidations in their own events, so the salt join, the deposit-price
-  recovery and the pairing are deleted at the cutover and the pool's
-  liquidity becomes a fold of one address. They sit together in the
-  positions fold and the pool fold so the deletion is a removal, not a
-  rewrite.
+  or pull every pool's on the chain. The PoolManager filter is compensation
+  for the live builds, whose maker events carry no geometry: the next
+  contracts emit a band's range, liquidity and every change to it on the
+  perp's own events, so the pool's liquidity becomes a fold of one address
+  and the second filter goes with the cutover.
 
 ## Debts
 
