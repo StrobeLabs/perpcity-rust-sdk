@@ -155,12 +155,16 @@ pays per refresh instead.
 - **Re-subscription after reconnect is manual.** Every consumer writes
   the same loop; a subscription that remembers its filters and replays
   them on reconnect would remove the most common way a feed dies quietly.
-- **The market feed carries two of the tape's three addresses.** The
-  perp and its beacon are one subscription; the PoolManager's liquidity
-  changes for the market's pool, which `History::market_tape` carries, are
-  not on the feed, so a fold that follows the feed after reading the tape
-  misses the book. Adding them is a second subscription whose logs
-  interleave with the first's inside a block, so the feed must merge two
-  streams into chain order before it can claim the tape's event set. Until
-  then a fold that needs the book live follows the lagged tail through the
-  handle.
+- **The market feed carries two of the tape's three addresses on the live
+  builds.** The perp and its beacon are one subscription; the PoolManager's
+  liquidity changes for the market's pool, which `History::market_tape`
+  carries, are not on the feed, so a fold that follows the feed after
+  reading the tape misses the book. Putting them on the feed is either a
+  second subscription, whose logs interleave with the first's inside a
+  block and must be merged into chain order against a block watermark, or
+  one subscription to the whole PoolManager, which is every pool on the
+  chain and is billed as such. Neither is built: the next contracts emit a
+  band's range, liquidity and every change to it on the perp's own events,
+  so after the cutover the feed's two addresses are the tape's two and the
+  gap closes by itself. Until then a fold that needs the book live follows
+  the lagged tail through the handle.

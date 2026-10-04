@@ -196,6 +196,11 @@ depends on. That separation is a cost rule, not a convenience.
   merge on chain point. One filter would either miss the book or pull
   every pool's liquidity on the chain; this was SDK #101, and the consumer
   that decided its shape is a fold that rebuilds a market from its events.
+  The PoolManager filter is compensation for the live builds, whose maker
+  events carry no geometry: the next contracts emit a band's range,
+  liquidity and every change to it on the perp's own events, so the book
+  becomes a fold of one address and the second filter goes with the
+  cutover.
 
 ## Debts
 
