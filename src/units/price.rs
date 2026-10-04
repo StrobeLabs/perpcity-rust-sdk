@@ -84,6 +84,27 @@ impl Price {
     }
 }
 
+/// The price as a person reads it, for logs and reports; a price with no
+/// reading ([`Price::to_f64`]) shows its Q96 word with an `x96` suffix.
+impl std::fmt::Display for Price {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.to_f64() {
+            Ok(price) => std::fmt::Display::fmt(&price, f),
+            Err(_) => write!(f, "{}x96", self.0),
+        }
+    }
+}
+
+/// The root's price as a person reads it; see [`Price`]'s `Display`.
+impl std::fmt::Display for SqrtPrice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.price() {
+            Ok(price) => std::fmt::Display::fmt(&price, f),
+            Err(_) => write!(f, "{}x96", self.0),
+        }
+    }
+}
+
 /// A price scaled by any [`Factor`]: a stop at half the mark, a landing
 /// zone a few percent off the index. Exact in Q96, truncated toward zero;
 /// a negative factor panics, since a price has no sign.
@@ -269,6 +290,21 @@ impl TryFrom<Price> for SqrtPrice {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A price displays as its human reading, with the formatter's
+    /// precision, and a price with no reading shows its word.
+    #[test]
+    fn a_price_displays_as_a_person_reads_it() {
+        let price = Price::try_from(1.5).unwrap();
+        assert_eq!(format!("{price}"), "1.5");
+        assert_eq!(format!("{price:.2}"), "1.50");
+        // The root is floored, so its price reads a hair under.
+        assert_eq!(
+            format!("{:.4}", SqrtPrice::try_from(price).unwrap()),
+            "1.5000"
+        );
+        assert_eq!(format!("{}", Price::from_x96(U256::ZERO)), "0x96");
+    }
 
     /// A price scales by any factor and divides into a plain number, which
     /// is what a stop and a basis are.

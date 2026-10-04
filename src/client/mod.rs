@@ -55,8 +55,8 @@ pub use state::{
 };
 pub use trades::{
     AdjustMakerParams, AdjustMakerResult, AdjustTakerParams, AdjustTakerResult,
-    ExactAdjustTakerParams, ExactOpenMakerParams, ExactOpenTakerParams, OpenMakerParams,
-    OpenResult, OpenTakerParams,
+    ExactAdjustMakerParams, ExactAdjustTakerParams, ExactOpenMakerParams, ExactOpenTakerParams,
+    OpenMakerParams, OpenResult, OpenTakerParams,
 };
 pub use transactions::TxBuilder;
 

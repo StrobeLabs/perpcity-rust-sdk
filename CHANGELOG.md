@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+The first consumer of 0.7.0 wrote its orders in the language and found the
+three places the chain's own values still arrived as floats. Breaking, so
+a minor bump when released.
+
+### Breaking
+
+- **The market snapshot and the stored EMAs are prices.** `MarketSnapshot::{pool_price, index_price, mark}` and `MarketConfig::pool_price` are `Price` (were `f64`), and `Emas::{amm_price, index}` likewise, with `Emas::advanced` and `Emas::mark` now the exact advance and the exact fair price, returning `Result` where the contract's own arithmetic can refuse. The snapshot is what a live cache seeds from before it follows the feed, and the feed has carried `Price` since 0.6.0: a cache that seeded from a float and then stored the events' exact words held two kinds of number under one name, and the strategy layer was converting the float back at the seam. `fair_price_f64` remains the one float twin, for simulators. A `MarketConfig::pool_price` printed with `{}` still reads as the number it did, through `Price`'s new `Display`.
+- **`close_maker` submits through the exact door.** It builds an `ExactAdjustMakerParams` from the negated depth rather than a human-unit `AdjustMakerParams` with a `0.0` margin; the transaction it sends is unchanged.
+
+### Added
+
+- **`ExactAdjustMakerParams` and `PerpClient::adjust_maker_exact`.** The maker adjustment in the chain's units — the margin change a `UsdcDelta`, the depth change an `LDelta`, the two limits as `PerpAtoms` and `UsdcAtoms` — with no float on the path, so the maker side has the single submission path the taker side has had since 0.5.0. `adjust_maker` scales into it and delegates. A strategy whose plan already holds the deltas as these types was converting the margin to a float to get here.
+- **`Side::long_if(bool)`**: the side a boolean judgement names — buy or sell, mark below the index or above — for the `if buy { Long } else { Short }` every consumer wrote.
+- **`Display` for `Price` and `SqrtPrice`**: the human reading, honouring the formatter's precision, so a price goes into a log line without a conversion; a price with no reading shows its Q96 word with an `x96` suffix.
+- **`Emas::stored(PricePair, last_touch)` and `Emas::pair()`**, the two ways between the contract's stored words and the typed pair.
+
 ## [0.7.0] - 2026-10-03
 
 A release about the language a strategy writes in. The units node now opens

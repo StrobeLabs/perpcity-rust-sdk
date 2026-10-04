@@ -106,9 +106,14 @@ smoothing of both, advanced from the last touch by the exact exponential
 the contract uses; the mark is the fair price of all four. `Mark` is
 those inputs at one block, and its fair price is what every health check
 prices at. `fair_price_f64` is the lossy twin for simulators, marked
-because the exact one is the default, and `Emas` is the f64 twin of the
-stored pair, for a cache that follows the feed and must keep marking
-between touches.
+because the exact one is the default. `Emas` is the stored pair with its
+touch, for a cache that follows the feed and must keep marking between
+touches: it and `PricePair` convert both ways (`stored`, `pair`) because
+one is the contract's two words and the other is the same two words as
+prices that know when they were stored, and it and `Price` flow both ways
+(`advanced` takes the spots in, `mark` hands the fair price out) because
+advancing is a function of the spots and marking is a price. Neither
+cycle is a conversion with two homes.
 
 ```text
       the pool                      the beacon
@@ -184,8 +189,8 @@ no snapshot, no exactness claim, f64 out.
 | [`TickRange`](range.rs#L25) | `lower < upper`, both in the V4 domain, checked once at construction so every formula downstream trusts it. Built from two ticks, or from two [`Price`](../units/DESIGN.md)s through `between`, which widens them to the enclosing ticks on the pool's spacing — the band a landing zone or a corridor becomes. `geomean` is its centre, the price at which a band's two legs are worth the same | [`TickRange::new`](range.rs#L37); [`TickRange::between`](range.rs#L55), from prices; a chain read, a config, an event | [`estimate_liquidity`](liquidity.rs#L32), [`margin_for_liquidity`](liquidity.rs#L60), [`liquidity_for_capacity`](capacity.rs#L137), every formula over a band — `band_capacity` takes the range inside a `MakerBand`; [`MakerBand`](range.rs#L140), as its range; [`ExactOpenMakerParams`](../client/DESIGN.md). The strategy layer's ladders, which build one per slot. |
 | [`MakerBand`](range.rs#L140) | a range with liquidity: the shape `makerDetails` stores; the one type for a band wherever it appears | [`MakerBand::new`](range.rs#L149) from a [`TickRange`](range.rs#L25); [`StateAt::maker_band`](../client/DESIGN.md), one position's band at a block | [`band_capacity`](capacity.rs#L118), what the band can back at a pool price; [`band_amounts`](liquidity.rs#L240), the tokens standing in it. The strategy layer's maker views and discovered positions carry one, so a band read from the chain and a band a strategy plans are the same type. |
 | [`PricePair`](pricing.rs#L41) | the contract's `(amm, index)` pair, `uint128` each, spot or EMA; narrowed from X96 with the contract's overflow rule | [`PricePair::try_from_x96`](pricing.rs#L56) from two X96 prices; [`calculate_emas`](pricing.rs#L71), the pair advanced | [`calculate_emas`](pricing.rs#L71), as the stored and the spot pair; [`Mark::advanced`](pricing.rs#L134), as the stored EMAs. The pair is one storage word on chain and advances as one value, so it is one type here. |
-| [`Mark`](pricing.rs#L114) | what the contract marks from at a block: pool price, index and EMAs advanced to that block's timestamp; [`fair_price`](pricing.rs#L218) is the mark | [`Mark::advanced`](pricing.rs#L134) from the stored [`PricePair`](pricing.rs#L41) and a [`BlockContext`](mod.rs#L51); [`StateAt::mark`](../client/DESIGN.md) and [`MarketReader::get_mark`](../client/DESIGN.md), which read the views and advance them | the impact bounds inside the pool read and the maker-equity batch, which price at the mark; the strategy layer, whose health checks and basis must value at the mark and not the pool price. It exists so the three prices travel as one value from one block. |
-| [`Emas`](pricing.rs#L169) | the stored EMA pair in human units with the touch it is current as of: the f64 twin of a [`PricePair`](pricing.rs#L41) at a `last_touch`; advancing it moves the touch | [`Emas::advanced`](pricing.rs#L186), the pair at a later time against the spot prices; the snapshot read in `client` and the `RatesAndEmasRefreshed` event carry one | nothing in the crate. The strategy layer's live cache, which holds one, replaces it on every touch the feed reports, and marks with it between touches; it is why a now-tense cache can price at the contract's mark and not the pool price. |
+| [`Mark`](pricing.rs#L114) | what the contract marks from at a block: pool price, index and EMAs advanced to that block's timestamp; [`fair_price`](pricing.rs#L247) is the mark | [`Mark::advanced`](pricing.rs#L134) from the stored [`PricePair`](pricing.rs#L41) and a [`BlockContext`](mod.rs#L51); [`StateAt::mark`](../client/DESIGN.md) and [`MarketReader::get_mark`](../client/DESIGN.md), which read the views and advance them | the impact bounds inside the pool read and the maker-equity batch, which price at the mark; the strategy layer, whose health checks and basis must value at the mark and not the pool price. It exists so the three prices travel as one value from one block. |
+| [`Emas`](pricing.rs#L168) | the stored EMA pair as two [`Price`](../units/DESIGN.md)s with the touch it is current as of: a [`PricePair`](pricing.rs#L41) that knows when it was stored; advancing it moves the touch, exactly as the contract would | [`Emas::stored`](pricing.rs#L179), from the contract's pair at its touch; [`Emas::advanced`](pricing.rs#L206), the pair at a later time against the spot prices, by the exact advance; the snapshot read in `client` carries one | [`Emas::mark`](pricing.rs#L224), the fair price of the spots and the advanced pair; [`Emas::pair`](pricing.rs#L192), the contract's `uint128` words back. The strategy layer's live cache, which holds one, replaces it on every touch the feed reports, and marks with it between touches; it is why a now-tense cache can price at the contract's mark and not the pool price. |
 | [`Capacity`](capacity.rs#L48) | one band's or the market's backing, as `calcCapacity` computes it: a [`PerSide`](../units/DESIGN.md) of [`PerpAtoms`](../units/DESIGN.md), so a side is read with `on` and the two legs are one field rather than two names. An alias rather than a struct: capacity and open interest are the same quantity in two roles, and the field that holds each names the role | [`band_capacity`](capacity.rs#L118) for a band; the market-wide read narrows the contract's struct | [`MarketCapacity`](capacity.rs#L59), as its capacity leg; the strategy layer's sizing, which asks what a planned band would back before placing it. |
 | [`MarketCapacity`](capacity.rs#L59) | capacity and its draw at a block: two [`PerSide`](../units/DESIGN.md) pairs of [`PerpAtoms`](../units/DESIGN.md) from one block; headroom and utilization derived by [`headroom`](capacity.rs#L73) and [`utilization_e6`](capacity.rs#L88) for a [`Side`](../units/DESIGN.md), never stored | [`StateAt::capacity`](../client/DESIGN.md), one multicall; [`MarketReader::get_capacity`](../client/DESIGN.md) as the convenience | nothing in the crate. The strategy layer's capacity gauges and utilization tiers, which need both legs from one block for the ratio to mean anything. |
 | [`PoolSnapshot`](swap.rs#L71), [`TickLiquidity`](swap.rs#L25) | the pool at a block: price, active liquidity as [`LUnits`](../units/DESIGN.md), a tick map whose gross is an `LUnits` and whose net is an [`LDelta`](../units/DESIGN.md) — a tick's crossing adds or removes depth, so it is the only one of the two that is signed — and the swap bounds. The map must reconcile with the active liquidity the pool reports, which is the sum of the nets at or below the tick | [`StateAt::pool`](../client/DESIGN.md); [`MarketReader::get_pool_snapshot`](../client/DESIGN.md); [`with_liquidity_delta`](swap.rs#L281), the same pool with a band added or removed | its own quotes, [`quote_perp`](swap.rs#L201) and [`quote_to_price`](swap.rs#L220); [`LiveTakerMarket::from_snapshot`](../feeds/DESIGN.md) and [`LiveTakerMarketPublisher::publish`](../feeds/DESIGN.md), which share it block-atomically. The strategy layer's depth probes and in-memory quoting hold one, which is why a quote needs no provider. |
@@ -274,6 +279,15 @@ already owns, and nothing reads a clock.
   from the last touch to the block.
 - **Golden vector**: a real on-chain outcome a port must reproduce
   exactly.
+
+## Accepted structure
+
+- **`Emas` and `PricePair` convert both ways.** `stored` lifts the
+  contract's two `uint128` words into prices that know their touch and
+  `pair` narrows them back for the arithmetic that is transcribed over the
+  contract's width. One is the wire shape and the other the same two
+  numbers as the types the rest of the crate speaks; neither direction is
+  a conversion with two homes.
 
 ## Debts
 

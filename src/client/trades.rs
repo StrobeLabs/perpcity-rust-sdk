@@ -119,6 +119,9 @@ pub struct ExactOpenMakerParams {
 }
 
 /// Client-facing parameters for adjusting a maker (LP) position.
+///
+/// Scaled into an [`ExactAdjustMakerParams`] inside
+/// [`PerpClient::adjust_maker`].
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct AdjustMakerParams {
     /// Position NFT token ID.
@@ -131,6 +134,27 @@ pub struct AdjustMakerParams {
     pub amt0_limit: u128,
     /// Max/min amount of token1 for slippage protection.
     pub amt1_limit: u128,
+}
+
+/// A maker adjustment in the chain's own units: the change of depth, the
+/// change of collateral (a [`UsdcDelta`] because it can withdraw), and the
+/// two limits as the asset counts they are. The single submission path;
+/// [`AdjustMakerParams`] is scaled into one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ExactAdjustMakerParams {
+    /// Position NFT token ID.
+    pub pos_id: U256,
+    /// The change in collateral: positive deposits, negative withdraws.
+    pub margin_delta: UsdcDelta,
+    /// The change in depth: positive adds, negative removes; the whole
+    /// liquidity negated settles and burns the position.
+    pub liquidity_delta: LDelta,
+    /// The most of the market's token an add may deposit, or the least a
+    /// removal must return.
+    pub amt0_limit: PerpAtoms,
+    /// The most USDC an add may deposit, or the least a removal must
+    /// return.
+    pub amt1_limit: UsdcAtoms,
 }
 
 // ── Results ─────────────────────────────────────────────────────────
@@ -540,24 +564,41 @@ impl PerpClient {
     }
 
     /// Adjust a maker position (margin, liquidity, or both).
+    ///
+    /// Scales the human-readable margin to atoms and delegates to
+    /// [`Self::adjust_maker_exact`], which is the single submission path.
     pub async fn adjust_maker(
         &self,
         params: &AdjustMakerParams,
         urgency: Urgency,
     ) -> Result<AdjustMakerResult> {
-        let margin_delta = scale_to_6dec(params.margin_delta)?;
+        let exact = ExactAdjustMakerParams {
+            pos_id: params.pos_id,
+            margin_delta: UsdcDelta::try_from(params.margin_delta)?,
+            liquidity_delta: params.liquidity_delta,
+            amt0_limit: PerpAtoms::new(params.amt0_limit),
+            amt1_limit: UsdcAtoms::new(params.amt1_limit),
+        };
+        self.adjust_maker_exact(&exact, urgency).await
+    }
 
+    /// Adjust a maker position without converting through floating point.
+    pub async fn adjust_maker_exact(
+        &self,
+        params: &ExactAdjustMakerParams,
+        urgency: Urgency,
+    ) -> Result<AdjustMakerResult> {
         let wire_params = crate::contracts::AdjustMakerParams {
             posId: params.pos_id,
-            marginDelta: margin_delta,
+            marginDelta: params.margin_delta.atoms(),
             liquidityDelta: params.liquidity_delta.units(),
-            amt0Limit: U256::from(params.amt0_limit),
-            amt1Limit: U256::from(params.amt1_limit),
+            amt0Limit: U256::from(params.amt0_limit.atoms()),
+            amt1Limit: U256::from(params.amt1_limit.atoms()),
         };
 
         tracing::debug!(
             pos_id = %params.pos_id,
-            margin_delta = params.margin_delta,
+            margin_delta_atoms = params.margin_delta.atoms(),
             liquidity_delta = params.liquidity_delta.units(),
             ?urgency,
             "adjusting maker position"
@@ -587,9 +628,9 @@ impl PerpClient {
     /// `current_liquidity` must be the position's full current liquidity,
     /// typically from locally tracked state.
     ///
-    /// This is a market close: the `amt0`/`amt1` minimums are set to `0`
-    /// (accept any output). For a protected close, call [`Self::adjust_maker`]
-    /// directly with explicit limits.
+    /// This is a market close: the `amt0`/`amt1` minimums are set to zero
+    /// (accept any output). For a protected close, call
+    /// [`Self::adjust_maker_exact`] directly with explicit limits.
     pub async fn close_maker(
         &self,
         pos_id: U256,
@@ -597,13 +638,13 @@ impl PerpClient {
         urgency: Urgency,
     ) -> Result<AdjustMakerResult> {
         let liquidity_delta = current_liquidity.negated()?;
-        self.adjust_maker(
-            &AdjustMakerParams {
+        self.adjust_maker_exact(
+            &ExactAdjustMakerParams {
                 pos_id,
-                margin_delta: 0.0,
+                margin_delta: UsdcDelta::ZERO,
                 liquidity_delta,
-                amt0_limit: 0,
-                amt1_limit: 0,
+                amt0_limit: PerpAtoms::ZERO,
+                amt1_limit: UsdcAtoms::ZERO,
             },
             urgency,
         )
