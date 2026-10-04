@@ -21,6 +21,8 @@ use crate::hft::gas::FeeCache;
 use crate::hft::state_cache::{BalanceKey, StateCache, StateCacheConfig};
 use crate::history::History;
 use crate::math::BlockContext;
+use crate::math::pricing::PricePair;
+use crate::storage::{perp_emas_slot, stored_emas};
 use crate::transport::provider::HftTransport;
 
 use super::queries::MarketImmutables;
@@ -435,6 +437,19 @@ impl ChainReader {
             .into());
         }
         Ok(index_x96)
+    }
+
+    /// The market's stored EMA pair at `block`, from its storage slot: the
+    /// one read both contract builds answer, since `v0.2.2` has no `emas()`.
+    pub(super) async fn stored_emas_at(&self, perp: Address, block: BlockId) -> Result<PricePair> {
+        let word = self
+            .inner
+            .provider
+            .get_storage_at(perp, perp_emas_slot())
+            .block_id(block)
+            .await
+            .map_err(alloy::contract::Error::TransportError)?;
+        Ok(stored_emas(word))
     }
 
     /// [`Self::get_index_price`] at `block`.

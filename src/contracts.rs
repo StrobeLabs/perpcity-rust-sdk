@@ -1,18 +1,23 @@
 //! On-chain contract bindings generated via Alloy's `sol!` macro.
 //!
-//! Structs, events, errors, and function selectors are reconciled against the
-//! **deployed** `perpcity-contracts` commit `4bbe554f` (the version live on
-//! Arbitrum), NOT `main` HEAD — HEAD has post-release work (e.g. `Position`
-//! gained `initMarginRatio` in #176, plus `lpFeeGrowth*` fields and the
-//! `HealthNotImproved` error) that is not yet on-chain. Source: commit `4bbe554f`
-//! (`Perp.sol`, `libraries/Structs.sol`, `libraries/Events.sol`,
-//! `libraries/Errors.sol`, `interfaces/modules/*`).
+//! Two contract builds are live on Arbitrum One and the bindings cover both:
 //!
-//! Caveat: the deployed bytecode predates `4bbe554f` for maker closes — live
-//! perps emit `MakerClosed`/`MakerConverted` shapes with
-//! `liqFee`/`isLiquidation` tails and no `MakerLiquidated` event.
-//! [`PerpDeployedEvents`] declares those shapes so `decode_log` recognizes
-//! both.
+//! - **build `58b42b7`** (the markets created before 2026-10-05): every
+//!   function and struct in [`Perp`], and the tailed close events in
+//!   [`PerpDeployedEvents`] plus `Perp::TakerClosed`;
+//! - **`v0.2.2-upgradeable`** (tag `198559a`; the markets on factory
+//!   `0x90C8cb83C4257156bf3eE0C9bB8f164B20A04da1`): the same views and
+//!   trade entry points, plus what [`PerpV022`] declares — the partial
+//!   `liquidate*` selectors, the untailed `TakerClosed`, the hooked pool
+//!   and the UUPS surface. It has no `emas()`; the stored pair is read from
+//!   storage slot 11 on both builds.
+//!
+//! Struct shapes, trade and view selectors, `createPerp` and `PerpCreated`
+//! are identical across the two. A market's build is read from its pool
+//! key: a `58b42b7` pool has no hook, a `v0.2.2` pool carries the
+//! `PerpGuardHook`. Neither build is the contracts repository's `main`,
+//! whose later work (`Position.initMarginRatio`, `lpFeeGrowth*`,
+//! `HealthNotImproved`, `previewPosition`) is on no chain.
 //!
 //! Architecture: `PerpFactory` creates `Perp` contracts. There is no
 //! `PerpManager` — each market is its own `Perp` contract (ERC721 for position
@@ -342,10 +347,9 @@ sol! {
         /// Burns the position NFT if fully closed.
         function adjustMaker(AdjustMakerParams calldata params) external;
 
-        /// Liquidate an unhealthy maker position. Always the full position:
-        /// the deployed perps predate partial liquidations, so only this
-        /// 2-arg selector exists on live markets — the later 3-arg partial
-        /// form reverts empty (no matching selector).
+        /// Liquidate an unhealthy maker position, whole. Build `58b42b7`
+        /// only: a `v0.2.2` market has no 2-arg selector and reverts empty;
+        /// it takes [`PerpV022::liquidateMaker`] with the liquidity amount.
         function liquidateMaker(uint256 posId, address liquidationFeeRecipient) external;
 
         /// Backstop a maker position approaching liquidation.
@@ -360,8 +364,8 @@ sol! {
         /// opposing `perpDelta`. Burns the position NFT if fully closed.
         function adjustTaker(AdjustTakerParams calldata params) external;
 
-        /// Liquidate an unhealthy taker position. Always the FULL position —
-        /// see `liquidateMaker` above for the deployment-era note.
+        /// Liquidate an unhealthy taker position, whole. Build `58b42b7`
+        /// only; a `v0.2.2` market takes [`PerpV022::liquidateTaker`].
         function liquidateTaker(uint256 posId, address liquidationFeeRecipient) external;
 
         /// Backstop a taker position approaching liquidation.
@@ -420,8 +424,9 @@ sol! {
 
         function cumulatives() external view returns (Cumulatives memory);
 
-        /// The stored EMA pair as of `rates().lastTouch`. Advance it to a
-        /// block with `math::pricing::calculate_emas` before pricing with it.
+        /// The stored EMA pair as of `rates().lastTouch`. Build `58b42b7`
+        /// only: `v0.2.2` dropped the view, so the SDK reads the pair from
+        /// storage slot 11 on both builds and never calls this.
         function emas() external view returns (PricePair memory);
 
         // ── ERC721 ─────────────────────────────────────────────────
@@ -462,20 +467,18 @@ sol! {
     }
 
     // ═══════════════════════════════════════════════════════════════════
-    //  Deployed-era events (pre-partial-liquidation contracts)
+    //  Build 58b42b7 maker close events
     // ═══════════════════════════════════════════════════════════════════
 
-    /// Maker close/convert events as emitted by the Perp contracts currently
-    /// live on Arbitrum, which predate partial liquidations.
+    /// Maker close/convert events as build `58b42b7` emits them.
     ///
-    /// On those contracts there is no `MakerLiquidated` event; a maker
-    /// liquidation emits `MakerConverted` (and the residual taker close
-    /// emits `TakerClosed`) with a `liqFee` amount and `isLiquidation =
-    /// true`. The later contracts dropped both tail fields (moving
-    /// liquidations to dedicated events), which changes the event signature
-    /// hash — so both shapes must be declared for `decode_log` to recognize
-    /// maker settles from live markets. (`Perp::TakerClosed` above already
-    /// carries the deployed-era tails, so takers need no legacy variant.)
+    /// That build has no `MakerLiquidated` event; a maker liquidation emits
+    /// `MakerConverted` (and the residual taker close emits `TakerClosed`)
+    /// with a `liqFee` amount and `isLiquidation = true`. `v0.2.2` dropped
+    /// both tail fields and moved liquidations to dedicated events, which
+    /// changes the signature hash, so both shapes are declared for
+    /// `decode_log`. (`Perp::TakerClosed` above is the `58b42b7` shape; the
+    /// `v0.2.2` one is [`PerpV022::TakerClosed`].)
     interface PerpDeployedEvents {
         event MakerConverted(
             uint256 posId,
@@ -495,6 +498,53 @@ sol! {
             uint256 liqFee,
             bool isLiquidation
         );
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    //  v0.2.2-upgradeable surface
+    // ═══════════════════════════════════════════════════════════════════
+
+    /// What a `v0.2.2-upgradeable` market (tag `198559a`) has that build
+    /// `58b42b7` does not. Everything else on such a market is [`Perp`].
+    ///
+    /// The market is an ERC-1967 proxy behind the factory's
+    /// `PERP_IMPLEMENTATION`; its pool carries the `PerpGuardHook`, which
+    /// reverts `UnauthorizedPoolAction` on any PoolManager call whose sender
+    /// is not the market itself. Liquidations take an amount and may be
+    /// partial: a full one emits the untailed close event, then
+    /// `TakerLiquidated` / `MakerLiquidated` with the fee.
+    #[sol(rpc)]
+    interface PerpV022 {
+        /// The close event without the liquidation tails; the fee is in the
+        /// `TakerLiquidated` log that follows a liquidation.
+        event TakerClosed(uint256 posId, SwapResult sr, int256 funding, uint256 utilFees);
+        /// `skim`: the owner swept the balance above the market's books.
+        event SurplusRecovered(address indexed recipient, uint256 amount);
+
+        /// Liquidate `liquidityAmount` of an unhealthy maker position; the
+        /// whole position when it equals the position's liquidity. Zero
+        /// reverts `ZeroLiquidity`, more than the position `MaxAmtExceeded`.
+        function liquidateMaker(uint256 posId, address liquidationFeeRecipient, uint128 liquidityAmount) external;
+
+        /// Liquidate `perpAmount` of an unhealthy taker position; the whole
+        /// position when it equals the position's perp amount. Zero reverts
+        /// `ZeroDelta`, more than the position `MaxAmtExceeded`.
+        function liquidateTaker(uint256 posId, address liquidationFeeRecipient, uint128 perpAmount) external;
+
+        /// The pool's hook, the `PerpGuardHook`.
+        function HOOKS() external view returns (address);
+
+        // `libraries/Errors.sol` additions.
+        error NoSurplus();
+        error ZeroAddress();
+        // `PerpGuardHook`.
+        error UnauthorizedPoolAction();
+        // OpenZeppelin ERC-1967 / UUPS / Initializable, on the proxy.
+        error ERC1967InvalidImplementation(address implementation);
+        error ERC1967NonPayable();
+        error UUPSUnauthorizedCallContext();
+        error UUPSUnsupportedProxiableUUID(bytes32 slot);
+        error InvalidInitialization();
     }
 
     // ═══════════════════════════════════════════════════════════════════
@@ -523,6 +573,9 @@ sol! {
         error StartingPriceTooLow();
         error StartingPriceTooHigh();
         error EmaWindowTooLow();
+        // `v0.2.2-upgradeable`: `setPerpImplementation`'s refusals.
+        error InvalidPerpImplementation();
+        error NotProtocolOwner();
 
         /// Create a new perpetual market. Returns the Perp contract address.
         function createPerp(
@@ -711,16 +764,37 @@ mod abi_lock {
             Perp::adjustMakerCall::SIGNATURE,
             "adjustMaker((uint256,int128,int128,uint256,uint256))"
         );
-        // Deployed 2-arg forms (full liquidation only); the post-#171 3-arg
-        // partial-liquidation selectors exist on no live market.
+        // Build 58b42b7: the 2-arg whole-position forms.
         assert_eq!(
             Perp::liquidateMakerCall::SIGNATURE,
             "liquidateMaker(uint256,address)"
         );
+        assert_eq!(Perp::liquidateMakerCall::SELECTOR, [0xaa, 0xfa, 0xf6, 0x74]);
         assert_eq!(
             Perp::liquidateTakerCall::SIGNATURE,
             "liquidateTaker(uint256,address)"
         );
+        assert_eq!(Perp::liquidateTakerCall::SELECTOR, [0xea, 0xc4, 0x19, 0x06]);
+        // v0.2.2-upgradeable: the 3-arg forms, the only ones its
+        // implementation (0x9b74b1ff217bdE6EB0e221Ca11034D67187EF9d3,
+        // Arbitrum One) dispatches.
+        assert_eq!(
+            PerpV022::liquidateMakerCall::SIGNATURE,
+            "liquidateMaker(uint256,address,uint128)"
+        );
+        assert_eq!(
+            PerpV022::liquidateMakerCall::SELECTOR,
+            [0x14, 0xca, 0x0f, 0x4c]
+        );
+        assert_eq!(
+            PerpV022::liquidateTakerCall::SIGNATURE,
+            "liquidateTaker(uint256,address,uint128)"
+        );
+        assert_eq!(
+            PerpV022::liquidateTakerCall::SELECTOR,
+            [0xbf, 0xb4, 0xb1, 0xc7]
+        );
+        assert_eq!(PerpV022::HOOKSCall::SELECTOR, [0xdc, 0xe1, 0x56, 0x1d]);
         assert_eq!(
             Perp::backstopMakerCall::SIGNATURE,
             "backstopMaker(uint256,uint128,address)"
@@ -760,6 +834,49 @@ mod abi_lock {
         assert_eq!(Perp::capacityCall::SELECTOR, [0x5c, 0xfc, 0x1a, 0x51]);
         assert_eq!(Perp::openInterestCall::SIGNATURE, "openInterest()");
         assert_eq!(Perp::openInterestCall::SELECTOR, [0xfa, 0x5a, 0x2e, 0x62]);
+    }
+
+    /// The v0.2.2 error selectors, so a typed revert from a proxy market
+    /// decodes by name.
+    #[test]
+    fn v022_error_selectors_match_the_tag() {
+        use alloy::sol_types::SolError;
+
+        assert_eq!(PerpV022::NoSurplus::SELECTOR, [0xc0, 0xef, 0x17, 0xd3]);
+        assert_eq!(PerpV022::ZeroAddress::SELECTOR, [0xd9, 0x2e, 0x23, 0x3d]);
+        assert_eq!(
+            PerpV022::UnauthorizedPoolAction::SELECTOR,
+            [0xb7, 0xcc, 0x50, 0x70]
+        );
+        assert_eq!(
+            PerpV022::ERC1967InvalidImplementation::SELECTOR,
+            [0x4c, 0x9c, 0x8c, 0xe3]
+        );
+        assert_eq!(
+            PerpV022::ERC1967NonPayable::SELECTOR,
+            [0xb3, 0x98, 0x97, 0x9f]
+        );
+        assert_eq!(
+            PerpV022::UUPSUnauthorizedCallContext::SELECTOR,
+            [0xe0, 0x7c, 0x8d, 0xba]
+        );
+        assert_eq!(
+            PerpV022::UUPSUnsupportedProxiableUUID::SELECTOR,
+            [0xaa, 0x1d, 0x49, 0xa4]
+        );
+        assert_eq!(
+            PerpV022::InvalidInitialization::SELECTOR,
+            [0xf9, 0x2e, 0xe8, 0xa9]
+        );
+        assert_eq!(Perp::TokenDoesNotExist::SELECTOR, [0xce, 0xea, 0x21, 0xb6]);
+        assert_eq!(
+            PerpFactory::InvalidPerpImplementation::SELECTOR,
+            [0xa4, 0x57, 0x69, 0x5f]
+        );
+        assert_eq!(
+            PerpFactory::NotProtocolOwner::SELECTOR,
+            [0xfb, 0x6f, 0xc0, 0xb7]
+        );
     }
 
     /// Event signatures (all params) — drives `topic0`; catches event drift.
@@ -813,6 +930,33 @@ mod abi_lock {
         assert_eq!(
             Perp::TakerLiquidated::SIGNATURE,
             "TakerLiquidated(uint256,uint128,uint256)"
+        );
+        assert_eq!(
+            Perp::TakerLiquidated::SIGNATURE_HASH,
+            alloy::primitives::b256!(
+                "2347417853c438a233b6d4d0630048d196587db0d521d33f5a4705721e1a91cf"
+            )
+        );
+        assert_eq!(
+            Perp::MakerLiquidated::SIGNATURE_HASH,
+            alloy::primitives::b256!(
+                "1ea1626f80876d431626ac0d48ac2bb9495fa178b8b7fab5fbb75fa9d430b554"
+            )
+        );
+        // v0.2.2-upgradeable: the untailed taker close.
+        assert_eq!(
+            PerpV022::TakerClosed::SIGNATURE,
+            format!("TakerClosed(uint256,{SWAP_RESULT},int256,uint256)")
+        );
+        assert_eq!(
+            PerpV022::TakerClosed::SIGNATURE_HASH,
+            alloy::primitives::b256!(
+                "208f950e4dba30512aa9e643b25c9df8bdb616ee90bbff00f669a5d1d3d452f3"
+            )
+        );
+        assert_eq!(
+            PerpV022::SurplusRecovered::SIGNATURE,
+            "SurplusRecovered(address,uint256)"
         );
         // Deployed-era maker closes (pre-#171): topic0 values transcribed
         // from logs emitted by the live Arbitrum perps.
