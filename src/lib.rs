@@ -57,7 +57,7 @@ pub use client::{
     ARBITRUM_CHAIN_ID, ARBITRUM_POOL_MANAGER, ARBITRUM_SEPOLIA_CHAIN_ID,
     ARBITRUM_SEPOLIA_PERP_FACTORY, ARBITRUM_SEPOLIA_POOL_MANAGER, ARBITRUM_SEPOLIA_USDC,
     ARBITRUM_USDC, AdjustMakerParams, AdjustMakerResult, AdjustTakerParams, AdjustTakerResult,
-    Bounds, ChainDeployments, ChainReader, ExactAdjustMakerParams, ExactAdjustTakerParams,
+    Bounds, ChainDeployments, ChainReader, Era, ExactAdjustMakerParams, ExactAdjustTakerParams,
     ExactOpenMakerParams, ExactOpenTakerParams, Fees, MAX_ROW_BATCH, MakerEquityKind,
     MakerEquityOutcome, MarginRatioTriple, MarginRatios, MarketConfig, MarketReader,
     MarketSnapshot, OpenInterest, OpenMakerParams, OpenResult, OpenTakerParams, PerpClient,

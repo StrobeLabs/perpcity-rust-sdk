@@ -10,7 +10,8 @@
 //! included — so [`OwnershipLog`] folds a tape into who held which
 //! position when; [`market_tape`] reads the perp, its beacon and its pool's
 //! liquidity changes in one chain order, which is everything a fold needs
-//! to rebuild the market; and [`token_transfers`] reads an ERC-20's `Transfer` events
+//! to rebuild the market, and [`Replay`] is that fold, every fold here an
+//! instance of [`Fold`]; and [`token_transfers`] reads an ERC-20's `Transfer` events
 //! between address sets (for example, every USDC transfer between a
 //! treasury and its wallets). [`History`] wraps them all with a uniform
 //! block-lag policy and a request width learned once across scans.
@@ -56,6 +57,8 @@
 #![doc = "\n\nThe design of this module: [`src/history/DESIGN.md`](https://github.com/StrobeLabs/perpcity-rust-sdk/blob/main/src/history/DESIGN.md)."]
 
 mod beacon;
+mod fold;
+mod replay;
 pub(crate) mod scan;
 mod tape;
 mod transfers;
@@ -67,6 +70,8 @@ pub mod test_support;
 mod tests;
 
 pub use beacon::{IndexPrint, beacon_prints, latest_beacon_prints};
+pub use fold::Fold;
+pub use replay::{Gaps, Replay};
 pub use scan::{ScanStats, get_logs_chunked};
 pub use tape::{
     ChainPoint, OwnershipLog, TapeAddresses, TapeEvent, latest_market_events, market_events,

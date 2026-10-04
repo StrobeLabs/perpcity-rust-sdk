@@ -41,6 +41,7 @@ use crate::events::{MarketEvent, decode_log};
 
 use futures_util::TryStreamExt;
 
+use super::fold::Fold;
 use super::scan::{SharedWidths, block_timestamps, check_block_range, scan_all, scan_newest};
 
 /// A position in the chain's total order: a block, then a log's index
@@ -167,26 +168,35 @@ pub struct OwnershipLog {
     spans: BTreeMap<U256, Vec<(ChainPoint, Address)>>,
 }
 
+impl Fold for OwnershipLog {
+    fn apply(&mut self, event: &TapeEvent) {
+        if let MarketEvent::PositionTransferred { to, pos_id, .. } = event.event {
+            let timeline = self.spans.entry(pos_id).or_default();
+            let point = event.point();
+            debug_assert!(
+                timeline.last().is_none_or(|&(last, _)| last < point),
+                "tape out of chain order at {point:?}"
+            );
+            timeline.push((point, to));
+        }
+    }
+
+    fn combine(&mut self, later: Self) {
+        for (pos_id, timeline) in later.spans {
+            self.spans.entry(pos_id).or_default().extend(timeline);
+        }
+    }
+}
+
 impl OwnershipLog {
     /// Fold the custody timeline out of a tape's transfer events; other
     /// events are skipped.
     ///
     /// `events` must be in chain order, as every reader in this module
-    /// returns them.
+    /// returns them. The same as [`Fold::fold`], kept inherent so the fold
+    /// is reachable without importing the trait.
     pub fn fold<'a>(events: impl IntoIterator<Item = &'a TapeEvent>) -> Self {
-        let mut spans: BTreeMap<U256, Vec<(ChainPoint, Address)>> = BTreeMap::new();
-        for event in events {
-            if let MarketEvent::PositionTransferred { to, pos_id, .. } = event.event {
-                let timeline = spans.entry(pos_id).or_default();
-                let point = event.point();
-                debug_assert!(
-                    timeline.last().is_none_or(|&(last, _)| last < point),
-                    "tape out of chain order at {point:?}"
-                );
-                timeline.push((point, to));
-            }
-        }
-        Self { spans }
+        <Self as Fold>::fold(events)
     }
 
     /// Who held `pos_id` at `at`: the recipient of its latest transfer at
