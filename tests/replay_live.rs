@@ -6,6 +6,10 @@
 //! its storage at the lagged head. The reads need no archive node, since
 //! the block is near the head.
 //!
+//! `PERPCITY_TAPE_FROM` bounds the scan, it does not start the market: the
+//! fold begins at genesis, so the bound must be at or before the market's
+//! first event, or the comparison fails on totals the tape never stated.
+//!
 //! ```bash
 //! RPC_URL=https://arb1.arbitrum.io/rpc \
 //! PERPCITY_PERP=0xea3f47e8…10dd \
