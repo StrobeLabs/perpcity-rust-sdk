@@ -163,7 +163,7 @@ async fn a_replayed_market_equals_the_read_at_the_same_block() {
         "positions: {takers} takers sized, {makers} makers banded, {unknown} takers of unknown size, {closed} closed"
     );
 
-    // The pool's book: every initialized tick's liquidity, the tick, the
+    // The pool's liquidity: every initialized tick's, the tick, the
     // active liquidity, and the price as the root's floored square.
     let pool = state.pool().await.unwrap();
     assert_eq!(
@@ -188,7 +188,7 @@ async fn a_replayed_market_equals_the_read_at_the_same_block() {
         None => println!("no swap has moved the tick; the pool's first tick is the factory's"),
     }
     println!(
-        "book: {} ticks, tick {}, liquidity {}",
+        "pool: {} initialized ticks, tick {}, active liquidity {}",
         pool.ticks.len(),
         pool.tick,
         pool.liquidity
