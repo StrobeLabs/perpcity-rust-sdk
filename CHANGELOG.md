@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+The changes below break the public API, so the next release is 0.10.0 (a minor bump, as for any breaking change before 1.0). A review of `units` against the standard it sets for itself — exact, idiomatic, nothing wrapping — found one path that could wrap and the rest polish.
+
+### Breaking
+
+- **`PerSide::on` returns `&T`** (was `T`, and only for `T: Copy`). The accessor is now the lookup it says it is, so a pair of anything can be read by side, not only a pair of `Copy` values. Every call on a `Copy` type still works through auto-deref for method calls; a site that compared or stored the value adds a `*`.
+- **`SqrtPrice::from_price(f64)` is gone.** It took the root in `f64` and scaled, and disagreed in the last bits with `SqrtPrice::try_from(Price)`, which takes the exact integer root of the Q96 word; two doors to one place that did not agree. The route from a float is `SqrtPrice::try_from(Price::try_from(x)?)?`, and `convert::price_to_sqrt_price_x96` takes it.
+
+### Fixed
+
+- **Scaling could wrap.** `Factor::apply` for `f64` and `Share` multiplied in 256 bits with the primitive's `*`, which wraps in release, so a `Price` word times a WAD factor could come back as a plausible wrong price. Both now take the product in 512 bits through `mul_div`, as every crossing already did, and a quotient past `U256` panics as the bug it is rather than wrapping. `FundingRate::over` and `UtilizationRate::over` follow for the same reason.
+- **`TryFrom<f64> for Price` claimed to keep the whole `f64` mantissa.** It keeps 48 fractional bits, which is the whole mantissa at 32 and above and every digit a six-decimal price has well below that; the doc now says so.
+- **The human door's exactness claim had no upper bound.** 0.9.0 said a six-decimal amount arrives as the atom count it names "at any magnitude the `f64` holds exactly". The first run of the new property test found the bound: 2^32 units, about four billion dollars, past which a unit in the `f64`'s last place is more than half an atom and the sixth decimal is not in the number to read. The doc and the design node now say so. No behaviour changed; a claim did.
+
+### Added
+
+- **`#[must_use]` on every value type in `units`**, so a dropped amount, price, rate, share or pair warns where it is dropped. Two sites in the crate were calling a function only for its error and now say so with `let _`.
+- **`Hash` on `Price` and `SqrtPrice`**, which the counts already had.
+- **Property tests over the exactness claims** (`tests/units_properties.rs`): a split returns every atom; a partition is exactly the whole; `value_at` and `perp_at` never gain an atom round-tripping; an implied price values back to at most the leg it came from; a price and its root round-trip within the documented floor; a human price reads back within a millionth; a six-decimal human amount is the atom count it names; a share and its complement lose at most one atom between them.
+
+### Design
+
+The `units` node's explanations are brought current: the crossing count (three corners on the asset pair, not two), the scaling rule (512 bits, not 256), the efficiency section (what the 512-bit product buys, where the allocations are), the `fixed_point` edge (it did not shrink, it became the one place a wide product is taken), and three new debts — the four macros against one generic, the width of the error type, and the odd name among the human readings.
+
 ## [0.9.0] - 2026-10-03
 
 Two findings from the typed position views in the strategy layer: a fill's

@@ -533,7 +533,7 @@ impl AccruedMakerSnapshot {
                     .util_earnings
                     .on(side)
                     .since(
-                        maker.last_util_earnings.on(side),
+                        *maker.last_util_earnings.on(side),
                         "utilization checkpoint ahead of market cumulative",
                     )?
                     .x96(),

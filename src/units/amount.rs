@@ -67,10 +67,12 @@ delta! {
 /// strategy computed, and most decimals have no binary representation, so
 /// `0.29` arrives as `0.28999999999999998` and a floor would make it an
 /// atom short. Rounding reads every decimal of six places or fewer to the
-/// atom it names, at any magnitude the `f64` holds exactly; a seventh
-/// place rounds, since there is nothing smaller to hold it. This is a
-/// choice about a caller's own input, not a transcription of the contract,
-/// which truncates in its own division — nothing here feeds a port.
+/// atom it names, up to 2^32 units (about four billion dollars), past
+/// which a unit in the `f64`'s last place is more than half an atom and
+/// the sixth decimal is not in the number to read; a seventh place rounds,
+/// since there is nothing smaller to hold it. This is a choice about a
+/// caller's own input, not a transcription of the contract, which
+/// truncates in its own division — nothing here feeds a port.
 ///
 /// # Errors
 ///
