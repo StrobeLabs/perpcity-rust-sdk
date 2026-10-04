@@ -27,6 +27,7 @@
 //! position's transfers arrive strictly increasing.
 
 use std::collections::BTreeMap;
+use std::result::Result as StdResult;
 
 use alloy::primitives::{Address, B256, U256};
 use alloy::providers::Provider;
@@ -95,7 +96,7 @@ impl TapeEvent {
         log: &Log,
         event: MarketEvent,
         timestamp: u64,
-    ) -> std::result::Result<Self, ValidationError> {
+    ) -> StdResult<Self, ValidationError> {
         let position = log
             .block_number
             .zip(log.block_hash)
@@ -392,7 +393,7 @@ pub(super) async fn latest_market_events_with<P: Provider>(
     Ok(events.split_off(skip))
 }
 
-fn perp_filter(perp: Address) -> std::result::Result<Filter, ValidationError> {
+fn perp_filter(perp: Address) -> StdResult<Filter, ValidationError> {
     if perp.is_zero() {
         return Err(ValidationError::InvalidConfig {
             reason: "perp address is zero".into(),
@@ -403,9 +404,7 @@ fn perp_filter(perp: Address) -> std::result::Result<Filter, ValidationError> {
 
 /// The market's two filters: the perp and its beacon by address; the
 /// PoolManager by the liquidity event and the pool id it indexes by.
-fn tape_filters(
-    addresses: TapeAddresses,
-) -> std::result::Result<(Filter, Filter), ValidationError> {
+fn tape_filters(addresses: TapeAddresses) -> StdResult<(Filter, Filter), ValidationError> {
     let TapeAddresses {
         perp,
         beacon,

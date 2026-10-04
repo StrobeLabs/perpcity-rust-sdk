@@ -129,6 +129,10 @@ fn addresses() -> TapeAddresses {
     }
 }
 
+/// The synthetic tape's last block: the scan's range is the market's life,
+/// as a caller's would be, not the chain's.
+const LAST_BLOCK: u64 = EVENTS / PER_BLOCK + 2;
+
 /// A recorded tape when `PERPCITY_TAPE` names one, else the synthetic one
 /// scanned once through the fake node.
 fn tape(runtime: &tokio::runtime::Runtime, logs: &[Log]) -> Vec<TapeEvent> {
@@ -136,10 +140,16 @@ fn tape(runtime: &tokio::runtime::Runtime, logs: &[Log]) -> Vec<TapeEvent> {
         let json = fs::read_to_string(&path).expect("PERPCITY_TAPE is a readable file");
         return serde_json::from_str(&json).expect("PERPCITY_TAPE holds a JSON list of TapeEvents");
     }
+    scan(runtime, logs)
+}
+
+/// One scan of `logs` through a fresh fake node: the pipeline's cost with
+/// no network under it.
+fn scan(runtime: &tokio::runtime::Runtime, logs: &[Log]) -> Vec<TapeEvent> {
     let node = FakeNode::new(logs.to_vec(), u64::MAX);
     let history = History::new(node.provider());
     runtime
-        .block_on(history.market_tape(addresses(), 0, Some(u64::MAX / 2)))
+        .block_on(history.market_tape(addresses(), 0, Some(LAST_BLOCK)))
         .expect("the synthetic tape scans")
 }
 
@@ -191,16 +201,7 @@ fn bench_history(c: &mut Criterion) {
     group.throughput(Throughput::Elements(events));
     group.bench_function(
         BenchmarkId::new("scan", "fake node, three addresses"),
-        |b| {
-            b.iter(|| {
-                let node = FakeNode::new(logs.clone(), u64::MAX);
-                let history = History::new(node.provider());
-                let rows = runtime
-                    .block_on(history.market_tape(addresses(), 0, Some(u64::MAX / 2)))
-                    .unwrap();
-                black_box(rows.len())
-            })
-        },
+        |b| b.iter(|| black_box(scan(&runtime, &logs).len())),
     );
 
     group.throughput(Throughput::Elements(events));
