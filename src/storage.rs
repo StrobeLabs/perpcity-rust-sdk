@@ -6,19 +6,28 @@
 //! the two layouts the SDK reads raw:
 //!
 //! - the Perp's `PerpStorage` — the `s.ticks[tick]` funding checkpoints
-//!   (read via `eth_getStorageAt`), and
+//!   and the stored EMA pair, which `v0.2.2` exposes no view for (both
+//!   read via `eth_getStorageAt`), and
 //! - the Uniswap V4 `PoolManager`'s `_pools[poolId]` `Pool.State` — the
 //!   tick bitmap and the fee-growth accounting (read via `extsload`).
 //!
-//! The offsets encode the deployed contract layouts and are locked by
-//! chain-backed tests at the call sites (the pool snapshot verifies its
-//! tick map against the pool's reported liquidity, and the maker
-//! equity math reproduces a real on-chain settle).
+//! The offsets encode the deployed contract layouts, the same on build
+//! `58b42b7` and `v0.2.2-upgradeable` for everything read here, and are
+//! locked by chain-backed tests at the call sites (the pool snapshot
+//! verifies its tick map against the pool's reported liquidity, the maker
+//! equity math reproduces a real on-chain settle, and the stored EMAs
+//! reproduce a `58b42b7` market's `emas()`).
 
 use alloy::primitives::{Address, B256, I256, U256, keccak256};
 
+use crate::math::pricing::PricePair;
+
 /// `PerpStorage.ticks` mapping slot: storage struct base 3 + field index 3.
 const PERP_TICKS_SLOT: u64 = 6;
+
+/// `PerpStorage.emas` slot: storage struct base 3 + field index 8. One
+/// word, `ammPrice` in the low 128 bits and `index` in the high 128.
+const PERP_EMAS_SLOT: u64 = 11;
 
 /// Offset of `cumlFundingDivSqrtPOppX96` — the second word of the Perp's
 /// two-word `TickInfo` struct — from the struct's base slot.
@@ -66,6 +75,20 @@ pub(crate) fn mapping_slot_signed(key: i32, base: U256) -> U256 {
 pub(crate) fn perp_tick_funding_slots(tick: i32) -> [U256; 2] {
     let base = mapping_slot_signed(tick, U256::from(PERP_TICKS_SLOT));
     [base, base + U256::from(TICK_FUNDING_DIV_SQRT_P_OPP_OFFSET)]
+}
+
+/// Slot of the Perp's stored EMA pair.
+pub(crate) fn perp_emas_slot() -> U256 {
+    U256::from(PERP_EMAS_SLOT)
+}
+
+/// The stored EMA pair from its storage word: `(ammPrice, index)`, each a
+/// `uint128` Q96 price, packed low then high.
+pub(crate) fn stored_emas(word: U256) -> PricePair {
+    PricePair {
+        amm: (word & U256::from(u128::MAX)).to::<u128>(),
+        index: (word >> 128u32).to::<u128>(),
+    }
 }
 
 /// Base slot of a pool's `Pool.State` inside the V4 PoolManager.
@@ -142,6 +165,25 @@ mod tests {
         let a = v4_position_slot(pool, owner, -60, 60, B256::from(U256::from(1u8)));
         let b = v4_position_slot(pool, owner, -60, 60, B256::from(U256::from(2u8)));
         assert_ne!(a, b);
+    }
+
+    /// Golden vector: HORMUZ-TRAFFIC (0x137e00487dc079dad69ba149994320a8ff4c5b17,
+    /// Arbitrum One) at block 510200629. `eth_getStorageAt(perp, 11)` held
+    /// this word and `emas()` returned (ammPrice 0x2a0de14e947109ae26a0796896,
+    /// index 0x260932b0391630af1d2acfd378): the pair is packed low then high.
+    #[test]
+    fn stored_emas_unpacks_amm_low_index_high() {
+        let word = U256::from_be_bytes(alloy::primitives::hex!(
+            "000000260932b0391630af1d2acfd3780000002a0de14e947109ae26a0796896"
+        ));
+        assert_eq!(
+            stored_emas(word),
+            PricePair {
+                amm: 0x2a0de14e947109ae26a0796896,
+                index: 0x260932b0391630af1d2acfd378,
+            }
+        );
+        assert_eq!(perp_emas_slot(), U256::from(11u8));
     }
 
     #[test]

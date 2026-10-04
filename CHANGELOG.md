@@ -7,7 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-The changes below break the public API, so the next release is 0.10.0 (a minor bump, as for any breaking change before 1.0). A review of `units` against the standard it sets for itself — exact, idiomatic, nothing wrapping — found one path that could wrap and the rest polish.
+The changes below break the public API, so the next release is 0.10.0 (a minor bump, as for any breaking change before 1.0). A review of `units` against the standard it sets for itself — exact, idiomatic, nothing wrapping — found one path that could wrap and the rest polish. Separately, the second live contract build is read, traded and decoded alongside the first.
+
+### Added
+
+- **`v0.2.2-upgradeable` markets read, trade, liquidate and decode.** The second live build (contracts tag `198559a`, factory `0x90C8cb83C4257156bf3eE0C9bB8f164B20A04da1`) shares every view and trade selector with build `58b42b7` and differs in three places the crate now covers. Liquidations: `v0.2.2` takes an amount (`liquidateTaker(uint256,address,uint128)` / `liquidateMaker(uint256,address,uint128)`), so `liquidate_*` and `simulate_liquidate_*` read the market's era once from its pool key (only a `v0.2.2` pool carries the guard hook) and, on the newer build, read the position's whole size first and send the 3-arg call; a position already at zero size is `ContractError::PositionNotFound` rather than a `ZeroLiquidity` revert. Events: the untailed `TakerClosed(posId, sr, funding, utilFees)` decodes to `MarketEvent::TakerClosed` with `liquidation_fee` zero and `is_liquidation` false, as the untailed maker closes already did; the fee is in the `TakerLiquidated` that follows (#167 tracks pairing the two). Errors: `NoSurplus`, `ZeroAddress`, `UnauthorizedPoolAction`, the ERC-1967 / UUPS / `Initializable` reverts of the proxy, `InvalidPerpImplementation`, `NotProtocolOwner` and the Solady ERC-721 reverts decode by name. The new bindings live in `contracts::PerpV022`; `Perp` is unchanged.
+
+### Changed
+
+- **The stored EMAs come from storage slot 11, not `emas()`.** `v0.2.2` dropped the view and both builds keep the `PricePair` at the same slot (`ammPrice` low, `index` high), so `get_snapshot`, `StateAt::mark` and the maker-equity batch read the word with `eth_getStorageAt` at the pinned block, alongside the beacon's index, in place of the multicall row. Same block, same round-trip count; the `Perp::emas` binding stays so the public surface does not move. A transport failure on that read is a transient `StorageReadFailed`, as the batched storage reads already report; the node's own answer still classifies by block.
 
 ### Breaking
 

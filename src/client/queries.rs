@@ -25,7 +25,7 @@ use crate::convert::{price_x96_to_f64, scale_from_6dec};
 use crate::errors::{ContractError, PerpCityError, Result, ValidationError};
 use crate::hft::state_cache::{CachedBounds, CachedFees};
 use crate::math::BlockContext;
-use crate::math::pricing::{Emas, Mark, PricePair};
+use crate::math::pricing::{Emas, Mark};
 use crate::units::{PerSide, PerpAtoms, Price, Ratio};
 
 use super::market::MarketReader;
@@ -184,8 +184,33 @@ pub(super) fn multicall_error(e: MulticallError) -> PerpCityError {
     }
 }
 
-/// Perp/pool values fixed at deployment, cached after the first pool
-/// snapshot. All are Solidity `immutable`s (or built from them), so no
+/// Which contract build a market runs. The two live builds share every
+/// view and trade selector; they differ in how a liquidation is called and
+/// in what a close event carries, and the SDK picks by era where it must.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Era {
+    /// Build `58b42b7`: whole-position 2-arg liquidations, tailed close
+    /// events, a hookless pool.
+    Legacy,
+    /// `v0.2.2-upgradeable` (tag `198559a`): an ERC-1967 proxy, 3-arg
+    /// liquidations by amount, untailed close events plus `*Liquidated`,
+    /// a pool guarded by the `PerpGuardHook`.
+    Upgradeable,
+}
+
+impl Era {
+    /// The era a pool key names: only `v0.2.2` pools carry a hook.
+    pub(crate) fn from_hooks(hooks: Address) -> Self {
+        if hooks == Address::ZERO {
+            Self::Legacy
+        } else {
+            Self::Upgradeable
+        }
+    }
+}
+
+/// Perp/pool values fixed at deployment, cached after the first read that
+/// needs one. All are Solidity `immutable`s (or built from them), so no
 /// block pinning is needed and they can never go stale.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct MarketImmutables {
@@ -193,6 +218,8 @@ pub(super) struct MarketImmutables {
     pub(super) pool_id: B256,
     /// Pool tick spacing (validated positive at load).
     pub(super) tick_spacing: i32,
+    /// The contract build, from the pool key's hook.
+    pub(super) era: Era,
 }
 
 /// Convert an `int88` per-day funding rate (scaled by 1e18) to a human-readable
@@ -209,10 +236,10 @@ impl MarketReader {
         self.perp.into_word().0
     }
 
-    /// The deployment-fixed values the pool snapshot needs, from the chain
-    /// reader's per-market cache, or two RPC reads the first time any
-    /// reader of this market asks. Not a block's to give, so it lives here
-    /// rather than on the handle.
+    /// The deployment-fixed values the pool snapshot and the liquidation
+    /// calls need, from the chain reader's per-market cache, or two RPC
+    /// reads the first time any reader of this market asks. Not a block's
+    /// to give, so it lives here rather than on the handle.
     pub(super) async fn immutables(&self) -> Result<MarketImmutables> {
         {
             let cached = self.chain.immutables_cache().lock().unwrap();
@@ -235,6 +262,7 @@ impl MarketReader {
         let immutables = MarketImmutables {
             pool_id,
             tick_spacing,
+            era: Era::from_hooks(pool_key.hooks),
         };
 
         self.chain
@@ -431,13 +459,15 @@ impl MarketReader {
     }
 
     /// The market's configuration and its state, in one multicall plus the
-    /// beacon index read.
+    /// beacon index read and the stored EMAs' storage word.
     ///
     /// Resolves the lagged snapshot block (see
     /// [`SNAPSHOT_BLOCK_LAG`](crate::constants::SNAPSHOT_BLOCK_LAG)) from the
     /// node's header, batches the `Perp`'s views at it, then reads `index()`
-    /// on the beacon the batch named at the same block: every field of the
-    /// snapshot is from that one block, which it carries.
+    /// on the beacon the batch named and the EMA slot together at the same
+    /// block: every field of the snapshot is from that one block, which it
+    /// carries. The EMAs come from storage because `v0.2.2` markets have no
+    /// `emas()` view and both builds keep the pair at the same slot.
     ///
     /// The block comes from the header, not from Multicall3's
     /// `blockAndAggregate`: on Arbitrum `block.number` inside the EVM is the
@@ -455,7 +485,7 @@ impl MarketReader {
     pub async fn get_snapshot(&self) -> Result<(MarketConfig, MarketSnapshot)> {
         let perp = Perp::new(self.perp, self.chain.provider());
         let (block, id) = self.chain.lagged_snapshot_block().await?;
-        let (modules, pool_key, pool_state, rates, oi, stored_emas, ema_window) = self
+        let (modules, pool_key, pool_state, rates, oi, ema_window) = self
             .chain
             .multicall_at(id)
             .add(perp.modules())
@@ -463,7 +493,6 @@ impl MarketReader {
             .add(perp.poolState())
             .add(perp.rates())
             .add(perp.openInterest())
-            .add(perp.emas())
             .add(perp.EMA_WINDOW())
             .aggregate()
             .await
@@ -474,21 +503,17 @@ impl MarketReader {
         let open_interest = OpenInterest::from(oi);
 
         let beacon = registered_module(modules.beacon, "IBeacon")?;
-        let index_x96 = self
-            .chain
-            .index_x96_at(beacon, id)
-            .await
-            .map_err(|e| pinned_read_error(e, block.number))?;
+        let (index_x96, stored_emas) = tokio::try_join!(
+            self.chain.index_x96_at(beacon, id),
+            self.chain.stored_emas_at(self.perp, id),
+        )
+        .map_err(|e| pinned_read_error(e, block.number))?;
         let index_price = read_price(index_x96, "index")?;
 
         // The mark exactly as the contract would set it at this block; the
         // stored pair goes out as it is so a cache can advance it itself.
         let last_touch = rates.lastTouch.to::<u64>();
         let ema_window = ema_window_secs(ema_window)?;
-        let stored_emas = PricePair {
-            amm: stored_emas.ammPrice,
-            index: stored_emas.index,
-        };
         let mark = Mark::advanced(
             block,
             pool_price,
@@ -1175,10 +1200,9 @@ mod tests {
     /// last touch, so the stored EMAs need no advancing.
     const SNAPSHOT_TIME: u64 = 1_700_000_000;
 
-    /// The seven `Perp` views the snapshot batches: pool price 1.5, both
-    /// stored EMAs 1.0 as of the block time.
-    fn snapshot_views() -> [Vec<u8>; 7] {
-        let one = x96(1, 0).to::<u128>();
+    /// The six `Perp` views the snapshot batches: pool price 1.5, last
+    /// touched at the block time.
+    fn snapshot_views() -> [Vec<u8>; 6] {
         [
             returns::<Perp::modulesCall>(&mock::modules()),
             returns::<Perp::poolKeyCall>(&mock::pool_key(SPACING)),
@@ -1188,9 +1212,16 @@ mod tests {
                 ..mock::rates(-5_000_000_000_000_000)
             }),
             returns::<Perp::openInterestCall>(&mock::open_interest(1_500_000, 250_000)),
-            returns::<Perp::emasCall>(&mock::emas(one, one)),
             returns::<Perp::EMA_WINDOWCall>(&U256::from(3_600u32)),
         ]
+    }
+
+    /// The beacon's index and the stored EMAs' word, read together after
+    /// the batch: index 1.25, both EMAs 1.0.
+    fn index_and_emas_answers(rpc: &Rpc) {
+        let one = x96(1, 0).to::<u128>();
+        rpc.call::<IBeacon::indexCall>(&x96(5, 2));
+        rpc.storage(mock::emas_word(one, one));
     }
 
     /// Answer the head and the lagged header the snapshot pins to, so the
@@ -1201,15 +1232,15 @@ mod tests {
     }
 
     /// The snapshot is the lagged block, one multicall for the `Perp`'s
-    /// seven views and the beacon at that block, and the slow layer —
-    /// which a second snapshot skips. It carries that block, the mark
-    /// priced from the stored EMAs, and the stored pair itself.
+    /// six views, the beacon and the EMA slot at that block, and the slow
+    /// layer — which a second snapshot skips. It carries that block, the
+    /// mark priced from the stored EMAs, and the stored pair itself.
     #[tokio::test]
     async fn perp_snapshot_is_one_block_plus_the_slow_layer() {
         let (client, rpc) = mock::client();
         let hash = snapshot_block(&rpc, 100);
         rpc.aggregate(100, snapshot_views());
-        rpc.call::<IBeacon::indexCall>(&x96(5, 2));
+        index_and_emas_answers(&rpc);
         fees_answers(&rpc);
         bounds_answers(&rpc);
 
@@ -1253,12 +1284,12 @@ mod tests {
         );
         assert!(
             rpc.is_drained(),
-            "blockNumber, header, multicall, index, fees, liqFee, ratios"
+            "blockNumber, header, multicall, index, emas, fees, liqFee, ratios"
         );
 
         let hash = snapshot_block(&rpc, 101);
         rpc.aggregate(101, snapshot_views());
-        rpc.call::<IBeacon::indexCall>(&x96(5, 2));
+        index_and_emas_answers(&rpc);
         assert_eq!(
             client.market().get_snapshot().await.unwrap(),
             (
@@ -1285,7 +1316,7 @@ mod tests {
         let (client, rpc) = mock::client();
         snapshot_block(&rpc, 510_368_453);
         rpc.aggregate(L1_BLOCK, snapshot_views());
-        rpc.call::<IBeacon::indexCall>(&x96(5, 2));
+        index_and_emas_answers(&rpc);
         fees_answers(&rpc);
         bounds_answers(&rpc);
 
@@ -1321,16 +1352,13 @@ mod tests {
     #[tokio::test]
     async fn perp_snapshot_without_a_beacon_names_the_missing_interface() {
         let (client, rpc) = mock::client();
-        let [_, pool_key, pool_state, rates, oi, emas, window] = snapshot_views();
+        let [_, pool_key, pool_state, rates, oi, window] = snapshot_views();
         let modules = returns::<Perp::modulesCall>(&Modules {
             beacon: Address::ZERO,
             ..mock::modules()
         });
         snapshot_block(&rpc, 100);
-        rpc.aggregate(
-            100,
-            [modules, pool_key, pool_state, rates, oi, emas, window],
-        );
+        rpc.aggregate(100, [modules, pool_key, pool_state, rates, oi, window]);
 
         let err = client.market().get_snapshot().await.unwrap_err();
         assert!(
@@ -1359,7 +1387,6 @@ mod tests {
             [
                 returns::<Perp::modulesCall>(&mock::modules()),
                 returns::<Perp::poolStateCall>(&mock::pool_state(one)),
-                returns::<Perp::emasCall>(&mock::emas(one.to::<u128>(), one.to::<u128>())),
                 returns::<Perp::ratesCall>(&Rates {
                     lastTouch: Uint::from(TOUCHED_AT),
                     ..mock::rates(0)
@@ -1368,6 +1395,7 @@ mod tests {
             ],
         );
         rpc.call::<IBeacon::indexCall>(&one);
+        rpc.storage(mock::emas_word(one.to::<u128>(), one.to::<u128>()));
 
         let mark = client.market().get_mark().await.unwrap();
         assert_eq!(
@@ -1387,7 +1415,10 @@ mod tests {
             }
         );
         assert_eq!(mark.fair_price(), Price::from_x96(one));
-        assert!(rpc.is_drained(), "blockNumber, block, multicall, index");
+        assert!(
+            rpc.is_drained(),
+            "blockNumber, block, multicall, index, emas"
+        );
     }
 
     /// A perp with no beacon fails by name after the batch, before the
@@ -1407,7 +1438,6 @@ mod tests {
                     ..mock::modules()
                 }),
                 returns::<Perp::poolStateCall>(&mock::pool_state(one)),
-                returns::<Perp::emasCall>(&mock::emas(0, 0)),
                 returns::<Perp::ratesCall>(&mock::rates(0)),
                 returns::<Perp::EMA_WINDOWCall>(&U256::from(3_600u32)),
             ],

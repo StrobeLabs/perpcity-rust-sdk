@@ -10,17 +10,19 @@ use alloy::primitives::{Address, Bytes, U256};
 use alloy::providers::{Empty, MulticallBuilder, Provider, RootProvider};
 use alloy::rpc::client::RpcClient;
 use alloy::sol_types::{SolCall, SolValue};
-use alloy::transports::BoxTransport;
+use alloy::transports::{BoxTransport, RpcError, TransportError};
 use serde::{Deserialize, Serialize};
 
 use crate::constants::{MULTICALL3, SNAPSHOT_BLOCK_LAG};
 use crate::contracts::{IBeacon, IERC20, IMulticall3};
 use crate::convert::{price_x96_to_f64, usdc_from_atoms};
-use crate::errors::{ContractError, Result, TransactionError, ValidationError};
+use crate::errors::{ContractError, PerpCityError, Result, TransactionError, ValidationError};
 use crate::hft::gas::FeeCache;
 use crate::hft::state_cache::{BalanceKey, StateCache, StateCacheConfig};
 use crate::history::History;
 use crate::math::BlockContext;
+use crate::math::pricing::PricePair;
+use crate::storage::{perp_emas_slot, stored_emas};
 use crate::transport::provider::HftTransport;
 
 use super::queries::MarketImmutables;
@@ -437,6 +439,24 @@ impl ChainReader {
         Ok(index_x96)
     }
 
+    /// The market's stored EMA pair at `block`, from its storage slot: the
+    /// one read both contract builds answer, since `v0.2.2` has no `emas()`.
+    ///
+    /// A transport failure is a typed, transient
+    /// [`ContractError::StorageReadFailed`]; the node's own answer stays a
+    /// response error so the caller's pinned-read mapping can name the
+    /// block it is about.
+    pub(super) async fn stored_emas_at(&self, perp: Address, block: BlockId) -> Result<PricePair> {
+        let word = self
+            .inner
+            .provider
+            .get_storage_at(perp, perp_emas_slot())
+            .block_id(block)
+            .await
+            .map_err(storage_read_error)?;
+        Ok(stored_emas(word))
+    }
+
     /// [`Self::get_index_price`] at `block`.
     pub(super) async fn index_price_at(&self, beacon: Address, block: BlockId) -> Result<f64> {
         let index_x96 = self.index_x96_at(beacon, block).await?;
@@ -528,10 +548,61 @@ impl ChainReader {
     }
 }
 
+/// A raw storage read's failure, classified: the node answering with an
+/// error is kept as the response it was, so the caller can read a pruned
+/// or missing block out of its message; anything else is the transport
+/// failing, retryable, and typed as the storage read it interrupted.
+fn storage_read_error(error: TransportError) -> PerpCityError {
+    match error {
+        RpcError::ErrorResp(_) => alloy::contract::Error::TransportError(error).into(),
+        other => ContractError::StorageReadFailed {
+            context: "stored EMAs at the market's slot".into(),
+            source: Some(Arc::new(other)),
+        }
+        .into(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use alloy::rpc::json_rpc::ErrorPayload;
+    use alloy::transports::TransportErrorKind;
+
     use super::*;
     use crate::client::mock;
+
+    /// A dropped connection on the slot read retries; the node's own
+    /// answer is left for the pinned-read mapping to classify.
+    #[test]
+    fn a_storage_read_cut_off_by_the_transport_is_transient() {
+        let cut = storage_read_error(TransportErrorKind::custom_str("connection reset"));
+        assert!(
+            matches!(
+                cut,
+                PerpCityError::Contract(ContractError::StorageReadFailed {
+                    source: Some(_),
+                    ..
+                })
+            ),
+            "{cut}"
+        );
+        assert!(cut.is_transient());
+
+        let answered = storage_read_error(RpcError::ErrorResp(ErrorPayload {
+            code: -32000,
+            message: "header not found".into(),
+            data: None,
+        }));
+        assert!(
+            matches!(
+                answered,
+                PerpCityError::Abi(alloy::contract::Error::TransportError(RpcError::ErrorResp(
+                    _
+                )))
+            ),
+            "{answered}"
+        );
+    }
 
     #[test]
     fn chain_deployments_serde_roundtrip() {
