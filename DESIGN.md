@@ -182,7 +182,7 @@ that carries it, the invariant it holds, and the node that owns it.
 |---|---|---|---|
 | A chain | [`ChainReader`](src/client/chain.rs#L56) | one transport, one deployment set, shared caches | [`client`](src/client/DESIGN.md) |
 | A market, now | [`MarketReader`](src/client/market.rs#L25) | one `Perp` over a `ChainReader`; every read is current | [`client`](src/client/DESIGN.md) |
-| A market, at a block | [`StateAt`](src/client/state.rs#L67) | the handle is the block; every read pinned to its hash | [`client`](src/client/DESIGN.md) |
+| A market, at a block | [`StateAt`](src/client/state.rs#L70) | the handle is the block; every read pinned to its hash | [`client`](src/client/DESIGN.md) |
 | A market with a signer | [`PerpClient`](src/client/mod.rs#L182) | a `MarketReader` plus the send pipeline | [`client`](src/client/DESIGN.md) |
 | A send | [`TxBuilder`](src/client/transactions.rs#L40) | one transaction, one nonce, one outcome | [`client`](src/client/DESIGN.md) |
 | A tick interval | [`TickRange`](src/math/range.rs#L25) | `lower < upper`, both in the V4 domain, checked at construction | [`math::range`](src/math/range.rs#L1) |
@@ -193,7 +193,7 @@ that carries it, the invariant it holds, and the node that owns it.
 | The pool at a block | [`PoolSnapshot`](src/math/swap.rs#L71) | price, liquidity and a tick map that reconciles with it | [`math::swap`](src/math/swap.rs#L1) |
 | A settle previewed | [`MakerEquityBreakdown`](src/math/maker_equity.rs#L177) | exact atoms, the contract's arithmetic | [`math::maker_equity`](src/math/maker_equity.rs#L1) |
 | A block | [`BlockContext`](src/math/mod.rs#L51) | number, hash, timestamp of one header | [`math`](src/math/DESIGN.md) |
-| An event | [`MarketEvent`](src/events.rs#L137) | the market's vocabulary, human units, either tense | [`events`](src/events/DESIGN.md) |
+| An event | [`MarketEvent`](src/events.rs#L156) | the market's vocabulary, human units, either tense | [`events`](src/events/DESIGN.md) |
 | An event in chain order | [`TapeEvent`](src/history/tape.rs#L63), [`ChainPoint`](src/history/tape.rs#L54) | block and log index | [`history`](src/history/DESIGN.md) |
 | Custody over time | [`OwnershipLog`](src/history/tape.rs#L165) | a fold of transfers; owner at a chain point | [`history`](src/history/DESIGN.md) |
 | A print | [`IndexPrint`](src/history/beacon.rs#L20) | the index at a chain point and time | [`history`](src/history/DESIGN.md) |

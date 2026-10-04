@@ -25,13 +25,16 @@ use crate::contracts::{
 };
 use crate::convert::usdc_from_atoms;
 use crate::errors::{ContractError, PerpCityError, Result, ValidationError};
+use crate::events::CumulativesInfo;
 use crate::math::BlockContext;
 use crate::math::capacity::MarketCapacity;
-use crate::math::pricing::Mark;
+use crate::math::pricing::{Emas, Mark};
 use crate::math::range::{MakerBand, TickRange};
 use crate::math::swap::{PoolSnapshot, TickLiquidity, active_liquidity};
 use crate::storage::{v4_tick_bitmap_slot, v4_tick_slot};
-use crate::units::{LDelta, LUnits, Price, Ratio, SqrtPrice, UsdcAtoms};
+use crate::units::{
+    FundingRate, LDelta, LUnits, PerSide, Price, Ratio, SqrtPrice, UsdcAtoms, UtilizationRate,
+};
 
 use super::market::MarketReader;
 use super::queries::{MarketImmutables, multicall_error, registered_module};
@@ -115,6 +118,18 @@ pub struct SolvencyState {
     pub bad_debt: UsdcAtoms,
     /// Margin the contract believes it holds.
     pub total_margin: UsdcAtoms,
+}
+
+/// The rates the last touch set, as the contract's `rates()` returns them
+/// and as `RatesAndEmasRefreshed` emits them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MarketRates {
+    /// Daily funding rate; positive when longs pay shorts.
+    pub funding_per_day: FundingRate,
+    /// Utilization fee per day, per side.
+    pub util_fee_per_day: PerSide<UtilizationRate>,
+    /// Unix timestamp of the touch that set them.
+    pub last_touch: u64,
 }
 
 /// One id's row in a batched read: every id passed to [`StateAt::positions`]
@@ -458,6 +473,94 @@ impl StateAt {
         }
         let range = TickRange::new(i24_to_i32(maker.tickLower), i24_to_i32(maker.tickUpper))?;
         Ok(Some(MakerBand::new(range, LUnits::new(maker.liquidity))))
+    }
+
+    /// [`Self::maker_band`] for many ids, in one row multicall per
+    /// [`MAX_ROW_BATCH`] ids, all at this block: exactly one
+    /// [`RowOutcome`] per id, `Ok(None)` for an id that holds no liquidity.
+    pub async fn maker_bands(&self, pos_ids: &[U256]) -> Vec<RowOutcome<MakerBand>> {
+        self.rows(
+            pos_ids,
+            |pos_id| [Perp::makerDetailsCall { posId: pos_id }.abi_encode()],
+            |pos_id, [row]| {
+                let maker = decode_row::<Perp::makerDetailsCall>(pos_id, row, "maker details")?;
+                if maker.liquidity == 0 {
+                    return Ok(None);
+                }
+                let range =
+                    TickRange::new(i24_to_i32(maker.tickLower), i24_to_i32(maker.tickUpper))?;
+                Ok(Some(MakerBand::new(range, LUnits::new(maker.liquidity))))
+            },
+        )
+        .await
+    }
+
+    /// The module in force for each kind at this block: `modules()`.
+    pub async fn modules(&self) -> Result<Modules> {
+        Perp::new(self.market.perp, self.market.chain.provider())
+            .modules()
+            .block(self.id())
+            .call()
+            .await
+            .map_err(|e| self.read_error(e))
+    }
+
+    /// The rates the last touch set at this block: `rates()`.
+    ///
+    /// # Errors
+    ///
+    /// [`ValidationError::Overflow`] if the funding rate does not fit
+    /// `i128`, which an `int88` always does.
+    pub async fn rates(&self) -> Result<MarketRates> {
+        let rates = Perp::new(self.market.perp, self.market.chain.provider())
+            .rates()
+            .block(self.id())
+            .call()
+            .await
+            .map_err(|e| self.read_error(e))?;
+        let funding =
+            i128::try_from(rates.fundingPerDay).map_err(|_| ValidationError::Overflow {
+                context: "funding per day".into(),
+            })?;
+        Ok(MarketRates {
+            funding_per_day: FundingRate::from_wad(funding),
+            util_fee_per_day: PerSide::new(
+                UtilizationRate::from_wad(rates.longUtilFeePerDay),
+                UtilizationRate::from_wad(rates.shortUtilFeePerDay),
+            ),
+            last_touch: rates.lastTouch.to::<u64>(),
+        })
+    }
+
+    /// The market's accumulators at this block: `cumulatives()`, as the
+    /// `CumulativesAccrued` event carries them.
+    pub async fn cumulatives(&self) -> Result<CumulativesInfo> {
+        Perp::new(self.market.perp, self.market.chain.provider())
+            .cumulatives()
+            .block(self.id())
+            .call()
+            .await
+            .map(Into::into)
+            .map_err(|e| self.read_error(e))
+    }
+
+    /// The stored EMA pair and the touch it is current as of, at this
+    /// block: the pair from its storage word, the touch from `rates()`. The
+    /// same `Emas` the `RatesAndEmasRefreshed` event carries, before any
+    /// advance to a later timestamp; [`Self::mark`] is the advanced form.
+    pub async fn emas(&self) -> Result<Emas> {
+        let chain = &self.market.chain;
+        let (rates, stored) = tokio::try_join!(self.rates(), async {
+            chain
+                .stored_emas_at(self.market.perp, self.id())
+                .await
+                .map_err(|e| pinned_read_error(e, self.block.number))
+        })?;
+        Ok(Emas {
+            amm_price: Price::from_x96(U256::from(stored.amm)),
+            index: Price::from_x96(U256::from(stored.index)),
+            last_touch: rates.last_touch,
+        })
     }
 
     /// The pool's current tick.

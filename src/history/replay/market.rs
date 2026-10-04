@@ -4,7 +4,8 @@
 
 use alloy::primitives::Address;
 
-use crate::client::OpenInterest;
+use crate::client::{MarketRates, OpenInterest};
+use crate::contracts;
 use crate::errors::ValidationError;
 use crate::events::{CumulativesInfo, MarketEvent, ModuleKind};
 use crate::math::BlockContext;
@@ -19,22 +20,19 @@ use super::super::tape::TapeEvent;
 /// beacon's last print, and the stored EMAs as the last touch left them.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub(super) struct Prices {
-    pool: Latest<Price>,
-    index: Latest<Price>,
-    emas: Latest<Emas>,
+    pub(super) pool: Latest<Price>,
+    pub(super) index: Latest<Price>,
+    pub(super) emas: Latest<Emas>,
 }
 
 impl Prices {
-    pub(super) fn pool(&self) -> Option<Price> {
-        self.pool.get()
-    }
-
-    pub(super) fn index(&self) -> Option<Price> {
-        self.index.get()
-    }
-
-    pub(super) fn emas(&self) -> Option<Emas> {
-        self.emas.get()
+    /// As a read supplied them at one block.
+    pub(super) fn seeded(pool: Price, index: Price, emas: Emas) -> Self {
+        Self {
+            pool: Latest::stated(pool),
+            index: Latest::stated(index),
+            emas: Latest::stated(emas),
+        }
     }
 
     /// The mark at `block`, with the EMAs advanced to its timestamp over
@@ -44,7 +42,9 @@ impl Prices {
         block: BlockContext,
         ema_window: u64,
     ) -> Result<Option<Mark>, ValidationError> {
-        let (Some(pool), Some(index), Some(emas)) = (self.pool(), self.index(), self.emas()) else {
+        let (Some(pool), Some(index), Some(emas)) =
+            (self.pool.get(), self.index.get(), self.emas.get())
+        else {
             return Ok(None);
         };
         Mark::advanced(
@@ -91,22 +91,19 @@ impl Fold for Prices {
 /// accumulators at the last accrual.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub(super) struct Rates {
-    funding_per_day: Latest<FundingRate>,
-    util_fee_per_day: Latest<PerSide<UtilizationRate>>,
-    cumulatives: Latest<CumulativesInfo>,
+    pub(super) funding_per_day: Latest<FundingRate>,
+    pub(super) util_fee_per_day: Latest<PerSide<UtilizationRate>>,
+    pub(super) cumulatives: Latest<CumulativesInfo>,
 }
 
 impl Rates {
-    pub(super) fn funding_per_day(&self) -> Option<FundingRate> {
-        self.funding_per_day.get()
-    }
-
-    pub(super) fn util_fee_per_day(&self) -> Option<PerSide<UtilizationRate>> {
-        self.util_fee_per_day.get()
-    }
-
-    pub(super) fn cumulatives(&self) -> Option<CumulativesInfo> {
-        self.cumulatives.get()
+    /// As a read supplied them at one block.
+    pub(super) fn seeded(rates: MarketRates, cumulatives: CumulativesInfo) -> Self {
+        Self {
+            funding_per_day: Latest::stated(rates.funding_per_day),
+            util_fee_per_day: Latest::stated(rates.util_fee_per_day),
+            cumulatives: Latest::stated(cumulatives),
+        }
     }
 }
 
@@ -137,8 +134,8 @@ impl Fold for Rates {
 /// emits whole and both zero before a market's first event.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub(super) struct Utilization {
-    capacity: Latest<Capacity>,
-    open_interest: Latest<OpenInterest>,
+    pub(super) capacity: Latest<Capacity>,
+    pub(super) open_interest: Latest<OpenInterest>,
 }
 
 impl Utilization {
@@ -150,8 +147,12 @@ impl Utilization {
         }
     }
 
-    pub(super) fn open_interest(&self) -> Option<OpenInterest> {
-        self.open_interest.get()
+    /// As a read supplied them at one block.
+    pub(super) fn seeded(read: MarketCapacity) -> Self {
+        Self {
+            capacity: Latest::stated(read.capacity),
+            open_interest: Latest::stated(read.open_interest),
+        }
     }
 
     /// Both at `block`, as the capacity read returns them.
@@ -190,6 +191,22 @@ pub(super) struct Modules {
 }
 
 impl Modules {
+    /// As `modules()` returned them at one block.
+    pub(super) fn seeded(read: contracts::Modules) -> Self {
+        let mut in_force = [Latest::default(); 6];
+        for (kind, address) in [
+            (ModuleKind::Beacon, read.beacon),
+            (ModuleKind::Fees, read.fees),
+            (ModuleKind::Funding, read.funding),
+            (ModuleKind::MarginRatios, read.marginRatios),
+            (ModuleKind::PriceImpact, read.priceImpact),
+            (ModuleKind::Pricing, read.pricing),
+        ] {
+            in_force[Self::index(kind)].set(address);
+        }
+        Self { in_force }
+    }
+
     pub(super) fn get(&self, kind: ModuleKind) -> Option<Address> {
         self.in_force[Self::index(kind)].get()
     }

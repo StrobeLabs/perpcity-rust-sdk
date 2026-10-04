@@ -51,7 +51,7 @@ pub use maker_equity::{MakerEquityKind, MakerEquityOutcome};
 pub use market::MarketReader;
 pub use queries::{Bounds, Fees, MarketConfig, MarketSnapshot, OpenInterest};
 pub use state::{
-    MAX_ROW_BATCH, MarginRatioTriple, MarginRatios, RowOutcome, SolvencyState, StateAt,
+    MAX_ROW_BATCH, MarginRatioTriple, MarginRatios, MarketRates, RowOutcome, SolvencyState, StateAt,
 };
 pub use trades::{
     AdjustMakerParams, AdjustMakerResult, AdjustTakerParams, AdjustTakerResult,

@@ -59,7 +59,7 @@ pub use client::{
     ARBITRUM_USDC, AdjustMakerParams, AdjustMakerResult, AdjustTakerParams, AdjustTakerResult,
     Bounds, ChainDeployments, ChainReader, ExactAdjustMakerParams, ExactAdjustTakerParams,
     ExactOpenMakerParams, ExactOpenTakerParams, Fees, MAX_ROW_BATCH, MakerEquityKind,
-    MakerEquityOutcome, MarginRatioTriple, MarginRatios, MarketConfig, MarketReader,
+    MakerEquityOutcome, MarginRatioTriple, MarginRatios, MarketConfig, MarketRates, MarketReader,
     MarketSnapshot, OpenInterest, OpenMakerParams, OpenResult, OpenTakerParams, PerpClient,
     RowOutcome, SolvencyState, StateAt, TxBuilder,
 };

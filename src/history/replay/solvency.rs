@@ -18,59 +18,9 @@ use crate::client::SolvencyState;
 use crate::events::MarketEvent;
 use crate::units::UsdcAtoms;
 
-use super::super::fold::{Fold, Latest};
+use super::super::fold::{Fold, Latest, Stated};
 use super::super::tape::TapeEvent;
-
-/// A total the contract states outright, with what accrued since the
-/// statement. A later statement replaces both; a segment without one adds
-/// its accruals to the one before.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Stated<T, S> {
-    value: Option<T>,
-    /// Whether this segment holds a statement, which decides how `since`
-    /// combines.
-    stated: bool,
-    since: S,
-}
-
-impl<T, S: Default> Default for Stated<T, S> {
-    fn default() -> Self {
-        Self {
-            value: None,
-            stated: false,
-            since: S::default(),
-        }
-    }
-}
-
-impl<T: Copy, S: Default + AddAssign> Stated<T, S> {
-    /// A total that is zero and stated before the market's first event.
-    fn genesis(zero: T) -> Self {
-        Self {
-            value: Some(zero),
-            stated: true,
-            since: S::default(),
-        }
-    }
-
-    fn state(&mut self, value: T) {
-        self.value = Some(value);
-        self.stated = true;
-        self.since = S::default();
-    }
-
-    fn value(&self) -> Option<T> {
-        self.value
-    }
-
-    fn combine(&mut self, later: Self) {
-        if later.stated {
-            *self = later;
-        } else {
-            self.since += later.since;
-        }
-    }
-}
+use super::Silences;
 
 /// What moved the margin total since it was last stated.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -89,13 +39,6 @@ impl AddAssign for MarginSince {
     }
 }
 
-/// The silences the books carry, as [`Gaps`](super::Gaps) reports them.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(super) struct Silences {
-    pub(super) total_margin_unemitted: u32,
-    pub(super) bad_debt_unemitted: u32,
-}
-
 /// The margin total and the bad debt, folded from the events that state
 /// them and the swaps that move them silently.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -112,9 +55,14 @@ pub(super) struct Solvency {
 impl Solvency {
     /// Before the first event: no margin, no debt, both stated.
     pub(super) fn genesis() -> Self {
+        Self::seeded(SolvencyState::default())
+    }
+
+    /// As a read returned the books at one block.
+    pub(super) fn seeded(read: SolvencyState) -> Self {
         Self {
-            margin: Stated::genesis(UsdcAtoms::ZERO),
-            debt: Stated::genesis(UsdcAtoms::ZERO),
+            margin: Stated::with(read.total_margin),
+            debt: Stated::with(read.bad_debt),
             transfer_in_tx: Latest::default(),
         }
     }
