@@ -24,7 +24,7 @@ pub mod events {
     pub use crate::events::*;
 }
 
-pub use crate::events::{MarketEvent, decode_log};
+pub use crate::events::{MarketEvent, decode_log, decode_transaction_logs};
 pub use block::BlockHeaderFeed;
 pub use market::MarketFeed;
 pub use taker::{LiveTakerMarket, LiveTakerMarketPublisher};

@@ -75,6 +75,22 @@ pub enum TransactionError {
         pos_id: U256,
     },
 
+    /// A mined receipt holds a log of this crate's vocabulary that the
+    /// binding cannot read: the shape on chain disagrees with the binding,
+    /// or a value is too wide to hold. The transaction succeeded on chain;
+    /// what it did is unknown to the reader. Logs outside the vocabulary
+    /// are not this error, they are skipped.
+    ///
+    /// Not transient: the same receipt decodes the same way again. Look
+    /// up `tx_hash` to read the effect by other means.
+    #[error("receipt {tx_hash} holds a log the binding cannot read: {context}")]
+    ReceiptUndecodable {
+        /// Hash of the mined transaction.
+        tx_hash: FixedBytes<32>,
+        /// Which log, as [`ValidationError::DecodeFailed`](crate::ValidationError::DecodeFailed) names it.
+        context: String,
+    },
+
     /// Receipt polling timed out before the transaction was confirmed.
     ///
     /// The transaction was broadcast and may still mine, so the send path
@@ -173,8 +189,9 @@ pub enum TransactionError {
 
 impl TransactionError {
     /// Hash of the signed transaction, for every failure from the broadcast
-    /// onward: `BroadcastFailed`, `ReceiptTimeout`, `Reverted` and
-    /// `OutOfGas`. `None` means nothing was sent.
+    /// onward: `BroadcastFailed`, `ReceiptTimeout`, `Reverted`, `OutOfGas`,
+    /// `TakerNotClosed` and `ReceiptUndecodable`. `None` means nothing was
+    /// sent.
     ///
     /// A `Some` hash may have landed on chain even when the error says the
     /// send failed, so look up its receipt before treating the effect as
@@ -185,7 +202,8 @@ impl TransactionError {
             | Self::ReceiptTimeout { tx_hash, .. }
             | Self::Reverted { tx_hash, .. }
             | Self::OutOfGas { tx_hash, .. }
-            | Self::TakerNotClosed { tx_hash, .. } => Some(*tx_hash),
+            | Self::TakerNotClosed { tx_hash, .. }
+            | Self::ReceiptUndecodable { tx_hash, .. } => Some(*tx_hash),
             _ => None,
         }
     }

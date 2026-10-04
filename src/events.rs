@@ -593,6 +593,135 @@ pub fn decode_log(log: &Log) -> Result<Option<MarketEvent>, ValidationError> {
     Ok(event)
 }
 
+/// Decode one transaction's logs, in receipt order, pairing each untailed
+/// `v0.2.2` close with the `*Liquidated` log that follows it.
+///
+/// A `v0.2.2` market says a position was liquidated in two logs: the close
+/// (`TakerClosed`, `MakerClosed` or `MakerConverted`, with no liquidation
+/// tails) and then `TakerLiquidated` or `MakerLiquidated` for the same
+/// position. [`decode_log`] sees one log at a time and reads the close as
+/// voluntary. Given the whole transaction, this function finds the first
+/// later `*Liquidated` of the same book, from the same address and for the
+/// same position, fills the close's `liquidation_fee` and `is_liquidation`
+/// from it, and leaves that `*Liquidated` out of the result. The output then
+/// reads as build `58b42b7` emitted it: a liquidation is a close with its
+/// tails set, once, so a consumer that counts the fee on the close and a
+/// consumer that counts it on `*Liquidated` both count it exactly once. A
+/// `*Liquidated` with no close to pair with, a partial liquidation after a
+/// `TakerAdjusted` or `MakerAdjusted`, stays in the output as its own event,
+/// since the adjust variants carry no tails. A close decoded from a tailed
+/// `58b42b7` shape is left as decoded and pairs with nothing.
+///
+/// Logs this vocabulary does not cover are skipped, as [`decode_log`] skips
+/// them.
+///
+/// # Errors
+///
+/// [`ValidationError::DecodeFailed`] from the first log that is this
+/// vocabulary's and will not decode, as [`decode_log`] reports it.
+pub fn decode_transaction_logs(logs: &[Log]) -> Result<Vec<MarketEvent>, ValidationError> {
+    let mut events: Vec<Option<MarketEvent>> =
+        logs.iter().map(decode_log).collect::<Result<_, _>>()?;
+    for i in 0..logs.len() {
+        let Some(book) = untailed_close_book(&logs[i]) else {
+            continue;
+        };
+        let (Some(MarketEvent::TakerClosed { pos_id, .. })
+        | Some(MarketEvent::MakerClosed { pos_id, .. })
+        | Some(MarketEvent::MakerConverted { pos_id, .. })) = events[i]
+        else {
+            continue;
+        };
+        let address = logs[i].address();
+        let Some((j, fee)) = (i + 1..logs.len()).find_map(|j| {
+            if logs[j].address() != address {
+                return None;
+            }
+            liquidation_tail(book, pos_id, events[j].as_ref()).map(|fee| (j, fee))
+        }) else {
+            continue;
+        };
+        match &mut events[i] {
+            Some(
+                MarketEvent::TakerClosed {
+                    liquidation_fee,
+                    is_liquidation,
+                    ..
+                }
+                | MarketEvent::MakerClosed {
+                    liquidation_fee,
+                    is_liquidation,
+                    ..
+                }
+                | MarketEvent::MakerConverted {
+                    liquidation_fee,
+                    is_liquidation,
+                    ..
+                },
+            ) => {
+                *liquidation_fee = fee;
+                *is_liquidation = true;
+            }
+            _ => unreachable!("the close at {i} matched above"),
+        }
+        events[j] = None;
+    }
+    Ok(events.into_iter().flatten().collect())
+}
+
+/// Which side of the book a position event is on, where the two sides'
+/// shapes differ.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CloseBook {
+    Taker,
+    Maker,
+}
+
+/// The book of a close log emitted without liquidation tails: `v0.2.2`'s
+/// `TakerClosed`, and the untailed `MakerClosed` / `MakerConverted` both
+/// builds' `Perp` binding carries. `None` for any other log, including the
+/// tailed closes of build `58b42b7`.
+fn untailed_close_book(log: &Log) -> Option<CloseBook> {
+    let topic0 = log.topic0()?;
+    if *topic0 == PerpV022::TakerClosed::SIGNATURE_HASH {
+        Some(CloseBook::Taker)
+    } else if *topic0 == Perp::MakerClosed::SIGNATURE_HASH
+        || *topic0 == Perp::MakerConverted::SIGNATURE_HASH
+    {
+        Some(CloseBook::Maker)
+    } else {
+        None
+    }
+}
+
+/// The liquidation fee `event` settles for `pos_id` on `book`, if it is
+/// that book's `*Liquidated` for that position.
+fn liquidation_tail(
+    book: CloseBook,
+    pos_id: U256,
+    event: Option<&MarketEvent>,
+) -> Option<UsdcAtoms> {
+    match (book, event) {
+        (
+            CloseBook::Taker,
+            Some(MarketEvent::TakerLiquidated {
+                pos_id: liquidated,
+                liquidation_fee,
+                ..
+            }),
+        )
+        | (
+            CloseBook::Maker,
+            Some(MarketEvent::MakerLiquidated {
+                pos_id: liquidated,
+                liquidation_fee,
+                ..
+            }),
+        ) if *liquidated == pos_id => Some(*liquidation_fee),
+        _ => None,
+    }
+}
+
 /// Decode a typed event from a raw log's topics + data.
 ///
 /// The topic already said which event this is, so a failure here is a log
@@ -704,7 +833,7 @@ pub(crate) fn rpc_log<E: SolEvent>(event: &E, address: Address) -> Log {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloy::primitives::{Address, B256, LogData, U256};
+    use alloy::primitives::{Address, B256, LogData, U256, b256};
     use alloy::rpc::types::Log as RpcLog;
 
     use crate::constants::Q96;
@@ -1197,5 +1326,274 @@ mod tests {
             removed: false,
         };
         assert!(decode_log(&log).unwrap().is_none());
+    }
+
+    /// The three untailed shapes and the two `*Liquidated` logs they pair
+    /// with, by topic, so a change to either binding fails here first.
+    #[test]
+    fn pairing_topics_are_the_deployed_ones() {
+        assert_eq!(
+            PerpV022::TakerClosed::SIGNATURE_HASH,
+            b256!("208f950e4dba30512aa9e643b25c9df8bdb616ee90bbff00f669a5d1d3d452f3")
+        );
+        assert_eq!(
+            Perp::MakerClosed::SIGNATURE_HASH,
+            b256!("b826713880e30e1c5fa8e7c11ed454fc86b1bf45b32e8e41a8820e49b9bb8b8b")
+        );
+        assert_eq!(
+            Perp::MakerConverted::SIGNATURE_HASH,
+            b256!("c15a901d4563095647dc937c9211b4ba9fe0aadb262575e0ae9b6dc2e19a2790")
+        );
+        assert_eq!(
+            Perp::TakerLiquidated::SIGNATURE_HASH,
+            b256!("2347417853c438a233b6d4d0630048d196587db0d521d33f5a4705721e1a91cf")
+        );
+        assert_eq!(
+            Perp::MakerLiquidated::SIGNATURE_HASH,
+            b256!("1ea1626f80876d431626ac0d48ac2bb9495fa178b8b7fab5fbb75fa9d430b554")
+        );
+    }
+
+    const PERP: Address = Address::repeat_byte(0x11);
+    const OTHER_PERP: Address = Address::repeat_byte(0x22);
+
+    /// A swap of 100 perp atoms for 100 USDC atoms at a Q96 price of one,
+    /// with no fees: the fill every test close carries.
+    fn flat_swap() -> SwapResult {
+        SwapResult {
+            delta: pack_balance_delta(-100_000_000, 100_000_000),
+            ammPrice: Q96,
+            totalFeeAmt: I256::ZERO,
+            lpFeeAmt: U256::ZERO,
+            protocolFeeAmt: U256::ZERO,
+            creatorFeeAmt: U256::ZERO,
+            insuranceFeeAmt: U256::ZERO,
+        }
+    }
+
+    /// `v0.2.2`'s untailed `TakerClosed` for `pos_id` on [`PERP`].
+    fn v022_taker_closed(pos_id: u64) -> RpcLog {
+        rpc_log(
+            &PerpV022::TakerClosed {
+                posId: U256::from(pos_id),
+                sr: flat_swap(),
+                funding: I256::ZERO,
+                utilFees: U256::ZERO,
+            },
+            PERP,
+        )
+    }
+
+    /// A `TakerAdjusted` for `pos_id` on [`PERP`]: the event a partial
+    /// liquidation emits before its `TakerLiquidated`.
+    fn taker_adjusted(pos_id: u64) -> RpcLog {
+        rpc_log(
+            &Perp::TakerAdjusted {
+                posId: U256::from(pos_id),
+                sr: flat_swap(),
+                funding: I256::ZERO,
+                utilFees: U256::ZERO,
+            },
+            PERP,
+        )
+    }
+
+    /// `TakerLiquidated` for `pos_id` settling `fee` atoms, emitted by
+    /// `address` so a test can place it on another market.
+    fn taker_liquidated(pos_id: u64, fee: u64, address: Address) -> RpcLog {
+        rpc_log(
+            &Perp::TakerLiquidated {
+                posId: U256::from(pos_id),
+                perpAmount: 100_000_000u128,
+                liqFee: U256::from(fee),
+            },
+            address,
+        )
+    }
+
+    /// The untailed `MakerClosed` for `pos_id` on [`PERP`].
+    fn untailed_maker_closed(pos_id: u64) -> RpcLog {
+        rpc_log(
+            &Perp::MakerClosed {
+                posId: U256::from(pos_id),
+                funding: I256::ZERO,
+                longUtilFees: U256::ZERO,
+                shortUtilFees: U256::ZERO,
+                lpFees: U256::ZERO,
+            },
+            PERP,
+        )
+    }
+
+    /// The untailed `MakerConverted` for `pos_id` on [`PERP`].
+    fn untailed_maker_converted(pos_id: u64) -> RpcLog {
+        rpc_log(
+            &Perp::MakerConverted {
+                posId: U256::from(pos_id),
+                funding: I256::ZERO,
+                longUtilFees: U256::ZERO,
+                shortUtilFees: U256::ZERO,
+                lpFees: U256::ZERO,
+            },
+            PERP,
+        )
+    }
+
+    /// `MakerLiquidated` for `pos_id` on [`PERP`] settling `fee` atoms.
+    fn maker_liquidated(pos_id: u64, fee: u64) -> RpcLog {
+        rpc_log(
+            &Perp::MakerLiquidated {
+                posId: U256::from(pos_id),
+                liquidityAmount: 9_000_000_000u128,
+                liqFee: U256::from(fee),
+            },
+            PERP,
+        )
+    }
+
+    /// Build `58b42b7`'s tailed `TakerClosed` for `pos_id` on [`PERP`],
+    /// carrying `fee` and `is_liquidation` in the event itself.
+    fn tailed_taker_closed(pos_id: u64, fee: u64, is_liquidation: bool) -> RpcLog {
+        rpc_log(
+            &Perp::TakerClosed {
+                posId: U256::from(pos_id),
+                sr: flat_swap(),
+                funding: I256::ZERO,
+                utilFees: U256::ZERO,
+                liqFee: U256::from(fee),
+                isLiquidation: is_liquidation,
+            },
+            PERP,
+        )
+    }
+
+    /// The close's tails as the transaction decoder leaves them, for the
+    /// one position event in `events`.
+    fn tails(events: &[MarketEvent]) -> (u128, bool) {
+        match events {
+            [
+                MarketEvent::TakerClosed {
+                    liquidation_fee,
+                    is_liquidation,
+                    ..
+                }
+                | MarketEvent::MakerClosed {
+                    liquidation_fee,
+                    is_liquidation,
+                    ..
+                }
+                | MarketEvent::MakerConverted {
+                    liquidation_fee,
+                    is_liquidation,
+                    ..
+                },
+            ] => (liquidation_fee.atoms(), *is_liquidation),
+            other => panic!("expected one close, got {other:?}"),
+        }
+    }
+
+    /// A `v0.2.2` taker liquidation reads as one close with its tails set.
+    #[test]
+    fn a_v022_taker_liquidation_pairs_into_its_close() {
+        let events =
+            decode_transaction_logs(&[v022_taker_closed(7), taker_liquidated(7, 1_250_000, PERP)])
+                .unwrap();
+        assert_eq!(tails(&events), (1_250_000, true));
+    }
+
+    /// A `v0.2.2` maker liquidation pairs into the close or the conversion,
+    /// whichever the contract emitted.
+    #[test]
+    fn a_v022_maker_liquidation_pairs_into_its_close_or_conversion() {
+        let closed =
+            decode_transaction_logs(&[untailed_maker_closed(4), maker_liquidated(4, 800_000)])
+                .unwrap();
+        assert_eq!(tails(&closed), (800_000, true));
+
+        let converted =
+            decode_transaction_logs(&[untailed_maker_converted(4), maker_liquidated(4, 800_000)])
+                .unwrap();
+        assert_eq!(tails(&converted), (800_000, true));
+    }
+
+    /// Without a `*Liquidated` after it, a `v0.2.2` close is voluntary.
+    #[test]
+    fn a_v022_close_with_no_liquidated_log_stays_voluntary() {
+        let events = decode_transaction_logs(&[v022_taker_closed(7)]).unwrap();
+        assert_eq!(tails(&events), (0, false));
+    }
+
+    /// A `*Liquidated` for another position, another market or the other
+    /// book stays its own event and leaves the close voluntary.
+    #[test]
+    fn a_liquidated_log_for_another_position_or_market_does_not_pair() {
+        for stray in [
+            taker_liquidated(8, 1_250_000, PERP),
+            taker_liquidated(7, 1_250_000, OTHER_PERP),
+            maker_liquidated(7, 1_250_000),
+        ] {
+            let events = decode_transaction_logs(&[v022_taker_closed(7), stray]).unwrap();
+            assert_eq!(events.len(), 2, "the stray stays in the output");
+            assert_eq!(tails(&events[..1]), (0, false));
+        }
+    }
+
+    /// Pairing only looks forward: a `*Liquidated` before the close is not
+    /// its tail.
+    #[test]
+    fn a_liquidated_log_before_the_close_does_not_pair() {
+        let events =
+            decode_transaction_logs(&[taker_liquidated(7, 1_250_000, PERP), v022_taker_closed(7)])
+                .unwrap();
+        assert_eq!(events.len(), 2);
+        assert_eq!(tails(&events[1..]), (0, false));
+    }
+
+    /// A partial liquidation follows an adjust, which carries no tails, so
+    /// its `*Liquidated` stays in the output.
+    #[test]
+    fn a_partial_liquidation_keeps_its_liquidated_event() {
+        let events =
+            decode_transaction_logs(&[taker_adjusted(7), taker_liquidated(7, 300_000, PERP)])
+                .unwrap();
+        assert!(matches!(
+            events[..],
+            [
+                MarketEvent::TakerAdjusted { .. },
+                MarketEvent::TakerLiquidated { liquidation_fee, .. }
+            ] if liquidation_fee.atoms() == 300_000
+        ));
+    }
+
+    /// A `58b42b7` close already carries its tails: it pairs with nothing
+    /// and reads as decoded.
+    #[test]
+    fn a_tailed_close_is_left_as_decoded() {
+        let events = decode_transaction_logs(&[
+            tailed_taker_closed(7, 0, false),
+            taker_liquidated(7, 1_250_000, PERP),
+        ])
+        .unwrap();
+        assert_eq!(events.len(), 2, "a 58b42b7 close pairs with nothing");
+        assert_eq!(tails(&events[..1]), (0, false));
+
+        let events = decode_transaction_logs(&[tailed_taker_closed(7, 1_250_000, true)]).unwrap();
+        assert_eq!(tails(&events), (1_250_000, true));
+    }
+
+    /// Each close pairs with the first `*Liquidated` after it, so two
+    /// liquidations in one transaction keep their own fees.
+    #[test]
+    fn two_liquidations_in_one_transaction_pair_in_order() {
+        let events = decode_transaction_logs(&[
+            v022_taker_closed(7),
+            taker_liquidated(7, 100, PERP),
+            v022_taker_closed(8),
+            taker_liquidated(8, 200, PERP),
+        ])
+        .unwrap();
+        assert_eq!(events.len(), 2);
+        assert_eq!(tails(&events[..1]), (100, true));
+        assert_eq!(tails(&events[1..]), (200, true));
     }
 }

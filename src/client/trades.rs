@@ -9,7 +9,7 @@ use crate::constants::{MIN_OPENING_MARGIN, TICK_SPACING};
 use crate::contracts::{IERC20, Perp, Position};
 use crate::convert::{scale_from_6dec, scale_to_6dec, unpack_balance_delta};
 use crate::errors::{ContractError, Result, TransactionError, ValidationError};
-use crate::feeds::{MarketEvent, decode_log};
+use crate::feeds::{MarketEvent, decode_transaction_logs};
 use crate::hft::gas::{GasLimits, Urgency};
 use crate::math::range::TickRange;
 use crate::math::tick::{align_tick_down, align_tick_up, price_to_tick};
@@ -228,29 +228,52 @@ fn parse_minted_token_id(receipt: &TransactionReceipt) -> std::result::Result<U2
 /// Extract the realized swap `(perp_delta, usd_delta)` from a taker
 /// open/adjust/close receipt.
 ///
-/// Reuses the market feed's [`decode_log`] to find the `TakerOpened` /
-/// `TakerAdjusted` / `TakerClosed` event and reads its decoded `SwapInfo`
-/// (already unpacked from the `BalanceDelta`). Every taker
+/// Reads the receipt's events through [`transaction_events`] to find the
+/// `TakerOpened` / `TakerAdjusted` / `TakerClosed` event and takes its
+/// decoded `SwapInfo` (already unpacked from the `BalanceDelta`). Every taker
 /// open/adjust/close emits one of these — a margin-only adjust still emits a
-/// `TakerAdjusted` with a zero-delta swap — so on the taker paths `None` means
-/// a decode/ABI failure, which the caller surfaces as an error rather than a
-/// zero fill. (Maker opens emit no taker swap, but they don't call this.)
-fn parse_taker_swap(receipt: &TransactionReceipt) -> Option<(PerpDelta, UsdcDelta)> {
-    for log in receipt.inner.logs() {
-        // An undecodable log is no different here from an unrecognised one:
-        // the caller's `ok_or` turns a receipt with no readable swap into
-        // `EventNotFound`, which says the same thing with the position's
-        // context attached.
-        if let Ok(Some(
-            MarketEvent::TakerOpened { swap, .. }
-            | MarketEvent::TakerAdjusted { swap, .. }
-            | MarketEvent::TakerClosed { swap, .. },
-        )) = decode_log(log)
-        {
-            return Some((swap.perp_delta, swap.usd_delta));
+/// `TakerAdjusted` with a zero-delta swap — so on the taker paths `None`
+/// means the receipt carries no such event, which the caller surfaces as an
+/// error rather than a zero fill. (Maker opens emit no taker swap, but they
+/// don't call this.)
+///
+/// # Errors
+///
+/// [`TransactionError::ReceiptUndecodable`] when a log of the crate's
+/// vocabulary will not decode, so a close next to it is not lost.
+fn parse_taker_swap(receipt: &TransactionReceipt) -> Result<Option<(PerpDelta, UsdcDelta)>> {
+    let events = transaction_events(receipt.inner.logs(), receipt.transaction_hash)?;
+    Ok(events.into_iter().find_map(|event| match event {
+        MarketEvent::TakerOpened { swap, .. }
+        | MarketEvent::TakerAdjusted { swap, .. }
+        | MarketEvent::TakerClosed { swap, .. } => Some((swap.perp_delta, swap.usd_delta)),
+        _ => None,
+    }))
+}
+
+/// A receipt's logs as market events, paired across the transaction by
+/// [`decode_transaction_logs`], so a `v0.2.2` liquidation reads as the
+/// tailed close it is on build `58b42b7`.
+///
+/// Logs outside the crate's vocabulary are skipped, as the decoder skips
+/// them. A log inside it that will not decode is a binding problem the
+/// reader must not hide: a receipt that closed a position and also holds
+/// such a log would otherwise read as no close at all. It comes back as
+/// [`TransactionError::ReceiptUndecodable`] with `tx_hash`, so the caller
+/// can read the effect by other means.
+///
+/// # Errors
+///
+/// [`TransactionError::ReceiptUndecodable`] from the first vocabulary log
+/// that will not decode.
+fn transaction_events(logs: &[RpcLog], tx_hash: B256) -> Result<Vec<MarketEvent>> {
+    decode_transaction_logs(logs).map_err(|err| {
+        TransactionError::ReceiptUndecodable {
+            tx_hash,
+            context: err.to_string(),
         }
-    }
-    None
+        .into()
+    })
 }
 
 /// Read the realized swap from a taker adjust or close receipt.
@@ -261,7 +284,7 @@ fn parse_taker_swap(receipt: &TransactionReceipt) -> Option<(PerpDelta, UsdcDelt
 /// than recording a bogus zero fill.
 fn adjust_taker_result(receipt: &TransactionReceipt) -> Result<AdjustTakerResult> {
     let (perp_delta, usd_delta) =
-        parse_taker_swap(receipt).ok_or(ContractError::EventNotFound {
+        parse_taker_swap(receipt)?.ok_or(ContractError::EventNotFound {
             event_name: "TakerAdjusted/TakerClosed".into(),
         })?;
     Ok(AdjustTakerResult {
@@ -287,17 +310,20 @@ fn check_opening_margin(margin: UsdcAtoms) -> std::result::Result<(), Validation
     Ok(())
 }
 
-/// Whether these logs carry the `TakerClosed` event for `pos_id`.
+/// Whether the logs of the transaction `tx_hash` carry the `TakerClosed`
+/// event for `pos_id`.
 ///
 /// A close whose swap leaves any perp delta mines as `TakerAdjusted`
 /// instead, with the position still open.
-fn closes_taker(logs: &[RpcLog], pos_id: U256) -> bool {
-    logs.iter().any(|log| {
-        matches!(
-            decode_log(log),
-            Ok(Some(MarketEvent::TakerClosed { pos_id: closed, .. })) if closed == pos_id
-        )
-    })
+///
+/// # Errors
+///
+/// [`TransactionError::ReceiptUndecodable`] when a vocabulary log will not
+/// decode; a close is then neither confirmed nor denied.
+fn closes_taker(logs: &[RpcLog], tx_hash: B256, pos_id: U256) -> Result<bool> {
+    Ok(transaction_events(logs, tx_hash)?.iter().any(|event| {
+        matches!(event, MarketEvent::TakerClosed { pos_id: closed, .. } if *closed == pos_id)
+    }))
 }
 
 /// Scale and validate position margin against the protocol's opening minimum.
@@ -374,7 +400,7 @@ impl PerpClient {
         // signals an ABI/decode problem, so fail loudly rather than recording a
         // bogus zero fill.
         let (perp_delta, usd_delta) =
-            parse_taker_swap(&receipt).ok_or(ContractError::EventNotFound {
+            parse_taker_swap(&receipt)?.ok_or(ContractError::EventNotFound {
                 event_name: "TakerOpened".into(),
             })?;
         tracing::debug!(pos_id = %pos_id, "taker position opened");
@@ -553,7 +579,7 @@ impl PerpClient {
             amt1_limit: UsdcAtoms::new(if perp_delta.atoms() > 0 { u128::MAX } else { 0 }),
         };
         let receipt = self.send_adjust_taker(&params, urgency).await?;
-        if !closes_taker(receipt.inner.logs(), pos_id) {
+        if !closes_taker(receipt.inner.logs(), receipt.transaction_hash, pos_id)? {
             return Err(TransactionError::TakerNotClosed {
                 tx_hash: receipt.transaction_hash,
                 pos_id,
@@ -941,6 +967,7 @@ mod tests {
     use crate::constants::Q96;
     use crate::contracts::{Perp, Position, SwapResult};
     use crate::convert::pack_balance_delta;
+    use crate::errors::{PerpCityError, TransactionError};
     use crate::events::rpc_log;
 
     #[test]
@@ -1034,14 +1061,66 @@ mod tests {
     fn only_a_taker_closed_event_for_the_position_is_a_close() {
         let pos_id = U256::from(1837u64);
         let perp = Address::repeat_byte(0x11);
+        let tx = B256::repeat_byte(0xab);
 
-        assert!(closes_taker(&[rpc_log(&closed(1837), perp)], pos_id));
-        assert!(!closes_taker(&[rpc_log(&adjusted(1837), perp)], pos_id));
+        assert!(closes_taker(&[rpc_log(&closed(1837), perp)], tx, pos_id).unwrap());
+        assert!(!closes_taker(&[rpc_log(&adjusted(1837), perp)], tx, pos_id).unwrap());
         assert!(
-            !closes_taker(&[rpc_log(&closed(1791), perp)], pos_id),
+            !closes_taker(&[rpc_log(&closed(1791), perp)], tx, pos_id).unwrap(),
             "another position's close does not close this one"
         );
-        assert!(!closes_taker(&[], pos_id));
+        assert!(!closes_taker(&[], tx, pos_id).unwrap());
+    }
+
+    /// The same log with its data cut short: a vocabulary topic the binding
+    /// cannot read.
+    fn truncated(mut log: alloy::rpc::types::Log) -> alloy::rpc::types::Log {
+        let topics = log.inner.data.topics().to_vec();
+        let data = log.inner.data.data.clone();
+        log.inner.data =
+            alloy::primitives::LogData::new_unchecked(topics, data[..32].to_vec().into());
+        log
+    }
+
+    /// A vocabulary log that will not decode is reported with the
+    /// transaction's hash, not hidden behind "no close found": the close
+    /// next to it did happen on chain.
+    #[test]
+    fn an_undecodable_vocabulary_log_is_an_error_that_names_the_transaction() {
+        let pos_id = U256::from(1837u64);
+        let perp = Address::repeat_byte(0x11);
+        let tx = B256::repeat_byte(0xab);
+        let logs = [
+            rpc_log(&closed(1837), perp),
+            truncated(rpc_log(&adjusted(1791), perp)),
+        ];
+
+        let err = closes_taker(&logs, tx, pos_id).unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                PerpCityError::Transaction(TransactionError::ReceiptUndecodable { tx_hash, context })
+                    if *tx_hash == tx && context.contains("TakerAdjusted")
+            ),
+            "got {err}"
+        );
+        assert_eq!(err.tx_hash(), Some(tx));
+    }
+
+    /// A log outside the crate's vocabulary is skipped, as the decoder
+    /// skips it; the close beside it still reads.
+    #[test]
+    fn a_log_outside_the_vocabulary_is_skipped() {
+        let pos_id = U256::from(1837u64);
+        let perp = Address::repeat_byte(0x11);
+        let tx = B256::repeat_byte(0xab);
+        let mut stray = rpc_log(&closed(1837), perp);
+        stray.inner.data = alloy::primitives::LogData::new_unchecked(
+            vec![B256::repeat_byte(0x5e)],
+            alloy::primitives::Bytes::from(vec![0u8; 7]),
+        );
+
+        assert!(closes_taker(&[stray, rpc_log(&closed(1837), perp)], tx, pos_id).unwrap());
     }
 
     #[test]
