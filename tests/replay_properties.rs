@@ -48,7 +48,7 @@ fn pos_id() -> impl Strategy<Value = U256> {
 }
 
 /// One of the events the fold reads, with the values a market could emit:
-/// the market's totals, the positions' lives, and the pool's book.
+/// the market's totals, the positions' lives, and the pool's liquidity.
 fn event() -> impl Strategy<Value = MarketEvent> {
     prop_oneof![
         (pos_id(), 1u64..1_000, 0u128..1_000_000).prop_map(|(pos_id, p, fee)| {

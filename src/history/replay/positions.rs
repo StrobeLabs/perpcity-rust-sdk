@@ -13,7 +13,8 @@ use crate::events::MarketEvent;
 use crate::math::range::{MakerBand, TickRange};
 use crate::units::{LDelta, LUnits, PerpDelta, Price};
 
-use super::tape::{ChainPoint, TapeEvent};
+use super::super::fold::{First, Fold, Latest};
+use super::super::tape::{ChainPoint, TapeEvent};
 
 /// What a position is, and what the tape has said about its size.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -45,13 +46,63 @@ pub enum PositionKind {
     },
 }
 
+impl PositionKind {
+    /// The earlier segment's kind is `self`; `later` saw the position after.
+    fn combine(self, later: Self, opened_here: bool) -> Self {
+        match (self, later) {
+            // A segment that learned nothing about what it is leaves the
+            // other's answer standing.
+            (kind, Self::Unknown) | (Self::Unknown, kind) => kind,
+            (
+                Self::Taker { moved, sized },
+                Self::Taker {
+                    moved: later_moved,
+                    sized: later_sized,
+                },
+            ) => Self::Taker {
+                moved: moved + later_moved,
+                sized: sized || later_sized,
+            },
+            (
+                Self::Maker {
+                    range,
+                    liquidity,
+                    deposit_pool_price,
+                },
+                Self::Maker {
+                    range: later_range,
+                    liquidity: later_liquidity,
+                    deposit_pool_price: later_deposit,
+                },
+            ) => Self::Maker {
+                range: range.or(later_range),
+                liquidity: LDelta::new(liquidity.units().wrapping_add(later_liquidity.units())),
+                // The deposit price is the open's: whichever segment saw
+                // the open knows it, and the other's is a later open the
+                // fold ignored.
+                deposit_pool_price: if opened_here {
+                    deposit_pool_price
+                } else {
+                    later_deposit
+                },
+            },
+            // The later segment saw the maker swap or convert, and knows
+            // only what moved since.
+            (Self::Maker { .. }, taker @ Self::Taker { .. }) => taker,
+            // A taker's liquidity changes are not its own; the fold ignores
+            // them, so the merge does too.
+            (taker @ Self::Taker { .. }, Self::Maker { .. }) => taker,
+        }
+    }
+}
+
 /// One position as the fold knows it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PositionState {
     kind: PositionKind,
-    opened: Option<ChainPoint>,
+    opened: First<ChainPoint>,
     last: ChainPoint,
-    closed: Option<ChainPoint>,
+    closed: First<ChainPoint>,
     liquidations: u32,
 }
 
@@ -64,7 +115,7 @@ impl PositionState {
     /// The event that opened it, if the fold saw it; `None` for a position
     /// first seen mid-life.
     pub fn opened(&self) -> Option<ChainPoint> {
-        self.opened
+        self.opened.get()
     }
 
     /// The last event that touched it.
@@ -74,12 +125,12 @@ impl PositionState {
 
     /// The event that closed it, once one has.
     pub fn closed(&self) -> Option<ChainPoint> {
-        self.closed
+        self.closed.get()
     }
 
     /// Whether no close has been seen.
     pub fn is_open(&self) -> bool {
-        self.closed.is_none()
+        !self.closed.is_set()
     }
 
     /// Liquidations the fold saw land on it, whole or partial.
@@ -110,7 +161,7 @@ impl PositionState {
         else {
             return None;
         };
-        self.opened?;
+        self.opened.get()?;
         let units = u128::try_from(liquidity.units()).ok()?;
         (units != 0).then(|| MakerBand::new(range, LUnits::new(units)))
     }
@@ -129,9 +180,9 @@ impl PositionState {
     fn first(at: ChainPoint) -> Self {
         Self {
             kind: PositionKind::Unknown,
-            opened: None,
+            opened: First::default(),
             last: at,
-            closed: None,
+            closed: First::default(),
             liquidations: 0,
         }
     }
@@ -184,10 +235,10 @@ impl PositionState {
                 deposit_pool_price: None,
             };
         }
-        if self.opened.is_some() {
+        if self.opened.is_set() {
             return;
         }
-        self.opened = Some(at);
+        self.opened.set(at);
         if let PositionKind::Maker {
             deposit_pool_price, ..
         } = &mut self.kind
@@ -199,7 +250,7 @@ impl PositionState {
     /// A segment that saw the open before any swap of its own did not know
     /// the price then; the segment before it did, as its last price.
     fn deposit_priced_at(&mut self, price_at_cut: Option<Price>) {
-        if self.opened.is_none() {
+        if !self.opened.is_set() {
             return;
         }
         if let PositionKind::Maker {
@@ -223,64 +274,23 @@ impl PositionState {
     }
 
     /// The earlier segment is `self`; `later` saw the same position after.
-    /// Every field is a sum, a first occurrence or a latest, so the merge
-    /// equals the fold of the two segments' events in order.
     fn combine(&mut self, later: Self) {
-        // The deposit price is the open's: whichever segment saw the open
-        // knows it, and the other's is a later open the fold ignored.
-        let opened_here = self.opened.is_some();
+        self.kind = self.kind.combine(later.kind, self.opened.is_set());
+        self.opened.combine(later.opened);
+        self.closed.combine(later.closed);
         self.last = later.last;
-        self.opened = self.opened.or(later.opened);
-        self.closed = self.closed.or(later.closed);
         self.liquidations += later.liquidations;
-        self.kind = match (self.kind, later.kind) {
-            // A segment that learned nothing about what it is leaves the
-            // other's answer standing.
-            (kind, PositionKind::Unknown) | (PositionKind::Unknown, kind) => kind,
-            (
-                PositionKind::Taker { moved, sized },
-                PositionKind::Taker {
-                    moved: later_moved,
-                    sized: later_sized,
-                },
-            ) => PositionKind::Taker {
-                moved: moved + later_moved,
-                sized: sized || later_sized,
-            },
-            (
-                PositionKind::Maker {
-                    range,
-                    liquidity,
-                    deposit_pool_price,
-                },
-                PositionKind::Maker {
-                    range: later_range,
-                    liquidity: later_liquidity,
-                    deposit_pool_price: later_deposit,
-                },
-            ) => PositionKind::Maker {
-                range: range.or(later_range),
-                liquidity: LDelta::new(liquidity.units().wrapping_add(later_liquidity.units())),
-                deposit_pool_price: if opened_here {
-                    deposit_pool_price
-                } else {
-                    later_deposit
-                },
-            },
-            // The later segment saw the maker swap or convert, and knows
-            // only what moved since.
-            (PositionKind::Maker { .. }, taker @ PositionKind::Taker { .. }) => taker,
-            // A taker's liquidity changes are not its own; the fold ignores
-            // them, so the merge does too.
-            (taker @ PositionKind::Taker { .. }, PositionKind::Maker { .. }) => taker,
-        };
     }
 }
 
 /// Every position the tape has mentioned, by id.
+///
+/// The fold watches the swaps for the pool price too, since a maker's
+/// deposit is classified at the price standing when it opens.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Positions {
     by_id: BTreeMap<U256, PositionState>,
+    pool_price: Latest<Price>,
 }
 
 impl Positions {
@@ -309,11 +319,23 @@ impl Positions {
         self.by_id.is_empty()
     }
 
-    /// Apply one event; `pool_price` is the fold's price at that event,
-    /// which a deposit is classified at. A position's first sight is
-    /// [`PositionKind::Unknown`] until an event says what it is, so a
-    /// segment records what it learned and never what it assumed.
-    pub(super) fn apply(&mut self, event: &TapeEvent, pool_price: Option<Price>) {
+    /// The position's state, of unknown kind if this is the fold's first
+    /// sight of it, touched at `at`.
+    fn touch(&mut self, pos_id: U256, at: ChainPoint) -> &mut PositionState {
+        let state = self
+            .by_id
+            .entry(pos_id)
+            .or_insert_with(|| PositionState::first(at));
+        state.last = at;
+        state
+    }
+}
+
+impl Fold for Positions {
+    /// A position's first sight is [`PositionKind::Unknown`] until an event
+    /// says what it is, so a segment records what it learned and never what
+    /// it assumed.
+    fn apply(&mut self, event: &TapeEvent) {
         let at = event.point();
         match event.event {
             MarketEvent::ModifyLiquidity {
@@ -324,15 +346,16 @@ impl Positions {
                 ..
             } => {
                 let range = TickRange::new(tick_lower, tick_upper).ok();
-                let state = self.touch(U256::from_be_bytes(salt.0), at);
-                state.liquidity_changed(range, liquidity_delta);
+                self.touch(U256::from_be_bytes(salt.0), at)
+                    .liquidity_changed(range, liquidity_delta);
             }
             MarketEvent::MakerOpened { pos_id } => {
-                let state = self.touch(pos_id, at);
-                state.maker_opened(at, pool_price);
+                let pool_price = self.pool_price.get();
+                self.touch(pos_id, at).maker_opened(at, pool_price);
             }
             MarketEvent::MakerAdjusted { pos_id, .. }
-            | MarketEvent::MakerBackstopped { pos_id, .. } => {
+            | MarketEvent::MakerBackstopped { pos_id, .. }
+            | MarketEvent::TakerBackstopped { pos_id, .. } => {
                 self.touch(pos_id, at);
             }
             MarketEvent::MakerConverted {
@@ -350,25 +373,22 @@ impl Positions {
                 ..
             } => {
                 let state = self.touch(pos_id, at);
-                state.closed.get_or_insert(at);
+                state.closed.set(at);
                 state.liquidations += u32::from(is_liquidation);
             }
-            MarketEvent::MakerLiquidated { pos_id, .. } => {
-                let state = self.touch(pos_id, at);
-                state.liquidations += 1;
-            }
-            MarketEvent::TakerLiquidated { pos_id, .. } => {
-                let state = self.touch(pos_id, at);
-                state.liquidations += 1;
+            MarketEvent::MakerLiquidated { pos_id, .. }
+            | MarketEvent::TakerLiquidated { pos_id, .. } => {
+                self.touch(pos_id, at).liquidations += 1;
             }
             MarketEvent::TakerOpened { pos_id, swap } => {
+                self.pool_price.set(swap.pool_price);
                 let state = self.touch(pos_id, at);
                 state.swapped(swap.perp_delta, true);
-                state.opened.get_or_insert(at);
+                state.opened.set(at);
             }
             MarketEvent::TakerAdjusted { pos_id, swap, .. } => {
-                let state = self.touch(pos_id, at);
-                state.swapped(swap.perp_delta, false);
+                self.pool_price.set(swap.pool_price);
+                self.touch(pos_id, at).swapped(swap.perp_delta, false);
             }
             MarketEvent::TakerClosed {
                 pos_id,
@@ -376,43 +396,29 @@ impl Positions {
                 is_liquidation,
                 ..
             } => {
+                self.pool_price.set(swap.pool_price);
                 let state = self.touch(pos_id, at);
                 state.swapped(swap.perp_delta, false);
-                state.closed.get_or_insert(at);
+                state.closed.set(at);
                 state.liquidations += u32::from(is_liquidation);
-            }
-            MarketEvent::TakerBackstopped { pos_id, .. } => {
-                self.touch(pos_id, at);
             }
             _ => {}
         }
     }
 
-    /// Merge the segment that follows; `price_at_cut` is the earlier
-    /// segment's last pool price, which an open in the later segment before
-    /// any swap of its own was classified at.
-    pub(super) fn combine(&mut self, later: Self, price_at_cut: Option<Price>) {
+    fn combine(&mut self, later: Self) {
+        // An open the later segment saw before any swap of its own was
+        // classified at this segment's last price.
+        let price_at_cut = self.pool_price.get();
         for (pos_id, mut state) in later.by_id {
             state.deposit_priced_at(price_at_cut);
             match self.by_id.entry(pos_id) {
                 Entry::Vacant(slot) => {
                     slot.insert(state);
                 }
-                Entry::Occupied(mut slot) => {
-                    slot.get_mut().combine(state);
-                }
+                Entry::Occupied(mut slot) => slot.get_mut().combine(state),
             }
         }
-    }
-
-    /// The position's state, of unknown kind if this is the fold's first
-    /// sight of it, touched at `at`.
-    fn touch(&mut self, pos_id: U256, at: ChainPoint) -> &mut PositionState {
-        let state = self
-            .by_id
-            .entry(pos_id)
-            .or_insert_with(|| PositionState::first(at));
-        state.last = at;
-        state
+        self.pool_price.combine(later.pool_price);
     }
 }

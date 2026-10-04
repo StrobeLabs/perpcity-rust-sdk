@@ -14,7 +14,7 @@
 //! and never a wallet, so that fold is how a market's activity is
 //! attributed to the addresses behind it. A market's state has two more
 //! sources, at other addresses: its index, [`MarketEvent::IndexUpdated`]
-//! from the beacon, and its book, [`MarketEvent::ModifyLiquidity`] from
+//! from the beacon, and its liquidity, [`MarketEvent::ModifyLiquidity`] from
 //! the PoolManager, which logs every perp pool's liquidity change under
 //! the pool's id. [`market_tape`] reads all three in one chain order, so a
 //! fold that rebuilds the market from its events has everything the chain
@@ -125,7 +125,7 @@ impl TapeEvent {
 /// The three addresses a market's tape is read from.
 ///
 /// A market's events come from its own contract; its index from the
-/// beacon it is configured with; its book from the shared PoolManager,
+/// beacon it is configured with; its liquidity from the shared PoolManager,
 /// which logs every pool's liquidity under the pool's id. The client knows
 /// all three ([`MarketReader::tape_addresses`](crate::MarketReader::tape_addresses));
 /// the handle only needs to be told.
@@ -340,13 +340,15 @@ pub(super) async fn market_tape_with<P: Provider>(
     widths: &SharedWidths,
     in_flight: usize,
 ) -> Result<Vec<TapeEvent>> {
-    let (market, book) = tape_filters(addresses)?;
-    let (market_logs, book_logs) = futures_util::try_join!(
+    let (market, liquidity) = tape_filters(addresses)?;
+    let (market_logs, liquidity_logs) = futures_util::try_join!(
         scan_all(provider, &market, from_block, to_block, widths, in_flight),
-        scan_all(provider, &book, from_block, to_block, widths, in_flight),
+        scan_all(
+            provider, &liquidity, from_block, to_block, widths, in_flight
+        ),
     )?;
     let mut decoded = decode_known(market_logs, widths);
-    decoded.extend(decode_known(book_logs, widths));
+    decoded.extend(decode_known(liquidity_logs, widths));
     decoded.sort_by_key(|(log, _)| (log.block_number, log.log_index));
     tape_rows(provider, decoded).await
 }
@@ -439,11 +441,11 @@ fn tape_filters(addresses: TapeAddresses) -> StdResult<(Filter, Filter), Validat
         }
     }
     let market = Filter::new().address(vec![perp, beacon]);
-    let book = Filter::new()
+    let liquidity = Filter::new()
         .address(pool_manager)
         .event_signature(IPoolManagerState::ModifyLiquidity::SIGNATURE_HASH)
         .topic1(pool_id);
-    Ok((market, book))
+    Ok((market, liquidity))
 }
 
 /// Decodes the logs this vocabulary recognizes, each kept with its log.

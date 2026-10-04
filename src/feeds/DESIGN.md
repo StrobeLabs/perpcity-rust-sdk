@@ -159,12 +159,12 @@ pays per refresh instead.
   builds.** The perp and its beacon are one subscription; the PoolManager's
   liquidity changes for the market's pool, which `History::market_tape`
   carries, are not on the feed, so a fold that follows the feed after
-  reading the tape misses the book. Putting them on the feed is either a
+  reading the tape misses the pool's liquidity. Putting them on the feed is either a
   second subscription, whose logs interleave with the first's inside a
   block and must be merged into chain order against a block watermark, or
   one subscription to the whole PoolManager, which is every pool on the
   chain and is billed as such. Neither is built: the next contracts emit a
   band's range, liquidity and every change to it on the perp's own events,
   so after the cutover the feed's two addresses are the tape's two and the
-  gap closes by itself. Until then a fold that needs the book live follows
-  the lagged tail through the handle.
+  gap closes by itself. Until then a fold that needs the pool's liquidity
+  live follows the lagged tail through the handle.
