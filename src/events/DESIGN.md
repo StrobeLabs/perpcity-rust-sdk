@@ -26,15 +26,17 @@ stream and on a stored tape. That holds only if both produce identical
 values from identical logs, which holds only if there is one decoder. The
 feed and the history never interpret a log themselves.
 
-**Every era's logs are on chain forever.** Calls target the deployed
+**A served era's logs stay decodable.** Calls target the deployed
 contracts, but a scan from a market's deploy block will meet every event
 shape that market ever emitted, and a scan over many markets meets both
-live builds. So the decoder knows every shape that was ever live, and a
-shape that lacks a field its sibling carries decodes to the same variant
+live builds. So the decoder knows every shape of every era it serves, and
+a shape that lacks a field its sibling carries decodes to the same variant
 with that field defaulted: `v0.2.2`'s `TakerClosed` has no liquidation
 tails, so it reads as a voluntary close and the `TakerLiquidated` after
-it says otherwise. This is the one place the era rule bends, and it bends
-on purpose.
+it says otherwise. Which eras are served is the root's rule: the audited
+builds for the crate's life, the beta builds before them only while live,
+so the tailed and untailed shapes here are deleted at the cutover rather
+than kept.
 
 **The vocabulary is exact, and the human view is a method.** A consumer
 used to read `swap.usd_delta` as dollars because the decoder had already
@@ -187,7 +189,7 @@ one kind may.
 - **Fee legs**: the LP, protocol, creator and insurance shares of a swap's
   fee, carried exactly.
 - **Era**: a contract version's event shapes; the decoder knows every era
-  a market emitted in.
+  it serves, which the root's rule names.
 - **Unknown**: a log that is not the market's vocabulary; skipped, never
   guessed.
 
