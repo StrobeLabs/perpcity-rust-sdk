@@ -1357,6 +1357,8 @@ mod tests {
     const PERP: Address = Address::repeat_byte(0x11);
     const OTHER_PERP: Address = Address::repeat_byte(0x22);
 
+    /// A swap of 100 perp atoms for 100 USDC atoms at a Q96 price of one,
+    /// with no fees: the fill every test close carries.
     fn flat_swap() -> SwapResult {
         SwapResult {
             delta: pack_balance_delta(-100_000_000, 100_000_000),
@@ -1369,6 +1371,7 @@ mod tests {
         }
     }
 
+    /// `v0.2.2`'s untailed `TakerClosed` for `pos_id` on [`PERP`].
     fn v022_taker_closed(pos_id: u64) -> RpcLog {
         rpc_log(
             &PerpV022::TakerClosed {
@@ -1381,6 +1384,8 @@ mod tests {
         )
     }
 
+    /// A `TakerAdjusted` for `pos_id` on [`PERP`]: the event a partial
+    /// liquidation emits before its `TakerLiquidated`.
     fn taker_adjusted(pos_id: u64) -> RpcLog {
         rpc_log(
             &Perp::TakerAdjusted {
@@ -1393,6 +1398,8 @@ mod tests {
         )
     }
 
+    /// `TakerLiquidated` for `pos_id` settling `fee` atoms, emitted by
+    /// `address` so a test can place it on another market.
     fn taker_liquidated(pos_id: u64, fee: u64, address: Address) -> RpcLog {
         rpc_log(
             &Perp::TakerLiquidated {
@@ -1404,6 +1411,7 @@ mod tests {
         )
     }
 
+    /// The untailed `MakerClosed` for `pos_id` on [`PERP`].
     fn untailed_maker_closed(pos_id: u64) -> RpcLog {
         rpc_log(
             &Perp::MakerClosed {
@@ -1417,6 +1425,7 @@ mod tests {
         )
     }
 
+    /// The untailed `MakerConverted` for `pos_id` on [`PERP`].
     fn untailed_maker_converted(pos_id: u64) -> RpcLog {
         rpc_log(
             &Perp::MakerConverted {
@@ -1430,6 +1439,7 @@ mod tests {
         )
     }
 
+    /// `MakerLiquidated` for `pos_id` on [`PERP`] settling `fee` atoms.
     fn maker_liquidated(pos_id: u64, fee: u64) -> RpcLog {
         rpc_log(
             &Perp::MakerLiquidated {
@@ -1441,6 +1451,8 @@ mod tests {
         )
     }
 
+    /// Build `58b42b7`'s tailed `TakerClosed` for `pos_id` on [`PERP`],
+    /// carrying `fee` and `is_liquidation` in the event itself.
     fn tailed_taker_closed(pos_id: u64, fee: u64, is_liquidation: bool) -> RpcLog {
         rpc_log(
             &Perp::TakerClosed {
@@ -1480,6 +1492,7 @@ mod tests {
         }
     }
 
+    /// A `v0.2.2` taker liquidation reads as one close with its tails set.
     #[test]
     fn a_v022_taker_liquidation_pairs_into_its_close() {
         let events =
@@ -1488,6 +1501,8 @@ mod tests {
         assert_eq!(tails(&events), (1_250_000, true));
     }
 
+    /// A `v0.2.2` maker liquidation pairs into the close or the conversion,
+    /// whichever the contract emitted.
     #[test]
     fn a_v022_maker_liquidation_pairs_into_its_close_or_conversion() {
         let closed =
@@ -1501,12 +1516,15 @@ mod tests {
         assert_eq!(tails(&converted), (800_000, true));
     }
 
+    /// Without a `*Liquidated` after it, a `v0.2.2` close is voluntary.
     #[test]
     fn a_v022_close_with_no_liquidated_log_stays_voluntary() {
         let events = decode_transaction_logs(&[v022_taker_closed(7)]).unwrap();
         assert_eq!(tails(&events), (0, false));
     }
 
+    /// A `*Liquidated` for another position, another market or the other
+    /// book stays its own event and leaves the close voluntary.
     #[test]
     fn a_liquidated_log_for_another_position_or_market_does_not_pair() {
         for stray in [
@@ -1520,6 +1538,8 @@ mod tests {
         }
     }
 
+    /// Pairing only looks forward: a `*Liquidated` before the close is not
+    /// its tail.
     #[test]
     fn a_liquidated_log_before_the_close_does_not_pair() {
         let events =
@@ -1529,6 +1549,8 @@ mod tests {
         assert_eq!(tails(&events[1..]), (0, false));
     }
 
+    /// A partial liquidation follows an adjust, which carries no tails, so
+    /// its `*Liquidated` stays in the output.
     #[test]
     fn a_partial_liquidation_keeps_its_liquidated_event() {
         let events =
@@ -1543,6 +1565,8 @@ mod tests {
         ));
     }
 
+    /// A `58b42b7` close already carries its tails: it pairs with nothing
+    /// and reads as decoded.
     #[test]
     fn a_tailed_close_is_left_as_decoded() {
         let events = decode_transaction_logs(&[
@@ -1557,6 +1581,8 @@ mod tests {
         assert_eq!(tails(&events), (1_250_000, true));
     }
 
+    /// Each close pairs with the first `*Liquidated` after it, so two
+    /// liquidations in one transaction keep their own fees.
     #[test]
     fn two_liquidations_in_one_transaction_pair_in_order() {
         let events = decode_transaction_logs(&[
