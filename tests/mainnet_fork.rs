@@ -20,11 +20,11 @@ use alloy::sol_types::{SolCall, SolValue};
 use perpcity_sdk::constants::SNAPSHOT_BLOCK_LAG;
 use perpcity_sdk::contracts::{Modules, Perp, PerpFactory};
 use perpcity_sdk::math::liquidity::estimate_liquidity;
-use perpcity_sdk::math::tick::{align_tick_down, align_tick_up, price_to_tick};
 use perpcity_sdk::{
     ARBITRUM_CHAIN_ID, ARBITRUM_POOL_MANAGER, ARBITRUM_USDC, ChainDeployments, ChainReader,
-    ExactOpenTakerParams, HftTransport, MakerEquityKind, OpenMakerParams, PerpCityError,
-    PerpClient, TickRange, TransactionError, TransportConfig, Urgency, UsdcAtoms, constants,
+    ExactOpenMakerParams, ExactOpenTakerParams, HftTransport, MakerEquityKind, PerpAtoms,
+    PerpCityError, PerpClient, PerpDelta, TickRange, TransactionError, TransportConfig, Urgency,
+    UsdcAtoms,
 };
 
 sol! {
@@ -292,9 +292,9 @@ async fn v022_market_reads_trades_and_liquidation_probes() {
     let (config, snapshot) = client.market().get_snapshot().await.unwrap();
     println!("snapshot: {snapshot:?}");
     assert_eq!(config.perp, perp);
-    assert!(snapshot.index_price > 0.0);
-    assert!(snapshot.emas.amm_price > 0.0 && snapshot.emas.index > 0.0);
-    assert!((snapshot.pool_price - config.pool_price).abs() < 1e-9);
+    assert!(snapshot.index_price.x96() > U256::ZERO);
+    assert!(snapshot.emas.amm_price.x96() > U256::ZERO && snapshot.emas.index.x96() > U256::ZERO);
+    assert_eq!(snapshot.pool_price, config.pool_price);
 
     // 3. The pool reads through the hook: `extsload` sees the guarded pool.
     let pool = client.market().state().await.unwrap().pool().await.unwrap();
@@ -305,31 +305,19 @@ async fn v022_market_reads_trades_and_liquidation_probes() {
 
     // 4. A maker band, then a taker against it.
     let pool_price = snapshot.pool_price;
-    let tick_lower = align_tick_down(
-        price_to_tick(pool_price * 0.8).unwrap(),
-        constants::TICK_SPACING,
-    );
-    let tick_upper = align_tick_up(
-        price_to_tick(pool_price * 1.25).unwrap(),
-        constants::TICK_SPACING,
-    );
-    let margin = 5_000.0;
-    let liquidity = estimate_liquidity(
-        &TickRange::new(tick_lower, tick_upper).unwrap(),
-        UsdcAtoms::try_from(margin).unwrap(),
-    )
-    .unwrap();
+    let range = TickRange::between(pool_price * 0.8, pool_price * 1.25).unwrap();
+    let margin = UsdcAtoms::try_from(5_000.0).unwrap();
+    let liquidity = estimate_liquidity(&range, margin).unwrap();
     // The fee cache is short-lived by design; refresh it before each send.
     client.chain().refresh_gas().await.unwrap();
     let maker = client
-        .open_maker(
-            &OpenMakerParams {
+        .open_maker_exact(
+            &ExactOpenMakerParams {
                 margin,
-                price_lower: pool_price * 0.8,
-                price_upper: pool_price * 1.25,
+                range,
                 liquidity,
-                max_amt0_in: u128::MAX,
-                max_amt1_in: u128::MAX,
+                max_amt0_in: PerpAtoms::new(u128::MAX),
+                max_amt1_in: UsdcAtoms::new(u128::MAX),
             },
             Urgency::Normal,
         )
@@ -351,9 +339,9 @@ async fn v022_market_reads_trades_and_liquidation_probes() {
     let taker = client
         .open_taker_exact(
             &ExactOpenTakerParams {
-                margin: 100_000_000,
-                perp_delta: 10_000_000,
-                amt1_limit: u128::MAX,
+                margin: UsdcAtoms::new(100_000_000),
+                perp_delta: PerpDelta::new(10_000_000),
+                amt1_limit: UsdcAtoms::new(u128::MAX),
             },
             Urgency::Normal,
         )
