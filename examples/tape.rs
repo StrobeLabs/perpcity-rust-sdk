@@ -8,11 +8,14 @@
 //! ```bash
 //! export RPC_URL="https://sepolia-rollup.arbitrum.io/rpc"
 //! export PERPCITY_PERP="0x..."
-//! export PERPCITY_TAPE_LIMIT=50   # optional, default 50
+//! export PERPCITY_TAPE_LIMIT=50        # optional, default 50
+//! export PERPCITY_TAPE_FROM=486214447  # optional: the whole tape from this block instead
+//! export PERPCITY_TAPE_OUT=hormuz.json # optional: write the rows as JSON (the history benchmark reads one)
 //! cargo run --release --example tape
 //! ```
 
 use std::env;
+use std::fs;
 
 use alloy::primitives::Address;
 use alloy::providers::ProviderBuilder;
@@ -40,13 +43,26 @@ async fn main() -> perpcity_sdk::Result<()> {
     // provider's learned eth_getLogs width across calls.
     let history = History::new(provider);
 
-    let tape = history.latest_market_events(perp, 0, None, limit).await?;
-    println!("newest {} market events of {perp}:", tape.len());
-    for row in &tape {
+    // Newest-first for a look at the market; from a block for the whole
+    // tape, which is what a fold or the history benchmark wants.
+    let from: Option<u64> = env::var("PERPCITY_TAPE_FROM")
+        .ok()
+        .and_then(|raw| raw.parse().ok());
+    let tape = match from {
+        Some(from) => history.market_events(perp, from, None).await?,
+        None => history.latest_market_events(perp, 0, None, limit).await?,
+    };
+    println!("{} market events of {perp}:", tape.len());
+    for row in tape.iter().take(limit) {
         println!(
             "  block {:>12} log {:>3} ts {:>10}  {:?}",
             row.block_number, row.log_index, row.timestamp, row.event
         );
+    }
+    if let Ok(path) = env::var("PERPCITY_TAPE_OUT") {
+        let json = serde_json::to_string(&tape).expect("a tape serializes");
+        fs::write(&path, json).expect("the tape file is writable");
+        println!("wrote {} rows to {path}", tape.len());
     }
 
     // The tape carries ownership: a position NFT is minted to its owner,

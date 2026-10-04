@@ -40,7 +40,7 @@ const HEADER_READ_CONCURRENCY: usize = 4;
 ///
 /// [`ContractError::BlockUnavailable`] for a header the provider does not
 /// hold, or the transport error from a header read.
-pub(super) async fn block_timestamps<'a, P: Provider>(
+pub(crate) async fn block_timestamps<'a, P: Provider>(
     provider: &P,
     logs: impl Iterator<Item = &'a Log>,
 ) -> Result<HashMap<u64, u64>> {

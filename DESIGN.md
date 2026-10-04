@@ -51,8 +51,11 @@ the contracts repository's head. When they disagree the chain wins and the
 fix goes in the binding, locked by an ABI test with the on-chain evidence
 beside it. Two builds are deployed, and a market's build is a fact read
 once from its pool key; where the two differ the client chooses by it.
-Events are the one exception, since logs from an earlier era are on chain
-forever and must stay decodable.
+Events from the first audited deployment onward stay decodable for as long
+as the crate exists, because a market's history is a fold over them and
+anyone with the crate should be able to take it. The beta builds before it
+are development history: served while they are live, deleted at the
+cutover, and kept as tapes recorded before it.
 
 **A read has a block.** A value from the chain is a fact about one block,
 and two values that must agree must come from the same one. The crate
@@ -159,10 +162,13 @@ pipeline owns rather than a race with the node.
 
 **Eras.** Two deployed builds are live, `58b42b7` and
 `v0.2.2-upgradeable`, and a market is one of them for life; the contracts
-repository's main branch is the next. Calls target only what is deployed,
-by the market's era where the builds differ. Events from every era that
-emitted them stay decodable. A cutover replaces the eras wholesale and
-deletes the compensation they needed.
+repository's main branch is the next, and the first the crate promises to
+keep decodable. Calls target only what is deployed, by the market's era
+where the builds differ. The cutover to the audited build replaces both
+live eras wholesale: their bindings, their event shapes and the
+compensation they needed are deleted, not gated, and their markets'
+histories live on as recorded tapes, readable by the release that
+recorded them.
 
 ## The type system
 
@@ -185,8 +191,8 @@ that carries it, the invariant it holds, and the node that owns it.
 | A settle previewed | [`MakerEquityBreakdown`](src/math/maker_equity.rs#L177) | exact atoms, the contract's arithmetic | [`math::maker_equity`](src/math/maker_equity.rs#L1) |
 | A block | [`BlockContext`](src/math/mod.rs#L51) | number, hash, timestamp of one header | [`math`](src/math/DESIGN.md) |
 | An event | [`MarketEvent`](src/events.rs#L137) | the market's vocabulary, human units, either tense | [`events`](src/events/DESIGN.md) |
-| An event in chain order | [`TapeEvent`](src/history/tape.rs#L56), [`ChainPoint`](src/history/tape.rs#L47) | block and log index | [`history`](src/history/DESIGN.md) |
-| Custody over time | [`OwnershipLog`](src/history/tape.rs#L100) | a fold of transfers; owner at a chain point | [`history`](src/history/DESIGN.md) |
+| An event in chain order | [`TapeEvent`](src/history/tape.rs#L62), [`ChainPoint`](src/history/tape.rs#L53) | block and log index | [`history`](src/history/DESIGN.md) |
+| Custody over time | [`OwnershipLog`](src/history/tape.rs#L164) | a fold of transfers; owner at a chain point | [`history`](src/history/DESIGN.md) |
 | A print | [`IndexPrint`](src/history/beacon.rs#L20) | the index at a chain point and time | [`history`](src/history/DESIGN.md) |
 | A failure | [`PerpCityError`](src/errors/mod.rs#L45) | typed, with a stated transience | [`errors`](src/errors/DESIGN.md) |
 | A transport | [`HftTransport`](src/transport/provider.rs#L523) | many endpoints, one provider, reads and writes classified | [`transport`](src/transport/DESIGN.md) |
@@ -452,8 +458,9 @@ these are the ones every node uses.
 - **Feed, tape**: the two tenses of events. A **print** is a beacon
   update; a **chain point** is a block and log index.
 - **Transient**: a failure a retry can fix. The variant says.
-- **Era**: a contract version whose logs are on chain forever; a market's
-  era is the build it was created on.
+- **Era**: a contract build and the event shapes it emits; a market's era
+  is the build it was created on. The audited builds stay decodable for
+  the crate's life; the beta builds before them only while live.
 
 ## Accepted structure
 

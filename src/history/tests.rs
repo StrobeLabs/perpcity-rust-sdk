@@ -792,6 +792,111 @@ async fn latest_market_events_counts_events_not_skipped_logs() {
     assert_eq!(blocks, vec![8, 10], "newest two events, oldest first");
 }
 
+const POOL_MANAGER: Address = Address::repeat_byte(0x9A);
+const POOL_ID: B256 = B256::repeat_byte(0x77);
+
+fn addresses() -> TapeAddresses {
+    TapeAddresses {
+        perp: PERP,
+        beacon: BEACON,
+        pool_manager: POOL_MANAGER,
+        pool_id: POOL_ID,
+    }
+}
+
+fn liquidity_change(pool_id: B256, pos_id: u64, delta: i128) -> IPoolManagerState::ModifyLiquidity {
+    IPoolManagerState::ModifyLiquidity {
+        id: pool_id,
+        sender: PERP,
+        tickLower: alloy::primitives::Signed::<24, 1>::try_from(-60).unwrap(),
+        tickUpper: alloy::primitives::Signed::<24, 1>::try_from(60).unwrap(),
+        liquidityDelta: alloy::primitives::I256::try_from(delta).unwrap(),
+        salt: B256::from(U256::from(pos_id)),
+    }
+}
+
+/// The market's tape reads three addresses in one chain order: the perp's
+/// own events, the beacon's prints, and the PoolManager's liquidity changes
+/// for this pool and no other. Every row carries its block hash.
+#[tokio::test]
+async fn the_market_tape_reads_three_addresses_in_one_chain_order() {
+    let other_pool = B256::repeat_byte(0x78);
+    let logs = vec![
+        mined_event_log(&taker_opened(1), PERP, 10, 0, Some(41)),
+        mined_event_log(
+            &IBeacon::IndexUpdated {
+                index: Q96 * U256::from(3),
+            },
+            BEACON,
+            10,
+            1,
+            Some(41),
+        ),
+        // The PoolManager logs every pool; only this market's pool belongs
+        // on its tape.
+        mined_event_log(
+            &liquidity_change(other_pool, 5, 1_000),
+            POOL_MANAGER,
+            12,
+            0,
+            Some(42),
+        ),
+        mined_event_log(
+            &liquidity_change(POOL_ID, 7, 1_000),
+            POOL_MANAGER,
+            12,
+            1,
+            Some(42),
+        ),
+        mined_event_log(&taker_opened(2), PERP, 20, 0, None),
+    ];
+    let node = FakeNode::new(logs, u64::MAX);
+    let history = History::new(node.provider());
+
+    let tape = history
+        .market_tape(addresses(), 0, Some(100))
+        .await
+        .unwrap();
+
+    let points: Vec<(u64, u64)> = tape.iter().map(|t| (t.block_number, t.log_index)).collect();
+    assert_eq!(points, vec![(10, 0), (10, 1), (12, 1), (20, 0)], "{tape:?}");
+    assert!(matches!(tape[0].event, MarketEvent::TakerOpened { .. }));
+    assert!(matches!(
+        tape[1].event,
+        MarketEvent::IndexUpdated { index } if index == Price::from_x96(Q96 * U256::from(3))
+    ));
+    assert!(matches!(
+        tape[2].event,
+        MarketEvent::ModifyLiquidity { pool_id, salt, .. }
+            if pool_id == POOL_ID && salt == B256::from(U256::from(7))
+    ));
+    assert!(
+        tape.iter().all(|t| t.block_hash == B256::with_last_byte(1)),
+        "every row carries the block hash its log came with"
+    );
+    assert_eq!(tape[3].timestamp, timestamp_of(20));
+    assert_eq!(
+        node.header_reads(),
+        vec![20],
+        "one header read, shared by both scans"
+    );
+}
+
+#[tokio::test]
+async fn a_tape_with_a_zero_address_reads_nothing() {
+    let node = FakeNode::new(Vec::new(), u64::MAX);
+    let mut addresses = addresses();
+    addresses.pool_manager = Address::ZERO;
+    let error = market_tape(&node.provider(), addresses, 0, 10)
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        PerpCityError::Validation(ValidationError::InvalidConfig { .. })
+    ));
+    assert!(node.requests().is_empty());
+}
+
 #[tokio::test]
 async fn a_zero_perp_reads_no_tape() {
     let node = FakeNode::new(Vec::new(), u64::MAX);

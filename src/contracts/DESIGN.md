@@ -41,11 +41,15 @@ EMAs are a view on one and a storage slot on both, so the slot is what
 the SDK reads. `PerpV022` holds what only the newer build has. Nothing
 above the client chooses by era; the client does, once per call shape.
 
-**Events are the era exception.** A market's early logs were emitted by
-an earlier version, and they are on chain forever. So the event bindings
-include every shape a live market has emitted, `PerpDeployedEvents` for
-the tailed maker closes of `58b42b7` and `PerpV022::TakerClosed` for the
-untailed taker close of `v0.2.2`, and the decoder recognises each.
+**Events are the era exception, for the eras the crate serves.** A
+market's early logs were emitted by an earlier version, so the event
+bindings include every shape a live market has emitted,
+`PerpDeployedEvents` for the tailed maker closes of `58b42b7` and
+`PerpV022::TakerClosed` for the untailed taker close of `v0.2.2`, and the
+decoder recognises each. Both are beta builds, served only while live: the
+cutover to the audited build deletes them with the rest of its
+compensation, and from that build on the event bindings are kept for the
+crate's life.
 
 **A slot is a layout fact, locked by an outcome.** A storage slot is
 derived by the Solidity mapping rule from a base slot and an offset, and

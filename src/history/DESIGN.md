@@ -85,14 +85,15 @@ state.
 
 | Type | Invariant | Produced by | Consumed by |
 |---|---|---|---|
-| [`History`](mod.rs#L115) | the scanning handle over a provider: learned width across scans; a block lag; bounded in-flight windows; cumulative stats | [`History::new`](mod.rs#L126) over any provider; [`ChainReader::history`](../client/DESIGN.md), the one handle a chain reader keeps so its scans share one learned width | nothing takes it; its reads produce the series below. The strategy layer's research sources take a reference to one so a whole run pays the width search once. |
-| [`ChainPoint`](tape.rs#L47) | where an event sits: block number and log index; the total order events are joined on | [`TapeEvent::point`](tape.rs#L71) | [`OwnershipLog::owner_at`](tape.rs#L136), custody at that point. The strategy layer's joins, a print against the fills after it, are on this key, which is why it is a type and not two fields. |
-| [`TapeEvent`](tape.rs#L56) | a [`MarketEvent`](../events/DESIGN.md) at a chain point: the same vocabulary as the feed, plus its position and timestamp | [`History::market_events`](mod.rs#L247) and [`History::latest_market_events`](mod.rs#L270), and their handle-less twins | [`OwnershipLog::fold`](tape.rs#L112). The strategy layer's economics, classification and series are folds over a slice of these; every fold that depends on order can assert it. |
-| [`OwnershipLog`](tape.rs#L100) | custody over time: a fold of transfers in chain order; owner at a point, not merely latest | [`OwnershipLog::fold`](tape.rs#L112) over the tape | nothing in the crate. The strategy layer's attribution, which asks who held a position when a trade happened, not who holds it now. |
-| [`IndexPrint`](beacon.rs#L20) | one beacon update: index, chain point and timestamp. The index is a [`Price`](../units/DESIGN.md), the same type the live `IndexUpdated` carries, so a fold over an index series cannot tell which tense produced its samples; `index_f64` is the lossy view and the field was `index_x96` when it was a bare word | [`History::beacon_prints`](mod.rs#L200) and [`History::latest_beacon_prints`](mod.rs#L223) | nothing in the crate. The strategy layer's index series and estimator bootstrap; it keeps the chain point so a print can be joined to the fills after it. |
-| [`TokenTransfer`](transfers.rs#L18) | one ERC-20 transfer between the address sets asked for; the sets are topic filters, not post-filters | [`History::token_transfers`](mod.rs#L287) | nothing in the crate. The strategy layer's fleet derivation and treasury ledger. |
+| [`History`](mod.rs#L120) | the scanning handle over a provider: learned width across scans; a block lag; bounded in-flight windows; cumulative stats. `market_tape` is the one read that walks a range for three addresses at once, the market's whole record in one chain order; the one-address reads stay for a caller that wants one series | [`History::new`](mod.rs#L131) over any provider; [`ChainReader::history`](../client/DESIGN.md), the one handle a chain reader keeps so its scans share one learned width | nothing takes it; its reads produce the series below. The strategy layer's research sources take a reference to one so a whole run pays the width search once. |
+| [`ChainPoint`](tape.rs#L53) | where an event sits: block number and log index; the total order events are joined on | [`TapeEvent::point`](tape.rs#L80) | [`OwnershipLog::owner_at`](tape.rs#L200), custody at that point. The strategy layer's joins, a print against the fills after it, are on this key, which is why it is a type and not two fields. |
+| [`TapeEvent`](tape.rs#L62) | a [`MarketEvent`](../events/DESIGN.md) at a chain point: the same vocabulary as the feed, plus its position, its block's hash and timestamp, and its transaction. The block hash is what lets a state rebuilt from the tape carry the same block identity a pinned read carries, so the two can be compared rather than approximately agreed; the transaction is what lets a fold pair the logs of one call. Both tenses build it through one constructor, so a feed's row and a scan's are the same row, though the feed does not yet carry the tape's whole event set | [`History::market_tape`](mod.rs#L275), [`History::market_events`](mod.rs#L252) and [`History::latest_market_events`](mod.rs#L298), and their handle-less twins; [`MarketFeed::next_stamped`](../feeds/DESIGN.md), the present tense of the same row over the perp and beacon | [`OwnershipLog::fold`](tape.rs#L176). The strategy layer's economics, classification and series are folds over a slice of these; every fold that depends on order can assert it. |
+| [`TapeAddresses`](tape.rs#L132) | the three addresses a market's record is spread across: its own contract, the beacon it reads, and the chain's PoolManager keyed by its pool id. The PoolManager is every pool on the chain, so it is filtered by the liquidity event and the pool id it indexes, never by address alone | [`MarketReader::tape_addresses`](../client/DESIGN.md), which knows all three; or a caller that does | [`History::market_tape`](mod.rs#L275) and [`market_tape`](tape.rs#L306). |
+| [`OwnershipLog`](tape.rs#L164) | custody over time: a fold of transfers in chain order; owner at a point, not merely latest | [`OwnershipLog::fold`](tape.rs#L176) over the tape | nothing in the crate. The strategy layer's attribution, which asks who held a position when a trade happened, not who holds it now. |
+| [`IndexPrint`](beacon.rs#L20) | one beacon update: index, chain point and timestamp. The index is a [`Price`](../units/DESIGN.md), the same type the live `IndexUpdated` carries, so a fold over an index series cannot tell which tense produced its samples; `index_f64` is the lossy view and the field was `index_x96` when it was a bare word | [`History::beacon_prints`](mod.rs#L205) and [`History::latest_beacon_prints`](mod.rs#L228) | nothing in the crate. The strategy layer's index series and estimator bootstrap; it keeps the chain point so a print can be joined to the fills after it. |
+| [`TokenTransfer`](transfers.rs#L18) | one ERC-20 transfer between the address sets asked for; the sets are topic filters, not post-filters | [`History::token_transfers`](mod.rs#L315) | nothing in the crate. The strategy layer's fleet derivation and treasury ledger. |
 | [`FakeNode`](test_support.rs#L68), [`Mode`](test_support.rs#L29) | an in-memory node that serves `eth_getLogs` under a chosen cap and answers as a provider would: accept, decline a too-wide range, or fail; behind the `test-utils` feature | [`FakeNode::new`](test_support.rs#L81) from a set of logs and a span cap | every scan test in the crate, through the provider it hands out. The strategy layer's research tests scan against it too, which is why it is a feature and not a test module. |
-| [`ScanStats`](scan.rs#L241) | what a scan cost: requests, rejections, narrowings, the learned width; the number a collector meters. It also counts `undecodable` — logs of this vocabulary that would not decode, which the scan skips rather than dying over, since one such log should not cost a scan of millions of blocks. A non-zero count is how a caller learns the tape it holds is short | [`History::stats`](mod.rs#L151) | nothing in the crate. The strategy layer's collector, and the benchmark suite, which asserts a scan's request count. |
+| [`ScanStats`](scan.rs#L241) | what a scan cost: requests, rejections, narrowings, the learned width; the number a collector meters. It also counts `undecodable` — logs of this vocabulary that would not decode, which the scan skips rather than dying over, since one such log should not cost a scan of millions of blocks. A non-zero count is how a caller learns the tape it holds is short | [`History::stats`](mod.rs#L156) | nothing in the crate. The strategy layer's collector, and the benchmark suite, which asserts a scan's request count. |
 
 Two decisions shape the surface. The free functions and the handle offer
 the same reads; the handle adds memory, concurrency and telemetry, and a
@@ -128,7 +129,15 @@ deliberately off the trading path.
   in breaker state.
 - **Measured.** `ScanStats` on the handle counts requests, rejections
   and narrowings across every scan it has run. It is the number the
-  regression harness (SDK #99) will assert.
+  regression harness (SDK #99) will assert. The pipeline's own cost,
+  with no network under it, is `benches/history_bench.rs`: over a
+  200,000-log three-address tape served by the fake node, the scan
+  (windows, JSON, decode into rows) runs at about 750,000 logs a second,
+  the decoder alone at 31 million a second serially and 170 million
+  across twelve cores, and a one-`match` fold at 84 million rows a
+  second. So of a replay's time against a real provider, essentially all
+  of it is the provider; the decode and the fold together are
+  milliseconds per hundred thousand events.
 
 A research process builds its own transport for scans so that a slow
 or refused log request cannot open the circuit breaker a trading loop
@@ -180,12 +189,30 @@ depends on. That separation is a cost rule, not a convenience.
   sorted index takes its key and returns it, so the cycle is the index
   relation rather than a conversion with two homes.
 
+- **The market's tape is two filters over one range.** The perp and its
+  beacon share a filter by address; the PoolManager, being every pool on
+  the chain, is filtered by the liquidity event's signature and the pool
+  id it indexes. The two scans share the learned width and their rows
+  merge on chain point. One filter would either miss the book or pull
+  every pool's liquidity on the chain; this was SDK #101, and the consumer
+  that decided its shape is a fold that rebuilds a market from its events.
+  The PoolManager filter is compensation for the live builds, whose maker
+  events carry no geometry: the next contracts emit a band's range,
+  liquidity and every change to it on the perp's own events, so the book
+  becomes a fold of one address and the second filter goes with the
+  cutover.
+
 ## Debts
 
-- **A tape is one address's logs.** The beacon's prints and the pool's
-  liquidity changes are separate scans over the same range; a
-  market-shaped scan that walks the range once for several addresses is
-  SDK #101, and research's access pattern will decide its shape.
+- **The market tape reads one beacon: the one named at the call.** A
+  market's beacon is governance's to swap, and a swap's `ModuleSet` is on
+  the tape, but the earlier beacon's prints are not scanned, so a tape
+  spanning a swap is short of index prints before it and nothing counts
+  the gap. No mainnet perp has emitted `SetBeacon`, so no tape is short
+  today. The fix is a two-phase scan — the perp first, each beacon over
+  the span the swaps give it — and until then a fold that meets a swap to
+  a beacon other than the one it was given counts the prints before it as
+  a gap rather than reading an empty index.
 - **Timestamps come per block when the provider omits them from logs**,
   read once per distinct block with bounded concurrency. A batched
   backfill is SDK #100.

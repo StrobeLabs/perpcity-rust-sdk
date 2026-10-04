@@ -8,7 +8,9 @@
 //! event history — the tape — through the same decoder the live feed
 //! uses ([`crate::events::decode_log`]), position-NFT transfers
 //! included — so [`OwnershipLog`] folds a tape into who held which
-//! position when; and [`token_transfers`] reads an ERC-20's `Transfer` events
+//! position when; [`market_tape`] reads the perp, its beacon and its pool's
+//! liquidity changes in one chain order, which is everything a fold needs
+//! to rebuild the market; and [`token_transfers`] reads an ERC-20's `Transfer` events
 //! between address sets (for example, every USDC transfer between a
 //! treasury and its wallets). [`History`] wraps them all with a uniform
 //! block-lag policy and a request width learned once across scans.
@@ -54,7 +56,7 @@
 #![doc = "\n\nThe design of this module: [`src/history/DESIGN.md`](https://github.com/StrobeLabs/perpcity-rust-sdk/blob/main/src/history/DESIGN.md)."]
 
 mod beacon;
-mod scan;
+pub(crate) mod scan;
 mod tape;
 mod transfers;
 
@@ -66,7 +68,10 @@ mod tests;
 
 pub use beacon::{IndexPrint, beacon_prints, latest_beacon_prints};
 pub use scan::{ScanStats, get_logs_chunked};
-pub use tape::{ChainPoint, OwnershipLog, TapeEvent, latest_market_events, market_events};
+pub use tape::{
+    ChainPoint, OwnershipLog, TapeAddresses, TapeEvent, latest_market_events, market_events,
+    market_tape,
+};
 pub use transfers::{TokenTransfer, token_transfers};
 
 use alloy::primitives::Address;
@@ -254,6 +259,29 @@ impl<P: Provider> History<P> {
         tape::market_events_with(
             &self.provider,
             perp,
+            from_block,
+            to,
+            &self.widths,
+            self.in_flight,
+        )
+        .await
+    }
+
+    /// [`market_tape`], to `to_block` or the lagged head.
+    ///
+    /// # Errors
+    ///
+    /// As [`market_tape`].
+    pub async fn market_tape(
+        &self,
+        addresses: TapeAddresses,
+        from_block: u64,
+        to_block: Option<u64>,
+    ) -> Result<Vec<TapeEvent>> {
+        let to = self.resolve(to_block).await?;
+        tape::market_tape_with(
+            &self.provider,
+            addresses,
             from_block,
             to,
             &self.widths,

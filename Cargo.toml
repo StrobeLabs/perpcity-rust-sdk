@@ -87,6 +87,11 @@ harness = false
 name = "transport_bench"
 harness = false
 
+[[bench]]
+name = "history_bench"
+harness = false
+required-features = ["test-utils"]
+
 # ── Release profile: aggressive optimizations for trading hot paths ──
 [profile.release]
 lto = "fat"           # Cross-crate inlining + dead code elimination
