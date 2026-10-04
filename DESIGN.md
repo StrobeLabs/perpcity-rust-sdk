@@ -144,7 +144,10 @@ is the handle's, not the call's.
 **Two tenses of events, one vocabulary.** The feed streams the present
 over a WebSocket; the tape replays the past from log scans. Both produce
 the same decoded `MarketEvent`, so anything that folds events, ownership,
-economics, a series, works on either tense unchanged.
+economics, a series, works on either tense unchanged. The crate's own
+fold of that kind is the replay: a market's state rebuilt from its events
+into the same types the pinned reads return, so what the chain said and
+what the chain holds are compared with `==`.
 
 **Two unit systems, one boundary.** The chain speaks in counts of atoms
 and in fixed-point encodings; humans speak in USDC, perp tokens, prices
@@ -191,8 +194,8 @@ that carries it, the invariant it holds, and the node that owns it.
 | A settle previewed | [`MakerEquityBreakdown`](src/math/maker_equity.rs#L177) | exact atoms, the contract's arithmetic | [`math::maker_equity`](src/math/maker_equity.rs#L1) |
 | A block | [`BlockContext`](src/math/mod.rs#L51) | number, hash, timestamp of one header | [`math`](src/math/DESIGN.md) |
 | An event | [`MarketEvent`](src/events.rs#L137) | the market's vocabulary, human units, either tense | [`events`](src/events/DESIGN.md) |
-| An event in chain order | [`TapeEvent`](src/history/tape.rs#L62), [`ChainPoint`](src/history/tape.rs#L53) | block and log index | [`history`](src/history/DESIGN.md) |
-| Custody over time | [`OwnershipLog`](src/history/tape.rs#L164) | a fold of transfers; owner at a chain point | [`history`](src/history/DESIGN.md) |
+| An event in chain order | [`TapeEvent`](src/history/tape.rs#L63), [`ChainPoint`](src/history/tape.rs#L54) | block and log index | [`history`](src/history/DESIGN.md) |
+| Custody over time | [`OwnershipLog`](src/history/tape.rs#L165) | a fold of transfers; owner at a chain point | [`history`](src/history/DESIGN.md) |
 | A print | [`IndexPrint`](src/history/beacon.rs#L20) | the index at a chain point and time | [`history`](src/history/DESIGN.md) |
 | A failure | [`PerpCityError`](src/errors/mod.rs#L45) | typed, with a stated transience | [`errors`](src/errors/DESIGN.md) |
 | A transport | [`HftTransport`](src/transport/provider.rs#L523) | many endpoints, one provider, reads and writes classified | [`transport`](src/transport/DESIGN.md) |
