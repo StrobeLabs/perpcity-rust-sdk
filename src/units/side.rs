@@ -88,6 +88,7 @@ impl PerpDelta {
 /// `long` and `short` serialises the same after adopting this; a side is
 /// read with [`on`](Self::on) rather than by naming its field.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[must_use]
 pub struct PerSide<T> {
     /// The long side's.
     pub long: T,
@@ -113,13 +114,10 @@ impl<T> PerSide<T> {
     }
 
     /// The value on one side.
-    pub fn on(&self, side: Side) -> T
-    where
-        T: Copy,
-    {
+    pub const fn on(&self, side: Side) -> &T {
         match side {
-            Side::Long => self.long,
-            Side::Short => self.short,
+            Side::Long => &self.long,
+            Side::Short => &self.short,
         }
     }
 
@@ -192,7 +190,7 @@ mod tests {
     #[test]
     fn a_pair_is_keyed_by_side() {
         let mut oi = PerSide::new(PerpAtoms::new(10), PerpAtoms::new(4));
-        assert_eq!(oi.on(Side::Short), PerpAtoms::new(4));
+        assert_eq!(*oi.on(Side::Short), PerpAtoms::new(4));
         assert_eq!(oi.total(), PerpAtoms::new(14));
         *oi.on_mut(Side::Short) = PerpAtoms::new(6);
         assert_eq!(oi.short, PerpAtoms::new(6));

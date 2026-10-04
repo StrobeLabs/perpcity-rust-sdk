@@ -73,7 +73,7 @@ impl MarketCapacity {
     pub fn headroom(&self, side: Side) -> PerpAtoms {
         self.capacity
             .on(side)
-            .saturating_sub(self.open_interest.on(side))
+            .saturating_sub(*self.open_interest.on(side))
     }
 
     /// Utilization on one side as the Perp passes it to the fees module:
@@ -168,7 +168,7 @@ pub fn liquidity_for_capacity(
     let liquidity = LUnits::new(liquidity.to::<u128>());
     // Capacity grows with liquidity, so if this band cannot be opened
     // because a side overflows `u128`, no liquidity reaching the target can.
-    priced.capacity(liquidity)?;
+    let _ = priced.capacity(liquidity)?;
     Ok(liquidity)
 }
 
@@ -376,7 +376,7 @@ mod tests {
             PerpAtoms::new(9_020_645)
         );
         assert_eq!(
-            HORMUZ_TRAFFIC.open_interest.on(Side::Short),
+            *HORMUZ_TRAFFIC.open_interest.on(Side::Short),
             PerpAtoms::new(42_582_564)
         );
     }
@@ -418,7 +418,7 @@ mod tests {
         let liquidity = liquidity_for_capacity(sqrt_price, &range, side, target).unwrap();
         let reached = band_capacity(sqrt_price, &MakerBand::new(range, liquidity)).unwrap();
         assert!(
-            reached.on(side) >= target,
+            *reached.on(side) >= target,
             "{side} target {target:?}: liquidity {} gives {:?}",
             liquidity.units(),
             reached.on(side)
@@ -426,7 +426,7 @@ mod tests {
         let one_less = liquidity.checked_sub(LUnits::new(1)).unwrap();
         let below = band_capacity(sqrt_price, &MakerBand::new(range, one_less)).unwrap();
         assert!(
-            below.on(side) < target,
+            *below.on(side) < target,
             "{side} target {target:?}: liquidity {} already gives {:?}",
             one_less.units(),
             below.on(side)
@@ -437,7 +437,7 @@ mod tests {
     fn liquidity_for_capacity_inverts_mainnet_opens() {
         for g in &GOLDEN {
             for side in [Side::Long, Side::Short] {
-                let target = g.capacity.on(side);
+                let target = *g.capacity.on(side);
                 if target.is_zero() {
                     continue;
                 }

@@ -100,6 +100,7 @@ macro_rules! count {
             Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash,
             serde::Serialize, serde::Deserialize,
         )]
+        #[must_use]
         #[repr(transparent)]
         #[serde(transparent)]
         pub struct $name($prim);
@@ -262,6 +263,7 @@ macro_rules! delta {
             Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash,
             serde::Serialize, serde::Deserialize,
         )]
+        #[must_use]
         #[repr(transparent)]
         #[serde(transparent)]
         pub struct $name($prim);
@@ -414,6 +416,7 @@ macro_rules! accumulator {
             Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash,
             serde::Serialize, serde::Deserialize,
         )]
+        #[must_use]
         #[repr(transparent)]
         #[serde(transparent)]
         pub struct $name($prim);

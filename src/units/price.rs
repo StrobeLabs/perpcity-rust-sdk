@@ -18,8 +18,9 @@ use super::{BIGINT_1E6, F64_1E6, F64_WAD, Factor, MAX_SAFE_F64_INT, Share};
 /// [`Self::x96`]. The pool price, the beacon's index, the EMAs of both and
 /// the mark the contract values positions at are all this type.
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
 )]
+#[must_use]
 #[repr(transparent)]
 #[serde(transparent)]
 pub struct Price(U256);
@@ -27,8 +28,9 @@ pub struct Price(U256);
 /// The square root of a price, Q96 fixed point, which is what Uniswap
 /// stores and what every liquidity formula is linear in.
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
 )]
+#[must_use]
 #[repr(transparent)]
 #[serde(transparent)]
 pub struct SqrtPrice(U256);
@@ -152,9 +154,11 @@ impl TryFrom<f64> for Price {
 
     /// A price a person wrote, in Q96.
     ///
-    /// The two-step conversion keeps the whole `f64` mantissa: the price
-    /// times 2^48 fits a `u128` for everything accepted, and the remaining
-    /// factor is an exact shift.
+    /// Two steps: the price times 2^48 as an integer, which fits a `u128`
+    /// for everything accepted, then an exact shift by the remaining 2^48.
+    /// The first step keeps 48 fractional bits — the whole `f64` mantissa
+    /// at 32 and above, and everything a six-decimal price has well below
+    /// that.
     ///
     /// # Errors
     ///
@@ -213,38 +217,6 @@ impl SqrtPrice {
                 context: "sqrtPriceX96² overflows U256".into(),
             })?;
         Ok(Price::from_x96(squared / Q96))
-    }
-
-    /// The root of `price`, where `price` is what a person wrote.
-    ///
-    /// Takes the root in `f64` and keeps a 6-decimal intermediate, so the
-    /// result is approximate; the exact path from a tick is
-    /// [`get_sqrt_ratio_at_tick`](crate::math::tick::get_sqrt_ratio_at_tick).
-    ///
-    /// # Errors
-    ///
-    /// [`ValidationError::InvalidPrice`] when `price` is not a positive
-    /// finite number, or is past 1e30.
-    pub fn from_price(price: f64) -> Result<Self, ValidationError> {
-        if !price.is_finite() || price <= 0.0 {
-            return Err(ValidationError::InvalidPrice {
-                reason: format!("price must be a positive finite number, got {price}"),
-            });
-        }
-        if price > 1e30 {
-            return Err(ValidationError::InvalidPrice {
-                reason: format!("price {price} exceeds maximum (1e30)"),
-            });
-        }
-        let scaled = price.sqrt() * F64_1E6;
-        if scaled > MAX_SAFE_F64_INT as f64 {
-            return Err(ValidationError::InvalidPrice {
-                reason: format!("scaled sqrt(price) {scaled} exceeds safe f64 integer range"),
-            });
-        }
-        // Through `u128` rather than straight to `U256`, so the float
-        // narrowing is the platform-independent one.
-        Ok(Self((U256::from(scaled as u128) * Q96) / BIGINT_1E6))
     }
 
     /// The price this is the root of, as a person reads it.
@@ -413,7 +385,7 @@ mod tests {
         );
         assert!((SqrtPrice::from_x96(Q96).price().unwrap() - 1.0).abs() < Q96_PRECISION);
 
-        let root = SqrtPrice::from_price(4.0).unwrap();
+        let root = SqrtPrice::try_from(Price::try_from(4.0).unwrap()).unwrap();
         assert!((root.price().unwrap() - 4.0).abs() < 1e-5);
 
         for (word, expected) in [
@@ -447,14 +419,14 @@ mod tests {
         // well above it — 1e-5 comes back as 9e-6, which is 10% out, and
         // 1e-6 comes back as nothing. SDK #152 tracks it; the floor is
         // pinned by `the_f64_view_reads_the_protocols_floor_as_zero`.
+        let root_of = |price: f64| SqrtPrice::try_from(Price::try_from(price).unwrap()).unwrap();
         for price in [0.01, 0.1, 0.5, 1.0, 2.0, 10.0, 100.0, 500.0, 1e6] {
-            let root = SqrtPrice::from_price(price).unwrap();
-            let back = root.price().unwrap();
+            let back = root_of(price).price().unwrap();
             let relative = (back - price).abs() / price;
             assert!(relative < 0.001, "{price} came back as {back}");
         }
 
-        let near_one = SqrtPrice::from_price(1.05).unwrap().price().unwrap();
+        let near_one = root_of(1.05).price().unwrap();
         assert!((near_one - 1.05).abs() / 1.05 < 0.0001, "{near_one}");
     }
 
@@ -489,7 +461,6 @@ mod tests {
         assert!(SqrtPrice::from_x96(U256::ZERO).squared().is_err());
         for price in [0.0, -1.0, f64::NAN, f64::INFINITY] {
             assert!(Price::try_from(price).is_err(), "{price}");
-            assert!(SqrtPrice::from_price(price).is_err(), "{price}");
         }
     }
 
@@ -524,7 +495,10 @@ mod tests {
     #[test]
     fn prices_order() {
         assert!(Price::try_from(1.0).unwrap() < Price::try_from(2.0).unwrap());
-        assert!(SqrtPrice::from_price(1.0).unwrap() < SqrtPrice::from_price(2.0).unwrap());
+        assert!(
+            SqrtPrice::try_from(Price::try_from(1.0).unwrap()).unwrap()
+                < SqrtPrice::try_from(Price::try_from(2.0).unwrap()).unwrap()
+        );
     }
 
     /// The wire form is the bare number.

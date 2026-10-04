@@ -119,8 +119,8 @@ impl PendingMaker {
     fn new(input_index: usize, pos_id: U256, position: Position, details: Maker) -> Result<Self> {
         let tick_lower = i24_to_i32(details.tickLower);
         let tick_upper = i24_to_i32(details.tickUpper);
-        get_sqrt_ratio_at_tick(tick_lower)?;
-        get_sqrt_ratio_at_tick(tick_upper)?;
+        let _ = get_sqrt_ratio_at_tick(tick_lower)?;
+        let _ = get_sqrt_ratio_at_tick(tick_upper)?;
         Ok(Self {
             input_index,
             pos_id,

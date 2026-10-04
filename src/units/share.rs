@@ -33,6 +33,7 @@ const ONE_E6: u32 = 1_000_000;
 /// that hold one are a strategy's configuration rather than a contract's
 /// word, and deserialising runs the same bound as constructing.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[must_use]
 #[repr(transparent)]
 pub struct Share(u32);
 

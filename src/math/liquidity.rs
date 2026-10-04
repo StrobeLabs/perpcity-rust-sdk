@@ -184,9 +184,9 @@ pub fn liquidity_for_target_ratio(
 ///
 /// ```
 /// use perpcity_sdk::math::liquidity::band_amounts;
-/// use perpcity_sdk::{LUnits, MakerBand, SqrtPrice, TickRange, band_capacity};
+/// use perpcity_sdk::{LUnits, MakerBand, Price, SqrtPrice, TickRange, band_capacity};
 ///
-/// let sqrt_price = SqrtPrice::from_price(35.0)?;
+/// let sqrt_price = SqrtPrice::try_from(Price::try_from(35.0)?)?;
 /// let band = MakerBand::new(TickRange::new(27_090, 38_100)?, LUnits::new(1_757_959));
 /// let (perp, _usdc) = band_amounts(sqrt_price, &band)?;
 /// assert_eq!(perp, band_capacity(sqrt_price, &band)?.long);
