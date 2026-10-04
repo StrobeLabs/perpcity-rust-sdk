@@ -63,7 +63,7 @@ use alloy::sol_types::SolEvent;
 use serde::{Deserialize, Serialize};
 
 use crate::contracts::{
-    IBeacon, IPoolManagerState, Perp, PerpDeployedEvents, PerpV022, SwapResult,
+    Cumulatives, IBeacon, IPoolManagerState, Perp, PerpDeployedEvents, PerpV022, SwapResult,
 };
 use crate::convert::unpack_balance_delta;
 use crate::errors::ValidationError;
@@ -99,6 +99,25 @@ pub struct SwapInfo {
     pub creator_fee: UsdcAtoms,
     /// Share paid into the insurance fund.
     pub insurance_fee: UsdcAtoms,
+}
+
+impl From<Cumulatives> for CumulativesInfo {
+    /// The contract's struct, whether an event carried it or a view
+    /// returned it: one conversion, so the two tenses agree to the word.
+    fn from(c: Cumulatives) -> Self {
+        Self {
+            funding: Funding::from_x96(c.fundingX96),
+            funding_div_sqrt_p: FundingPerSqrtPrice::from_x96(c.fundingDivSqrtPX96),
+            util_payments: PerSide::new(
+                Earnings::from_x96(c.longUtilPaymentsX96),
+                Earnings::from_x96(c.shortUtilPaymentsX96),
+            ),
+            util_earnings: PerSide::new(
+                Earnings::from_x96(c.longUtilEarningsX96),
+                Earnings::from_x96(c.shortUtilEarningsX96),
+            ),
+        }
+    }
 }
 
 /// What a touch settled on a maker position, in the units the chain
@@ -495,20 +514,8 @@ pub fn decode_log(log: &Log) -> Result<Option<MarketEvent>, ValidationError> {
         })
     } else if topic0 == Perp::CumulativesAccrued::SIGNATURE_HASH {
         let d = decode_raw::<Perp::CumulativesAccrued>(log)?;
-        let c = &d.cumls;
         Some(MarketEvent::CumulativesAccrued {
-            cumulatives: CumulativesInfo {
-                funding: Funding::from_x96(c.fundingX96),
-                funding_div_sqrt_p: FundingPerSqrtPrice::from_x96(c.fundingDivSqrtPX96),
-                util_payments: PerSide::new(
-                    Earnings::from_x96(c.longUtilPaymentsX96),
-                    Earnings::from_x96(c.shortUtilPaymentsX96),
-                ),
-                util_earnings: PerSide::new(
-                    Earnings::from_x96(c.longUtilEarningsX96),
-                    Earnings::from_x96(c.shortUtilEarningsX96),
-                ),
-            },
+            cumulatives: d.cumls.into(),
         })
     } else if topic0 == Perp::RatesAndEmasRefreshed::SIGNATURE_HASH {
         let d = decode_raw::<Perp::RatesAndEmasRefreshed>(log)?;

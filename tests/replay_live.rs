@@ -22,7 +22,7 @@ use std::env;
 use alloy::primitives::{Address, U256};
 use perpcity_sdk::convert::unpack_balance_delta;
 use perpcity_sdk::history::{Fold, PositionKind, Replay};
-use perpcity_sdk::{ChainReader, HftTransport, TransportConfig};
+use perpcity_sdk::{ChainReader, HftTransport, StateAt, TransportConfig};
 
 /// The first block of the deployed-era factory: every live market's tape
 /// starts at or after it.
@@ -77,6 +77,37 @@ async fn a_replayed_market_equals_the_read_at_the_same_block() {
     }
 
     let state = market.state_at(tip).await.unwrap();
+    agrees(&replay, &state, config.ema_window).await;
+
+    // The other start: the reads at an earlier block, then the tape from
+    // there. Every total a read supplied and every position's margin is
+    // known at the seed; what the tail touched is known from the tail.
+    let seed_block = tip - SEED_LAG;
+    let earlier = market.state_at(seed_block).await.unwrap();
+    let mut seeded = Replay::seeded(&earlier).await.unwrap();
+    let seeded_gaps = seeded.gaps();
+    assert_eq!(seeded_gaps.margin_unknown, 0, "a seed knows every margin");
+    assert_eq!(seeded_gaps.partial_positions, 0, "a seed knows every level");
+    let applied = seeded
+        .catch_up(history, addresses, Some(tip))
+        .await
+        .unwrap();
+    println!(
+        "seeded at {seed_block}, {} positions, caught up {applied} events to {tip}",
+        seeded.positions().len()
+    );
+    assert_eq!(seeded.gaps().refused, 0, "the tail is in order");
+    agrees(&seeded, &state, config.ema_window).await;
+    println!("the seeded replay agrees with the read at block {tip}");
+}
+
+/// Blocks behind the lagged head the seeded run starts from: long enough
+/// to hold events, short enough for a non-archive node to serve the state.
+const SEED_LAG: u64 = 2_000;
+
+/// Every quantity the tape carries, rebuilt in `replay`, against the read
+/// at `state`'s block, to the atom.
+async fn agrees(replay: &Replay, state: &StateAt, ema_window: u64) {
     let block = state.block();
 
     let capacity = state.capacity().await.unwrap();
@@ -88,7 +119,7 @@ async fn a_replayed_market_equals_the_read_at_the_same_block() {
 
     let mark = state.mark().await.unwrap();
     assert_eq!(
-        replay.mark_at(block, config.ema_window).unwrap(),
+        replay.mark_at(block, ema_window).unwrap(),
         Some(mark),
         "the mark's inputs: pool price, index, EMAs advanced to the block"
     );
@@ -119,15 +150,21 @@ async fn a_replayed_market_equals_the_read_at_the_same_block() {
 
     // Every position minted: the fold's view against the row the contract
     // holds. A taker's size is its row's `amount0`; a maker's band is
-    // `makerDetails`; a closed position has no row.
+    // `makerDetails`; a closed position has no row. A position the fold
+    // never met is one that closed before a seed, which has no row either.
     let ids: Vec<U256> = (1..minted).map(U256::from).collect();
     let (mut takers, mut makers, mut closed, mut unknown) = (0, 0, 0, 0);
     for outcome in state.positions(&ids).await {
         let pos_id = outcome.pos_id;
         let read = outcome.row.unwrap();
-        let folded = replay
-            .position(pos_id)
-            .unwrap_or_else(|| panic!("position {pos_id} was minted but is not on the tape"));
+        let Some(folded) = replay.position(pos_id) else {
+            assert!(
+                read.is_none(),
+                "position {pos_id} is held on chain but the fold never met it"
+            );
+            closed += 1;
+            continue;
+        };
         let Some(row) = read else {
             assert!(
                 !folded.is_open(),
@@ -155,7 +192,7 @@ async fn a_replayed_market_equals_the_read_at_the_same_block() {
                 makers += 1;
             }
             PositionKind::Unknown => {
-                panic!("position {pos_id} is of unknown kind on a tape from genesis")
+                panic!("position {pos_id} is of unknown kind on a tape from genesis or a seed")
             }
         }
     }
@@ -193,5 +230,5 @@ async fn a_replayed_market_equals_the_read_at_the_same_block() {
         pool.tick,
         pool.liquidity
     );
-    println!("replay agrees with the read at block {}", block.number);
+    println!("the replay agrees with the read at block {}", block.number);
 }

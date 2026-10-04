@@ -44,10 +44,11 @@ impl<T, S: Default> Default for Stated<T, S> {
 }
 
 impl<T: Copy, S: Default + AddAssign> Stated<T, S> {
-    /// A total that is zero and stated before the market's first event.
-    fn genesis(zero: T) -> Self {
+    /// A total stated with nothing accrued since: zero before the market's
+    /// first event, or what a read returned.
+    fn with(value: T) -> Self {
         Self {
-            value: Some(zero),
+            value: Some(value),
             stated: true,
             since: S::default(),
         }
@@ -112,9 +113,14 @@ pub(super) struct Solvency {
 impl Solvency {
     /// Before the first event: no margin, no debt, both stated.
     pub(super) fn genesis() -> Self {
+        Self::seeded(SolvencyState::default())
+    }
+
+    /// As a read returned the books at one block.
+    pub(super) fn seeded(read: SolvencyState) -> Self {
         Self {
-            margin: Stated::genesis(UsdcAtoms::ZERO),
-            debt: Stated::genesis(UsdcAtoms::ZERO),
+            margin: Stated::with(read.total_margin),
+            debt: Stated::with(read.bad_debt),
             transfer_in_tx: Latest::default(),
         }
     }

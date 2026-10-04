@@ -12,6 +12,7 @@
 
 use std::collections::BTreeMap;
 
+use crate::errors::ValidationError;
 use crate::events::MarketEvent;
 use crate::math::swap::TickLiquidity;
 use crate::units::{LDelta, LUnits};
@@ -43,9 +44,9 @@ impl TickSums {
 pub(super) struct Pool {
     ticks: BTreeMap<i32, TickSums>,
     tick: Latest<i32>,
-    /// Whether every change since the pool's first is in, which only a fold
-    /// from genesis can say.
-    from_genesis: bool,
+    /// Whether the map is whole: every change since the pool's first is in,
+    /// because the fold started at genesis or from the pool read.
+    whole: bool,
 }
 
 impl Pool {
@@ -53,9 +54,44 @@ impl Pool {
     /// to come will be seen.
     pub(super) fn genesis() -> Self {
         Self {
-            from_genesis: true,
+            whole: true,
             ..Self::default()
         }
+    }
+
+    /// As the pool read returned it at one block: the map whole, the tick
+    /// known.
+    ///
+    /// # Errors
+    ///
+    /// [`ValidationError::Overflow`] if a tick's gross liquidity does not
+    /// fit the signed sum the fold keeps, which no pool's does.
+    pub(super) fn seeded(
+        ticks: BTreeMap<i32, TickLiquidity>,
+        tick: i32,
+    ) -> Result<Self, ValidationError> {
+        let ticks = ticks
+            .into_iter()
+            .map(|(tick, liquidity)| {
+                let gross = i128::try_from(liquidity.gross.units()).map_err(|_| {
+                    ValidationError::Overflow {
+                        context: "a tick's gross liquidity as a signed sum".into(),
+                    }
+                })?;
+                Ok((
+                    tick,
+                    TickSums {
+                        net: liquidity.net.units(),
+                        gross,
+                    },
+                ))
+            })
+            .collect::<Result<_, ValidationError>>()?;
+        Ok(Self {
+            ticks,
+            tick: Latest::stated(tick),
+            whole: true,
+        })
     }
 
     /// The pool's tick, where the last swap that moved it left it. `None`
@@ -68,7 +104,7 @@ impl Pool {
     /// `None` for a fold that did not start at genesis: a segment knows what
     /// changed, not what stands.
     pub(super) fn ticks(&self) -> Option<BTreeMap<i32, TickLiquidity>> {
-        if !self.from_genesis {
+        if !self.whole {
             return None;
         }
         self.ticks
@@ -89,7 +125,7 @@ impl Pool {
     /// Liquidity active at the pool's tick: the net of every initialized
     /// tick at or below it. `None` until the tick is known, or off genesis.
     pub(super) fn liquidity(&self) -> Option<LUnits> {
-        if !self.from_genesis {
+        if !self.whole {
             return None;
         }
         let tick = self.tick()?;

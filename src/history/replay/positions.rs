@@ -11,10 +11,11 @@ use alloy::primitives::U256;
 
 use crate::events::MarketEvent;
 use crate::math::range::{MakerBand, TickRange};
-use crate::units::{LDelta, LUnits, PerpDelta, Price};
+use crate::units::{LDelta, LUnits, PerpDelta, Price, UsdcAtoms};
 
 use super::super::fold::{First, Fold, Latest};
 use super::super::tape::{ChainPoint, TapeEvent};
+use super::seed::SeedPosition;
 
 /// What a position is, and what the tape has said about its size.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -34,11 +35,15 @@ pub enum PositionKind {
     },
     /// A maker, a range with liquidity in it.
     Maker {
-        /// The range, from the first liquidity change the fold saw.
+        /// The range, from the first liquidity change the fold saw or the
+        /// read that seeded it.
         range: Option<TickRange>,
         /// Liquidity changed since the fold first saw the position; the
-        /// liquidity standing, once the open was seen.
+        /// liquidity standing, once `sized`.
         liquidity: LDelta,
+        /// Whether `liquidity` is the liquidity standing, because the fold
+        /// saw the open or a read supplied the level.
+        sized: bool,
         /// The pool price at the open, which its capacity was classified
         /// at. `None` when the fold did not see the open, or no swap had
         /// printed a price before it.
@@ -67,16 +72,19 @@ impl PositionKind {
                 Self::Maker {
                     range,
                     liquidity,
+                    sized,
                     deposit_pool_price,
                 },
                 Self::Maker {
                     range: later_range,
                     liquidity: later_liquidity,
+                    sized: later_sized,
                     deposit_pool_price: later_deposit,
                 },
             ) => Self::Maker {
                 range: range.or(later_range),
                 liquidity: LDelta::new(liquidity.units().wrapping_add(later_liquidity.units())),
+                sized: sized || later_sized,
                 // The deposit price is the open's: whichever segment saw
                 // the open knows it, and the other's is a later open the
                 // fold ignored.
@@ -101,9 +109,12 @@ impl PositionKind {
 pub struct PositionState {
     kind: PositionKind,
     opened: First<ChainPoint>,
-    last: ChainPoint,
+    last: Latest<ChainPoint>,
     closed: First<ChainPoint>,
     liquidations: u32,
+    /// The margin a read supplied; gone once any event touches the
+    /// position, since no live event carries it.
+    margin: Option<UsdcAtoms>,
 }
 
 impl PositionState {
@@ -112,15 +123,34 @@ impl PositionState {
         self.kind
     }
 
+    /// Whether the fold knows where the position stands: a taker's size
+    /// or a maker's liquidity, from the open it saw or the read that
+    /// seeded it. False for a position first seen mid-life, a maker
+    /// converted to a taker, and a kind the tape never named.
+    pub fn level_known(&self) -> bool {
+        match self.kind {
+            PositionKind::Taker { sized, .. } | PositionKind::Maker { sized, .. } => sized,
+            PositionKind::Unknown => false,
+        }
+    }
+
     /// The event that opened it, if the fold saw it; `None` for a position
-    /// first seen mid-life.
+    /// first seen mid-life or supplied by a read.
     pub fn opened(&self) -> Option<ChainPoint> {
         self.opened.get()
     }
 
-    /// The last event that touched it.
-    pub fn last(&self) -> ChainPoint {
-        self.last
+    /// The last event that touched it; `None` for a position a read
+    /// supplied that no event has touched since.
+    pub fn last(&self) -> Option<ChainPoint> {
+        self.last.get()
+    }
+
+    /// The position's margin, when a read supplied it and no event has
+    /// touched the position since. No live event carries margin, so the
+    /// fold never knows it from the tape alone.
+    pub fn margin(&self) -> Option<UsdcAtoms> {
+        self.margin
     }
 
     /// The event that closed it, once one has.
@@ -149,19 +179,20 @@ impl PositionState {
     }
 
     /// The maker's band, as `makerDetails` holds it, when the fold knows it
-    /// whole: the range from a liquidity change and the liquidity from the
-    /// open onward. `None` for a taker, for a maker whose open the fold did
-    /// not see, and for one whose liquidity is gone.
+    /// whole: the range from a liquidity change or a read, the liquidity
+    /// from the open or the read onward. `None` for a taker, for a maker
+    /// whose level the fold does not know, and for one whose liquidity is
+    /// gone.
     pub fn maker_band(&self) -> Option<MakerBand> {
         let PositionKind::Maker {
             range: Some(range),
             liquidity,
+            sized: true,
             ..
         } = self.kind
         else {
             return None;
         };
-        self.opened.get()?;
         let units = u128::try_from(liquidity.units()).ok()?;
         (units != 0).then(|| MakerBand::new(range, LUnits::new(units)))
     }
@@ -181,9 +212,46 @@ impl PositionState {
         Self {
             kind: PositionKind::Unknown,
             opened: First::default(),
-            last: at,
+            last: Latest::stated(at),
             closed: First::default(),
             liquidations: 0,
+            margin: None,
+        }
+    }
+
+    /// A position as a read described it: its level known, its margin
+    /// known, no event seen.
+    fn seeded(position: SeedPosition) -> Self {
+        let (kind, margin) = match position {
+            SeedPosition::Taker { size, margin } => (
+                PositionKind::Taker {
+                    moved: size,
+                    sized: true,
+                },
+                margin,
+            ),
+            SeedPosition::Maker {
+                range,
+                liquidity,
+                margin,
+            } => (
+                PositionKind::Maker {
+                    range: Some(range),
+                    liquidity,
+                    sized: true,
+                    deposit_pool_price: None,
+                },
+                margin,
+            ),
+            SeedPosition::Unknown { margin } => (PositionKind::Unknown, margin),
+        };
+        Self {
+            kind,
+            opened: First::default(),
+            last: Latest::default(),
+            closed: First::default(),
+            liquidations: 0,
+            margin: Some(margin),
         }
     }
 
@@ -218,6 +286,7 @@ impl PositionState {
                 self.kind = PositionKind::Maker {
                     range,
                     liquidity: delta,
+                    sized: false,
                     deposit_pool_price: None,
                 };
             }
@@ -225,13 +294,14 @@ impl PositionState {
         }
     }
 
-    /// A maker's open, if none was seen yet: the deposit is classified at
-    /// the pool price then.
+    /// A maker's open, if none was seen yet: the liquidity so far is the
+    /// level, and the deposit is classified at the pool price then.
     fn maker_opened(&mut self, at: ChainPoint, pool_price: Option<Price>) {
         if let PositionKind::Unknown = self.kind {
             self.kind = PositionKind::Maker {
                 range: None,
                 liquidity: LDelta::ZERO,
+                sized: false,
                 deposit_pool_price: None,
             };
         }
@@ -240,9 +310,12 @@ impl PositionState {
         }
         self.opened.set(at);
         if let PositionKind::Maker {
-            deposit_pool_price, ..
+            sized,
+            deposit_pool_price,
+            ..
         } = &mut self.kind
         {
+            *sized = true;
             *deposit_pool_price = pool_price;
         }
     }
@@ -274,12 +347,15 @@ impl PositionState {
     }
 
     /// The earlier segment is `self`; `later` saw the same position after.
+    /// The later segment touched it, so whatever margin a read had
+    /// supplied is gone.
     fn combine(&mut self, later: Self) {
         self.kind = self.kind.combine(later.kind, self.opened.is_set());
         self.opened.combine(later.opened);
         self.closed.combine(later.closed);
-        self.last = later.last;
+        self.last.combine(later.last);
         self.liquidations += later.liquidations;
+        self.margin = later.margin;
     }
 }
 
@@ -294,6 +370,21 @@ pub struct Positions {
 }
 
 impl Positions {
+    /// Every position a read described at one block, and the pool price
+    /// then, which a maker opened before the next swap is classified at.
+    pub(super) fn seeded(
+        pool_price: Price,
+        positions: impl IntoIterator<Item = (U256, SeedPosition)>,
+    ) -> Self {
+        Self {
+            by_id: positions
+                .into_iter()
+                .map(|(pos_id, position)| (pos_id, PositionState::seeded(position)))
+                .collect(),
+            pool_price: Latest::stated(pool_price),
+        }
+    }
+
     /// One position, if the tape has mentioned it.
     pub fn get(&self, pos_id: U256) -> Option<&PositionState> {
         self.by_id.get(&pos_id)
@@ -320,13 +411,15 @@ impl Positions {
     }
 
     /// The position's state, of unknown kind if this is the fold's first
-    /// sight of it, touched at `at`.
+    /// sight of it, touched at `at`. Any touch moves the margin, which no
+    /// event carries, so a margin a read supplied is forgotten here.
     fn touch(&mut self, pos_id: U256, at: ChainPoint) -> &mut PositionState {
         let state = self
             .by_id
             .entry(pos_id)
             .or_insert_with(|| PositionState::first(at));
-        state.last = at;
+        state.last.set(at);
+        state.margin = None;
         state
     }
 }

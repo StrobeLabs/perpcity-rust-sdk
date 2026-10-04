@@ -4,7 +4,8 @@
 
 use alloy::primitives::Address;
 
-use crate::client::OpenInterest;
+use crate::client::{MarketRates, OpenInterest};
+use crate::contracts;
 use crate::errors::ValidationError;
 use crate::events::{CumulativesInfo, MarketEvent, ModuleKind};
 use crate::math::BlockContext;
@@ -25,6 +26,15 @@ pub(super) struct Prices {
 }
 
 impl Prices {
+    /// As a read supplied them at one block.
+    pub(super) fn seeded(pool: Price, index: Price, emas: Emas) -> Self {
+        Self {
+            pool: Latest::stated(pool),
+            index: Latest::stated(index),
+            emas: Latest::stated(emas),
+        }
+    }
+
     pub(super) fn pool(&self) -> Option<Price> {
         self.pool.get()
     }
@@ -97,6 +107,15 @@ pub(super) struct Rates {
 }
 
 impl Rates {
+    /// As a read supplied them at one block.
+    pub(super) fn seeded(rates: MarketRates, cumulatives: CumulativesInfo) -> Self {
+        Self {
+            funding_per_day: Latest::stated(rates.funding_per_day),
+            util_fee_per_day: Latest::stated(rates.util_fee_per_day),
+            cumulatives: Latest::stated(cumulatives),
+        }
+    }
+
     pub(super) fn funding_per_day(&self) -> Option<FundingRate> {
         self.funding_per_day.get()
     }
@@ -150,6 +169,14 @@ impl Utilization {
         }
     }
 
+    /// As a read supplied them at one block.
+    pub(super) fn seeded(read: MarketCapacity) -> Self {
+        Self {
+            capacity: Latest::stated(read.capacity),
+            open_interest: Latest::stated(read.open_interest),
+        }
+    }
+
     pub(super) fn open_interest(&self) -> Option<OpenInterest> {
         self.open_interest.get()
     }
@@ -190,6 +217,22 @@ pub(super) struct Modules {
 }
 
 impl Modules {
+    /// As `modules()` returned them at one block.
+    pub(super) fn seeded(read: contracts::Modules) -> Self {
+        let mut in_force = [Latest::default(); 6];
+        for (kind, address) in [
+            (ModuleKind::Beacon, read.beacon),
+            (ModuleKind::Fees, read.fees),
+            (ModuleKind::Funding, read.funding),
+            (ModuleKind::MarginRatios, read.marginRatios),
+            (ModuleKind::PriceImpact, read.priceImpact),
+            (ModuleKind::Pricing, read.pricing),
+        ] {
+            in_force[Self::index(kind)].set(address);
+        }
+        Self { in_force }
+    }
+
     pub(super) fn get(&self, kind: ModuleKind) -> Option<Address> {
         self.in_force[Self::index(kind)].get()
     }
