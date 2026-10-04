@@ -66,6 +66,10 @@ pub enum PerpCityError {
     /// JSON serialization / deserialization error.
     #[error(transparent)]
     Serde(#[from] serde_json::Error),
+
+    /// The filesystem's error, from writing or reading a recording.
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
 }
 
 impl PerpCityError {

@@ -4,16 +4,16 @@
 //! The tape is synthetic and in memory, served by the history readers' own
 //! fake node, so the scan here measures the scanning pipeline and not a
 //! provider's latency: windows, decoding into rows, the header reads a
-//! provider that omits timestamps would cost. Set `PERPCITY_TAPE` to a
-//! JSON file of `TapeEvent`s (the `tape` example can write one) to fold a
-//! recorded market instead of the synthetic one.
+//! provider that omits timestamps would cost. Set `PERPCITY_RECORDING` to
+//! a recording's directory (the `record` example writes one) to decode and
+//! fold a recorded market instead of the synthetic one.
 //!
 //! ```bash
 //! cargo bench --features test-utils --bench history_bench
 //! ```
 
 use std::env;
-use std::fs;
+use std::path::Path;
 use std::thread;
 
 use alloy::primitives::{Address, B256, Log as PrimitiveLog, U256};
@@ -24,7 +24,7 @@ use perpcity_sdk::constants::Q96;
 use perpcity_sdk::contracts::{Capacity, IBeacon, IPoolManagerState, OpenInterest, Perp};
 use perpcity_sdk::events::{MarketEvent, decode_log};
 use perpcity_sdk::history::test_support::FakeNode;
-use perpcity_sdk::history::{History, TapeAddresses, TapeEvent};
+use perpcity_sdk::history::{History, Recording, TapeAddresses, TapeEvent};
 
 const PERP: Address = Address::repeat_byte(0xF0);
 const BEACON: Address = Address::repeat_byte(0xBE);
@@ -133,12 +133,15 @@ fn addresses() -> TapeAddresses {
 /// as a caller's would be, not the chain's.
 const LAST_BLOCK: u64 = EVENTS / PER_BLOCK + 2;
 
-/// A recorded tape when `PERPCITY_TAPE` names one, else the synthetic one
-/// scanned once through the fake node.
+/// A recorded tape when `PERPCITY_RECORDING` names a recording, decoded
+/// from its raw logs, else the synthetic one scanned once through the fake
+/// node.
 fn tape(runtime: &tokio::runtime::Runtime, logs: &[Log]) -> Vec<TapeEvent> {
-    if let Ok(path) = env::var("PERPCITY_TAPE") {
-        let json = fs::read_to_string(&path).expect("PERPCITY_TAPE is a readable file");
-        return serde_json::from_str(&json).expect("PERPCITY_TAPE holds a JSON list of TapeEvents");
+    if let Ok(dir) = env::var("PERPCITY_RECORDING") {
+        return Recording::read(Path::new(&dir))
+            .expect("PERPCITY_RECORDING is a recording directory")
+            .tape()
+            .expect("the recording decodes");
     }
     scan(runtime, logs)
 }

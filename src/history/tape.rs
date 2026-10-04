@@ -340,17 +340,43 @@ pub(super) async fn market_tape_with<P: Provider>(
     widths: &SharedWidths,
     in_flight: usize,
 ) -> Result<Vec<TapeEvent>> {
+    let logs =
+        market_logs_with(provider, addresses, from_block, to_block, widths, in_flight).await?;
+    let decoded = decode_known(logs, widths);
+    tape_rows(provider, decoded).await
+}
+
+/// The raw logs a market's tape is decoded from, in chain order: the
+/// perp's and the beacon's by address, the PoolManager's by the liquidity
+/// event and the pool id, each stamped with its block's timestamp. What a
+/// recording keeps, since a decoder can be rerun over logs and never over
+/// what it decoded.
+pub(super) async fn market_logs_with<P: Provider>(
+    provider: &P,
+    addresses: TapeAddresses,
+    from_block: u64,
+    to_block: u64,
+    widths: &SharedWidths,
+    in_flight: usize,
+) -> Result<Vec<Log>> {
     let (market, liquidity) = tape_filters(addresses)?;
-    let (market_logs, liquidity_logs) = futures_util::try_join!(
+    let (mut logs, liquidity_logs) = futures_util::try_join!(
         scan_all(provider, &market, from_block, to_block, widths, in_flight),
         scan_all(
             provider, &liquidity, from_block, to_block, widths, in_flight
         ),
     )?;
-    let mut decoded = decode_known(market_logs, widths);
-    decoded.extend(decode_known(liquidity_logs, widths));
-    decoded.sort_by_key(|(log, _)| (log.block_number, log.log_index));
-    tape_rows(provider, decoded).await
+    logs.extend(liquidity_logs);
+    logs.sort_by_key(|log| (log.block_number, log.log_index));
+    let headers = block_timestamps(provider, logs.iter()).await?;
+    for log in &mut logs {
+        if log.block_timestamp.is_none()
+            && let Some(number) = log.block_number
+        {
+            log.block_timestamp = headers.get(&number).copied();
+        }
+    }
+    Ok(logs)
 }
 
 /// The newest `limit` market events `perp` emitted in blocks

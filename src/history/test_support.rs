@@ -142,6 +142,7 @@ impl FakeNode {
         params: Option<&RawValue>,
     ) -> Result<ResponsePayload, TransportError> {
         match method {
+            "eth_chainId" => Ok(success(&format!("0x{CHAIN_ID:x}"))),
             "eth_blockNumber" => {
                 let head = self.head.unwrap_or_else(|| {
                     self.logs
@@ -158,6 +159,7 @@ impl FakeNode {
                 let number = parse_quantity(&tag);
                 self.state.lock().unwrap().header_reads.push(number);
                 let mut block = Block::<B256>::default();
+                block.header.hash = hash_of(number);
                 block.header.inner.number = number;
                 block.header.inner.timestamp = timestamp_of(number);
                 Ok(success(&block))
@@ -241,9 +243,20 @@ impl Service<RequestPacket> for FakeNode {
     }
 }
 
+/// The chain id the node reports.
+pub const CHAIN_ID: u64 = 31_337;
+
 /// The timestamp the node reports for a block.
 pub fn timestamp_of(block: u64) -> u64 {
     1_700_000_000 + block / 4
+}
+
+/// The header hash the node reports for a block: a function of the
+/// number, so a recording's tip hash can be checked against it.
+pub fn hash_of(block: u64) -> B256 {
+    let mut hash = B256::from(alloy::primitives::U256::from(block));
+    hash.0[0] = 0xB1;
+    hash
 }
 
 /// A mined log from `address` with one topic, the given data, and no

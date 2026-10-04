@@ -10,12 +10,14 @@
 //! export PERPCITY_PERP="0x..."
 //! export PERPCITY_TAPE_LIMIT=50        # optional, default 50
 //! export PERPCITY_TAPE_FROM=486214447  # optional: the whole tape from this block instead
-//! export PERPCITY_TAPE_OUT=hormuz.json # optional: write the rows as JSON (the history benchmark reads one)
 //! cargo run --release --example tape
 //! ```
+//!
+//! To keep a tape as a file, record its raw logs with the `record` example
+//! instead; a recording decodes offline and can be checked against the
+//! chain later.
 
 use std::env;
-use std::fs;
 
 use alloy::primitives::Address;
 use alloy::providers::ProviderBuilder;
@@ -59,12 +61,6 @@ async fn main() -> perpcity_sdk::Result<()> {
             row.block_number, row.log_index, row.timestamp, row.event
         );
     }
-    if let Ok(path) = env::var("PERPCITY_TAPE_OUT") {
-        let json = serde_json::to_string(&tape).expect("a tape serializes");
-        fs::write(&path, json).expect("the tape file is writable");
-        println!("wrote {} rows to {path}", tape.len());
-    }
-
     // The tape carries ownership: a position NFT is minted to its owner,
     // moved by mid-life transfers, and burned on close.
     let mut mints = 0u32;
