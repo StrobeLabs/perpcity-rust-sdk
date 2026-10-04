@@ -293,6 +293,12 @@ pub(super) async fn market_events_with<P: Provider>(
 /// names `ModifyLiquidity` and the pool id it indexes by. The two scans
 /// share the learned width, and the rows are merged on chain point.
 ///
+/// The beacon is the one in `addresses`, for the whole range. A market
+/// whose beacon governance swapped inside the range has its earlier
+/// beacon's prints missing here, with the `ModuleSet` that swapped it on
+/// the tape to say so; a fold that meets one counts the prints before it
+/// as a gap. No live market has swapped its beacon yet.
+///
 /// # Errors
 ///
 /// As [`market_events`]; a zero address in `addresses` is

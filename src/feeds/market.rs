@@ -87,10 +87,16 @@ impl MarketFeed {
     /// block, block hash, log index, timestamp and transaction.
     ///
     /// This is the feed for a fold that orders on chain point or pairs the
-    /// logs of one transaction: the same [`TapeEvent`] a scan yields, so the
-    /// fold never knows which tense fed it. When the subscription's log
-    /// omits its block timestamp, the header is read from `provider`, once,
-    /// as a scan reads it.
+    /// logs of one transaction: each row is the [`TapeEvent`] a scan would
+    /// have built from the same log, so the fold never knows which tense fed
+    /// it. The event *set* is the subscription's, the perp and its beacon;
+    /// the PoolManager's liquidity changes that
+    /// [`History::market_tape`](crate::history::History::market_tape) also
+    /// carries are not on this feed, so a fold that needs the book live
+    /// follows the lagged tail through the handle until a feed over all
+    /// three addresses exists. When the subscription's log omits its block
+    /// timestamp, the header is read from `provider`, once, as a scan reads
+    /// it.
     ///
     /// `None` and `Some(Err)` as on [`Self::next`]; the header read's own
     /// failure comes back as its error.

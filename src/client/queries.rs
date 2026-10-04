@@ -280,8 +280,9 @@ impl MarketReader {
     /// PoolManager with this market's pool id.
     ///
     /// The beacon is governance's to change, so this is the beacon at the
-    /// time of the call; a tape read from the market's genesis carries
-    /// every `SetBeacon` and a fold learns the earlier ones from it.
+    /// time of the call, and the tape scans that one for the whole range;
+    /// a swap inside the range shows on the tape as a `ModuleSet`, and the
+    /// earlier beacon's prints before it are not read (see `market_tape`).
     ///
     /// # Errors
     ///

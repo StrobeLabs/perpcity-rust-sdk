@@ -907,6 +907,45 @@ mod tests {
         }
     }
 
+    /// Golden vector: a real `SetPricingModule` log from Arbitrum One
+    /// (HORMUZ-COUNT-PERP `0x8ac0…7b6c`, block 477_478_424, tx
+    /// `0xfd4168ead7a8…`, log 17). The signature hash cannot say which
+    /// field is indexed; this log can: the module is the second topic and
+    /// the data is empty, on the deployed build as in the declaration.
+    #[test]
+    fn decode_mainnet_set_pricing_module_golden_vector() {
+        let log = RpcLog {
+            inner: alloy::primitives::Log {
+                address: alloy::primitives::address!("8ac0179073a9eb5aaee58e5ebe9882066b9e7b6c"),
+                data: LogData::new_unchecked(
+                    vec![
+                        alloy::primitives::b256!(
+                            "a3c68ccb672060124d2ccfc83677f8c033e5f93ec4eff04e73206a48129d9c28"
+                        ),
+                        alloy::primitives::b256!(
+                            "000000000000000000000000ac7d819ba220fda0e59b05db61afbbe9ab852914"
+                        ),
+                    ],
+                    alloy::primitives::Bytes::new(),
+                ),
+            },
+            ..Default::default()
+        };
+        match decode_log(&log)
+            .unwrap()
+            .expect("should decode mainnet SetPricingModule")
+        {
+            MarketEvent::ModuleSet { module, address } => {
+                assert_eq!(module, ModuleKind::Pricing);
+                assert_eq!(
+                    address,
+                    alloy::primitives::address!("ac7d819ba220fda0e59b05db61afbbe9ab852914")
+                );
+            }
+            other => panic!("expected ModuleSet, got {other:?}"),
+        }
+    }
+
     #[test]
     fn decode_open_interest_updated_event() {
         let event = Perp::OpenInterestUpdated {
