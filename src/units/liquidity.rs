@@ -15,6 +15,7 @@
 //! [`LDelta`] has no operators, only methods that can fail, and the
 //! difference from [`UsdcDelta`](super::UsdcDelta) is deliberate.
 
+use std::fmt;
 use std::num::NonZeroUsize;
 
 use alloy::primitives::U256;
@@ -23,6 +24,20 @@ use crate::errors::ValidationError;
 
 use super::factor::scale_delta;
 use super::{Factor, Share, count};
+
+/// Liquidity reads as the whole count it is: the pool's unit has no
+/// fraction, so there is nothing to scale for a person.
+impl fmt::Display for LUnits {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(&self.units(), f)
+    }
+}
+
+impl fmt::Display for LDelta {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(&self.units(), f)
+    }
+}
 
 count! {
     /// Liquidity, in the pool's own units: what `makerDetails` stores for a
@@ -227,6 +242,14 @@ impl TryFrom<U256> for LUnits {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Liquidity displays as the whole count it is.
+    #[test]
+    fn liquidity_displays_as_a_whole_count() {
+        assert_eq!(LUnits::new(1_000_000).to_string(), "1000000");
+        assert_eq!(LDelta::new(-500).to_string(), "-500");
+        assert_eq!(format!("{:>6}", LDelta::new(-500)), "  -500");
+    }
 
     /// Liquidity is the count that does *not* get an addition operator. The
     /// two assets' do, because the protocol's supply bounds their sums; the
