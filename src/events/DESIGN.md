@@ -32,9 +32,23 @@ shape that market ever emitted, and a scan over many markets meets both
 live builds. So the decoder knows every shape that was ever live, and a
 shape that lacks a field its sibling carries decodes to the same variant
 with that field defaulted: `v0.2.2`'s `TakerClosed` has no liquidation
-tails, so it reads as a voluntary close and the `TakerLiquidated` after
-it says otherwise. This is the one place the era rule bends, and it bends
-on purpose.
+tails, so from one log it reads as a voluntary close and the
+`TakerLiquidated` after it says otherwise. This is the one place the era
+rule bends, and it bends on purpose.
+
+**A transaction pairs what a log cannot.** `decode_log` sees one log and
+has no way to know what follows it, so `decode_transaction_logs` takes a
+transaction's logs in receipt order and fills each untailed close from
+the first later `*Liquidated` of the same book, address and position,
+dropping that `*Liquidated` from the result. The output is then what
+build `58b42b7` emitted: a liquidation is a close with its tails set,
+once, and `TakerLiquidated` / `MakerLiquidated` remain only where no
+close can carry them, after a partial liquidation's adjust. A consumer
+that counts the fee on the close and one that counts it on `*Liquidated`
+both count it exactly once. A tailed `58b42b7` close pairs with nothing.
+The feed and the tape still decode log by log (SDK #167 keeps the
+three-state tail open for the next breaking release); the trades' receipt
+readers go through the transaction decoder.
 
 **The vocabulary is exact, and the human view is a method.** A consumer
 used to read `swap.usd_delta` as dollars because the decoder had already
@@ -140,7 +154,7 @@ transport, only against the vocabulary.
 
 | Type | Invariant | Produced by | Consumed by |
 |---|---|---|---|
-| [`MarketEvent`](../events.rs#L137) | one event, either tense: the same value from the same log, however delivered. **Every quantity carries its unit as a type**, with no `f64` left on the vocabulary: USDC as [`UsdcAtoms`](../units/DESIGN.md) or [`UsdcDelta`](../units/DESIGN.md) by whether the contract's word is signed, a perp amount as [`PerpAtoms`](../units/DESIGN.md) or [`PerpDelta`](../units/DESIGN.md), a price as [`Price`](../units/DESIGN.md), the two rates as [`FundingRate`](../units/DESIGN.md) and [`UtilizationRate`](../units/DESIGN.md) holding the contract's WAD exactly, liquidity as [`LUnits`](../units/DESIGN.md) and [`LDelta`](../units/DESIGN.md), a tick's checkpoints as [`Funding`](../units/DESIGN.md) and [`FundingPerSqrtPrice`](../units/DESIGN.md), and every long/short pair — capacity, open interest, the utilization rates — as one [`PerSide`](../units/DESIGN.md) field a side keys. The decoder converted to `f64` before, so the exact word was gone upstream of every consumer and a fold over a million fee legs accumulated rounding it could not avoid; now it sums integers and converts once at the end. A settled fee is spelled `liquidation_fee` rather than `liq_fee`, because the abbreviation also named a fee *rate* and the two are different quantities; a log of another vocabulary is `None`, and a log of *this* one that will not decode is an error naming the field or the signature — the two were one `None` until now, which is how a tape lost events without saying so | [`decode_log`](../events.rs#L323), the one decoder, which knows every era's shape; delivered live by [`MarketFeed::next`](../feeds/DESIGN.md) | [`TapeEvent`](../history/DESIGN.md), which stamps it with its chain point; the trades on `PerpClient`, which decode a receipt's logs with the same decoder to report a swap's deltas from the event rather than the request. The strategy layer's live cache and research folds match on it, and the ownership fold in `history` is the model: one `match`, either tense. |
+| [`MarketEvent`](../events.rs#L137) | one event, either tense: the same value from the same log, however delivered. **Every quantity carries its unit as a type**, with no `f64` left on the vocabulary: USDC as [`UsdcAtoms`](../units/DESIGN.md) or [`UsdcDelta`](../units/DESIGN.md) by whether the contract's word is signed, a perp amount as [`PerpAtoms`](../units/DESIGN.md) or [`PerpDelta`](../units/DESIGN.md), a price as [`Price`](../units/DESIGN.md), the two rates as [`FundingRate`](../units/DESIGN.md) and [`UtilizationRate`](../units/DESIGN.md) holding the contract's WAD exactly, liquidity as [`LUnits`](../units/DESIGN.md) and [`LDelta`](../units/DESIGN.md), a tick's checkpoints as [`Funding`](../units/DESIGN.md) and [`FundingPerSqrtPrice`](../units/DESIGN.md), and every long/short pair — capacity, open interest, the utilization rates — as one [`PerSide`](../units/DESIGN.md) field a side keys. The decoder converted to `f64` before, so the exact word was gone upstream of every consumer and a fold over a million fee legs accumulated rounding it could not avoid; now it sums integers and converts once at the end. A settled fee is spelled `liquidation_fee` rather than `liq_fee`, because the abbreviation also named a fee *rate* and the two are different quantities; a log of another vocabulary is `None`, and a log of *this* one that will not decode is an error naming the field or the signature — the two were one `None` until now, which is how a tape lost events without saying so | [`decode_log`](../events.rs#L323), the one decoder, which knows every era's shape; delivered live by [`MarketFeed::next`](../feeds/DESIGN.md); [`decode_transaction_logs`](../events.rs#L622), over one transaction's logs, which pairs an untailed `v0.2.2` close with its `*Liquidated` and returns the tailed close alone | [`TapeEvent`](../history/DESIGN.md), which stamps it with its chain point; the trades on `PerpClient`, which decode a receipt's logs with the transaction decoder to report a swap's deltas from the event rather than the request. The strategy layer's live cache and research folds match on it, and the ownership fold in `history` is the model: one `match`, either tense. |
 | [`SwapInfo`](../events.rs#L81) | a taker swap's outcome: the four fee legs sum to the total; deltas are the swap's, signed as V4 signs them, and every field now carries its unit — the deltas as [`PerpDelta`](../units/DESIGN.md) and [`UsdcDelta`](../units/DESIGN.md), the four shares as [`UsdcAtoms`](../units/DESIGN.md), the total as a `UsdcDelta` because the contract's `totalFeeAmt` is signed while its shares are not. The price is spelled `pool_price` and typed [`Price`](../units/DESIGN.md), and the rename is the substance: it is the pool's price, not the one the contract marks at, so a basis taken against it is not the basis a liquidation uses | the decoder, inside `TakerOpened`, `TakerAdjusted` and `TakerClosed` | the taker trades' results, which report the realised deltas; the strategy layer's economics, which attribute each fee leg exactly rather than by a ratio on an aggregate. |
 | [`MakerSettle`](../events.rs#L107) | what a touch credited a maker: the settle the chain performed, not a preview. `funding` is a [`UsdcDelta`](../units/DESIGN.md) positive when the position **pays** — the same direction as the equity preview's `funding_owed` — so it is subtracted from the earnings rather than added, which is why the type's own doc no longer claims a settle's parts all point one way; the utilization fees are a [`PerSide`](../units/DESIGN.md) of [`UsdcAtoms`](../units/DESIGN.md), as the preview's are | the decoder, inside the maker events | nothing in the crate. The strategy layer's maker income folds; the settle preview in `math` is checked against these. |
 | [`CumulativesInfo`](../events.rs#L125) | the market's accumulators at an accrual, verbatim: a [`Funding`](../units/DESIGN.md), a [`FundingPerSqrtPrice`](../units/DESIGN.md), and the utilization payments and earnings each a [`PerSide`](../units/DESIGN.md) of [`Earnings`](../units/DESIGN.md), rather than the six bare words they used to be, so the encoding is the type's and what a reader must do with a level — take the growth since a checkpoint — is the type's too | the decoder, inside `CumulativesAccrued` | nothing in the crate. The strategy layer's reconciliation of accruals against settles, which subtracts its own checkpoint through `since`. |
@@ -170,7 +184,8 @@ one kind may.
 ## Terminology
 
 - **Event vocabulary**: `MarketEvent`, the set of things the market can
-  say. **Decode**: log in, vocabulary out, once.
+  say. **Decode**: log in, vocabulary out, once. **Pair**: a transaction's
+  untailed close given the tails of the `*Liquidated` after it.
 - **Position event**: about one position id. **Market event**: about the
   market's state. **Touch**: the event of an accrual,
   `RatesAndEmasRefreshed`.
@@ -185,6 +200,12 @@ one kind may.
 
 ## Debts
 
+- **A single-log decode of an untailed close cannot say "unknown".** It
+  says voluntary, and only `decode_transaction_logs` corrects it. A
+  three-state tail (`Voluntary`, `Liquidated { fee }`, `Unknown`) would make
+  the field unable to lie from one log; it changes every `match` on the
+  three close variants, so it waits for the next breaking release (SDK
+  #167).
 - **Maker events carry no price.** A maker's inventory PnL is therefore
   not on the tape; only its income is. The next contract era's events
   are the fix, and the strategy layer's reconciliation names the gap

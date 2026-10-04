@@ -9,7 +9,7 @@ use crate::constants::{MIN_OPENING_MARGIN, TICK_SPACING};
 use crate::contracts::{IERC20, Perp, Position};
 use crate::convert::{scale_from_6dec, scale_to_6dec, unpack_balance_delta};
 use crate::errors::{ContractError, Result, TransactionError, ValidationError};
-use crate::feeds::{MarketEvent, decode_log};
+use crate::feeds::{MarketEvent, decode_transaction_logs};
 use crate::hft::gas::{GasLimits, Urgency};
 use crate::math::range::TickRange;
 use crate::math::tick::{align_tick_down, align_tick_up, price_to_tick};
@@ -228,29 +228,33 @@ fn parse_minted_token_id(receipt: &TransactionReceipt) -> std::result::Result<U2
 /// Extract the realized swap `(perp_delta, usd_delta)` from a taker
 /// open/adjust/close receipt.
 ///
-/// Reuses the market feed's [`decode_log`] to find the `TakerOpened` /
-/// `TakerAdjusted` / `TakerClosed` event and reads its decoded `SwapInfo`
-/// (already unpacked from the `BalanceDelta`). Every taker
+/// Reads the receipt's events through [`transaction_events`] to find the
+/// `TakerOpened` / `TakerAdjusted` / `TakerClosed` event and takes its
+/// decoded `SwapInfo` (already unpacked from the `BalanceDelta`). Every taker
 /// open/adjust/close emits one of these — a margin-only adjust still emits a
 /// `TakerAdjusted` with a zero-delta swap — so on the taker paths `None` means
 /// a decode/ABI failure, which the caller surfaces as an error rather than a
 /// zero fill. (Maker opens emit no taker swap, but they don't call this.)
 fn parse_taker_swap(receipt: &TransactionReceipt) -> Option<(PerpDelta, UsdcDelta)> {
-    for log in receipt.inner.logs() {
-        // An undecodable log is no different here from an unrecognised one:
-        // the caller's `ok_or` turns a receipt with no readable swap into
-        // `EventNotFound`, which says the same thing with the position's
-        // context attached.
-        if let Ok(Some(
+    transaction_events(receipt.inner.logs())
+        .into_iter()
+        .find_map(|event| match event {
             MarketEvent::TakerOpened { swap, .. }
             | MarketEvent::TakerAdjusted { swap, .. }
-            | MarketEvent::TakerClosed { swap, .. },
-        )) = decode_log(log)
-        {
-            return Some((swap.perp_delta, swap.usd_delta));
-        }
-    }
-    None
+            | MarketEvent::TakerClosed { swap, .. } => Some((swap.perp_delta, swap.usd_delta)),
+            _ => None,
+        })
+}
+
+/// A receipt's logs as market events, paired across the transaction by
+/// [`decode_transaction_logs`], so a `v0.2.2` liquidation reads as the
+/// tailed close it is on build `58b42b7`.
+///
+/// A log the decoder recognises and cannot read is a binding problem, and
+/// the readers above report it as the event they then fail to find: an
+/// unreadable receipt yields no events rather than a partial list.
+fn transaction_events(logs: &[RpcLog]) -> Vec<MarketEvent> {
+    decode_transaction_logs(logs).unwrap_or_default()
 }
 
 /// Read the realized swap from a taker adjust or close receipt.
@@ -292,11 +296,8 @@ fn check_opening_margin(margin: UsdcAtoms) -> std::result::Result<(), Validation
 /// A close whose swap leaves any perp delta mines as `TakerAdjusted`
 /// instead, with the position still open.
 fn closes_taker(logs: &[RpcLog], pos_id: U256) -> bool {
-    logs.iter().any(|log| {
-        matches!(
-            decode_log(log),
-            Ok(Some(MarketEvent::TakerClosed { pos_id: closed, .. })) if closed == pos_id
-        )
+    transaction_events(logs).iter().any(|event| {
+        matches!(event, MarketEvent::TakerClosed { pos_id: closed, .. } if *closed == pos_id)
     })
 }
 

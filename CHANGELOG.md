@@ -30,6 +30,7 @@ The changes below break the public API, so the next release is 0.10.0 (a minor b
 
 ### Added
 
+- **`decode_transaction_logs`** decodes one transaction's logs in receipt order and pairs each untailed `v0.2.2` close (`TakerClosed`, `MakerClosed`, `MakerConverted`) with the `TakerLiquidated` / `MakerLiquidated` that follows it for the same position, filling `liquidation_fee` and `is_liquidation` and dropping the paired `*Liquidated` from the result, so a liquidation reads as the tailed close build `58b42b7` emits. An unpaired `*Liquidated` (a partial liquidation) stays. `decode_log` is unchanged: from one log the untailed shapes still read as a voluntary close (#167). The trades' receipt readers use the new function.
 - **`#[must_use]` on every value type in `units`**, so a dropped amount, price, rate, share or pair warns where it is dropped. Two sites in the crate were calling a function only for its error and now say so with `let _`.
 - **`Hash` on `Price` and `SqrtPrice`**, which the counts already had.
 - **Property tests over the exactness claims** (`tests/units_properties.rs`): a split returns every atom; a partition is exactly the whole; `value_at` and `perp_at` never gain an atom round-tripping; an implied price values back to at most the leg it came from; a price and its root round-trip within the documented floor; a human price reads back within a millionth; a six-decimal human amount is the atom count it names; a share and its complement lose at most one atom between them.
