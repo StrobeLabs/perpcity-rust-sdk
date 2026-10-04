@@ -31,7 +31,7 @@ use crate::math::pricing::Mark;
 use crate::math::range::{MakerBand, TickRange};
 use crate::math::swap::{PoolSnapshot, TickLiquidity, active_liquidity};
 use crate::storage::{v4_tick_bitmap_slot, v4_tick_slot};
-use crate::units::{LDelta, LUnits, Price, Ratio, SqrtPrice};
+use crate::units::{LDelta, LUnits, Price, Ratio, SqrtPrice, UsdcAtoms};
 
 use super::market::MarketReader;
 use super::queries::{MarketImmutables, multicall_error, registered_module};
@@ -100,16 +100,21 @@ pub struct MarginRatios {
     pub taker: MarginRatioTriple,
 }
 
-/// The market's own solvency books, in USDC: the contract's `SolvencyState`.
+/// The market's own solvency books, in the chain's units: the contract's
+/// `SolvencyState`.
 ///
 /// `total_margin` moves only when real USDC enters or leaves, so it is
-/// the honest upper bound on what positions may collectively claim.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+/// the honest upper bound on what positions may collectively claim. Both
+/// are atoms, because the figures they are compared against — the sum of
+/// every position's margin, the USDC the contract holds, the same books
+/// rebuilt from the tape — are exact, and a comparison to the cent needs
+/// both sides exact.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SolvencyState {
     /// Insolvency the contract has recognised and booked.
-    pub bad_debt: f64,
+    pub bad_debt: UsdcAtoms,
     /// Margin the contract believes it holds.
-    pub total_margin: f64,
+    pub total_margin: UsdcAtoms,
 }
 
 /// One id's row in a batched read: every id passed to [`StateAt::positions`]
@@ -283,8 +288,8 @@ impl StateAt {
             .await
             .map_err(|e| self.read_error(e))?;
         Ok(SolvencyState {
-            bad_debt: usdc_from_atoms(state.badDebt, "badDebt")?,
-            total_margin: usdc_from_atoms(state.totalMargin, "totalMargin")?,
+            bad_debt: UsdcAtoms::new(state.badDebt),
+            total_margin: UsdcAtoms::new(state.totalMargin),
         })
     }
 
@@ -968,14 +973,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn solvency_is_scaled_to_usdc() {
+    async fn solvency_is_the_contracts_atoms() {
         let (state, rpc) = state().await;
         rpc.call::<Perp::solvencyStateCall>(&mock::solvency(1_500_000, 250_000_000));
         assert_eq!(
             state.solvency().await.unwrap(),
             SolvencyState {
-                bad_debt: 1.5,
-                total_margin: 250.0,
+                bad_debt: UsdcAtoms::new(1_500_000),
+                total_margin: UsdcAtoms::new(250_000_000),
             }
         );
     }

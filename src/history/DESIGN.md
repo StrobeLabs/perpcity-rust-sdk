@@ -68,13 +68,21 @@ point. The **prints** are one beacon's `IndexUpdated` logs as an index
 series. The **transfers** are one token's `Transfer` logs between address
 sets. Each is the same shape: a range, a filter, the decoder, chain order.
 
-Over the tape sit the folds. `OwnershipLog` folds the position NFT's
-transfers into custody over time, so `owner_at(pos, point)` answers who
-held a position when an event happened, which is the attribution a
-measurement wants, and `latest_owner` answers the naive question for
-compatibility. Research's economics and reconciliation are further folds
-over the same tape, and they live above this crate because they apply a
-perspective.
+Over the tape sit the folds, every one an instance of one trait. `Fold`
+is a state that advances by one event and merges with the fold of the
+segment after it, so the same code is a batch computation over the tape,
+a live one over the stamped feed, and a parallel one over segments cut at
+block boundaries. `OwnershipLog` folds the position NFT's transfers into
+custody over time, so `owner_at(pos, point)` answers who held a position
+when an event happened, which is the attribution a measurement wants, and
+`latest_owner` answers the naive question for compatibility. `Replay`
+folds the market's own totals — pool price, index, EMAs and rates,
+capacity and open interest, the solvency books, the modules in force —
+into the same types the pinned reads return, so a market rebuilt from its
+tape is compared to a market read from storage with `==`; what the tape
+cannot carry it counts in `Gaps` rather than guessing. Research's
+economics and reconciliation are further folds over the same tape, and
+they live above this crate because they apply a perspective.
 
 `History` is the handle that owns the learned width, the block lag, the
 in-flight bound and the telemetry, so that a long-lived scanner meters
@@ -85,15 +93,18 @@ state.
 
 | Type | Invariant | Produced by | Consumed by |
 |---|---|---|---|
-| [`History`](mod.rs#L120) | the scanning handle over a provider: learned width across scans; a block lag; bounded in-flight windows; cumulative stats. `market_tape` is the one read that walks a range for three addresses at once, the market's whole record in one chain order; the one-address reads stay for a caller that wants one series | [`History::new`](mod.rs#L131) over any provider; [`ChainReader::history`](../client/DESIGN.md), the one handle a chain reader keeps so its scans share one learned width | nothing takes it; its reads produce the series below. The strategy layer's research sources take a reference to one so a whole run pays the width search once. |
-| [`ChainPoint`](tape.rs#L53) | where an event sits: block number and log index; the total order events are joined on | [`TapeEvent::point`](tape.rs#L80) | [`OwnershipLog::owner_at`](tape.rs#L200), custody at that point. The strategy layer's joins, a print against the fills after it, are on this key, which is why it is a type and not two fields. |
-| [`TapeEvent`](tape.rs#L62) | a [`MarketEvent`](../events/DESIGN.md) at a chain point: the same vocabulary as the feed, plus its position, its block's hash and timestamp, and its transaction. The block hash is what lets a state rebuilt from the tape carry the same block identity a pinned read carries, so the two can be compared rather than approximately agreed; the transaction is what lets a fold pair the logs of one call. Both tenses build it through one constructor, so a feed's row and a scan's are the same row, though the feed does not yet carry the tape's whole event set | [`History::market_tape`](mod.rs#L275), [`History::market_events`](mod.rs#L252) and [`History::latest_market_events`](mod.rs#L298), and their handle-less twins; [`MarketFeed::next_stamped`](../feeds/DESIGN.md), the present tense of the same row over the perp and beacon | [`OwnershipLog::fold`](tape.rs#L176). The strategy layer's economics, classification and series are folds over a slice of these; every fold that depends on order can assert it. |
-| [`TapeAddresses`](tape.rs#L132) | the three addresses a market's record is spread across: its own contract, the beacon it reads, and the chain's PoolManager keyed by its pool id. The PoolManager is every pool on the chain, so it is filtered by the liquidity event and the pool id it indexes, never by address alone | [`MarketReader::tape_addresses`](../client/DESIGN.md), which knows all three; or a caller that does | [`History::market_tape`](mod.rs#L275) and [`market_tape`](tape.rs#L306). |
-| [`OwnershipLog`](tape.rs#L164) | custody over time: a fold of transfers in chain order; owner at a point, not merely latest | [`OwnershipLog::fold`](tape.rs#L176) over the tape | nothing in the crate. The strategy layer's attribution, which asks who held a position when a trade happened, not who holds it now. |
-| [`IndexPrint`](beacon.rs#L20) | one beacon update: index, chain point and timestamp. The index is a [`Price`](../units/DESIGN.md), the same type the live `IndexUpdated` carries, so a fold over an index series cannot tell which tense produced its samples; `index_f64` is the lossy view and the field was `index_x96` when it was a bare word | [`History::beacon_prints`](mod.rs#L205) and [`History::latest_beacon_prints`](mod.rs#L228) | nothing in the crate. The strategy layer's index series and estimator bootstrap; it keeps the chain point so a print can be joined to the fills after it. |
-| [`TokenTransfer`](transfers.rs#L18) | one ERC-20 transfer between the address sets asked for; the sets are topic filters, not post-filters | [`History::token_transfers`](mod.rs#L315) | nothing in the crate. The strategy layer's fleet derivation and treasury ledger. |
+| [`History`](mod.rs#L125) | the scanning handle over a provider: learned width across scans; a block lag; bounded in-flight windows; cumulative stats. `market_tape` is the one read that walks a range for three addresses at once, the market's whole record in one chain order; the one-address reads stay for a caller that wants one series | [`History::new`](mod.rs#L136) over any provider; [`ChainReader::history`](../client/DESIGN.md), the one handle a chain reader keeps so its scans share one learned width | nothing takes it; its reads produce the series below. The strategy layer's research sources take a reference to one so a whole run pays the width search once. |
+| [`ChainPoint`](tape.rs#L54) | where an event sits: block number and log index; the total order events are joined on | [`TapeEvent::point`](tape.rs#L81) | [`OwnershipLog::owner_at`](tape.rs#L210), custody at that point. The strategy layer's joins, a print against the fills after it, are on this key, which is why it is a type and not two fields. |
+| [`TapeEvent`](tape.rs#L63) | a [`MarketEvent`](../events/DESIGN.md) at a chain point: the same vocabulary as the feed, plus its position, its block's hash and timestamp, and its transaction. The block hash is what lets a state rebuilt from the tape carry the same block identity a pinned read carries, so the two can be compared rather than approximately agreed; the transaction is what lets a fold pair the logs of one call. Both tenses build it through one constructor, so a feed's row and a scan's are the same row, though the feed does not yet carry the tape's whole event set | [`History::market_tape`](mod.rs#L280), [`History::market_events`](mod.rs#L257) and [`History::latest_market_events`](mod.rs#L303), and their handle-less twins; [`MarketFeed::next_stamped`](../feeds/DESIGN.md), the present tense of the same row over the perp and beacon | [`OwnershipLog::fold`](tape.rs#L198). The strategy layer's economics, classification and series are folds over a slice of these; every fold that depends on order can assert it. |
+| [`TapeAddresses`](tape.rs#L133) | the three addresses a market's record is spread across: its own contract, the beacon it reads, and the chain's PoolManager keyed by its pool id. The PoolManager is every pool on the chain, so it is filtered by the liquidity event and the pool id it indexes, never by address alone | [`MarketReader::tape_addresses`](../client/DESIGN.md), which knows all three; or a caller that does | [`History::market_tape`](mod.rs#L280) and [`market_tape`](tape.rs#L316). |
+| [`Fold`](fold.rs#L26) | the one contract every fold over a tape shares: `apply` one event, `combine` the fold of the segment after, and the law `fold(a ++ b) == combine(fold(a), fold(b))` at any cut between blocks, which makes a fold of any prefix a checkpoint and lets segments fold on separate cores. An implementation allocates nothing on the common path of `apply` | the two folds here implement it, and the strategy layer's interpreters implement the same trait rather than a sibling | nothing takes it: a trait with one open verb, like `Factor` in `units`. `OwnershipLog` and `Replay` are the crate's instances, and the strategy layer's folds are the rest, so that one contract serves both repositories and the sweep that cuts a tape into segments is written once. |
+| [`OwnershipLog`](tape.rs#L165) | custody over time: a fold of transfers in chain order; owner at a point, not merely latest. The first instance of [`Fold`](fold.rs#L26): `apply` appends a transfer, `combine` appends a later segment's timelines | [`OwnershipLog::fold`](tape.rs#L198) over the tape, the trait's fold kept inherent so it is reachable without the import | [`Replay`](replay.rs#L65), which folds it in the same pass. The strategy layer's attribution, which asks who held a position when a trade happened, not who holds it now. |
+| [`Replay`](replay.rs#L65) | a market rebuilt from its events: every quantity a total the contract emitted (the latest wins), a sum of its deltas, or a first occurrence, so the fold combines across segments. Its accessors return the read types — [`MarketCapacity`](../math/DESIGN.md), [`Mark`](../math/DESIGN.md), [`Emas`](../math/DESIGN.md), [`SolvencyState`](../client/DESIGN.md), [`OpenInterest`](../client/DESIGN.md) — and the ones whose read carries a block take the caller's [`BlockContext`](../math/DESIGN.md), so a rebuilt snapshot equals a pinned read at that block or the fold is wrong; that equality is the test the type exists to pass, run against a live market. From genesis the totals that are zero before any event — capacity, open interest, the books — are zero, while what only the factory's creation log carries — the modules, the first price, the first EMAs — is unknown until the market's own events state it. The margin total is the last `MarginTransferred` less the swap fees removed since, the one rule here that is the live build's rather than the vocabulary's: the removal is silent, and whether it came before or after the transaction's statement is the path's — a deposit is transferred before it, a withdrawal after, a liquidation's fee after the close event — so the fold reads the statement's sign and transaction to know which | [`Replay::from_genesis`](replay.rs#L109) for a market, then `apply` over the tape's rows or the stamped feed's; the trait's `fold` for a segment, whose totals are unknown until stated | nothing in the crate. The strategy layer's monitor runs it on every market it watches; its live cache seeds from a read and follows the feed through it; its backtests drive it with an engine's events. |
+| [`Gaps`](replay.rs#L38) | how many times a figure may have moved without an event saying so, since the last event that stated it: donations and bookings that move the margin total silently, swaps whose insurance fee repaid debt silently. Counted, never guessed, and decided from the latest total at the read so the count itself combines across segments | [`Replay::gaps`](replay.rs#L245) | nothing in the crate: the strategy layer's gate. A reading with a nonzero gap is forensic, not a decision's input, and the pinned read is its check. Both silences are the live builds'; the next build emits what repaid the debt on every swap and the margin total on every path, and the type shrinks with it. |
+| [`IndexPrint`](beacon.rs#L20) | one beacon update: index, chain point and timestamp. The index is a [`Price`](../units/DESIGN.md), the same type the live `IndexUpdated` carries, so a fold over an index series cannot tell which tense produced its samples; `index_f64` is the lossy view and the field was `index_x96` when it was a bare word | [`History::beacon_prints`](mod.rs#L210) and [`History::latest_beacon_prints`](mod.rs#L233) | nothing in the crate. The strategy layer's index series and estimator bootstrap; it keeps the chain point so a print can be joined to the fills after it. |
+| [`TokenTransfer`](transfers.rs#L18) | one ERC-20 transfer between the address sets asked for; the sets are topic filters, not post-filters | [`History::token_transfers`](mod.rs#L320) | nothing in the crate. The strategy layer's fleet derivation and treasury ledger. |
 | [`FakeNode`](test_support.rs#L68), [`Mode`](test_support.rs#L29) | an in-memory node that serves `eth_getLogs` under a chosen cap and answers as a provider would: accept, decline a too-wide range, or fail; behind the `test-utils` feature | [`FakeNode::new`](test_support.rs#L81) from a set of logs and a span cap | every scan test in the crate, through the provider it hands out. The strategy layer's research tests scan against it too, which is why it is a feature and not a test module. |
-| [`ScanStats`](scan.rs#L241) | what a scan cost: requests, rejections, narrowings, the learned width; the number a collector meters. It also counts `undecodable` — logs of this vocabulary that would not decode, which the scan skips rather than dying over, since one such log should not cost a scan of millions of blocks. A non-zero count is how a caller learns the tape it holds is short | [`History::stats`](mod.rs#L156) | nothing in the crate. The strategy layer's collector, and the benchmark suite, which asserts a scan's request count. |
+| [`ScanStats`](scan.rs#L241) | what a scan cost: requests, rejections, narrowings, the learned width; the number a collector meters. It also counts `undecodable` — logs of this vocabulary that would not decode, which the scan skips rather than dying over, since one such log should not cost a scan of millions of blocks. A non-zero count is how a caller learns the tape it holds is short | [`History::stats`](mod.rs#L161) | nothing in the crate. The strategy layer's collector, and the benchmark suite, which asserts a scan's request count. |
 
 Two decisions shape the surface. The free functions and the handle offer
 the same reads; the handle adds memory, concurrency and telemetry, and a
@@ -175,13 +186,23 @@ depends on. That separation is a cost rule, not a convenience.
   update. **Transfer**: one ERC-20 movement between address sets.
 - **Chain point**: block and log index; **chain order**: the order they
   induce, the join key for everything.
-- **Fold**: a pass over a tape that produces a derived view; the
-  ownership log is the one that lives here.
+- **Fold**: a state that advances by one event and merges with the fold
+  of the segment after it; the trait of that name, and the ownership log
+  and the replay are the two that live here. **Replay**: the fold that
+  rebuilds a market's own state. **Gap**: a figure that may have moved
+  without an event saying so, counted since the event that last stated it.
 - **Newest-first**: a scan that stops early, sequential by design.
 - **Lag**: blocks held back from the head so a scan's top is on every
   replica.
 
 ## Accepted structure
+
+- **`Fold` names no other type in its signature, by design.** The trait
+  takes a `TapeEvent` and returns `Self`; what a fold produces is the
+  implementor's to say, so the trait itself connects to nothing in the
+  graph and its instances, `OwnershipLog::apply` and `Replay::apply`, carry
+  the edges. The same shape as `Factor` in `units`: one open verb, the
+  types on the implementations.
 
 - **`ChainPoint` goes into `OwnershipLog` and comes back out of it.**
   It is the coordinate the fold is sorted by: `owner_at` takes one and
@@ -201,6 +222,21 @@ depends on. That separation is a cost rule, not a convenience.
   liquidity and every change to it on the perp's own events, so the book
   becomes a fold of one address and the second filter goes with the
   cutover.
+
+- **The replay's snapshots are the reads' types, with the caller's block.**
+  `Replay::capacity_at` produces a `MarketCapacity`, `Replay::mark_at` a
+  `Mark`, `Replay::emas` an `Emas`, `Replay::solvency` a `SolvencyState`,
+  `Replay::open_interest` an `OpenInterest`, `Replay::cumulatives` a
+  `CumulativesInfo`, and `Replay::funding_per_day` and
+  `Replay::util_fee_per_day` the two rates as a `FundingRate` and a
+  `PerSide` of `UtilizationRate`, every one a type `StateAt`, `MarketReader`
+  or the decoder also produces, so every snapshot type now has two
+  producers. That is the point: the two must agree at a block, and `==` is
+  how they are compared. The block on a
+  snapshot is the caller's because the fold's last event may be blocks
+  before the read, and the mark advances the EMAs to the block it is asked
+  for; a fold that stamped its own block would compare unequal for the
+  wrong reason.
 
 ## Debts
 
