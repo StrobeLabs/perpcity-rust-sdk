@@ -293,10 +293,10 @@ with nothing but fields is not thereby a different kind of thing.
 
 `convert` has no rows at all, because it declares no types: its functions
 are edges. Every read that returns a price calls
-[`price_x96_to_f64`](../convert.rs#L177) once; the trades call
-[`scale_to_6dec`](../convert.rs#L47) once; the balance and solvency reads
-call [`usdc_from_atoms`](../convert.rs#L87); the decoder and the
-maker-equity batch call [`unpack_balance_delta`](../convert.rs#L283). The
+[`price_x96_to_f64`](../convert.rs#L178) once; the trades call
+[`scale_to_6dec`](../convert.rs#L48) once; the balance and solvency reads
+call [`usdc_from_atoms`](../convert.rs#L88); the decoder and the
+maker-equity batch call [`unpack_balance_delta`](../convert.rs#L286). The
 types on either side of that door do have rows: the wire side's in
 [`units`](../units/DESIGN.md), the human side's here, the exact twins in
 [`math`](../math/DESIGN.md).

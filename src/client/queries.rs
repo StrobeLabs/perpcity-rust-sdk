@@ -893,7 +893,7 @@ mod tests {
             (oi.long, oi.short),
             (PerpAtoms::new(1_500_000), PerpAtoms::new(250_000))
         );
-        assert_eq!(oi.on(Side::Short), oi.short);
+        assert_eq!(*oi.on(Side::Short), oi.short);
         assert_eq!(oi.total(), PerpAtoms::new(1_750_000));
         assert!(rpc.is_drained());
     }

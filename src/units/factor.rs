@@ -13,6 +13,7 @@ use alloy::primitives::U256;
 
 use crate::constants::WAD;
 
+use super::fixed_point::{Rounding, mul_div};
 use super::share::Share;
 
 /// A dimensionless factor applied to a quantity.
@@ -60,6 +61,13 @@ pub trait Factor: Copy {
     }
 }
 
+/// `x × numerator / denominator` with the product in 512 bits, so a wide
+/// word times a wide factor cannot wrap before the divide; a quotient past
+/// `U256` is a quantity no type here can hold, and panics as a bug.
+fn scaled(x: U256, numerator: U256, denominator: U256) -> U256 {
+    mul_div(x, numerator, denominator, Rounding::TowardZero).expect("a scaled quantity left U256")
+}
+
 /// The literal in a strategy's hand: taken to WAD once, which holds every
 /// digit an `f64` has, and exact from there.
 ///
@@ -78,7 +86,7 @@ impl Factor for f64 {
             wad <= u128::MAX as f64,
             "factor {self} is past the WAD width"
         );
-        x * U256::from(wad as u128) / WAD
+        scaled(x, U256::from(wad as u128), WAD)
     }
 
     fn is_negative(self) -> bool {
@@ -88,7 +96,7 @@ impl Factor for f64 {
 
 impl Factor for Share {
     fn apply(self, x: U256) -> U256 {
-        x * U256::from(self.e6()) / super::BIGINT_1E6
+        scaled(x, U256::from(self.e6()), super::BIGINT_1E6)
     }
 }
 

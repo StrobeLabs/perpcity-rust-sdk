@@ -230,7 +230,9 @@ pub fn price_f64_to_x96(price: f64) -> Result<U256, ValidationError> {
 /// assert!(diff < Q96 / U256::from(1_000_000));
 /// ```
 pub fn price_to_sqrt_price_x96(price: f64) -> Result<U256, ValidationError> {
-    SqrtPrice::from_price(price).map(SqrtPrice::x96)
+    Price::try_from(price)
+        .and_then(SqrtPrice::try_from)
+        .map(SqrtPrice::x96)
 }
 
 /// Convert a `sqrtPriceX96` value back to a human-readable price.

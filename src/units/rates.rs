@@ -21,6 +21,7 @@ use alloy::primitives::U256;
 use crate::constants::WAD;
 use crate::errors::ValidationError;
 
+use super::fixed_point::{Rounding, mul_div};
 use super::{BIGINT_1E6, F64_1E6, F64_WAD, Factor, UsdcAtoms, UsdcDelta};
 
 /// The largest value a `uint24` holds, which is the domain of every ratio
@@ -31,9 +32,18 @@ const MAX_E6: u32 = (1 << 24) - 1;
 const SECS_PER_DAY: u64 = 86_400;
 
 /// `notional` at a per-day WAD rate over `elapsed`, truncated toward zero.
+/// The notional-seconds product fits `U256` (a `u128` count by a `u64` of
+/// seconds); the rate is applied with a 512-bit intermediate so a wide rate
+/// cannot wrap it before the divide.
 fn accrued(wad: u128, elapsed: Duration, notional: UsdcAtoms) -> u128 {
-    let atoms = U256::from(notional.atoms()) * U256::from(wad) * U256::from(elapsed.as_secs())
-        / (WAD * U256::from(SECS_PER_DAY));
+    let notional_seconds = U256::from(notional.atoms()) * U256::from(elapsed.as_secs());
+    let atoms = mul_div(
+        notional_seconds,
+        U256::from(wad),
+        WAD * U256::from(SECS_PER_DAY),
+        Rounding::TowardZero,
+    )
+    .expect("an accrual on a bounded notional fits U256");
     u128::try_from(atoms).expect("an accrual on a bounded notional fits u128")
 }
 
@@ -54,6 +64,7 @@ fn accrued(wad: u128, elapsed: Duration, notional: UsdcAtoms) -> u128 {
     serde::Serialize,
     serde::Deserialize,
 )]
+#[must_use]
 #[repr(transparent)]
 #[serde(transparent)]
 pub struct FundingRate(i128);
@@ -75,6 +86,7 @@ pub struct FundingRate(i128);
     serde::Serialize,
     serde::Deserialize,
 )]
+#[must_use]
 #[repr(transparent)]
 #[serde(transparent)]
 pub struct UtilizationRate(u64);
@@ -87,6 +99,7 @@ pub struct UtilizationRate(u64);
 /// [`Self::fraction`] is the lossy view a person reads, which is why the
 /// type carries the scale and not the name.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize)]
+#[must_use]
 #[repr(transparent)]
 #[serde(transparent)]
 pub struct Ratio(u32);
