@@ -6,6 +6,8 @@
 //! they are indistinguishable as primitives, and the one operation that
 //! crosses between them is a valuation at a [`Price`].
 
+use std::fmt;
+
 use alloy::primitives::{I256, U256};
 
 use super::fixed_point::{Rounding, mul_div, s_full_mul_div, to_i256};
@@ -14,6 +16,11 @@ use crate::errors::ValidationError;
 
 use super::price::Price;
 use super::{F64_1E6, MAX_SAFE_F64_INT, bounded_count, count, delta};
+
+/// The atoms in one unit of either asset: both are six-decimal.
+const ATOMS_PER_UNIT: u128 = 1_000_000;
+/// The decimal places an atom is the last of.
+const PLACES: usize = 6;
 
 bounded_count! {
     /// USDC the chain holds: a count of atoms, each a millionth of a
@@ -54,14 +61,16 @@ delta! {
     PerpDelta(i128) as atoms, magnitude PerpAtoms
 }
 
-/// A human amount as a signed count of atoms, with the fractional atom
-/// floored.
+/// A human amount as a signed count of atoms, rounded to the nearest atom.
 ///
-/// Floored, not truncated: a negative amount rounds away from zero, so
-/// `-1.1234567` is `-1_123_457` atoms rather than `-1_123_456`. That is a
+/// Rounded, not floored: the amount is a number a person wrote or a
+/// strategy computed, and most decimals have no binary representation, so
+/// `0.29` arrives as `0.28999999999999998` and a floor would make it an
+/// atom short. Rounding reads every decimal of six places or fewer to the
+/// atom it names, at any magnitude the `f64` holds exactly; a seventh
+/// place rounds, since there is nothing smaller to hold it. This is a
 /// choice about a caller's own input, not a transcription of the contract,
-/// which truncates toward zero in its signed division — nothing here feeds
-/// a port, and the behaviour is pinned by a test.
+/// which truncates in its own division — nothing here feeds a port.
 ///
 /// # Errors
 ///
@@ -78,7 +87,28 @@ fn atoms_from_f64(amount: f64) -> Result<i128, ValidationError> {
             context: format!("amount {amount} exceeds safe f64 integer range (2^53)"),
         });
     }
-    Ok((amount * F64_1E6).floor() as i128)
+    Ok((amount * F64_1E6).round() as i128)
+}
+
+/// A count of atoms as the decimal a person reads, exact: the sign, the
+/// whole units, and the fraction with its trailing zeros trimmed, so
+/// `5_800_000` is `5.8` and `100_000_000` is `100`. A precision asked of
+/// the formatter truncates the fraction to that many places.
+fn fmt_atoms(f: &mut fmt::Formatter<'_>, negative: bool, magnitude: u128) -> fmt::Result {
+    let whole = magnitude / ATOMS_PER_UNIT;
+    let fraction = format!("{:0PLACES$}", magnitude % ATOMS_PER_UNIT);
+    let fraction = match f.precision() {
+        Some(places) => &fraction[..places.min(PLACES)],
+        None => fraction.trim_end_matches('0'),
+    };
+    let text = if fraction.is_empty() {
+        whole.to_string()
+    } else {
+        format!("{whole}.{fraction}")
+    };
+    // Padded as an integer is, so the width and fill apply and the
+    // precision, already spent on the fraction, does not shorten the text.
+    f.pad_integral(!negative, "", &text)
 }
 
 /// A count of atoms the chain returned in a wider word, narrowed to the
@@ -124,6 +154,30 @@ impl UsdcAtoms {
         )?;
         Ok(PerpAtoms::new(atoms_from_u256(atoms, "tokens at price")?))
     }
+
+    /// The price this much USDC implies for `size` tokens: USDC per token,
+    /// what a fill's two legs say it traded at, exact in Q96 and floored.
+    /// The third corner of the crossing, after [`PerpAtoms::value_at`] and
+    /// [`Self::perp_at`].
+    ///
+    /// # Errors
+    ///
+    /// [`ValidationError::InvalidPrice`] when `size` is zero: nothing was
+    /// traded, so no price was.
+    pub fn per(self, size: PerpAtoms) -> Result<Price, ValidationError> {
+        if size.is_zero() {
+            return Err(ValidationError::InvalidPrice {
+                reason: "no tokens to price USDC against".into(),
+            });
+        }
+        let x96 = mul_div(
+            U256::from(self.atoms()),
+            Q96,
+            U256::from(size.atoms()),
+            Rounding::TowardZero,
+        )?;
+        Ok(Price::from_x96(x96))
+    }
 }
 
 impl UsdcDelta {
@@ -145,6 +199,17 @@ impl UsdcDelta {
         } else {
             magnitude
         })
+    }
+
+    /// The price this USDC leg implies for the `size` leg it was traded
+    /// against, by magnitudes: a position's entry price from its cost basis
+    /// and its exposure, whichever way each points.
+    ///
+    /// # Errors
+    ///
+    /// As [`UsdcAtoms::per`].
+    pub fn per(self, size: PerpDelta) -> Result<Price, ValidationError> {
+        self.magnitude().per(size.magnitude())
     }
 }
 
@@ -195,6 +260,35 @@ impl PerpDelta {
             Rounding::TowardZero,
         )?;
         Ok(UsdcDelta::new(atoms_from_i256(atoms, "position value")?))
+    }
+}
+
+// ── The human view ────────────────────────────────────────────────────
+//
+// What a person reads in a log or a report: the exact decimal, `5.8`,
+// never the atom count and never a float's trailing noise.
+
+impl fmt::Display for UsdcAtoms {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt_atoms(f, false, self.atoms())
+    }
+}
+
+impl fmt::Display for UsdcDelta {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt_atoms(f, self.is_negative(), self.atoms().unsigned_abs())
+    }
+}
+
+impl fmt::Display for PerpAtoms {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt_atoms(f, false, self.atoms())
+    }
+}
+
+impl fmt::Display for PerpDelta {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt_atoms(f, self.is_negative(), self.atoms().unsigned_abs())
     }
 }
 
@@ -303,6 +397,70 @@ mod tests {
     use super::*;
     use crate::units::Share;
 
+    /// The float door reads every decimal of six places or fewer to the
+    /// atom it names: most hundredths have no binary representation, and a
+    /// floor would have made some of them an atom short — the order a
+    /// strategy did not mean to send.
+    #[test]
+    fn a_human_amount_reads_to_the_atom_it_names() {
+        for cents in 1..100i128 {
+            let exact = PerpDelta::new(cents * 10_000);
+            let amount = cents as f64 / 100.0;
+            assert_eq!(PerpDelta::try_from(amount).unwrap(), exact, "{amount}");
+            assert_eq!(PerpDelta::try_from(-amount).unwrap(), -exact, "-{amount}");
+        }
+        assert_eq!(PerpDelta::try_from(5.8).unwrap(), PerpDelta::new(5_800_000));
+        assert_eq!(UsdcAtoms::try_from(0.000001).unwrap(), UsdcAtoms::new(1));
+        assert_eq!(
+            UsdcDelta::try_from(-1.000001).unwrap(),
+            UsdcDelta::new(-1_000_001)
+        );
+        // A seventh place has nothing to hold it and rounds to the nearer
+        // atom, away from zero on the half.
+        assert_eq!(UsdcAtoms::try_from(1.0000019).unwrap().atoms(), 1_000_002);
+        assert_eq!(UsdcAtoms::try_from(1.0000011).unwrap().atoms(), 1_000_001);
+        assert_eq!(UsdcDelta::try_from(-1.1234567).unwrap().atoms(), -1_123_457);
+    }
+
+    /// An amount displays as the exact decimal, trailing zeros trimmed,
+    /// and never as a float's noise; a precision truncates; width pads.
+    #[test]
+    fn an_amount_displays_as_the_decimal_a_person_reads() {
+        assert_eq!(PerpDelta::new(5_800_000).to_string(), "5.8");
+        assert_eq!(PerpDelta::new(100_000_000).to_string(), "100");
+        assert_eq!(PerpDelta::new(290_000).to_string(), "0.29");
+        assert_eq!(PerpDelta::new(-1_000_001).to_string(), "-1.000001");
+        assert_eq!(PerpDelta::ZERO.to_string(), "0");
+        assert_eq!(UsdcAtoms::new(1).to_string(), "0.000001");
+        assert_eq!(format!("{:.2}", UsdcAtoms::new(5_800_000)), "5.80");
+        assert_eq!(format!("{:.0}", UsdcDelta::new(-5_800_000)), "-5");
+        assert_eq!(format!("{:>8}", PerpAtoms::new(5_800_000)), "     5.8");
+    }
+
+    /// The third corner of the crossing: a fill's USDC leg over its token
+    /// leg is the price it traded at, exact where the legs allow and
+    /// floored where they do not.
+    #[test]
+    fn a_fill_implies_its_price() {
+        let usd = UsdcAtoms::try_from(580.0).unwrap();
+        let size = PerpAtoms::try_from(5.8).unwrap();
+        assert_eq!(usd.per(size).unwrap(), Price::try_from(100.0).unwrap());
+        // The inverse of the valuation on the same legs.
+        assert_eq!(size.value_at(usd.per(size).unwrap()).unwrap(), usd);
+        // By magnitudes on the signed legs: a short's cost basis is as
+        // negative as its exposure, and the price is the same.
+        let paid = UsdcDelta::try_from(-580.0).unwrap();
+        let held = PerpDelta::try_from(-5.8).unwrap();
+        assert_eq!(paid.per(held).unwrap(), Price::try_from(100.0).unwrap());
+        // One third floors.
+        let third = UsdcAtoms::new(1).per(PerpAtoms::new(3)).unwrap();
+        assert_eq!(third.x96(), Q96 / U256::from(3));
+        assert!(matches!(
+            usd.per(PerpAtoms::ZERO),
+            Err(ValidationError::InvalidPrice { .. })
+        ));
+    }
+
     /// The two assets' counts add with an operator and sum from an
     /// iterator, because the protocol bounds what a sum of balances can
     /// reach. Subtracting stays checked: a negative count is not a count,
@@ -347,19 +505,6 @@ mod tests {
             UsdcDelta::new(-2_500_000)
         );
         assert_eq!(UsdcDelta::new(-2_000_000).usdc(), -2.0);
-    }
-
-    /// A fraction of an atom truncates toward zero, as the chain's own
-    /// division does, rather than rounding to the nearer atom.
-    #[test]
-    fn a_fraction_of_an_atom_truncates() {
-        assert_eq!(UsdcAtoms::try_from(1.0000019).unwrap().atoms(), 1_000_001);
-        // Floored, so a negative amount rounds *away* from zero rather than
-        // toward it: 1.1234567 keeps 1_123_456 atoms and its negative keeps
-        // 1_123_457. This is the behaviour `atoms_from_f64` documents, and
-        // the direction only a signed amount can show.
-        assert_eq!(UsdcDelta::try_from(1.1234567).unwrap().atoms(), 1_123_456);
-        assert_eq!(UsdcDelta::try_from(-1.1234567).unwrap().atoms(), -1_123_457);
     }
 
     /// A factor a count cannot take is a bug and says so.

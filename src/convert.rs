@@ -30,7 +30,8 @@ use crate::units::{Price, Ratio, SqrtPrice, UsdcDelta};
 /// Scale a human-readable amount to its 6-decimal on-chain representation.
 ///
 /// Supports negative values (for `marginDelta`, `usdDelta`, etc.).
-/// Uses `floor` to match Solidity's truncation semantics.
+/// Rounds to the nearest atom, as [`UsdcDelta::try_from`] does: the
+/// amount is a number a person wrote, not a contract word.
 ///
 /// # Errors
 ///

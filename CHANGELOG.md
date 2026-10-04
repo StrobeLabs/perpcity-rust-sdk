@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+The changes below break the public API, so the next release is 0.9.0 (a minor bump, as for any breaking change before 1.0). Two findings from the typed position views in the strategy layer: a fill's two legs imply a price the language could not express, and the human door to an amount was flooring numbers people wrote.
+
+### Breaking
+
+- **`TryFrom<f64>` for the amounts rounds to the nearest atom** (was floored). The door is for a number a person wrote or a strategy computed, and most decimals have no binary representation: `0.29` arrives as `0.28999999999999998`, so the floor made it `289_999` atoms, an order a strategy did not mean to send. Rounding reads every decimal of six places or fewer to the atom it names, at any magnitude the `f64` holds exactly; a seventh place rounds to the nearer atom, away from zero on the half. Only an input with more than six places can observe the change.
+
+### Added
+
+- **`UsdcAtoms::per(PerpAtoms) -> Price` and `UsdcDelta::per(PerpDelta) -> Price`**: the price two legs of a fill imply, USDC per token, exact in Q96 and floored; the third corner of the asset crossing, the inverse of both `value_at` and `perp_at`. A position's entry price is its cost basis over its exposure, and until now every consumer divided two floats to get it.
+- **`Display` for the six amounts.** `UsdcAtoms`, `UsdcDelta`, `PerpAtoms` and `PerpDelta` write the exact decimal with trailing zeros trimmed — `5.8` for `5_800_000` atoms, `-1.000001`, `100` — a precision truncating the fraction and a width padding as an integer's does; `LUnits` and `LDelta` write the whole count, since the pool's unit has no fraction. A log line takes an amount without a lossy `.usdc()` first.
+
 ## [0.8.0] - 2026-10-03
 
 The release the first consumer of the language asked for. It wrote its
