@@ -305,6 +305,34 @@ pub enum MarketEvent {
         to: Address,
         pos_id: U256,
     },
+
+    // ── Governance ───────────────────────────────────────────────────
+    /// Governance swapped one of the market's six modules. The rules a
+    /// market prices, funds, fees and bounds by are the module's, so a fold
+    /// that rebuilds the market from its events reads these to know which
+    /// rules were in force at each point.
+    ModuleSet {
+        module: ModuleKind,
+        address: Address,
+    },
+}
+
+/// The six modules a market delegates to; what a [`MarketEvent::ModuleSet`]
+/// names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ModuleKind {
+    /// The index source.
+    Beacon,
+    /// Swap, insurance, creator and utilization fee rates.
+    Fees,
+    /// The funding rate rule.
+    Funding,
+    /// Initial, liquidation and backstop margin ratios, per kind.
+    MarginRatios,
+    /// The price band a swap may move the pool within.
+    PriceImpact,
+    /// The fair price the contract marks at.
+    Pricing,
 }
 
 /// Decode a raw Alloy [`Log`] into a [`MarketEvent`], if recognized.
@@ -587,10 +615,34 @@ pub fn decode_log(log: &Log) -> Result<Option<MarketEvent>, ValidationError> {
                 pos_id: d.tokenId,
             })
         }
+
+    // ── Governance ───────────────────────────────────────────────────
+    } else if topic0 == Perp::SetBeacon::SIGNATURE_HASH {
+        let d = decode_raw::<Perp::SetBeacon>(log)?;
+        Some(module_set(ModuleKind::Beacon, d.beacon))
+    } else if topic0 == Perp::SetFeesModule::SIGNATURE_HASH {
+        let d = decode_raw::<Perp::SetFeesModule>(log)?;
+        Some(module_set(ModuleKind::Fees, d.fees))
+    } else if topic0 == Perp::SetFundingModule::SIGNATURE_HASH {
+        let d = decode_raw::<Perp::SetFundingModule>(log)?;
+        Some(module_set(ModuleKind::Funding, d.funding))
+    } else if topic0 == Perp::SetMarginRatiosModule::SIGNATURE_HASH {
+        let d = decode_raw::<Perp::SetMarginRatiosModule>(log)?;
+        Some(module_set(ModuleKind::MarginRatios, d.marginRatios))
+    } else if topic0 == Perp::SetPriceImpactModule::SIGNATURE_HASH {
+        let d = decode_raw::<Perp::SetPriceImpactModule>(log)?;
+        Some(module_set(ModuleKind::PriceImpact, d.priceImpact))
+    } else if topic0 == Perp::SetPricingModule::SIGNATURE_HASH {
+        let d = decode_raw::<Perp::SetPricingModule>(log)?;
+        Some(module_set(ModuleKind::Pricing, d.pricing))
     } else {
         None
     };
     Ok(event)
+}
+
+fn module_set(module: ModuleKind, address: Address) -> MarketEvent {
+    MarketEvent::ModuleSet { module, address }
 }
 
 /// Decode a typed event from a raw log's topics + data.
@@ -794,6 +846,64 @@ mod tests {
         {
             MarketEvent::MakerOpened { pos_id } => assert_eq!(pos_id, U256::from(3u64)),
             _ => panic!("expected MakerOpened"),
+        }
+    }
+
+    /// Each of the six module setters decodes to `ModuleSet` naming its
+    /// module, so a fold can tell which rules were in force.
+    #[test]
+    fn decode_module_set_events() {
+        let module = Address::repeat_byte(0x4D);
+        let cases: [(LogData, ModuleKind); 6] = [
+            (
+                Perp::SetBeacon { beacon: module }.encode_log_data(),
+                ModuleKind::Beacon,
+            ),
+            (
+                Perp::SetFeesModule { fees: module }.encode_log_data(),
+                ModuleKind::Fees,
+            ),
+            (
+                Perp::SetFundingModule { funding: module }.encode_log_data(),
+                ModuleKind::Funding,
+            ),
+            (
+                Perp::SetMarginRatiosModule {
+                    marginRatios: module,
+                }
+                .encode_log_data(),
+                ModuleKind::MarginRatios,
+            ),
+            (
+                Perp::SetPriceImpactModule {
+                    priceImpact: module,
+                }
+                .encode_log_data(),
+                ModuleKind::PriceImpact,
+            ),
+            (
+                Perp::SetPricingModule { pricing: module }.encode_log_data(),
+                ModuleKind::Pricing,
+            ),
+        ];
+        for (data, expected) in cases {
+            let log = RpcLog {
+                inner: alloy::primitives::Log {
+                    address: Address::ZERO,
+                    data,
+                },
+                ..Default::default()
+            };
+            match decode_log(&log).unwrap().expect("a module setter decodes") {
+                MarketEvent::ModuleSet {
+                    module: kind,
+                    address,
+                } => {
+                    assert_eq!(kind, expected);
+                    assert_eq!(address, module);
+                }
+                other => panic!("expected ModuleSet, got {other:?}"),
+            }
         }
     }
 

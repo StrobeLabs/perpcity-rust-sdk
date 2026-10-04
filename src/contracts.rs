@@ -310,6 +310,16 @@ sol! {
         event LossSocialized(uint256 originalAmount, uint256 feeCharged, uint128 badDebtAfter);
         event MarginTransferred(int128 marginDelta, uint128 totalMargin);
 
+        // Governance: the six modules a market delegates to, each swapped
+        // by one event. A fold that rebuilds the market from its events
+        // needs them to know which rules were in force.
+        event SetBeacon(address indexed beacon);
+        event SetFeesModule(address indexed fees);
+        event SetFundingModule(address indexed funding);
+        event SetMarginRatiosModule(address indexed marginRatios);
+        event SetPriceImpactModule(address indexed priceImpact);
+        event SetPricingModule(address indexed pricing);
+
         // ── Errors (from libraries/Errors.sol) ──────────────────────
 
         error Abdicated();
@@ -1033,5 +1043,39 @@ mod abi_lock {
                 "ddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
             )
         );
+        // The six module setters, `cast keccak` of each signature; the
+        // same on both live builds.
+        for (signature, hash) in [
+            (
+                Perp::SetBeacon::SIGNATURE,
+                "eda478a82221a6140112aa7f09cae9d34ba9ef5afe98665b4b91af27bfae4b80",
+            ),
+            (
+                Perp::SetFeesModule::SIGNATURE,
+                "52a6977e4b34f6211e8979d27735f11d62127fde19dac323e94a7b1b3dcc927d",
+            ),
+            (
+                Perp::SetFundingModule::SIGNATURE,
+                "3d9e293475ebd5f1c539a7b7b922bdd95152550f0b65820ee5b1b2dd1546d734",
+            ),
+            (
+                Perp::SetMarginRatiosModule::SIGNATURE,
+                "9e2c08905af50bef2fe2ea75467e6a980ed96b0d42e3166ea2ddd7da61d0ff99",
+            ),
+            (
+                Perp::SetPriceImpactModule::SIGNATURE,
+                "75f628c85f0f4623da54cc34d09abc7c38b277a46a64acc1b8624aacce3bd4c8",
+            ),
+            (
+                Perp::SetPricingModule::SIGNATURE,
+                "a3c68ccb672060124d2ccfc83677f8c033e5f93ec4eff04e73206a48129d9c28",
+            ),
+        ] {
+            assert_eq!(
+                alloy::primitives::keccak256(signature.as_bytes()),
+                hash.parse::<alloy::primitives::B256>().unwrap(),
+                "{signature}"
+            );
+        }
     }
 }
