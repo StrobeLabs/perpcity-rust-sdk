@@ -7,7 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-The changes below break the public API, so the next release is 0.9.0 (a minor bump, as for any breaking change before 1.0). Two findings from the typed position views in the strategy layer: a fill's two legs imply a price the language could not express, and the human door to an amount was flooring numbers people wrote.
+## [0.9.0] - 2026-10-03
+
+Two findings from the typed position views in the strategy layer: a fill's
+two legs imply a price the language could not express, and the human door
+to an amount was flooring numbers people wrote. Breaking, so a minor bump,
+as for any breaking change before 1.0.
 
 ### Breaking
 
@@ -456,7 +461,8 @@ and why none of it changes a value on the wire.
 - Examples: quickstart, open_position, open_maker, market_maker, hft_bot
 - Benchmarks: math, HFT pipeline, transport
 
-[Unreleased]: https://github.com/StrobeLabs/perpcity-rust-sdk/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/StrobeLabs/perpcity-rust-sdk/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/StrobeLabs/perpcity-rust-sdk/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/StrobeLabs/perpcity-rust-sdk/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/StrobeLabs/perpcity-rust-sdk/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/StrobeLabs/perpcity-rust-sdk/compare/v0.5.0...v0.6.0
