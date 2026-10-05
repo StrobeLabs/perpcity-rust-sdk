@@ -172,9 +172,17 @@ impl OwnershipLog {
             .is_some_and(|holder| wallets.contains(holder))
     }
 
-    /// Whether one of `wallets` is the last to have held `pos_id`.
+    /// Who holds `pos_id` now: the recipient of its last transfer, `None`
+    /// once it is burned or if this tape never saw it minted. Unlike
+    /// [`latest_owner`](Self::latest_owner), a burn ends the holding.
+    pub fn holder(&self, pos_id: U256) -> Option<Address> {
+        let (_, holder) = self.spans.get(&pos_id)?.last()?;
+        (!holder.is_zero()).then_some(*holder)
+    }
+
+    /// Whether one of `wallets` holds `pos_id` now; false once it is burned.
     pub fn held_by(&self, pos_id: U256, wallets: &Wallets) -> bool {
-        self.latest_owner(pos_id)
+        self.holder(pos_id)
             .is_some_and(|holder| wallets.contains(holder))
     }
 
@@ -218,5 +226,39 @@ mod tests {
         let same: Wallets = [b, a, a].into_iter().collect();
         assert_eq!(same, ours);
         assert!(Wallets::default().is_empty());
+    }
+
+    /// A burn ends a holding: the position's final owner is still named,
+    /// but nobody holds it now.
+    #[test]
+    fn a_burned_position_has_a_final_owner_and_no_holder() {
+        let a = Address::repeat_byte(0x0A);
+        let pos = U256::from(7);
+        let transfer = |block, from, to| TapeEvent {
+            block_number: block,
+            block_hash: Default::default(),
+            log_index: 0,
+            timestamp: block,
+            tx_hash: Default::default(),
+            event: MarketEvent::PositionTransferred {
+                from,
+                to,
+                pos_id: pos,
+            },
+        };
+        let minted = OwnershipLog::fold(&[transfer(1, Address::ZERO, a)]);
+        assert_eq!(minted.holder(pos), Some(a));
+        assert!(minted.held_by(pos, &Wallets::one(a)));
+
+        let burned =
+            OwnershipLog::fold(&[transfer(1, Address::ZERO, a), transfer(2, a, Address::ZERO)]);
+        assert_eq!(
+            burned.latest_owner(pos),
+            Some(a),
+            "the final owner, for attribution"
+        );
+        assert_eq!(burned.holder(pos), None, "held by nobody now");
+        assert!(!burned.held_by(pos, &Wallets::one(a)));
+        assert_eq!(burned.holder(U256::from(8)), None, "never minted");
     }
 }

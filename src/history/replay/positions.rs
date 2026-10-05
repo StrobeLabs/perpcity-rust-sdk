@@ -400,14 +400,16 @@ impl Positions {
         self.iter().filter(|(_, state)| state.is_open())
     }
 
-    /// The positions one of `wallets` holds now, as `custody` records it,
-    /// ascending by id: a cohort's or an agent's book.
+    /// The open positions one of `wallets` holds now, as `custody` records
+    /// it, ascending by id: a cohort's or an agent's book. Open by the
+    /// fold's own account, so a close whose burn the tape has not yet
+    /// carried is already off the book.
     pub fn held_by<'a>(
         &'a self,
         wallets: &'a Wallets,
         custody: &'a OwnershipLog,
     ) -> impl Iterator<Item = (U256, &'a PositionState)> + 'a {
-        self.iter()
+        self.open()
             .filter(move |(pos_id, _)| custody.held_by(*pos_id, wallets))
     }
 
