@@ -194,8 +194,10 @@ that carries it, the invariant it holds, and the node that owns it.
 | A settle previewed | [`MakerEquityBreakdown`](src/math/maker_equity.rs#L177) | exact atoms, the contract's arithmetic | [`math::maker_equity`](src/math/maker_equity.rs#L1) |
 | A block | [`BlockContext`](src/math/mod.rs#L51) | number, hash, timestamp of one header | [`math`](src/math/DESIGN.md) |
 | An event | [`MarketEvent`](src/events.rs#L156) | the market's vocabulary, human units, either tense | [`events`](src/events/DESIGN.md) |
-| An event in chain order | [`TapeEvent`](src/history/tape/mod.rs#L66), [`ChainPoint`](src/history/tape/mod.rs#L57) | block and log index | [`history`](src/history/DESIGN.md) |
-| Custody over time | [`OwnershipLog`](src/history/tape/custody.rs#L33) | a fold of transfers; owner at a chain point | [`history`](src/history/DESIGN.md) |
+| An event in chain order | [`TapeEvent`](src/history/tape/mod.rs#L66), [`ChainPoint`](src/history/tape/mod.rs#L57) | block and log index | [history/tape](src/history/tape/DESIGN.md) |
+| Custody over time | [`OwnershipLog`](src/history/tape/custody.rs#L33) | a fold of transfers; owner at a chain point | [history/tape](src/history/tape/DESIGN.md) |
+| A computation over the tape | [`Fold`](src/history/fold/mod.rs#L34) | the fold of a concatenation is the combination of the folds | [history/fold](src/history/fold/DESIGN.md) |
+| A value over time | [`Series`](src/history/fold/series.rs#L152), [`Arrivals`](src/history/fold/series.rs#L322) | chain order; appends across segments; trimmed to a retention | [history/fold](src/history/fold/DESIGN.md) |
 | A market rebuilt from its events | [`Replay`](src/history/replay/mod.rs#L136) | the reads' types, folded from the tape; equal to the reads at a block | [history/replay](src/history/replay/DESIGN.md) |
 | A print | [`IndexPrint`](src/history/beacon.rs#L20) | the index at a chain point and time | [`history`](src/history/DESIGN.md) |
 | A failure | [`PerpCityError`](src/errors/mod.rs#L45) | typed, with a stated transience | [`errors`](src/errors/DESIGN.md) |
@@ -402,8 +404,9 @@ exist, and it is the one edge that leaves the repository.
   Consumed by `feeds` and `history`, which never re-decode, and by
   everything above that folds events.
 - **`feeds`** and **`history`**: the two tenses of events. `feeds` provides
-  the live streams; `history` provides scans, the tape, the ownership
-  fold, prints and transfers. Both consume `events`.
+  the live streams; `history` provides scans, prints, transfers and
+  recordings, and three nodes below it: the tape, the fold algebra, and
+  the replay. Both consume `events`.
 - **`hft`**: the execution machinery. Provides the pipeline, nonce and gas
   caches, the state cache the now-reads serve from. Consumed by `client`.
 - **`transport`**: endpoints, health and routing. Provides `HftTransport`.
