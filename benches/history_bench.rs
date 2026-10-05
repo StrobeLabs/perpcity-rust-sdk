@@ -24,7 +24,7 @@ use perpcity_sdk::constants::Q96;
 use perpcity_sdk::contracts::{Capacity, IBeacon, IPoolManagerState, OpenInterest, Perp};
 use perpcity_sdk::events::{MarketEvent, decode_log};
 use perpcity_sdk::history::test_support::FakeNode;
-use perpcity_sdk::history::{History, Recording, TapeAddresses, TapeEvent};
+use perpcity_sdk::history::{Fold, History, Recording, Replay, TapeAddresses, TapeEvent};
 
 const PERP: Address = Address::repeat_byte(0xF0);
 const BEACON: Address = Address::repeat_byte(0xBE);
@@ -192,6 +192,52 @@ fn fold_noop(tape: &[TapeEvent]) -> u64 {
     })
 }
 
+/// The market rebuilt from the tape in one pass: the fold the replay
+/// program exists for, with every component fold behind it.
+fn fold_replay(perp: Address, tape: &[TapeEvent]) -> Replay {
+    let mut replay = Replay::from_genesis(perp);
+    for row in tape {
+        replay.apply(row);
+    }
+    replay
+}
+
+/// The tape cut into one segment per core at block boundaries, each
+/// folded on its own thread, then combined in order: the monoid law as
+/// wall-clock time. Equal to [`fold_replay`] on every read.
+fn fold_segments(perp: Address, tape: &[TapeEvent]) -> Replay {
+    let threads = thread::available_parallelism().map_or(1, |n| n.get());
+    let segments = cut_at_blocks(tape, threads);
+    thread::scope(|scope| {
+        let handles: Vec<_> = segments
+            .into_iter()
+            .map(|segment| scope.spawn(move || Replay::fold(segment)))
+            .collect();
+        let mut whole = Replay::from_genesis(perp);
+        for handle in handles {
+            whole.combine(handle.join().unwrap());
+        }
+        whole
+    })
+}
+
+/// `tape` in `parts` contiguous segments, every cut between two blocks:
+/// a fold may be combined at a block boundary and nowhere else.
+fn cut_at_blocks(tape: &[TapeEvent], parts: usize) -> Vec<&[TapeEvent]> {
+    let target = tape.len().div_ceil(parts).max(1);
+    let mut segments = Vec::with_capacity(parts);
+    let mut start = 0;
+    while start < tape.len() {
+        let mut end = (start + target).min(tape.len());
+        while end < tape.len() && tape[end].block_number == tape[end - 1].block_number {
+            end += 1;
+        }
+        segments.push(&tape[start..end]);
+        start = end;
+    }
+    segments
+}
+
 fn bench_history(c: &mut Criterion) {
     let runtime = tokio::runtime::Runtime::new().unwrap();
     let logs = synthetic_logs();
@@ -219,6 +265,18 @@ fn bench_history(c: &mut Criterion) {
     group.bench_function(BenchmarkId::new("fold", "no-op match"), |b| {
         b.iter(|| black_box(fold_noop(&tape)))
     });
+    group.bench_function(BenchmarkId::new("fold", "replay, one pass"), |b| {
+        b.iter(|| black_box(fold_replay(PERP, &tape).applied()))
+    });
+    group.bench_function(
+        BenchmarkId::new("fold", "replay, one segment per core"),
+        |b| b.iter(|| black_box(fold_segments(PERP, &tape).applied())),
+    );
+    assert_eq!(
+        fold_segments(PERP, &tape),
+        fold_replay(PERP, &tape),
+        "segments combine to the one-pass fold"
+    );
 
     group.finish();
 }

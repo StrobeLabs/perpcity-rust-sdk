@@ -54,7 +54,15 @@ Three feeds, one connection manager.
 `MarketFeed` is one market's present: a subscription filtered to the
 `Perp`'s address and its beacon's, every matching log decoded into a
 `MarketEvent`, consumed by calling `next` in a loop. There is no market
-id; the address filter is the market.
+id; the address filter is the market. `next` hands back a `Result`, so a
+log of this vocabulary that will not decode reaches the consumer as the
+hole it is, where an admin log the vocabulary does not speak is skipped;
+the feed reads on either way, and `None` means the socket is gone.
+`next_stamped` hands back the same event as the `TapeEvent` a scan would
+have built from the log, with its block, block hash, log index, timestamp
+and transaction, reading one header when the subscription omits the
+timestamp. A fold written over the tape therefore runs over the feed
+unchanged, which is the point of the two tenses sharing one row.
 
 `BlockHeaderFeed` is the chain's clock: each new header as it lands,
 carrying the base fee a gas cache wants.
@@ -72,7 +80,7 @@ leaving re-subscription to its callers.
 
 | Type | Invariant | Produced by | Consumed by |
 |---|---|---|---|
-| [`MarketFeed`](market.rs#L51) | one market's events as they happen: filtered to the market and its beacon; every log decoded by [`decode_log`](../events/DESIGN.md) into the same [`MarketEvent`](../events/DESIGN.md) the tape yields; nothing interpreted here. `next` hands back a `Result` so that a log of this vocabulary that will not decode reaches the caller instead of being skipped like the admin logs — a live consumer sees the hole as it happens, and the feed reads on either way. `None` still means the socket is gone. `next_stamped` hands back each event as the [`TapeEvent`](../history/DESIGN.md) a scan would have built from the same log — block, block hash, log index, timestamp, transaction — through the tape's own constructor, with one header read when the subscription's log omits its timestamp. The row is the tape's; the event set is not yet: the feed carries the perp and its beacon, and the PoolManager's liquidity changes the market tape also carries are a debt below | [`MarketFeed::subscribe`](market.rs#L62) over a [`WsManager`](../transport/DESIGN.md) | nothing in the crate. The strategy layer's live cache calls `next` in a loop and folds each event into its view, and because the feed and the tape speak one vocabulary that fold is one function; a fold that needs the book as well follows the lagged tail through the `History` handle. |
+| [`MarketFeed`](market.rs#L51) | one market's events as they happen: logs filtered to the perp and its beacon, each decoded by [`decode_log`](../events/DESIGN.md) into the [`MarketEvent`](../events/DESIGN.md) the tape yields; nothing interpreted. `next_stamped` builds the [`TapeEvent`](../history/DESIGN.md) a scan would have, through the tape's own constructor, so both tenses yield one row. The PoolManager's liquidity changes are not yet on the feed; a debt below | [`MarketFeed::subscribe`](market.rs#L62) over a [`WsManager`](../transport/DESIGN.md) | nothing in the crate. The strategy layer's live cache folds each event into its view with the fold the tape takes; one that needs the pool's liquidity as well follows the lagged tail through the `History` handle. |
 | [`BlockHeaderFeed`](block.rs#L38) | headers as they land: one header per block, in order | [`BlockHeaderFeed::subscribe`](block.rs#L44) over a [`WsManager`](../transport/DESIGN.md) | nothing in the crate. The strategy layer, when it can afford the subscription, pushes each header's base fee into the chain reader. |
 | [`LiveTakerMarket`](taker.rs#L18), [`LiveTakerMarketPublisher`](taker.rs#L90) | a shared pool snapshot: published only when every read succeeded at one block hash; consumers see the latest and its currency | [`LiveTakerMarket::subscribe`](taker.rs#L37) from a [`MarketReader`](../client/DESIGN.md), which refreshes on each header; [`LiveTakerMarket::from_snapshot`](taker.rs#L27) from a [`PoolSnapshot`](../math/DESIGN.md) a caller reads itself | nothing in the crate. The strategy layer's taker quotes against `latest` in memory and checks `is_current` before acting, which is the feed shape for a value that is read rather than emitted. |
 
