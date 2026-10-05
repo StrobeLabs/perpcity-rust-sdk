@@ -111,7 +111,7 @@ async fn main() -> perpcity_sdk::Result<()> {
 
     // ── 3. Health-check each candidate, then (optionally) send ──────
     // The typed revert says exactly why not: NotLiquidatable = healthy
-    // right now, retry later; NonMakerPosition = wrong book, drop the id;
+    // right now, retry later; NonMakerPosition = wrong role, drop the id;
     // transients = keep going.
     let fee_recipient = client.address();
     for (pos_id, _) in candidates {

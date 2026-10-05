@@ -418,9 +418,6 @@ Two costs in this table are not what they should be and are debts:
   because the chain offers no owner index. It is correct and slow; the
   ownership fold over the tape (`history`) is the right answer for anything
   above a handful of positions.
-- **The liquidation twins are keyed by an enum called `Book`.** It names
-  which kind of position a liquidation targets, and "book" is retired
-  vocabulary; it should be a position kind.
 - **`StateAt::modules` returns the contract's own `Modules` struct**, six
   bare addresses in the binding's field names, where the replay's fold
   keys them by `ModuleKind`. A typed set keyed by kind, shared by the read

@@ -15,7 +15,7 @@ use crate::math::range::TickRange;
 use crate::math::tick::{align_tick_down, align_tick_up, price_to_tick};
 use crate::units::{LDelta, LUnits, PerpAtoms, PerpDelta, UsdcAtoms, UsdcDelta};
 
-use super::market::{Book, validate_fee_recipient};
+use super::market::{PositionRole, validate_fee_recipient};
 use super::{MAX_APPROVAL, PerpClient, i32_to_i24};
 
 // ── Parameters ──────────────────────────────────────────────────────
@@ -715,18 +715,18 @@ impl PerpClient {
         fee_recipient: Address,
         urgency: Urgency,
     ) -> Result<TransactionReceipt> {
-        self.send_liquidation(Book::Maker, pos_id, fee_recipient, urgency)
+        self.send_liquidation(PositionRole::Maker, pos_id, fee_recipient, urgency)
             .await
     }
 
     /// Check whether a taker `pos_id` is liquidatable right now, via
-    /// `eth_call` — the batch/scanner probe for the taker book.
+    /// `eth_call` — the batch/scanner probe for takers.
     ///
     /// Identical contract semantics to
     /// [`Self::simulate_liquidate_maker`], including the typed-revert
     /// triage via
     /// [`TransactionError::is_revert`](crate::errors::TransactionError::is_revert)
-    /// — except the "wrong book" revert here is `Perp::NonTakerPosition`
+    /// — except the "wrong role" revert here is `Perp::NonTakerPosition`
     /// (drop the id, or route it to the maker twin). As on the maker side,
     /// prefer calling [`Self::liquidate_taker`] directly when racing; this
     /// probe is for sweeps.
@@ -754,7 +754,7 @@ impl PerpClient {
         fee_recipient: Address,
         urgency: Urgency,
     ) -> Result<TransactionReceipt> {
-        self.send_liquidation(Book::Taker, pos_id, fee_recipient, urgency)
+        self.send_liquidation(PositionRole::Taker, pos_id, fee_recipient, urgency)
             .await
     }
 
@@ -763,7 +763,7 @@ impl PerpClient {
     /// broadcast.
     async fn send_liquidation(
         &self,
-        book: Book,
+        role: PositionRole,
         pos_id: U256,
         fee_recipient: Address,
         urgency: Urgency,
@@ -771,13 +771,13 @@ impl PerpClient {
         validate_fee_recipient(fee_recipient)?;
         let calldata = self
             .market
-            .liquidation_calldata(book, pos_id, fee_recipient)
+            .liquidation_calldata(role, pos_id, fee_recipient)
             .await?;
 
         tracing::debug!(
             pos_id = %pos_id,
             %fee_recipient,
-            book = book.label(),
+            role = role.label(),
             ?urgency,
             "liquidating position"
         );
@@ -791,7 +791,7 @@ impl PerpClient {
         tracing::debug!(
             pos_id = %pos_id,
             tx_hash = %receipt.transaction_hash,
-            book = book.label(),
+            role = role.label(),
             "position liquidated"
         );
         Ok(receipt)
@@ -870,8 +870,8 @@ impl PerpClient {
     /// accrual history, so the transfer hands over the live position — the
     /// contract settles nothing, withdraws nothing, and the recipient
     /// adjusts or closes it exactly as the sender could have. Use it to move
-    /// a position between wallets you control (handing a hand-seeded book to
-    /// the account that will manage it); the receiving account must be able
+    /// a position between wallets you control (handing hand-seeded liquidity
+    /// to the account that will manage it); the receiving account must be able
     /// to call the Perp, so an EOA or a contract that can.
     ///
     /// Ownership is checked before sending: the contract's own

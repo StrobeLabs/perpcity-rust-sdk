@@ -39,6 +39,7 @@ The changes below break the public API, so the next release is 0.10.0 (a minor b
 ### Changed
 
 - **The stored EMAs come from storage slot 11, not `emas()`.** `v0.2.2` dropped the view and both builds keep the `PricePair` at the same slot (`ammPrice` low, `index` high), so `get_snapshot`, `StateAt::mark` and the maker-equity batch read the word with `eth_getStorageAt` at the pinned block, alongside the beacon's index, in place of the multicall row. Same block, same round-trip count; the `Perp::emas` binding stays so the public surface does not move. A transport failure on that read is a transient `StorageReadFailed`, as the batched storage reads already report; the node's own answer still classifies by block.
+- **The liquidation twins are keyed by a position's role, not a "book".** The private enum behind `liquidate_maker`, `liquidate_taker` and their probes is `PositionRole { Maker, Taker }`, and the docs, the tracing field and the client node say role where they said book. The markets are pools; the word had no referent. No public signature changes.
 
 ### Breaking
 
