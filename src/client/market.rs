@@ -15,8 +15,8 @@ use super::queries::Era;
 /// on.
 ///
 /// Every read addressed to a market — its pool state, positions, capacity,
-/// the contract's mark, the taker book, maker equities, the liquidation
-/// probes, and its storage at one block ([`Self::state`]) — is here.
+/// the contract's mark, maker equities, the liquidation probes, and its
+/// storage at one block ([`Self::state`]) — is here.
 /// Owned and cheap to clone (the chain reader is an
 /// Arc), so it can be stored in a struct or moved into a task, and every
 /// reader of one market over one chain reader shares that reader's caches.
@@ -66,13 +66,13 @@ impl MarketReader {
     // ── Liquidation probes ───────────────────────────────────────────
 
     /// Check whether a maker `pos_id` is liquidatable right now, via
-    /// `eth_call` from `from` — the batch/scanner probe for the maker book.
+    /// `eth_call` from `from` — the batch/scanner probe for makers.
     ///
     /// `Ok(())` means the liquidation would succeed. A typed revert says
     /// why not — triage it with
     /// [`TransactionError::is_revert`](crate::errors::TransactionError::is_revert):
     /// `Perp::NotLiquidatable` is a healthy position, `Perp::NonMakerPosition`
-    /// the wrong book (route it to the taker twin). An empty revert or
+    /// the wrong role (route it to the taker twin). An empty revert or
     /// out-of-gas inside the pinned limit
     /// ([`SimulationFailed`](crate::errors::TransactionError::SimulationFailed))
     /// is the node's answer and not transient; a transport failure
@@ -97,16 +97,16 @@ impl MarketReader {
         pos_id: U256,
         fee_recipient: Address,
     ) -> Result<()> {
-        self.simulate_liquidation(from, Book::Maker, pos_id, fee_recipient)
+        self.simulate_liquidation(from, PositionRole::Maker, pos_id, fee_recipient)
             .await
     }
 
     /// Check whether a taker `pos_id` is liquidatable right now, via
-    /// `eth_call` from `from` — the batch/scanner probe for the taker book.
+    /// `eth_call` from `from` — the batch/scanner probe for takers.
     ///
     /// Identical semantics to [`Self::simulate_liquidate_maker`], including
     /// what `from` means and the era's call shape (the size read here is
-    /// `positions`), except the "wrong book" revert is
+    /// `positions`), except the "wrong role" revert is
     /// `Perp::NonTakerPosition`.
     pub async fn simulate_liquidate_taker(
         &self,
@@ -114,23 +114,23 @@ impl MarketReader {
         pos_id: U256,
         fee_recipient: Address,
     ) -> Result<()> {
-        self.simulate_liquidation(from, Book::Taker, pos_id, fee_recipient)
+        self.simulate_liquidation(from, PositionRole::Taker, pos_id, fee_recipient)
             .await
     }
 
     /// Shared `eth_call` health probe behind the two public liquidation
-    /// probes: validates the fee recipient, encodes the book's call, and
+    /// probes: validates the fee recipient, encodes the role's call, and
     /// preflights from `from` at the pinned [`GasLimits::LIQUIDATE`] cap.
     async fn simulate_liquidation(
         &self,
         from: Address,
-        book: Book,
+        role: PositionRole,
         pos_id: U256,
         fee_recipient: Address,
     ) -> Result<()> {
         validate_fee_recipient(fee_recipient)?;
         let calldata = self
-            .liquidation_calldata(book, pos_id, fee_recipient)
+            .liquidation_calldata(role, pos_id, fee_recipient)
             .await?;
         self.chain
             .preflight_call(from, self.perp, &calldata, 0, Some(GasLimits::LIQUIDATE))
@@ -145,32 +145,32 @@ impl MarketReader {
     /// the perp amount from `positions` for a taker, the liquidity from
     /// `makerDetails` for a maker. A size the chain moves between this read
     /// and the send reverts `MaxAmtExceeded`, one block wide at most; a zero
-    /// size is a position that is gone or not of this book.
+    /// size is a position that is gone or not of this role.
     pub(super) async fn liquidation_calldata(
         &self,
-        book: Book,
+        role: PositionRole,
         pos_id: U256,
         fee_recipient: Address,
     ) -> Result<Bytes> {
         match self.immutables().await?.era {
-            Era::Legacy => Ok(book.whole_calldata(pos_id, fee_recipient)),
+            Era::Legacy => Ok(role.whole_calldata(pos_id, fee_recipient)),
             Era::Upgradeable => {
-                let amount = self.liquidation_size(book, pos_id).await?;
-                Ok(book.amount_calldata(pos_id, fee_recipient, amount))
+                let amount = self.liquidation_size(role, pos_id).await?;
+                Ok(role.amount_calldata(pos_id, fee_recipient, amount))
             }
         }
     }
 
     /// The whole size of `pos_id` in the units the era's liquidation takes.
-    async fn liquidation_size(&self, book: Book, pos_id: U256) -> Result<u128> {
+    async fn liquidation_size(&self, role: PositionRole, pos_id: U256) -> Result<u128> {
         let perp = Perp::new(self.perp, self.chain.provider());
-        let size = match book {
-            Book::Taker => {
+        let size = match role {
+            PositionRole::Taker => {
                 let position = perp.positions(pos_id).call().await?;
                 let (perp_atoms, _usd) = unpack_balance_delta(position.delta);
                 perp_atoms.unsigned_abs()
             }
-            Book::Maker => perp.makerDetails(pos_id).call().await?.liquidity,
+            PositionRole::Maker => perp.makerDetails(pos_id).call().await?.liquidity,
         };
         if size == 0 {
             return Err(ContractError::PositionNotFound { pos_id }.into());
@@ -179,15 +179,15 @@ impl MarketReader {
     }
 }
 
-/// Which book, maker or taker, a liquidation targets. The two contract
-/// entry points are twins; only the encoded call differs.
+/// The role, maker or taker, of the position a liquidation targets. The
+/// two contract entry points are twins; only the encoded call differs.
 #[derive(Debug, Clone, Copy)]
-pub(super) enum Book {
+pub(super) enum PositionRole {
     Maker,
     Taker,
 }
 
-impl Book {
+impl PositionRole {
     /// Build `58b42b7`'s call: the whole position, no amount.
     fn whole_calldata(self, pos_id: U256, fee_recipient: Address) -> Bytes {
         match self {
@@ -275,7 +275,7 @@ mod tests {
 
         let calldata = client
             .market()
-            .liquidation_calldata(Book::Taker, U256::from(7u8), RECIPIENT)
+            .liquidation_calldata(PositionRole::Taker, U256::from(7u8), RECIPIENT)
             .await
             .unwrap();
         assert_eq!(
@@ -305,7 +305,7 @@ mod tests {
 
         let calldata = client
             .market()
-            .liquidation_calldata(Book::Taker, U256::from(7u8), RECIPIENT)
+            .liquidation_calldata(PositionRole::Taker, U256::from(7u8), RECIPIENT)
             .await
             .unwrap();
         assert_eq!(
@@ -328,7 +328,7 @@ mod tests {
         });
         let calldata = client
             .market()
-            .liquidation_calldata(Book::Maker, U256::from(8u8), RECIPIENT)
+            .liquidation_calldata(PositionRole::Maker, U256::from(8u8), RECIPIENT)
             .await
             .unwrap();
         assert_eq!(
@@ -346,7 +346,7 @@ mod tests {
     }
 
     /// A zero size on a `v0.2.2` market is a position that is gone or not
-    /// of this book: named, not sent to revert `ZeroLiquidity`.
+    /// of this role: named, not sent to revert `ZeroLiquidity`.
     #[tokio::test]
     async fn upgradeable_market_names_a_vanished_position() {
         let (client, rpc) = mock::client();
@@ -356,7 +356,7 @@ mod tests {
 
         let err = client
             .market()
-            .liquidation_calldata(Book::Maker, U256::from(8u8), RECIPIENT)
+            .liquidation_calldata(PositionRole::Maker, U256::from(8u8), RECIPIENT)
             .await
             .unwrap_err();
         assert!(
