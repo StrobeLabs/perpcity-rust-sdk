@@ -173,8 +173,10 @@ impl Summary {
         }
         for r in &graph.rows {
             // A companion shares its subject's row, so a change to the
-            // companion's shape is held to the same row.
-            let text = format!("{}|{}|{}", r.invariant, r.produced, r.consumed);
+            // companion's shape is held to the same row. Link targets are
+            // dropped first: a line number moving is not the row changing.
+            let text =
+                without_link_targets(&format!("{}|{}|{}", r.invariant, r.produced, r.consumed));
             let words = text.split_whitespace().count();
             for id in std::iter::once(r.subject).chain(r.companions.iter().copied()) {
                 s.rows.insert(path(id), text.clone());
@@ -209,6 +211,24 @@ impl Summary {
             self.surface.len()
         )
     }
+}
+
+/// `text` with every markdown link's `(target)` removed, so two rows that
+/// differ only in where their links point compare equal.
+fn without_link_targets(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(i) = rest.find("](") {
+        out.push_str(&rest[..=i]);
+        match rest[i + 2..].find(')') {
+            Some(close) => rest = &rest[i + 2 + close + 1..],
+            None => {
+                rest = &rest[i + 1..];
+            }
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 /// What changed between two summaries, as markdown for a PR.

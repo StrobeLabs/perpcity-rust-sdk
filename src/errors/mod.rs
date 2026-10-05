@@ -66,6 +66,12 @@ pub enum PerpCityError {
     /// JSON serialization / deserialization error.
     #[error(transparent)]
     Serde(#[from] serde_json::Error),
+
+    /// The filesystem's error, from writing or reading a recording. Not
+    /// transient: a path that is missing or unwritable stays so, and
+    /// [`is_transient`](Self::is_transient) says no.
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
 }
 
 impl PerpCityError {

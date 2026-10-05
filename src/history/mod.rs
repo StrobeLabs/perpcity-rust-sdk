@@ -58,6 +58,7 @@
 
 mod beacon;
 mod fold;
+mod recording;
 mod replay;
 pub(crate) mod scan;
 mod tape;
@@ -71,6 +72,7 @@ mod tests;
 
 pub use beacon::{IndexPrint, beacon_prints, latest_beacon_prints};
 pub use fold::{First, Fold, Latest, Sequenced, Stated};
+pub use recording::{FORMAT, Manifest, Recording, TailCheck};
 pub use replay::{
     Faults, Gaps, PositionKind, PositionState, Positions, Replay, Silences, Unknowns,
 };
