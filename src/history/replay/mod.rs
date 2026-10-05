@@ -40,7 +40,7 @@ use crate::math::swap::TickLiquidity;
 use crate::units::{FundingRate, LUnits, PerSide, Price, UsdcAtoms, UtilizationRate};
 
 use self::activity::Activity;
-pub use self::activity::{Liquidation, Settlement, Swap, SwapAction};
+pub use self::activity::{Liquidation, Settlement};
 use self::market::{Modules, Prices, Rates, Utilization};
 use self::pool::Pool;
 pub use self::positions::{PositionKind, PositionState, Positions};
@@ -48,7 +48,7 @@ use self::seed::Seed;
 use self::solvency::Solvency;
 use super::History;
 use super::fold::{Arrivals, Fold, Latest, Retention, Sample, Sequenced, Series};
-use super::tape::{ChainPoint, OwnershipLog, TapeAddresses, TapeEvent};
+use super::tape::{ChainPoint, OwnershipLog, Swap, TapeAddresses, TapeEvent};
 
 /// What the fold does not know, in three kinds, each with its own cure. A
 /// reading with a nonzero gap is forensic, not a decision's input.

@@ -24,7 +24,9 @@ use perpcity_sdk::constants::Q96;
 use perpcity_sdk::contracts::{Capacity, IBeacon, IPoolManagerState, OpenInterest, Perp};
 use perpcity_sdk::events::{MarketEvent, decode_log};
 use perpcity_sdk::history::test_support::{FakeNode, mined_event_log, timestamp_of};
-use perpcity_sdk::history::{Fold, History, Recording, Replay, TapeAddresses, TapeEvent};
+use perpcity_sdk::history::{
+    Fold, History, Recording, Replay, Tape, TapeAddresses, TapeEvent, TapeSlice,
+};
 
 const PERP: Address = Address::repeat_byte(0xF0);
 const BEACON: Address = Address::repeat_byte(0xBE);
@@ -124,7 +126,7 @@ const LAST_BLOCK: u64 = EVENTS / PER_BLOCK + 2;
 /// A recorded tape when `PERPCITY_RECORDING` names a recording, decoded
 /// from its raw logs, else the synthetic one scanned once through the fake
 /// node.
-fn tape(runtime: &tokio::runtime::Runtime, logs: &[Log]) -> Vec<TapeEvent> {
+fn tape(runtime: &tokio::runtime::Runtime, logs: &[Log]) -> Tape {
     if let Ok(dir) = env::var("PERPCITY_RECORDING") {
         return Recording::read(Path::new(&dir))
             .expect("PERPCITY_RECORDING is a recording directory")
@@ -136,7 +138,7 @@ fn tape(runtime: &tokio::runtime::Runtime, logs: &[Log]) -> Vec<TapeEvent> {
 
 /// One scan of `logs` through a fresh fake node: the pipeline's cost with
 /// no network under it.
-fn scan(runtime: &tokio::runtime::Runtime, logs: &[Log]) -> Vec<TapeEvent> {
+fn scan(runtime: &tokio::runtime::Runtime, logs: &[Log]) -> Tape {
     let node = FakeNode::new(logs.to_vec(), u64::MAX);
     let history = History::new(node.provider());
     runtime
@@ -193,12 +195,11 @@ fn fold_replay(perp: Address, tape: &[TapeEvent]) -> Replay {
 /// The tape cut into one segment per core at block boundaries, each
 /// folded on its own thread, then combined in order: the monoid law as
 /// wall-clock time. Equal to [`fold_replay`] on every read.
-fn fold_segments(perp: Address, tape: &[TapeEvent]) -> Replay {
+fn fold_segments(perp: Address, tape: &TapeSlice) -> Replay {
     let threads = thread::available_parallelism().map_or(1, |n| n.get());
-    let segments = cut_at_blocks(tape, threads);
     thread::scope(|scope| {
-        let handles: Vec<_> = segments
-            .into_iter()
+        let handles: Vec<_> = tape
+            .segments(threads)
             .map(|segment| scope.spawn(move || Replay::fold(segment)))
             .collect();
         let mut whole = Replay::from_genesis(perp);
@@ -207,23 +208,6 @@ fn fold_segments(perp: Address, tape: &[TapeEvent]) -> Replay {
         }
         whole
     })
-}
-
-/// `tape` in `parts` contiguous segments, every cut between two blocks:
-/// a fold may be combined at a block boundary and nowhere else.
-fn cut_at_blocks(tape: &[TapeEvent], parts: usize) -> Vec<&[TapeEvent]> {
-    let target = tape.len().div_ceil(parts).max(1);
-    let mut segments = Vec::with_capacity(parts);
-    let mut start = 0;
-    while start < tape.len() {
-        let mut end = (start + target).min(tape.len());
-        while end < tape.len() && tape[end].block_number == tape[end - 1].block_number {
-            end += 1;
-        }
-        segments.push(&tape[start..end]);
-        start = end;
-    }
-    segments
 }
 
 fn bench_history(c: &mut Criterion) {

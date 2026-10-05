@@ -158,9 +158,9 @@ earliest kept is not the earliest that was.
   design.** The collection takes its element in by `push` or `stated` and
   hands it back from `since`, `window` and `busiest`: one element type,
   one collection, no conversion between them to move. `TapeEvent::sample`
-  is how an event becomes a `Sample`; `change_over` is how a `Series`
-  yields a `Change`; `Replay::retaining` is how a `Retention` reaches
-  every series at once.
+  and `TapeEvent::arrival` are how an event becomes a `Sample` or an
+  `Arrival`; `change_over` is how a `Series` yields a `Change`;
+  `Replay::retaining` is how a `Retention` reaches every series at once.
 - **`Sequenced` takes a `ChainPoint` and hands one back.**
   `Sequenced::standing_at` takes the point a seeded fold stands at, and
   `Sequenced::point` says where the guard stands now. The point is the

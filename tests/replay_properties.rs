@@ -8,7 +8,7 @@ use std::collections::BTreeSet;
 use alloy::primitives::{Address, B256, I256, U256};
 use perpcity_sdk::events::{CumulativesInfo, MarketEvent, ModuleKind};
 use perpcity_sdk::history::test_support::tape::{per_side, price, row, settle, swap};
-use perpcity_sdk::history::{Fold, Replay, TapeEvent};
+use perpcity_sdk::history::{Fold, Replay, Tape, TapeEvent};
 use perpcity_sdk::{
     Earnings, Funding, FundingPerSqrtPrice, FundingRate, LDelta, LUnits, PerSide, PerpAtoms,
     UsdcAtoms, UsdcDelta, UtilizationRate,
@@ -287,7 +287,12 @@ fn the_generator_speaks_the_whole_vocabulary() {
 /// A tape of up to a few hundred events in strictly increasing chain
 /// order, a few per block, one transaction per block, so a cut inside a
 /// block is a cut inside a transaction.
-fn tape() -> impl Strategy<Value = Vec<TapeEvent>> {
+fn tape() -> impl Strategy<Value = Tape> {
+    rows().prop_map(|rows| Tape::new(rows).expect("rows built in order are a tape"))
+}
+
+/// The rows of [`tape`], before the type sees them.
+fn rows() -> impl Strategy<Value = Vec<TapeEvent>> {
     prop::collection::vec((event(), 1u64..4), 0..300).prop_map(|rows| {
         let mut block = 1;
         let mut index = 0;
@@ -307,6 +312,24 @@ fn tape() -> impl Strategy<Value = Vec<TapeEvent>> {
 }
 
 proptest! {
+    /// Rows in any order, some repeated, collect into the tape they came
+    /// from; and a tape cut anywhere appends back into itself.
+    #[test]
+    fn a_tape_is_the_order_of_its_rows(
+        (rows, shuffled) in rows().prop_flat_map(|rows| (Just(rows.clone()), Just(rows).prop_shuffle())),
+        cut_at in 0.0f64..1.0,
+    ) {
+        let tape = Tape::new(rows).unwrap();
+        let from_shuffled: Result<Tape, _> = shuffled.iter().chain(&shuffled).copied().collect();
+        prop_assert_eq!(from_shuffled.unwrap(), tape.clone());
+
+        let cut = ((tape.len() as f64) * cut_at) as usize;
+        let (before, after) = tape.split_at(cut);
+        let mut rejoined = before.to_owned();
+        rejoined.append(after.to_owned()).unwrap();
+        prop_assert_eq!(rejoined, tape);
+    }
+
     /// `fold(a ++ b) == combine(fold(a), fold(b))` for every cut.
     #[test]
     fn the_fold_of_a_concatenation_is_the_combination_of_the_folds(
