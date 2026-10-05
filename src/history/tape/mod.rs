@@ -28,6 +28,7 @@
 
 mod custody;
 mod read;
+mod view;
 
 use std::borrow::Borrow;
 use std::ops::Deref;
