@@ -1748,6 +1748,43 @@ mod tests {
         }
     }
 
+    /// The other build's shape: the close says nothing of a liquidation
+    /// and the dedicated event after it carries no price. The record is
+    /// the same one, assembled from the transaction's progress, whether
+    /// the cut falls before the close, between it and the event, or after.
+    #[test]
+    fn a_liquidation_said_only_by_the_dedicated_event_is_the_same_record() {
+        let mut tape = liquidation_tape();
+        let MarketEvent::TakerClosed { is_liquidation, .. } = &mut tape[2].event else {
+            unreachable!("the fixture's third row is the close");
+        };
+        *is_liquidation = false;
+        let market = genesis(&tape);
+
+        let liquidations = market.liquidations();
+        assert_eq!(liquidations.len(), 1);
+        let arrival = liquidations.last().unwrap();
+        assert_eq!(arrival.point, tape[3].point(), "the dedicated event");
+        assert_eq!(
+            arrival.mark,
+            Liquidation {
+                pos_id: U256::from(1),
+                role: PositionRole::Taker,
+                fee: UsdcAtoms::new(5_000),
+                pool_price_before: Some(price(43)),
+                pool_price_after: Some(price(40)),
+                index_then: Some(price(42)),
+            },
+            "the prices around the transaction, not around the event"
+        );
+
+        for cut in 0..=tape.len() {
+            let mut left = genesis(&tape[..cut]);
+            left.combine(Replay::fold(&tape[cut..]));
+            assert_eq!(left, market, "cut at {cut}");
+        }
+    }
+
     /// The series keep what the contract stated, and a window of it.
     #[test]
     fn the_replay_keeps_series_and_trims_them_to_a_retention() {

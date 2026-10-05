@@ -108,50 +108,87 @@ pub(super) struct Activity {
     /// segment's record is filled from the one before it at the cut.
     pool_price: Latest<Price>,
     index: Latest<Price>,
-    /// The positions already recorded as liquidated in the current
-    /// transaction, so a close and the dedicated event that follows it
-    /// make one arrival.
-    in_tx: LiquidatedInTx,
+    /// What the current transaction has done so far, since a liquidation
+    /// is said across several of its events.
+    in_tx: InTx,
 }
 
-/// The positions recorded as liquidated in one transaction.
+/// One transaction's progress: the pool price when it began, the last
+/// swap each position made in it, and the positions already recorded as
+/// liquidated in it. A liquidation's record is assembled from these, so
+/// the tailed close of one build and the close-then-dedicated-event of the
+/// other give the same record.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-struct LiquidatedInTx {
+struct InTx {
     tx: Option<B256>,
-    positions: Vec<U256>,
+    /// The pool price as the last swap before this transaction left it.
+    price_at_start: Option<Price>,
+    /// The pool price after each position's last swap in this transaction.
+    swaps: Vec<(U256, Price)>,
+    liquidated: Vec<U256>,
 }
 
-impl LiquidatedInTx {
-    /// Note `pos_id` liquidated in `tx`; whether it is the first time.
-    fn note(&mut self, tx: B256, pos_id: U256) -> bool {
+impl InTx {
+    /// Make `tx` the current transaction, if it is not already, with
+    /// `pool_price` as the price standing when it began.
+    fn enter(&mut self, tx: B256, pool_price: Option<Price>) {
         if self.tx != Some(tx) {
-            self.tx = Some(tx);
-            self.positions.clear();
+            *self = Self {
+                tx: Some(tx),
+                price_at_start: pool_price,
+                swaps: Vec::new(),
+                liquidated: Vec::new(),
+            };
         }
-        if self.positions.contains(&pos_id) {
+    }
+
+    fn swapped(&mut self, pos_id: U256, after: Price) {
+        match self.swaps.iter_mut().find(|(id, _)| *id == pos_id) {
+            Some(entry) => entry.1 = after,
+            None => self.swaps.push((pos_id, after)),
+        }
+    }
+
+    fn swap_of(&self, pos_id: U256) -> Option<Price> {
+        self.swaps
+            .iter()
+            .find(|(id, _)| *id == pos_id)
+            .map(|(_, price)| *price)
+    }
+
+    /// Note `pos_id` liquidated; whether it is the first time this
+    /// transaction says so.
+    fn liquidate(&mut self, pos_id: U256) -> bool {
+        if self.liquidated.contains(&pos_id) {
             return false;
         }
-        self.positions.push(pos_id);
+        self.liquidated.push(pos_id);
         true
     }
 
-    /// Whether `pos_id` was already noted in `tx`.
-    fn noted(&self, tx: B256, pos_id: U256) -> bool {
-        self.tx == Some(tx) && self.positions.contains(&pos_id)
+    fn liquidated(&self, tx: B256, pos_id: U256) -> bool {
+        self.tx == Some(tx) && self.liquidated.contains(&pos_id)
     }
 
     /// Merge the segment after this one: the same transaction continues
-    /// the set; a different one replaces it.
-    fn combine(&mut self, later: Self) {
+    /// this one's progress; a different one replaces it, taking the price
+    /// this segment held if the later one had none.
+    fn combine(&mut self, later: Self, price_before_later: Option<Price>) {
         match (self.tx, later.tx) {
             (Some(mine), Some(theirs)) if mine == theirs => {
-                for pos_id in later.positions {
-                    if !self.positions.contains(&pos_id) {
-                        self.positions.push(pos_id);
-                    }
+                for (pos_id, after) in later.swaps {
+                    self.swapped(pos_id, after);
+                }
+                for pos_id in later.liquidated {
+                    self.liquidate(pos_id);
                 }
             }
-            (_, Some(_)) => *self = later,
+            (_, Some(_)) => {
+                *self = later;
+                if self.price_at_start.is_none() {
+                    self.price_at_start = price_before_later;
+                }
+            }
             (_, None) => {}
         }
     }
@@ -183,6 +220,11 @@ impl Activity {
         }
     }
 
+    /// Record `pos_id` liquidated in this event's transaction, once per
+    /// transaction however many events say it. The price before is the
+    /// one standing when the transaction began; the price after is the
+    /// position's own swap in it, which the tailed close carries on the
+    /// event and the dedicated event finds in the transaction's progress.
     fn liquidated(
         &mut self,
         event: &TapeEvent,
@@ -191,21 +233,24 @@ impl Activity {
         fee: UsdcAtoms,
         pool_price_after: Option<Price>,
     ) {
-        if !self.in_tx.note(event.tx_hash, pos_id) {
+        self.in_tx.enter(event.tx_hash, self.pool_price.get());
+        if !self.in_tx.liquidate(pos_id) {
             return;
         }
         let mark = Liquidation {
             pos_id,
             role,
             fee,
-            pool_price_before: self.pool_price.get(),
-            pool_price_after,
+            pool_price_before: self.in_tx.price_at_start,
+            pool_price_after: pool_price_after.or_else(|| self.in_tx.swap_of(pos_id)),
             index_then: self.index.get(),
         };
         self.liquidations.push(Self::arrival(event, mark));
     }
 
     fn swapped(&mut self, event: &TapeEvent, pos_id: U256, action: SwapAction, info: SwapInfo) {
+        self.in_tx.enter(event.tx_hash, self.pool_price.get());
+        self.in_tx.swapped(pos_id, info.pool_price);
         self.swaps.push(Self::arrival(
             event,
             Swap {
@@ -312,30 +357,40 @@ impl Fold for Activity {
         }
     }
 
-    /// Two things a cut inside a transaction or before a price would have
-    /// known: a liquidation the later segment recorded again, because this
-    /// one had already recorded it in the same transaction, is dropped; a
-    /// liquidation the later segment recorded before its first swap or
-    /// print is filled with the price this segment held then. Both as the
-    /// fold of both segments in sequence would have done.
+    /// What a cut inside a transaction or before a price would have known,
+    /// repaired as the fold of both segments in sequence would have recorded
+    /// it: a liquidation the later segment said again, because this one had
+    /// already said it in the same transaction, is dropped; one recorded
+    /// before the later segment saw a price, or saw the position's own swap
+    /// earlier in the transaction, takes what this segment held.
     fn combine(&mut self, mut later: Self) {
         later
             .liquidations
-            .drop_where(|a| self.in_tx.noted(a.tx, a.mark.pos_id));
+            .drop_where(|a| self.in_tx.liquidated(a.tx, a.mark.pos_id));
         for arrival in later.liquidations.arrivals_mut() {
-            if arrival.mark.pool_price_before.is_none() {
-                arrival.mark.pool_price_before = self.pool_price.get();
+            let mark = &mut arrival.mark;
+            let same_tx = self.in_tx.tx == Some(arrival.tx);
+            if mark.pool_price_before.is_none() {
+                mark.pool_price_before = if same_tx {
+                    self.in_tx.price_at_start
+                } else {
+                    self.pool_price.get()
+                };
             }
-            if arrival.mark.index_then.is_none() {
-                arrival.mark.index_then = self.index.get();
+            if mark.pool_price_after.is_none() && same_tx {
+                mark.pool_price_after = self.in_tx.swap_of(mark.pos_id);
+            }
+            if mark.index_then.is_none() {
+                mark.index_then = self.index.get();
             }
         }
         self.swaps.combine(later.swaps);
         self.liquidations.combine(later.liquidations);
         self.settlements.combine(later.settlements);
         self.prints.combine(later.prints);
+        let price_before_later = self.pool_price.get();
         self.pool_price.combine(later.pool_price);
         self.index.combine(later.index);
-        self.in_tx.combine(later.in_tx);
+        self.in_tx.combine(later.in_tx, price_before_later);
     }
 }

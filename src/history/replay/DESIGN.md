@@ -101,7 +101,7 @@ nowhere else. The three joins the live build's events force, a maker's
 band from `ModifyLiquidity` by salt, its deposit price from the fold's own
 pool price, a liquidation paired with the action before it, live in
 `Positions` and `Pool`, so the cutover deletes them by removal. `Market`
-itself is a struct of folds whose `apply` and `combine` are eight lines
+itself is a struct of folds whose `apply` and `combine` are nine lines
 each, and `Sequenced` is the chain-order guard any fold a driver feeds
 directly can wear.
 
@@ -192,7 +192,7 @@ fixed-size state in a map keyed by id, each touched tick a pair of sums,
 each custody record a point and an address. A closed position stays, which
 is the first debt below. Position ids are sequential from the contract's
 counter, so a `Vec` indexed by id is the layout to reach for if a
-benchmark ever asks; one dispatch by event family in place of eight
+benchmark ever asks; one dispatch by event family in place of nine
 matches is the other, and at these throughputs neither is measurable.
 
 ## The type system

@@ -190,11 +190,19 @@ depends on. That separation is a cost rule, not a convenience.
 
 ## Terminology
 
-- **Scan**: a chunked `eth_getLogs` over a range. **Window**: one carve
-  of the range at the believed width. **Width**: the span the provider
-  currently accepts; **learn**: how the scan finds it.
-- **Narrowing**: a window halving itself on rejection; the scan working,
-  not the endpoint failing.
+- **Scan**: a chunked `eth_getLogs` over a range. **Scan window**: one
+  carve of the range at the believed width. **Width**: the span the
+  provider currently accepts; **learn**: how the scan finds it.
+- **Narrowing**: a scan window halving itself on rejection; the scan
+  working, not the endpoint failing.
+- **Window**, the type: a length of time a question is asked over, in
+  block time. The scan window above is a span of blocks, and is always
+  called that.
+- **Series**: a value that holds between updates, kept in chain order.
+  **Arrivals**: a point process, a mark per arrival. **Retention**: how
+  much of either is kept, everything or the last window. **Reading**: a
+  value with its provenance, the point it holds at and the samples it was
+  computed from.
 - **Tape**: one market's events in chain order. **Print**: one beacon
   update. **Transfer**: one ERC-20 movement between address sets.
 - **Chain point**: block and log index; **chain order**: the order they
