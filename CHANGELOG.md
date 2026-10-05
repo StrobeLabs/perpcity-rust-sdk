@@ -7,7 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-The changes below break the public API, so the next release is 0.11.0 (a minor bump, as for any breaking change before 1.0). The replay keeps history: what a market's figures were is asked as often as what they are, and until now every question about when had to re-read the events the replay had already interpreted.
+## [0.11.0] - 2026-10-05
+
+The history release. The replay keeps history: what a market's figures
+were is asked as often as what they are, and until now every question
+about when had to re-read the events the replay had already interpreted.
+Two shapes carry it, a series for a value that holds between updates and
+arrivals for events that happen, each answering with its provenance and
+trimmed to a retention; the replay keeps both, and a ninth fold records
+the market's activity, one liquidation record per position per
+transaction whichever build's events carried it. Around it the history
+module's layers became its directories and its design nodes, its tests
+were read and reorganized with the rows they share in one home, and the
+law the whole program rests on was stated at any cut and found wanting in
+one fold, which is fixed. Breaking, so a minor bump, as for any breaking
+change before 1.0.
 
 ### Breaking
 
@@ -20,6 +34,15 @@ The changes below break the public API, so the next release is 0.11.0 (a minor b
 - **The replay keeps arrivals**, through a ninth component fold: `swaps`, every taker swap with its `SwapInfo` and whether it opened, adjusted or closed; `liquidations`, one `Liquidation` per position per liquidating transaction whichever build's events carried it, a tailed close, a conversion, or the dedicated event after, with the pool price before and after and the index then; `settlements`, what a position paid or earned in funding, utilization fees and LP fees when it was touched; `prints`, the beacon's prints as arrivals. A cut inside a liquidating transaction, or before a segment's first price, is repaired at `combine` as the fold of both segments would have recorded it; the property tests cut everywhere and say so.
 - **`PositionRole` is public**, maker or taker: the enum the liquidation twins were keyed on, now the side a liquidation or settlement record carries.
 - **`TapeEvent::sample(value)`**, a value stamped with the event's point and time.
+- **`history::test_support::tape`**, under `test-utils`: the row builders a fixture tape is written with, `row`, `price`, `swap`, `settle`, `modify` and `per_side`, and `assert_combine_law`, the fold law as a checker any implementor runs at every cut of a tape from a start of its choosing; `mined_event_log` beside `FakeNode`, a typed log as a node returns it. The replay tests, the property tests and the bench build their rows from them, so a fold in a crate built on the replay is tested over the same rows and held to the same law. `tests/replay_properties` requires the feature now, and its generator speaks the whole `MarketEvent` vocabulary, one transaction per block, held to it by a match with no wildcard: a new variant does not compile until the generator produces it.
+
+### Changed
+
+- **The history module's layers are its directories, and its design nodes mirror them.** `history/tape` holds the row, the three readers and custody; `history/fold` the contract, the chain-order guard, the three shapes and the series; `history/replay` the market rebuilt; the tests sit one file per module under test. No public path changed. The history node is the aerial view of how the layers fit, with a node for the tape and one for the algebra beneath it beside the replay's. The fold node states the law at any cut, between blocks or inside one, since the tests cut inside transactions and the first property run found what that catches.
+
+### Fixed
+
+- **The solvency fold kept its law only between transactions.** A withdrawal transfers after its swap's fees leave, so the fold removes a swap's fees only when no nonpositive `MarginTransferred` in the same transaction has been seen. A segment that began between the transfer and the swap had not seen it, removed the fees, and combined into a margin total short of the whole fold's by those fees. The fold now notes what it removed in its first transaction before any transfer, and `combine` takes it back when the earlier segment holds that transaction's withdrawal. Found by the property tests once the shared rows gave their adjusts and closes the fees the unit fixtures carry; the unit test with exactly that shape now checks the law at every cut. Nothing a one-pass fold returned changes.
 
 ## [0.10.0] - 2026-10-05
 
@@ -533,7 +556,8 @@ and why none of it changes a value on the wire.
 - Examples: quickstart, open_position, open_maker, market_maker, hft_bot
 - Benchmarks: math, HFT pipeline, transport
 
-[Unreleased]: https://github.com/StrobeLabs/perpcity-rust-sdk/compare/v0.10.0...HEAD
+[Unreleased]: https://github.com/StrobeLabs/perpcity-rust-sdk/compare/v0.11.0...HEAD
+[0.11.0]: https://github.com/StrobeLabs/perpcity-rust-sdk/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/StrobeLabs/perpcity-rust-sdk/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/StrobeLabs/perpcity-rust-sdk/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/StrobeLabs/perpcity-rust-sdk/compare/v0.7.0...v0.8.0
