@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+The changes below break the public API, so the next release is 0.12.0 (a minor bump, as for any breaking change before 1.0). The tape is a type: every reader returned a vector whose chain order every fold assumed and nothing checked.
+
+### Breaking
+
+- **The readers return a `Tape`.** `market_events`, `market_tape`, `latest_market_events`, their `History` counterparts and `Recording::tape` return `history::Tape` in place of `Vec<TapeEvent>`. A `Tape` derefs to `TapeSlice` and on to `[TapeEvent]`, so a caller that indexed, sliced, iterated or folded the vector is unchanged; a caller that stored it in a `Vec<TapeEvent>` field takes `Tape`, or `into_vec()`.
+
+### Added
+
+- **`history::Tape` and `history::TapeSlice`, the record as a type.** A `Tape` owns the invariant the vector only implied: rows in strict chain order, one hash and a monotone timestamp per block. `Tape::new` checks once and refuses at the first row that breaks it with `ValidationError::InvalidTape`, which names the row and the reason; `push` refuses a row that does not follow the last, as `Sequenced` refuses an event; `append` takes the segment after or refuses it whole; a collect of rows in any order, some repeated, sorts them, keeps the first at each point and checks the rest. `TapeSlice` is any run of a tape's rows, what the tape derefs to and what the groupings yield, so a segment answers as the whole does: `blocks()`, `transactions()`, `windows(window)` and `segments(n)`, the last cut only between blocks for a fold per core; `split_at(row)`, the cut the combine law is checked at; `at(point)`, `between`, `in_blocks` and `in_time`, each a binary search; and the lenses `swaps()`, `prints()` and `of_position(id)`, typed records with their points. The bench's own block-boundary cutter is `segments` now, and the property tests say a tape shuffled and doubled collects back into itself and a tape split at any row appends back into itself.
+- **`Swap` and `SwapAction` are the tape's marks.** They move from the replay to the tape, since a tape yields them unaided through `Swap::of` and the `swaps` lens; the replay's activity fold keeps the same record as arrivals, so a question asked of a tape and of a replay is asked in one vocabulary. Their path at `history::` is unchanged.
+- **`TapeEvent::arrival(mark)`**, a mark stamped with the event's point, time and transaction, as `sample` stamps a value.
+
 ## [0.11.0] - 2026-10-05
 
 The history release. The replay keeps history: what a market's figures
