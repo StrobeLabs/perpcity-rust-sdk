@@ -210,7 +210,7 @@ async fn agrees(replay: &Replay, state: &StateAt, ema_window: u64) {
     );
     assert_eq!(
         pool.sqrt_price.squared().unwrap(),
-        replay.pool_price().unwrap(),
+        replay.pool_price().value().unwrap(),
         "the pool price"
     );
     match replay.pool_tick() {

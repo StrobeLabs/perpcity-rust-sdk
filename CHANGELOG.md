@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+The changes below break the public API, so the next release is 0.11.0 (a minor bump, as for any breaking change before 1.0). The replay keeps history: what a market's figures were is asked as often as what they are, and until now every question about when had to re-read the events the replay had already interpreted.
+
+### Breaking
+
+- **`Replay::pool_price`, `Replay::index` and `Replay::open_interest` return series**, `&Series<Price>` and `&Series<OpenInterest>`, whose `value()` is the latest value the accessors returned before and whose `latest()` is that value with its provenance. A caller that read the latest value adds `.value()`.
+
+### Added
+
+- **`history::Series` and `history::Arrivals`, the two shapes a market's history takes.** A `Series<T>` is a value that holds between updates: `at(point)` and `at_time` answer the last statement at or before, `change_over(window)` the value then and now, `peak(window)` the largest in a window. An `Arrivals<M>` is a point process with a mark per arrival: `count_in(window)`, `busiest(window)`, the arrivals in a window. Both are kept in chain order and refuse a push at or before their last point, as `Sequenced` does; both append when segments of a tape combine, so a fold holding them keeps the law `fold(a ++ b) == combine(fold(a), fold(b))`, which `tests/replay_properties.rs` now checks over them; both trim to a `Retention`, the last `Window` plus the sample before it, or everything. Every question returns a `Reading<T>`: the value in its units, the point it holds at, the timestamp, and the `Span` of samples it was computed from, so an alarm can name what moved it and a forensic bin can reproduce it. No bound anywhere: a bound is the caller's policy.
+- **The replay keeps series.** `Replay::retaining(retention)` sets how much every series keeps; the default is everything. `pool_price` and `index` are series of every swap's price and every print; `capacity` and `open_interest` of every update; `margin_total` and `bad_debt` of what the contract stated, statement by statement, which append across segments where the fold's own running totals would not. `deposited` is the USDC that entered as margin since the fold's start, what bad debt is set against, since no trading loss can exceed what was ever deposited. `solvency()` and the block-taking accessors are unchanged.
+- **The replay keeps arrivals**, through a ninth component fold: `swaps`, every taker swap with its `SwapInfo` and whether it opened, adjusted or closed; `liquidations`, one `Liquidation` per position per liquidating transaction whichever build's events carried it, a tailed close, a conversion, or the dedicated event after, with the pool price before and after and the index then; `settlements`, what a position paid or earned in funding, utilization fees and LP fees when it was touched; `prints`, the beacon's prints as arrivals. A cut inside a liquidating transaction, or before a segment's first price, is repaired at `combine` as the fold of both segments would have recorded it; the property tests cut everywhere and say so.
+- **`PositionRole` is public**, maker or taker: the enum the liquidation twins were keyed on, now the side a liquidation or settlement record carries.
+- **`TapeEvent::sample(value)`**, a value stamped with the event's point and time.
+
 ## [0.10.0] - 2026-10-05
 
 The replay release. The tape becomes sufficient for a fold, everything the

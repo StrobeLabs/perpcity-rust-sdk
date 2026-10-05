@@ -15,6 +15,7 @@
 //! many positions stand on a figure no event stated, and a consumer gates
 //! on it.
 
+mod activity;
 mod market;
 mod pool;
 mod positions;
@@ -31,11 +32,13 @@ use crate::client::{OpenInterest, SolvencyState, StateAt};
 use crate::errors::{Result, ValidationError};
 use crate::events::{CumulativesInfo, ModuleKind};
 use crate::math::BlockContext;
-use crate::math::capacity::MarketCapacity;
+use crate::math::capacity::{Capacity, MarketCapacity};
 use crate::math::pricing::{Emas, Mark};
 use crate::math::swap::TickLiquidity;
-use crate::units::{FundingRate, LUnits, PerSide, Price, UtilizationRate};
+use crate::units::{FundingRate, LUnits, PerSide, Price, UsdcAtoms, UtilizationRate};
 
+use self::activity::Activity;
+pub use self::activity::{Liquidation, Settlement, Swap, SwapAction};
 use self::market::{Modules, Prices, Rates, Utilization};
 use self::pool::Pool;
 pub use self::positions::{PositionKind, PositionState, Positions};
@@ -43,6 +46,7 @@ use self::seed::Seed;
 use self::solvency::Solvency;
 use super::History;
 use super::fold::{Fold, Latest, Sequenced};
+use super::series::{Arrivals, Retention, Sample, Series};
 use super::tape::{ChainPoint, OwnershipLog, TapeAddresses, TapeEvent};
 
 /// What the fold does not know, in three kinds, each with its own cure. A
@@ -112,9 +116,16 @@ pub struct Faults {
 /// The market is a composition of folds, one per concern, each a `Fold` in
 /// its own right: the mark's inputs, the touch's rates, capacity and open
 /// interest, the solvency books, the modules, the pool's liquidity, the
-/// positions, and custody. `apply` hands every event to each; `combine`
-/// merges each with its counterpart. The one rule of the live build's, how
-/// a swap's fees leave the margin total, lives in the solvency fold alone.
+/// positions, custody, and what arrived. `apply` hands every event to
+/// each; `combine` merges each with its counterpart. The one rule of the
+/// live build's, how a swap's fees leave the margin total, lives in the
+/// solvency fold alone.
+///
+/// What a figure was is asked as often as what it is, so the folds keep
+/// the history of what they track: the prices, capacity, open interest and
+/// the stated books as a [`Series`], the swaps, liquidations, settlements
+/// and prints as [`Arrivals`], all trimmed to the replay's
+/// [`retention`](Self::retaining).
 ///
 /// Three starts: [`from_genesis`](Self::from_genesis) before the market's
 /// first event, [`seeded`](Self::seeded) from the reads at a block, and the
@@ -129,7 +140,7 @@ pub struct Replay {
     market: Sequenced<Market>,
 }
 
-/// The eight folds the market is composed of; `Replay` keeps them behind
+/// The nine folds the market is composed of; `Replay` keeps them behind
 /// the chain-order guard.
 #[derive(Debug, Clone, Default, PartialEq)]
 struct Market {
@@ -141,6 +152,17 @@ struct Market {
     pool: Pool,
     positions: Positions,
     custody: OwnershipLog,
+    activity: Activity,
+}
+
+impl Market {
+    /// Keep only `retention` of every series from here on.
+    fn retain(&mut self, retention: Retention) {
+        self.prices.retain(retention);
+        self.utilization.retain(retention);
+        self.solvency.retain(retention);
+        self.activity.retain(retention);
+    }
 }
 
 impl Fold for Market {
@@ -153,6 +175,7 @@ impl Fold for Market {
         self.pool.apply(event);
         self.positions.apply(event);
         self.custody.apply(event);
+        self.activity.apply(event);
     }
 
     fn combine(&mut self, later: Self) {
@@ -164,12 +187,22 @@ impl Fold for Market {
         self.pool.combine(later.pool);
         self.positions.combine(later.positions);
         self.custody.combine(later.custody);
+        self.activity.combine(later.activity);
     }
 }
 
 impl Replay {
     fn market(&self) -> &Market {
         self.market.inner()
+    }
+
+    /// Keep only `retention` of every series: the last window for a
+    /// monitor, everything for a forensic or research fold. The default is
+    /// everything. A series trimmed to a window answers only inside it and
+    /// says so.
+    pub fn retaining(mut self, retention: Retention) -> Self {
+        self.market.inner_mut().retain(retention);
+        self
     }
 
     /// The market before its first event. What is zero before any event is
@@ -219,15 +252,21 @@ impl Replay {
             block: seed.block.number,
             log_index: u64::MAX,
         };
+        let at = Sample {
+            point: end_of_block,
+            timestamp: seed.block.timestamp,
+            value: (),
+        };
         let market = Market {
-            prices: Prices::seeded(seed.pool_price, seed.index, seed.emas),
+            prices: Prices::seeded(at, seed.pool_price, seed.index, seed.emas),
             rates: Rates::seeded(seed.rates, seed.cumulatives),
-            utilization: Utilization::seeded(seed.capacity),
-            solvency: Solvency::seeded(seed.solvency),
+            utilization: Utilization::seeded(at, seed.capacity),
+            solvency: Solvency::seeded(at, seed.solvency),
             modules: Modules::seeded(seed.modules),
             pool: Pool::seeded(seed.ticks, seed.tick)?,
             positions: Positions::seeded(seed.pool_price, seed.positions),
             custody: OwnershipLog::default(),
+            activity: Activity::seeded(seed.pool_price, seed.index),
         };
         Ok(Self {
             perp: seed.perp,
@@ -297,14 +336,15 @@ impl Replay {
         self.block.get()
     }
 
-    /// The pool price after the last swap.
-    pub fn pool_price(&self) -> Option<Price> {
-        self.market().prices.pool.get()
+    /// The pool price after each swap; its latest is the pool price now.
+    pub fn pool_price(&self) -> &Series<Price> {
+        &self.market().prices.pool
     }
 
-    /// The beacon's last print.
-    pub fn index(&self) -> Option<Price> {
-        self.market().prices.index.get()
+    /// The beacon's prints as the index that held between them; its latest
+    /// is the index now.
+    pub fn index(&self) -> &Series<Price> {
+        &self.market().prices.index
     }
 
     /// The stored EMA pair and the touch it is current as of, as the last
@@ -328,9 +368,14 @@ impl Replay {
         self.market().rates.cumulatives.get()
     }
 
-    /// Taker open interest, per side.
-    pub fn open_interest(&self) -> Option<OpenInterest> {
-        self.market().utilization.open_interest.get()
+    /// Taker open interest per side, as each update stated it.
+    pub fn open_interest(&self) -> &Series<OpenInterest> {
+        &self.market().utilization.open_interest
+    }
+
+    /// Capacity per side, as each update stated it.
+    pub fn capacity(&self) -> &Series<Capacity> {
+        &self.market().utilization.capacity
     }
 
     /// Capacity and its draw at `block`, as [`StateAt::capacity`](crate::StateAt::capacity)
@@ -360,6 +405,48 @@ impl Replay {
     /// both have been stated. Read [`Self::gaps`] beside it.
     pub fn solvency(&self) -> Option<SolvencyState> {
         self.market().solvency.state()
+    }
+
+    /// The margin total as each `MarginTransferred` stated it. The fees
+    /// swaps removed since the last statement are not in it; the books
+    /// ([`Self::solvency`]) carry those.
+    pub fn margin_total(&self) -> &Series<UsdcAtoms> {
+        &self.market().solvency.margin_stated
+    }
+
+    /// The bad debt as each booking, socialization or donation stated it.
+    pub fn bad_debt(&self) -> &Series<UsdcAtoms> {
+        &self.market().solvency.debt_stated
+    }
+
+    /// USDC that entered as margin since the fold's start: every positive
+    /// `MarginTransferred` delta, summed. What bad debt is set against,
+    /// since no trading loss can exceed what was ever deposited.
+    pub fn deposited(&self) -> UsdcAtoms {
+        self.market().solvency.deposited
+    }
+
+    /// Every taker swap, in chain order.
+    pub fn swaps(&self) -> &Arrivals<Swap> {
+        &self.market().activity.swaps
+    }
+
+    /// Every liquidation, one per position per liquidating transaction,
+    /// whichever build's events carried it, with the prices around it.
+    pub fn liquidations(&self) -> &Arrivals<Liquidation> {
+        &self.market().activity.liquidations
+    }
+
+    /// Every settlement a position made: funding, utilization fees and,
+    /// for makers, LP fees.
+    pub fn settlements(&self) -> &Arrivals<Settlement> {
+        &self.market().activity.settlements
+    }
+
+    /// The beacon's prints as arrivals, for when their timing is the
+    /// question; [`Self::index`] is the same prints as the value that held.
+    pub fn prints(&self) -> &Arrivals<Price> {
+        &self.market().activity.prints
     }
 
     /// The module of `kind` in force, once a `ModuleSet` has named one.
@@ -458,9 +545,10 @@ mod tests {
 
     use alloy::primitives::I256;
 
+    use super::super::series::{Change, Window};
     use super::seed::{Seed, SeedPosition};
     use super::*;
-    use crate::client::MarketRates;
+    use crate::client::{MarketRates, PositionRole};
     use crate::constants::Q96;
     use crate::contracts::Modules as ContractModules;
     use crate::events::{MakerSettle, MarketEvent, SwapInfo};
@@ -615,8 +703,8 @@ mod tests {
 
         assert_eq!(market.applied(), 10);
         assert_eq!(market.block(), Some(last));
-        assert_eq!(market.pool_price(), Some(price(43)));
-        assert_eq!(market.index(), Some(price(42)));
+        assert_eq!(market.pool_price().value(), Some(price(43)));
+        assert_eq!(market.index().value(), Some(price(42)));
         assert_eq!(
             market.capacity_at(last),
             Some(MarketCapacity {
@@ -850,7 +938,7 @@ mod tests {
                 open_interest: PerSide::default(),
             })
         );
-        assert_eq!(empty.pool_price(), None);
+        assert_eq!(empty.pool_price().value(), None);
         assert_eq!(empty.emas(), None);
         assert_eq!(empty.module(ModuleKind::Pricing), None);
         assert_eq!(empty.gaps(), Gaps::default());
@@ -1420,8 +1508,8 @@ mod tests {
         Seed {
             perp: market.perp(),
             block: at,
-            pool_price: market.pool_price().unwrap(),
-            index: market.index().unwrap(),
+            pool_price: market.pool_price().value().unwrap(),
+            index: market.index().value().unwrap(),
             emas,
             rates: MarketRates {
                 funding_per_day: market.funding_per_day().unwrap(),
@@ -1583,5 +1671,123 @@ mod tests {
         seeded.apply(&tape[3]);
         assert_eq!(seeded.gaps().faults.refused, 1);
         assert_eq!(seeded.applied(), 1);
+    }
+
+    /// A print, an open, then a liquidation the build says twice in one
+    /// transaction: the tailed close and the dedicated event after it.
+    fn liquidation_tape() -> Vec<TapeEvent> {
+        vec![
+            row(30, 0, MarketEvent::IndexUpdated { index: price(42) }),
+            row(
+                31,
+                0,
+                MarketEvent::TakerOpened {
+                    pos_id: U256::from(1),
+                    swap: sized_swap(1_000_000, price(43)),
+                },
+            ),
+            row(
+                32,
+                0,
+                MarketEvent::TakerClosed {
+                    pos_id: U256::from(1),
+                    swap: sized_swap(-1_000_000, price(40)),
+                    funding: UsdcDelta::ZERO,
+                    util_fees: UsdcAtoms::ZERO,
+                    liquidation_fee: UsdcAtoms::new(5_000),
+                    is_liquidation: true,
+                },
+            ),
+            row(
+                32,
+                1,
+                MarketEvent::TakerLiquidated {
+                    pos_id: U256::from(1),
+                    perp_amount: PerpAtoms::new(1_000_000),
+                    liquidation_fee: UsdcAtoms::new(5_000),
+                },
+            ),
+        ]
+    }
+
+    /// One arrival however many events say it, with the prices around it;
+    /// and the same arrival whether the cut falls inside the transaction or
+    /// before the prices it is recorded against.
+    #[test]
+    fn a_liquidation_is_one_arrival_with_the_prices_around_it() {
+        let tape = liquidation_tape();
+        let market = genesis(&tape);
+
+        let liquidations = market.liquidations();
+        assert_eq!(liquidations.len(), 1);
+        let arrival = liquidations.last().unwrap();
+        assert_eq!(
+            arrival.point,
+            tape[2].point(),
+            "the close, not the event after it"
+        );
+        assert_eq!(
+            arrival.mark,
+            Liquidation {
+                pos_id: U256::from(1),
+                role: PositionRole::Taker,
+                fee: UsdcAtoms::new(5_000),
+                pool_price_before: Some(price(43)),
+                pool_price_after: Some(price(40)),
+                index_then: Some(price(42)),
+            }
+        );
+        assert_eq!(market.swaps().len(), 2);
+        assert_eq!(market.settlements().len(), 1);
+        assert_eq!(market.prints().len(), 1);
+
+        for cut in 0..=tape.len() {
+            let mut left = genesis(&tape[..cut]);
+            left.combine(Replay::fold(&tape[cut..]));
+            assert_eq!(left, market, "cut at {cut}");
+        }
+    }
+
+    /// The series keep what the contract stated, and a window of it.
+    #[test]
+    fn the_replay_keeps_series_and_trims_them_to_a_retention() {
+        let tape = liquidation_tape();
+        let market = genesis(&tape);
+        assert_eq!(market.index().value(), Some(price(42)));
+        assert_eq!(
+            market.pool_price().samples().len(),
+            2,
+            "the open's and the close's prices"
+        );
+        assert_eq!(
+            market.pool_price().at(tape[1].point()).map(|r| r.value),
+            Some(price(43))
+        );
+        assert_eq!(
+            market
+                .pool_price()
+                .change_over(Window::seconds(10))
+                .map(|r| r.value),
+            Some(Change {
+                from: price(43),
+                to: price(40)
+            })
+        );
+
+        // The rows are ten seconds apart; a five-second window keeps the
+        // last sample and the one before it.
+        let mut short =
+            Replay::from_genesis(Address::ZERO).retaining(Retention::Last(Window::seconds(5)));
+        for row in &tape {
+            short.apply(row);
+        }
+        assert_eq!(short.pool_price().samples().len(), 2);
+        assert_eq!(short.pool_price().value(), Some(price(40)));
+        assert_eq!(
+            short.open_interest().samples().len(),
+            1,
+            "genesis's zero is the one sample before the window"
+        );
+        assert_eq!(short.deposited(), UsdcAtoms::ZERO);
     }
 }

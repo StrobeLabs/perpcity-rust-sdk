@@ -73,22 +73,29 @@ monitor runs it on every live market.
 ```text
    Replay
    └─ Sequenced< Market >       an event at or before the last point is refused and counted
-      └─ Market                 hands each event to eight folds; merges each with its twin
+      └─ Market                 hands each event to nine folds; merges each with its twin
 
          fold           holds                                 shape            fed by
          ────────────   ───────────────────────────────────   ──────────────   ──────────────────────────
-         Prices         pool price · index · stored EMAs      Latest           swaps, prints, the touch
+         Prices         pool price · index · stored EMAs      Series · Latest  swaps, prints, the touch
          Rates          funding · utilization fees · cumuls   Latest           the touch, accruals
-         Utilization    capacity · open interest              Latest           their updates
+         Utilization    capacity · open interest              Series           their updates
          Modules        the address in force, per kind        Latest, six      ModuleSet
-         Solvency       margin · bad debt                     Stated           transfers, swaps, bookings
+         Solvency       margin · bad debt, and as stated      Stated · Series  transfers, swaps, bookings
          Pool           liquidity per tick · the tick         sums · Latest    ModifyLiquidity, TicksCrossed
          Positions      kind · size or band · margin, per id  First/Latest/sums  every position event
          OwnershipLog   custody over time                     append           PositionTransferred
+         Activity       swaps · liquidations · settlements    Arrivals         the trades, the closes,
+                        · prints                                               the prints
 ```
 
-Eight folds because the market has eight concerns, and a concern's rule
-belongs with its state. The one rule the live build needs that no event
+Nine folds because the market has nine concerns, and a concern's rule
+belongs with its state. Where a concern's history is asked for as often
+as its state, the fold keeps it: the prices, the capacity and the open
+interest, and the stated books are `Series`, whose `latest()` is the old
+answer; the trades, the liquidations, the settlements and the prints are
+`Arrivals`. All of them append when segments combine, so the law holds
+with them, and all trim to the replay's `Retention`. The one rule the live build needs that no event
 states, how a swap's fees leave the margin total, lives in `Solvency` and
 nowhere else. The three joins the live build's events force, a maker's
 band from `ModifyLiquidity` by salt, its deposit price from the fold's own
@@ -151,18 +158,23 @@ tape of 200,000 events on a twelve-core laptop:
 | decode, one thread | 31 M |
 | decode, one thread per core | 170 M |
 | fold, a no-op match per row | 87 M |
-| `Replay`, one pass | 17 M |
-| `Replay`, one segment per core, combined | 14.5 M |
+| `Replay`, one pass | 13 M |
+| `Replay`, one segment per core, combined | 9.8 M |
 
-**The fold is not where time goes.** `apply` is eight matches and a few
-field writes; it allocates only for a position first seen, a tick first
-touched and a custody record. On the recorded HORMUZ-SHIPS tape it runs at
-97 M events per second, and a 10 M-event market folds in under a second
-on one core. The scan is three orders slower with no network at all, and
-a provider adds its latency on top, so the work a consumer should avoid
-is re-scanning, not re-folding. That is what the checkpoint half of the
-law buys: a fold of any prefix is a checkpoint, a seed is a checkpoint the
-chain supplies, and `catch_up` scans only the blocks since.
+**The fold is not where time goes.** `apply` is nine matches, a few
+field writes and the pushes that keep the series; it allocates only for a
+position first seen, a tick first touched, a custody record, and each
+sample or arrival kept. On the recorded HORMUZ-SHIPS tape it runs at
+62 M events per second, and a 10 M-event market folds in under a second
+on one core. Keeping the series cost a quarter of the fold's throughput
+on the synthetic tape and a third on the recorded one, which is the price
+of answering "when" without re-reading the events; retention bounds what
+it costs in memory. The scan is three orders slower with no network at
+all, and a provider adds its latency on top, so the work a consumer
+should avoid is re-scanning, not re-folding. That is what the checkpoint
+half of the law buys: a fold of any prefix is a checkpoint, a seed is a
+checkpoint the chain supplies, and `catch_up` scans only the blocks
+since.
 
 **The decode parallelizes; the fold's segments do not yet pay.** The
 decoder is pure, so one thread per core gives five and a half times the
@@ -187,9 +199,10 @@ matches is the other, and at these throughputs neither is measurable.
 
 | Type | Invariant | Produced by | Consumed by |
 |---|---|---|---|
-| [`Replay`](../replay.rs#L124) | the market as its events describe it, in the reads' types; every quantity a latest-wins total, a sum or a first occurrence, so the fold combines across segments; an event at or before the fold's point is refused, never applied | [`Replay::from_genesis`](../replay.rs#L184) before the first event; [`Replay::seeded`](../replay.rs#L213) from the reads on a [`StateAt`](../../client/DESIGN.md); the trait's `fold` for a segment; then `apply`, or `Replay::catch_up` over the tape | nothing in the crate. The strategy layer's monitor, live cache, research folds and backtests, each driving it from a different source. |
-| [`Positions`](positions.rs#L367), [`PositionState`](positions.rs#L109), [`PositionKind`](positions.rs#L22) | every position the tape mentioned: a taker's size as the sum of its swaps, a maker's band as its first range and the sum of its liquidity changes, the margin a read supplied until an event touches it. A position met mid-life, or a kind the tape never named, is `Unknown` or unsized rather than guessed, so segments merge into the whole | folded inside `Replay`; read through [`Replay::positions`](../replay.rs#L378) and `Replay::position` | the strategy layer's live cache, whose own position fold this replaces, and its economics folds. A `MakerBand` here and one read from chain compare with `==`. |
-| [`Gaps`](../replay.rs#L51), [`Silences`](../replay.rs#L65), [`Unknowns`](../replay.rs#L81), [`Faults`](../replay.rs#L96) | what the fold does not know, in three kinds with three cures: what the contract moved silently, cured by the cutover; what the fold's start did not supply, cured by a seed; what the driver did wrong, cured by `catch_up`. Decided at the read from the latest totals, so the counts combine like the rest | [`Replay::gaps`](../replay.rs#L411) | nothing in the crate: the strategy layer's gate, one alarm per part. A reading with a nonzero gap is forensic, not a decision's input. |
+| [`Replay`](../replay.rs#L135) | the market as its events describe it, in the reads' types, with the history of each figure kept as a series or as arrivals; every field combines across segments, the series by appending; an event at or before the fold's point is refused, never applied | [`Replay::from_genesis`](../replay.rs#L217), [`Replay::seeded`](../replay.rs#L246) from a [`StateAt`](../../client/DESIGN.md), or the trait's `fold`; `Replay::retaining` sets the `Retention`; then `apply` or `Replay::catch_up` | nothing in the crate; `Replay::deposited`, what bad debt is set against, is the one bare sum. The strategy layer's monitor, live cache and research folds, each driving it from a different source. |
+| [`Positions`](positions.rs#L367), [`PositionState`](positions.rs#L109), [`PositionKind`](positions.rs#L22) | every position the tape mentioned: a taker's size as the sum of its swaps, a maker's band as its first range and the sum of its liquidity changes, the margin a read supplied until an event touches it. A position met mid-life, or a kind the tape never named, is `Unknown` or unsized rather than guessed, so segments merge into the whole | folded inside `Replay`; read through [`Replay::positions`](../replay.rs#L465) and `Replay::position` | the strategy layer's live cache, whose own position fold this replaces, and its economics folds. A `MakerBand` here and one read from chain compare with `==`. |
+| [`Liquidation`](activity.rs#L45), [`Swap`](activity.rs#L34), [`SwapAction`](activity.rs#L23), [`Settlement`](activity.rs#L65) | the marks on the market's arrivals. A liquidation is one record per position per liquidating transaction, whichever build's events carried it, with the pool price before and after and the index then; a cut inside the transaction or before the first price is repaired at `combine`, as the fold of both segments would have recorded it. A swap is the event's own settlement; a settlement is what a position paid or earned when touched | the activity fold inside `Replay`, read through `Replay::swaps`, `Replay::liquidations`, `Replay::settlements` | the readings over arrivals in the strategy layer: intensity, a cascade's run, a sweep. |
+| [`Gaps`](../replay.rs#L55), [`Silences`](../replay.rs#L69), [`Unknowns`](../replay.rs#L85), [`Faults`](../replay.rs#L100) | what the fold does not know, in three kinds with three cures: what the contract moved silently, cured by the cutover; what the fold's start did not supply, cured by a seed; what the driver did wrong, cured by `catch_up`. Decided at the read from the latest totals, so the counts combine like the rest | [`Replay::gaps`](../replay.rs#L498) | nothing in the crate: the strategy layer's gate, one alarm per part. A reading with a nonzero gap is forensic, not a decision's input. |
 
 ## Accepted structure
 
