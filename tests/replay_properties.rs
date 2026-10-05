@@ -3,22 +3,49 @@
 //! so a fold of any prefix is a checkpoint and segments fold on separate
 //! cores.
 
-use alloy::primitives::{Address, B256, U256};
-use perpcity_sdk::events::{MarketEvent, ModuleKind};
-use perpcity_sdk::history::test_support::tape::{per_side, price, settle, swap};
+use std::collections::BTreeSet;
+
+use alloy::primitives::{Address, B256, I256, U256};
+use perpcity_sdk::events::{CumulativesInfo, MarketEvent, ModuleKind};
+use perpcity_sdk::history::test_support::tape::{per_side, price, row, settle, swap};
 use perpcity_sdk::history::{Fold, Replay, TapeEvent};
 use perpcity_sdk::{
-    FundingRate, LDelta, LUnits, PerSide, PerpAtoms, UsdcAtoms, UsdcDelta, UtilizationRate,
+    Earnings, Funding, FundingPerSqrtPrice, FundingRate, LDelta, LUnits, PerSide, PerpAtoms,
+    UsdcAtoms, UsdcDelta, UtilizationRate,
 };
 use proptest::prelude::*;
+use proptest::strategy::ValueTree;
+use proptest::test_runner::TestRunner;
 
 /// A position id from a small pool, so each position sees many events.
 fn pos_id() -> impl Strategy<Value = U256> {
     (1u64..50).prop_map(U256::from)
 }
 
+/// A tick on the pool's spacing.
+fn tick() -> impl Strategy<Value = i32> {
+    (-10i32..10).prop_map(|t| t * 60)
+}
+
+fn cumulatives(n: u64) -> CumulativesInfo {
+    let x96 = |k: u64| I256::try_from(n * k).unwrap();
+    CumulativesInfo {
+        funding: Funding::from_x96(x96(1)),
+        funding_div_sqrt_p: FundingPerSqrtPrice::from_x96(x96(2)),
+        util_payments: PerSide::new(
+            Earnings::from_x96(U256::from(n * 3)),
+            Earnings::from_x96(U256::from(n * 4)),
+        ),
+        util_earnings: PerSide::new(
+            Earnings::from_x96(U256::from(n * 5)),
+            Earnings::from_x96(U256::from(n * 6)),
+        ),
+    }
+}
+
 /// One of the events the fold reads, with the values a market could emit:
 /// the market's totals, the positions' lives, and the pool's liquidity.
+/// Every variant of the vocabulary is here; `name_of` holds it to that.
 fn event() -> impl Strategy<Value = MarketEvent> {
     prop_oneof![
         (pos_id(), 1u64..1_000, 0u128..1_000_000).prop_map(|(pos_id, p, fee)| {
@@ -112,9 +139,11 @@ fn event() -> impl Strategy<Value = MarketEvent> {
             }
         }),
         (1u64..1_000).prop_map(|i| MarketEvent::IndexUpdated { index: price(i) }),
-        (0u128..1_000_000_000).prop_map(|m| MarketEvent::MarginTransferred {
-            margin_delta: UsdcDelta::new(0),
-            total_margin: UsdcAtoms::new(m),
+        (-1_000_000i128..1_000_000, 0u128..1_000_000_000).prop_map(|(d, m)| {
+            MarketEvent::MarginTransferred {
+                margin_delta: UsdcDelta::new(d),
+                total_margin: UsdcAtoms::new(m),
+            }
         }),
         (0u128..1_000_000).prop_map(|d| MarketEvent::BadDebtAccounted {
             bad_debt: UsdcAtoms::new(d),
@@ -150,11 +179,114 @@ fn event() -> impl Strategy<Value = MarketEvent> {
                 pos_id: U256::from(pos),
             }
         }),
+        (pos_id(), 0u128..1_000_000, 1u8..=255).prop_map(|(pos_id, margin, to)| {
+            MarketEvent::MakerBackstopped {
+                pos_id,
+                margin_in: UsdcAtoms::new(margin),
+                pos_recipient: Address::repeat_byte(to),
+                settle: settle(),
+            }
+        }),
+        (pos_id(), 0u128..1_000_000, 1u8..=255, -1_000i128..1_000).prop_map(
+            |(pos_id, margin, to, funding)| MarketEvent::TakerBackstopped {
+                pos_id,
+                margin_in: UsdcAtoms::new(margin),
+                pos_recipient: Address::repeat_byte(to),
+                funding: UsdcDelta::new(funding),
+                util_fees: UsdcAtoms::new(7),
+            }
+        ),
+        (1u64..1_000_000).prop_map(|n| MarketEvent::CumulativesAccrued {
+            cumulatives: cumulatives(n),
+        }),
+        (tick(), 1u64..1_000).prop_map(|(tick, n)| MarketEvent::TickInitialized {
+            tick,
+            cuml_funding_opp: Funding::from_x96(I256::try_from(n).unwrap()),
+            cuml_funding_div_sqrt_p_opp: FundingPerSqrtPrice::from_x96(
+                I256::try_from(n * 2).unwrap()
+            ),
+        }),
+        tick().prop_map(|tick| MarketEvent::TickDeleted { tick }),
     ]
 }
 
+/// The variant's name, by a match with no wildcard: a new variant does not
+/// compile until `event` produces it and this names it.
+fn name_of(event: &MarketEvent) -> &'static str {
+    match event {
+        MarketEvent::MakerOpened { .. } => "MakerOpened",
+        MarketEvent::MakerAdjusted { .. } => "MakerAdjusted",
+        MarketEvent::MakerConverted { .. } => "MakerConverted",
+        MarketEvent::MakerClosed { .. } => "MakerClosed",
+        MarketEvent::MakerLiquidated { .. } => "MakerLiquidated",
+        MarketEvent::MakerBackstopped { .. } => "MakerBackstopped",
+        MarketEvent::TakerOpened { .. } => "TakerOpened",
+        MarketEvent::TakerAdjusted { .. } => "TakerAdjusted",
+        MarketEvent::TakerClosed { .. } => "TakerClosed",
+        MarketEvent::TakerLiquidated { .. } => "TakerLiquidated",
+        MarketEvent::TakerBackstopped { .. } => "TakerBackstopped",
+        MarketEvent::CapacityUpdated { .. } => "CapacityUpdated",
+        MarketEvent::OpenInterestUpdated { .. } => "OpenInterestUpdated",
+        MarketEvent::CumulativesAccrued { .. } => "CumulativesAccrued",
+        MarketEvent::RatesAndEmasRefreshed { .. } => "RatesAndEmasRefreshed",
+        MarketEvent::TicksCrossed { .. } => "TicksCrossed",
+        MarketEvent::TickInitialized { .. } => "TickInitialized",
+        MarketEvent::TickDeleted { .. } => "TickDeleted",
+        MarketEvent::Donated { .. } => "Donated",
+        MarketEvent::BadDebtAccounted { .. } => "BadDebtAccounted",
+        MarketEvent::LossSocialized { .. } => "LossSocialized",
+        MarketEvent::MarginTransferred { .. } => "MarginTransferred",
+        MarketEvent::IndexUpdated { .. } => "IndexUpdated",
+        MarketEvent::ModifyLiquidity { .. } => "ModifyLiquidity",
+        MarketEvent::PositionTransferred { .. } => "PositionTransferred",
+        MarketEvent::ModuleSet { .. } => "ModuleSet",
+    }
+}
+
+/// Every name `name_of` can return.
+const VOCABULARY: [&str; 26] = [
+    "MakerOpened",
+    "MakerAdjusted",
+    "MakerConverted",
+    "MakerClosed",
+    "MakerLiquidated",
+    "MakerBackstopped",
+    "TakerOpened",
+    "TakerAdjusted",
+    "TakerClosed",
+    "TakerLiquidated",
+    "TakerBackstopped",
+    "CapacityUpdated",
+    "OpenInterestUpdated",
+    "CumulativesAccrued",
+    "RatesAndEmasRefreshed",
+    "TicksCrossed",
+    "TickInitialized",
+    "TickDeleted",
+    "Donated",
+    "BadDebtAccounted",
+    "LossSocialized",
+    "MarginTransferred",
+    "IndexUpdated",
+    "ModifyLiquidity",
+    "PositionTransferred",
+    "ModuleSet",
+];
+
+/// A few thousand draws produce every variant, so the law below is
+/// checked over the whole vocabulary and not the part someone remembered.
+#[test]
+fn the_generator_speaks_the_whole_vocabulary() {
+    let mut runner = TestRunner::deterministic();
+    let seen: BTreeSet<&str> = (0..3_000)
+        .map(|_| name_of(&event().new_tree(&mut runner).unwrap().current()))
+        .collect();
+    assert_eq!(seen, VOCABULARY.into_iter().collect());
+}
+
 /// A tape of up to a few hundred events in strictly increasing chain
-/// order, a few per block.
+/// order, a few per block, one transaction per block, so a cut inside a
+/// block is a cut inside a transaction.
 fn tape() -> impl Strategy<Value = Vec<TapeEvent>> {
     prop::collection::vec((event(), 1u64..4), 0..300).prop_map(|rows| {
         let mut block = 1;
@@ -168,14 +300,7 @@ fn tape() -> impl Strategy<Value = Vec<TapeEvent>> {
                     block += step;
                     index = 0;
                 }
-                TapeEvent {
-                    block_number: block,
-                    block_hash: B256::with_last_byte((block % 251) as u8),
-                    log_index: index,
-                    timestamp: 1_700_000_000 + block * 10,
-                    tx_hash: B256::with_last_byte(3),
-                    event,
-                }
+                row(block, index, event)
             })
             .collect()
     })

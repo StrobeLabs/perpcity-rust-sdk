@@ -17,15 +17,20 @@ use crate::history::fold::Fold;
 use crate::history::tape::TapeEvent;
 use crate::units::{LDelta, PerSide, PerpAtoms, PerpDelta, Price, UsdcAtoms, UsdcDelta};
 
+use super::hash_of;
+
 /// A row in `block` at `log_index`, ten seconds a block, with one
-/// transaction per block, so a fixture's transaction is its block's.
+/// transaction per block, so a fixture's transaction is its block's and
+/// no two blocks share one.
 pub fn row(block: u64, log_index: u64, event: MarketEvent) -> TapeEvent {
+    let mut tx_hash = B256::from(U256::from(block));
+    tx_hash.0[0] = 0x7A;
     TapeEvent {
         block_number: block,
-        block_hash: B256::with_last_byte(block as u8),
+        block_hash: hash_of(block),
         log_index,
         timestamp: 1_700_000_000 + block * 10,
-        tx_hash: B256::repeat_byte(block as u8),
+        tx_hash,
         event,
     }
 }
