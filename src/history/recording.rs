@@ -14,7 +14,7 @@ use std::path::Path;
 use std::result::Result as StdResult;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use alloy::primitives::B256;
+use alloy::primitives::{B256, keccak256};
 use alloy::providers::Provider;
 use alloy::rpc::types::Log;
 use serde::{Deserialize, Serialize};
@@ -23,7 +23,7 @@ use crate::errors::{ContractError, Result, ValidationError};
 use crate::events::decode_log;
 
 use super::History;
-use super::tape::{TapeAddresses, TapeEvent, market_logs_with};
+use super::tape::{TapeAddresses, TapeEvent, market_logs_with, stamp_timestamps};
 
 /// The recording format this crate writes and reads.
 pub const FORMAT: u32 = 1;
@@ -50,16 +50,22 @@ pub struct Manifest {
     pub crate_version: String,
     /// Logs held.
     pub logs: u64,
+    /// Keccak-256 of the log file's bytes exactly as written, so a log
+    /// reordered, substituted or lost is refused at read rather than
+    /// decoded into a different tape.
+    pub logs_hash: B256,
     /// Logs of this vocabulary that would not decode when recorded: the
     /// gaps the tape has, counted rather than dropped.
     pub undecodable: u64,
 }
 
-/// A market's raw logs over a range, with their manifest.
+/// A market's raw logs over a range, with their manifest. The manifest is
+/// read through [`manifest`](Self::manifest) and never written to: it
+/// describes these logs, and a caller that could edit it could write a
+/// file whose manifest describes other logs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Recording {
-    /// What the logs are.
-    pub manifest: Manifest,
+    manifest: Manifest,
     logs: Vec<Log>,
 }
 
@@ -103,7 +109,7 @@ impl<P: Provider> History<P> {
         to_block: Option<u64>,
     ) -> Result<Recording> {
         let to = self.resolve(to_block).await?;
-        let logs = market_logs_with(
+        let mut logs = market_logs_with(
             &self.provider,
             addresses,
             from_block,
@@ -112,11 +118,13 @@ impl<P: Provider> History<P> {
             self.in_flight,
         )
         .await?;
+        stamp_timestamps(&self.provider, &mut logs).await?;
         let (chain_id, tip_hash) = tokio::try_join!(
             async { self.provider.get_chain_id().await.map_err(Into::into) },
             self.header_hash(to),
         )?;
         let undecodable = logs.iter().filter(|log| decode_log(log).is_err()).count() as u64;
+        let logs_hash = keccak256(lines_of(&logs)?);
         Ok(Recording {
             manifest: Manifest {
                 format: FORMAT,
@@ -131,6 +139,7 @@ impl<P: Provider> History<P> {
                     .unwrap_or(0),
                 crate_version: env!("CARGO_PKG_VERSION").to_string(),
                 logs: logs.len() as u64,
+                logs_hash,
                 undecodable,
             },
             logs,
@@ -149,6 +158,11 @@ impl<P: Provider> History<P> {
 }
 
 impl Recording {
+    /// What the logs are.
+    pub fn manifest(&self) -> &Manifest {
+        &self.manifest
+    }
+
     /// The logs, in chain order.
     pub fn logs(&self) -> &[Log] {
         &self.logs
@@ -191,16 +205,11 @@ impl Recording {
     /// The filesystem's, as [`PerpCityError::Io`](crate::PerpCityError::Io).
     pub fn write(&self, dir: &Path) -> Result<()> {
         fs::create_dir_all(dir)?;
+        fs::write(dir.join(LOGS), lines_of(&self.logs)?)?;
         fs::write(
             dir.join(MANIFEST),
             serde_json::to_string_pretty(&self.manifest)?,
         )?;
-        let mut lines = String::new();
-        for log in &self.logs {
-            lines.push_str(&serde_json::to_string(log)?);
-            lines.push('\n');
-        }
-        fs::write(dir.join(LOGS), lines)?;
         Ok(())
     }
 
@@ -209,8 +218,9 @@ impl Recording {
     /// # Errors
     ///
     /// The filesystem's and the parser's; [`ValidationError::DecodeFailed`]
-    /// for a manifest of another [`FORMAT`], or a log count that disagrees
-    /// with the manifest's, which is a truncated or edited file.
+    /// for a manifest of another [`FORMAT`], or a log file whose hash is not
+    /// the manifest's: a log reordered, substituted or lost, or a manifest
+    /// and a log file from two different recordings.
     pub fn read(dir: &Path) -> Result<Self> {
         let manifest: Manifest = serde_json::from_str(&fs::read_to_string(dir.join(MANIFEST))?)?;
         if manifest.format != FORMAT {
@@ -222,20 +232,21 @@ impl Recording {
             }
             .into());
         }
-        let logs = fs::read_to_string(dir.join(LOGS))?
-            .lines()
-            .map(serde_json::from_str::<Log>)
-            .collect::<StdResult<Vec<_>, _>>()?;
-        if logs.len() as u64 != manifest.logs {
+        let bytes = fs::read(dir.join(LOGS))?;
+        let hash = keccak256(&bytes);
+        if hash != manifest.logs_hash {
             return Err(ValidationError::DecodeFailed {
                 context: format!(
-                    "the manifest says {} logs and the file holds {}",
-                    manifest.logs,
-                    logs.len()
+                    "the log file hashes to {hash}, not the manifest's {}: edited, truncated, or not this recording's",
+                    manifest.logs_hash
                 ),
             }
             .into());
         }
+        let logs = String::from_utf8_lossy(&bytes)
+            .lines()
+            .map(serde_json::from_str::<Log>)
+            .collect::<StdResult<Vec<_>, _>>()?;
         Ok(Self { manifest, logs })
     }
 
@@ -257,7 +268,7 @@ impl Recording {
         let from = to
             .saturating_sub(blocks.saturating_sub(1))
             .max(self.manifest.from_block);
-        let (rescanned, hash) = tokio::try_join!(
+        let (mut rescanned, hash) = tokio::try_join!(
             market_logs_with(
                 &history.provider,
                 self.manifest.addresses,
@@ -268,6 +279,7 @@ impl Recording {
             ),
             history.header_hash(to),
         )?;
+        stamp_timestamps(&history.provider, &mut rescanned).await?;
         let recorded: Vec<&Log> = self
             .logs
             .iter()
@@ -286,3 +298,15 @@ impl Recording {
 
 const MANIFEST: &str = "manifest.json";
 const LOGS: &str = "logs.jsonl";
+
+/// The log file's bytes: one log per line, in chain order. The one
+/// serialization, so the hash the manifest carries is of exactly what
+/// [`Recording::write`] puts on disk.
+fn lines_of(logs: &[Log]) -> Result<String> {
+    let mut lines = String::new();
+    for log in logs {
+        lines.push_str(&serde_json::to_string(log)?);
+        lines.push('\n');
+    }
+    Ok(lines)
+}

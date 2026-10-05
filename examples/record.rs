@@ -53,7 +53,7 @@ async fn main() -> perpcity_sdk::Result<()> {
     let history = chain.history();
 
     let recording = history.record(addresses, from, None).await?;
-    let manifest = &recording.manifest;
+    let manifest = recording.manifest();
     println!(
         "recorded {} logs of {perp} over blocks {}..={} on chain {}; tip {}; {} undecodable",
         manifest.logs,
@@ -85,5 +85,9 @@ async fn main() -> perpcity_sdk::Result<()> {
         tail.recorded,
         tail.rescanned
     );
+    if !tail.holds() {
+        // A script that records and checks must see the failure.
+        std::process::exit(1);
+    }
     Ok(())
 }

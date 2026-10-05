@@ -5,7 +5,7 @@ use std::fs;
 use std::time::Duration;
 
 use alloy::primitives::{
-    Address, B256, Bytes, Log as PrimitiveLog, LogData, U256, address, b256, bytes,
+    Address, B256, Bytes, Log as PrimitiveLog, LogData, U256, address, b256, bytes, keccak256,
 };
 use alloy::rpc::types::{Filter, Log};
 use alloy::sol_types::SolEvent;
@@ -1114,7 +1114,7 @@ async fn a_recording_holds_the_raw_logs_and_decodes_to_the_tape_offline() {
     let history = History::new(node.provider()).with_lag(0);
     let recording = history.record(addresses(), 0, Some(30)).await.unwrap();
 
-    let manifest = &recording.manifest;
+    let manifest = recording.manifest();
     assert_eq!(manifest.format, FORMAT);
     assert_eq!(manifest.chain_id, CHAIN_ID);
     assert_eq!((manifest.from_block, manifest.to_block), (0, 30));
@@ -1135,6 +1135,11 @@ async fn a_recording_holds_the_raw_logs_and_decodes_to_the_tape_offline() {
     recording.write(&dir).unwrap();
     let read = Recording::read(&dir).unwrap();
     assert_eq!(read, recording);
+    assert_eq!(
+        manifest.logs_hash,
+        keccak256(fs::read(dir.join("logs.jsonl")).unwrap()),
+        "the manifest hashes the file as written"
+    );
     let scanned = history.market_tape(addresses(), 0, Some(30)).await.unwrap();
     assert_eq!(
         read.tape().unwrap(),
@@ -1142,11 +1147,28 @@ async fn a_recording_holds_the_raw_logs_and_decodes_to_the_tape_offline() {
         "the file decodes to the scan"
     );
 
-    // A file short of a log is refused, not read as a shorter tape.
-    let lines = fs::read_to_string(dir.join("logs.jsonl")).unwrap();
-    let truncated: Vec<&str> = lines.lines().take(3).collect();
-    fs::write(dir.join("logs.jsonl"), truncated.join("\n") + "\n").unwrap();
-    assert!(Recording::read(&dir).is_err());
+    // A file short of a log, or with two logs swapped, is refused rather
+    // than read as a different tape: the hash binds order and content.
+    let lines: Vec<String> = fs::read_to_string(dir.join("logs.jsonl"))
+        .unwrap()
+        .lines()
+        .map(str::to_owned)
+        .collect();
+    fs::write(dir.join("logs.jsonl"), lines[..3].join("\n") + "\n").unwrap();
+    assert!(
+        Recording::read(&dir).is_err(),
+        "a truncated file is refused"
+    );
+    let swapped = [&lines[1], &lines[0], &lines[2], &lines[3]];
+    fs::write(
+        dir.join("logs.jsonl"),
+        swapped.map(String::as_str).join("\n") + "\n",
+    )
+    .unwrap();
+    assert!(
+        Recording::read(&dir).is_err(),
+        "a reordered file is refused"
+    );
     fs::remove_dir_all(&dir).unwrap();
 }
 

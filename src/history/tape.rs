@@ -348,9 +348,9 @@ pub(super) async fn market_tape_with<P: Provider>(
 
 /// The raw logs a market's tape is decoded from, in chain order: the
 /// perp's and the beacon's by address, the PoolManager's by the liquidity
-/// event and the pool id, each stamped with its block's timestamp. What a
-/// recording keeps, since a decoder can be rerun over logs and never over
-/// what it decoded.
+/// event and the pool id. As the node returned them: a tape stamps only
+/// the logs it decodes, a recording stamps them all with
+/// [`stamp_timestamps`].
 pub(super) async fn market_logs_with<P: Provider>(
     provider: &P,
     addresses: TapeAddresses,
@@ -368,15 +368,26 @@ pub(super) async fn market_logs_with<P: Provider>(
     )?;
     logs.extend(liquidity_logs);
     logs.sort_by_key(|log| (log.block_number, log.log_index));
+    Ok(logs)
+}
+
+/// Give every log its block's timestamp, read from the header once per
+/// block when the node omitted it, so the logs decode with no node later.
+///
+/// # Errors
+///
+/// [`ContractError::BlockUnavailable`](crate::errors::ContractError::BlockUnavailable)
+/// for a header the node does not have.
+pub(super) async fn stamp_timestamps<P: Provider>(provider: &P, logs: &mut [Log]) -> Result<()> {
     let headers = block_timestamps(provider, logs.iter()).await?;
-    for log in &mut logs {
+    for log in logs.iter_mut() {
         if log.block_timestamp.is_none()
             && let Some(number) = log.block_number
         {
             log.block_timestamp = headers.get(&number).copied();
         }
     }
-    Ok(logs)
+    Ok(())
 }
 
 /// The newest `limit` market events `perp` emitted in blocks
