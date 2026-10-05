@@ -1,13 +1,82 @@
-//! Custody: who held each position, folded from the tape's transfers.
+//! Custody: who held each position, folded from the tape's transfers; and
+//! the wallet set a question is scoped to, which custody answers for.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use alloy::primitives::{Address, U256};
+use serde::{Deserialize, Serialize};
 
 use crate::events::MarketEvent;
 use crate::history::fold::Fold;
 
 use super::{ChainPoint, TapeEvent};
+
+/// The wallets a question is scoped to: one agent's, a cohort's, or
+/// anyone's. A market series filtered by a set is a cohort series; by one
+/// wallet, an agent's. The set is addresses alone; how it was drawn, from
+/// a file or a walk of the master's transfers, is the caller's.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Wallets(BTreeSet<Address>);
+
+impl Wallets {
+    /// One wallet: an agent's own scope.
+    pub fn one(wallet: Address) -> Self {
+        Self(BTreeSet::from([wallet]))
+    }
+
+    /// Whether `wallet` is in the set.
+    pub fn contains(&self, wallet: Address) -> bool {
+        self.0.contains(&wallet)
+    }
+
+    /// Add `wallet`; whether it was new.
+    pub fn insert(&mut self, wallet: Address) -> bool {
+        self.0.insert(wallet)
+    }
+
+    /// The wallets, ascending.
+    pub fn iter(&self) -> impl Iterator<Item = Address> + '_ {
+        self.0.iter().copied()
+    }
+
+    /// Wallets in the set.
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    /// Whether the set names no wallet.
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+impl FromIterator<Address> for Wallets {
+    fn from_iter<I: IntoIterator<Item = Address>>(wallets: I) -> Self {
+        Self(wallets.into_iter().collect())
+    }
+}
+
+impl Extend<Address> for Wallets {
+    fn extend<I: IntoIterator<Item = Address>>(&mut self, wallets: I) {
+        self.0.extend(wallets);
+    }
+}
+
+impl<'a> IntoIterator for &'a Wallets {
+    type Item = &'a Address;
+    type IntoIter = std::collections::btree_set::Iter<'a, Address>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.iter()
+    }
+}
+
+/// A mark about one position, which custody can attribute to a holder:
+/// what the custody filter on arrivals is written against.
+pub trait Positioned {
+    /// The position the mark is about.
+    fn pos_id(&self) -> U256;
+}
 
 /// Who held each of a market's positions, over time: the custody
 /// timeline folded from a tape's [`MarketEvent::PositionTransferred`]
@@ -95,6 +164,20 @@ impl OwnershipLog {
             .find(|owner| !owner.is_zero())
     }
 
+    /// Whether one of `wallets` held `pos_id` at `at`: the attribution of
+    /// an event to a scope. A position's mint lands before its opening
+    /// trade in the same transaction, so an open is its minter's.
+    pub fn held_by_at(&self, pos_id: U256, wallets: &Wallets, at: ChainPoint) -> bool {
+        self.owner_at(pos_id, at)
+            .is_some_and(|holder| wallets.contains(holder))
+    }
+
+    /// Whether one of `wallets` is the last to have held `pos_id`.
+    pub fn held_by(&self, pos_id: U256, wallets: &Wallets) -> bool {
+        self.latest_owner(pos_id)
+            .is_some_and(|holder| wallets.contains(holder))
+    }
+
     /// Every transfer of `pos_id`, oldest first, as
     /// `(point, new owner)`; the zero address ends the position.
     pub fn transfers(&self, pos_id: U256) -> impl Iterator<Item = (ChainPoint, Address)> + '_ {
@@ -114,5 +197,26 @@ impl OwnershipLog {
     /// Whether the tape held no position transfers at all.
     pub fn is_empty(&self) -> bool {
         self.spans.is_empty()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_wallet_set_is_a_set() {
+        let a = Address::repeat_byte(0x0A);
+        let b = Address::repeat_byte(0x0B);
+        let mut ours = Wallets::one(a);
+        assert!(ours.contains(a));
+        assert!(!ours.contains(b));
+        assert!(ours.insert(b));
+        assert!(!ours.insert(b), "already in");
+        assert_eq!(ours.len(), 2);
+        assert_eq!(ours.iter().collect::<Vec<_>>(), vec![a, b], "ascending");
+        let same: Wallets = [b, a, a].into_iter().collect();
+        assert_eq!(same, ours);
+        assert!(Wallets::default().is_empty());
     }
 }
