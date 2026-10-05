@@ -93,12 +93,13 @@ row, which is what the combine law is checked at.
 
 | Type | Invariant | Produced by | Consumed by |
 |---|---|---|---|
-| [`ChainPoint`](mod.rs#L63) | where an event sits: block number and log index; the total order events are joined on | [`TapeEvent::point`](mod.rs#L90) | [`OwnershipLog::owner_at`](custody.rs#L78), custody at that point. The strategy layer's joins, a print against the fills after it, are on this key, which is why it is a type and not two fields. |
-| [`Tape`](mod.rs#L181), [`TapeSlice`](mod.rs#L313) | a market's record: rows in strict chain order with one hash and a monotone timestamp per block, checked once at `Tape::new`; grows only forward. `TapeSlice` is a run of its rows, what a `Tape` derefs to and a segment is, with the groupings, lookups and lenses the prose above names | [`History::market_tape`](../DESIGN.md), [`History::market_events`](../DESIGN.md) and [`History::latest_market_events`](../DESIGN.md); [`Recording::tape`](../DESIGN.md), with no node; [`Tape::new`](mod.rs#L190) from rows a caller holds, or a collect of rows in any order | every fold, through `Fold::fold`; `Replay::catch_up`. The strategy layer's sources hand one out and its interpreters take a slice. |
-| [`TapeEvent`](mod.rs#L72) | a [`MarketEvent`](../../events/DESIGN.md) at a chain point, with its block's hash and timestamp and its transaction. Every tense builds it through one constructor, so a scan's row, a feed's and a recording's are the same row; `sample` stamps a value with its point and time, `arrival` a mark with its transaction too | the rows of a [`Tape`](mod.rs#L181), which every reader returns; [`MarketFeed::next_stamped`](../../feeds/DESIGN.md), the present tense | [`OwnershipLog::fold`](custody.rs#L66). The strategy layer's economics, classification and series are folds over a slice of these. |
-| [`Swap`](lenses.rs#L28), [`SwapAction`](lenses.rs#L17) | a taker's swap as the event settled it: the position, whether it opened, adjusted or closed, and the `SwapInfo`. The one mark a tape yields unaided, so the lens and the replay's activity fold speak one record | [`Swap::of`](lenses.rs#L39) from a taker's event; the `swaps` lens, as arrivals | `Replay::swaps`, the arrivals the replay keeps. The strategy layer's flow readings, over either. |
+| [`ChainPoint`](mod.rs#L63) | where an event sits: block number and log index; the total order events are joined on | [`TapeEvent::point`](mod.rs#L90) | [`OwnershipLog::owner_at`](custody.rs#L147), custody at that point. The strategy layer's joins, a print against the fills after it, are on this key, which is why it is a type and not two fields. |
+| [`Tape`](mod.rs#L181), [`TapeSlice`](mod.rs#L316) | a market's record: rows in strict chain order with one hash and a monotone timestamp per block, checked once at `Tape::new`; grows only forward. `TapeSlice` is a run of its rows, what a `Tape` derefs to and a segment is, with the groupings, lookups and lenses the prose above names | [`History::market_tape`](../DESIGN.md), [`History::market_events`](../DESIGN.md) and [`History::latest_market_events`](../DESIGN.md); [`Recording::tape`](../DESIGN.md), with no node; [`Tape::new`](mod.rs#L190) from rows a caller holds, or a collect of rows in any order | every fold, through `Fold::fold`; `Replay::catch_up`. The strategy layer's sources hand one out and its interpreters take a slice. |
+| [`TapeEvent`](mod.rs#L72) | a [`MarketEvent`](../../events/DESIGN.md) at a chain point, with its block's hash and timestamp and its transaction. Every tense builds it through one constructor, so a scan's row, a feed's and a recording's are the same row; `sample` stamps a value with its point and time, `arrival` a mark with its transaction too | the rows of a [`Tape`](mod.rs#L181), which every reader returns; [`MarketFeed::next_stamped`](../../feeds/DESIGN.md), the present tense | [`OwnershipLog::fold`](custody.rs#L135). The strategy layer's economics, classification and series are folds over a slice of these. |
+| [`Swap`](lenses.rs#L28), [`SwapAction`](lenses.rs#L17) | a taker's swap as the event settled it: the position, whether it opened, adjusted or closed, and the `SwapInfo`; `Positioned`, so custody attributes it. The one mark a tape yields unaided, so the lens and the replay's activity fold speak one record | [`Swap::of`](lenses.rs#L39) from a taker's event; the `swaps` lens, as arrivals | `Replay::swaps`, the arrivals the replay keeps. The strategy layer's flow readings, over either. |
 | [`TapeAddresses`](mod.rs#L161) | the three addresses a market's record is spread across: its own contract, the beacon it reads, and the chain's PoolManager keyed by its pool id. The PoolManager is every pool on the chain, so it is filtered by the liquidity event and the pool id it indexes, never by address alone | [`MarketReader::tape_addresses`](../../client/DESIGN.md), which knows all three; or a caller that does | [`History::market_tape`](../DESIGN.md) and [`market_tape`](read.rs#L85). |
-| [`OwnershipLog`](custody.rs#L33) | custody over time: a fold of transfers in chain order; owner at a point, not merely latest. The first instance of [`Fold`](../fold/DESIGN.md): `apply` appends a transfer, `combine` appends a later segment's timelines | [`OwnershipLog::fold`](custody.rs#L66) over the tape, the trait's fold kept inherent so it is reachable without the import | [`Replay`](../replay/DESIGN.md), which folds it in the same pass. The strategy layer's attribution, which asks who held a position when a trade happened, not who holds it now. |
+| [`OwnershipLog`](custody.rs#L102) | custody over time: a fold of transfers in chain order; owner at a point, not merely latest, and whether a `Wallets` held a position then or holds it now. The first instance of [`Fold`](../fold/DESIGN.md): `apply` appends a transfer, `combine` appends a later segment's timelines | [`OwnershipLog::fold`](custody.rs#L135) over the tape, the trait's fold kept inherent so it is reachable without the import | [`Replay`](../replay/DESIGN.md), which folds it in the same pass; the custody filters on `Arrivals` and `Positions`. The strategy layer's attribution, which asks who held a position when a trade happened. |
+| [`Wallets`](custody.rs#L19), [`Positioned`](custody.rs#L76) | the scope a question is asked at: a set of addresses, one agent's or a cohort's, with no memory of how it was drawn. A `Positioned` mark names the position it is about, which is what custody attributes to a holder | `Wallets::one`, or a collect of addresses; the strategy layer draws a cohort's from its fleet file or a walk of the master's transfers. `Swap`, `Liquidation` and `Settlement` are `Positioned` | `Arrivals::by` and `Positions::held_by`, with the custody fold. An outside market maker asks the same question of their own wallets. |
 
 ## Edges
 
@@ -128,6 +129,8 @@ row, which is what the combine law is checked at.
   from and to the zero address that begin and end it.
 - **Undecodable**: a log of this vocabulary the decoder refused, counted
   by the scan and skipped by the tape.
+- **Scope**: the wallets a question is asked for; one wallet is an agent's
+  scope, a set is a cohort's, none is the market's.
 - **Run**: a contiguous slice of a tape's rows, a tape by type.
   **Segment**: a run cut between blocks. **Lens**: a filtering view of a
   run yielding typed records with their points.
@@ -149,6 +152,17 @@ row, which is what the combine law is checked at.
   searches, and `transfers` hands back the point of every change. A sorted
   index takes its key and returns it, so the cycle is the index relation
   rather than a conversion with two homes.
+- **`Positioned` names no other type in its signature, by design.** One
+  method, the position a mark is about; it appears as the bound on
+  `Arrivals::by`, which the graph does not draw, and the marks that carry
+  the edges are `Swap`, `Liquidation` and `Settlement`. The same shape as
+  `Fold` and `Factor`: one open verb, the types on the implementations.
+- **Custody is a parameter of the filters, not a capture.** `Arrivals::by`
+  and `Positions::held_by` take the `Wallets` and the `OwnershipLog`
+  together, so a bare `Arrivals` or `Positions` never holds a reference to
+  a fold it does not own, and the same filter runs against a replay's
+  custody or one folded from a tape alone. The replay is where both live,
+  so `market.swaps().by(&ours, market.custody())` is the call.
 - **`Tape` and `TapeEvent` flow both ways by design.** `Tape::new` takes
   rows in, and `into_vec` and the slice hand them back: one row type, one
   collection, as `Series` and `Sample` in the fold node. `TapeSlice::to_owned`
