@@ -12,11 +12,9 @@ use alloy::primitives::{B256, U256};
 
 use crate::client::PositionRole;
 use crate::events::{MakerSettle, MarketEvent, SwapInfo};
+use crate::history::fold::{Arrival, Arrivals, Fold, Latest, Retention};
+use crate::history::tape::TapeEvent;
 use crate::units::{Price, UsdcAtoms, UsdcDelta};
-
-use super::super::fold::{Fold, Latest};
-use super::super::series::{Arrival, Arrivals, Retention};
-use super::super::tape::TapeEvent;
 
 /// What a taker's swap was for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

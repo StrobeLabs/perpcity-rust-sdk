@@ -10,11 +10,11 @@ use std::collections::btree_map::Entry;
 use alloy::primitives::U256;
 
 use crate::events::MarketEvent;
+use crate::history::fold::{First, Fold, Latest};
+use crate::history::tape::{ChainPoint, TapeEvent};
 use crate::math::range::{MakerBand, TickRange};
 use crate::units::{LDelta, LUnits, PerpDelta, Price, UsdcAtoms};
 
-use super::super::fold::{First, Fold, Latest};
-use super::super::tape::{ChainPoint, TapeEvent};
 use super::seed::SeedPosition;
 
 /// What a position is, and what the tape has said about its size.

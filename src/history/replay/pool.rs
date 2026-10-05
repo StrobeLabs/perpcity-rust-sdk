@@ -14,11 +14,10 @@ use std::collections::BTreeMap;
 
 use crate::errors::ValidationError;
 use crate::events::MarketEvent;
+use crate::history::fold::{Fold, Latest};
+use crate::history::tape::TapeEvent;
 use crate::math::swap::TickLiquidity;
 use crate::units::{LDelta, LUnits};
-
-use super::super::fold::{Fold, Latest};
-use super::super::tape::TapeEvent;
 
 /// Signed sums at one tick; the pool's `liquidityNet` and `liquidityGross`
 /// once every change since genesis is in.
