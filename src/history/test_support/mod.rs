@@ -6,7 +6,11 @@
 //! asked for, so tests can check that a scan covers its range exactly once.
 //!
 //! Public under the `test-utils` feature, so a crate building on the
-//! history readers can test its own scans against the same node.
+//! history readers can test its own scans against the same node. The
+//! rows a fold's tests are written with, and the law they are held to,
+//! are in [`tape`].
+
+pub mod tape;
 
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
@@ -20,6 +24,7 @@ use alloy::rpc::json_rpc::{
     ErrorPayload, RequestPacket, Response, ResponsePacket, ResponsePayload,
 };
 use alloy::rpc::types::{Block, Filter, Log};
+use alloy::sol_types::SolEvent;
 use alloy::transports::{TransportError, TransportErrorKind, TransportFut};
 use serde_json::value::RawValue;
 use tower::Service;
@@ -271,6 +276,30 @@ pub fn mined_log(address: Address, topic0: B256, data: Bytes, block: u64, index:
         block_number: Some(block),
         block_timestamp: None,
         transaction_hash: Some(B256::with_last_byte(2)),
+        transaction_index: Some(0),
+        log_index: Some(index),
+        removed: false,
+    }
+}
+
+/// A mined log from `address` carrying a typed `event`, as a node returns
+/// it, with or without its block timestamp.
+pub fn mined_event_log<E: SolEvent>(
+    event: &E,
+    address: Address,
+    block: u64,
+    index: u64,
+    timestamp: Option<u64>,
+) -> Log {
+    Log {
+        inner: PrimitiveLog {
+            address,
+            data: event.encode_log_data(),
+        },
+        block_hash: Some(B256::with_last_byte(1)),
+        block_number: Some(block),
+        block_timestamp: timestamp,
+        transaction_hash: Some(B256::with_last_byte(3)),
         transaction_index: Some(0),
         log_index: Some(index),
         removed: false,

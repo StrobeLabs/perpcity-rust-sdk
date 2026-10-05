@@ -23,7 +23,9 @@ fold on separate cores. The unit tests check it at every cut of a named
 tape and the property tests at random cuts of random tapes; the first run
 of the latter found a liquidation recorded twice when the cut fell inside
 a transaction, which is why the law is stated at any cut and not only
-between blocks.
+between blocks. The checker is `assert_combine_law` in the history
+node's test support, beside the rows a fixture tape is built from, so a
+fold in the strategy layer is held to the same law over the same rows.
 
 **Shapes make the law local.** Every field of a fold's state is a total
 the contract emits whole, a value fixed by its first occurrence, a stated
@@ -167,11 +169,11 @@ earliest kept is not the earliest that was.
 
 ## Debts
 
-- **The law has no shared checker.** Each implementor writes the
-  every-cut loop in its own tests, and the random tape the property tests
-  draw from lives in one test file. A checker beside the trait and the
-  generator beside it, under the `test-utils` feature, would hold a fold
-  in the strategy layer to the same law with the same tapes.
+- **The random tapes live in one test file.** The property tests draw
+  from a generator beside them; a fold in the strategy layer that wants
+  random tapes writes its own. Sharing it would make `proptest` a
+  dependency of the `test-utils` feature, which is the cost that has kept
+  it where it is.
 - **A trim is a drain from the front of a `Vec`.** Under a retention, a
   push that drops a sample shifts every kept sample. At a monitor's
   windows this is not measurable; a ring buffer is the fix if a long

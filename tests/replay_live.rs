@@ -1,6 +1,7 @@
 //! The claim a replay makes, checked against a live market: the state
 //! rebuilt from the tape equals the state read from storage at the same
-//! block, to the atom, for every quantity the tape carries.
+//! block, to the atom, for every quantity the tape carries. The beacon's
+//! newest prints are read through the same handle on the way.
 //!
 //! Ignored by default: it scans a market's whole tape over RPC and reads
 //! its storage at the lagged head. The reads need no archive node, since
@@ -71,6 +72,20 @@ async fn a_replayed_market_equals_the_read_at_the_same_block() {
         history.stats().undecodable
     );
     assert_eq!(history.stats().undecodable, 0, "the tape has a gap");
+
+    // The beacon's newest prints through the same handle, oldest first.
+    let prints = history
+        .latest_beacon_prints(addresses.beacon, from, Some(tip), 10)
+        .await
+        .unwrap();
+    assert!(!prints.is_empty(), "the market's beacon prints");
+    assert!(
+        prints
+            .windows(2)
+            .all(|pair| pair[0].block_number <= pair[1].block_number),
+        "prints come oldest first"
+    );
+
     let mut replay = Replay::from_genesis(perp);
     for row in &tape {
         replay.apply(row);

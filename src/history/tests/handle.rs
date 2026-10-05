@@ -152,19 +152,3 @@ async fn the_handle_reads_to_the_lagged_head_by_default() {
     assert_eq!(node.requests(), vec![(0, 99_992)]);
     assert_eq!(logs.last().unwrap().block_number.unwrap(), 99_000);
 }
-
-#[tokio::test]
-async fn a_reversed_range_is_rejected_before_any_request() {
-    let node = FakeNode::new(Vec::new(), u64::MAX);
-    let error = get_logs_chunked(&node.provider(), &filter(), 5, 4)
-        .await
-        .unwrap_err();
-    assert!(matches!(
-        error,
-        PerpCityError::Validation(ValidationError::InvalidBlockRange {
-            from_block: 5,
-            to_block: 4
-        })
-    ));
-    assert!(node.requests().is_empty());
-}

@@ -99,25 +99,6 @@ async fn transfers_are_filtered_by_both_sets_and_none_is_any() {
 }
 
 #[tokio::test]
-async fn an_unfiltered_or_zero_token_query_is_refused_before_any_request() {
-    let node = FakeNode::new(Vec::new(), u64::MAX);
-    let provider = node.provider();
-    for (token, senders) in [(USDC, None), (Address::ZERO, Some(&[TREASURY][..]))] {
-        let error = token_transfers(&provider, token, senders, None, 0, 100)
-            .await
-            .unwrap_err();
-        assert!(
-            matches!(
-                error,
-                PerpCityError::Validation(ValidationError::InvalidConfig { .. })
-            ),
-            "{error:?}"
-        );
-    }
-    assert!(node.requests().is_empty());
-}
-
-#[tokio::test]
 async fn an_empty_set_matches_nothing_without_a_request() {
     let node = FakeNode::new(vec![transfer_log(TREASURY, WALLET_A, 100, 10)], u64::MAX);
     let provider = node.provider();

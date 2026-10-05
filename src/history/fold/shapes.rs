@@ -134,3 +134,74 @@ impl<T: Copy, S: Default + AddAssign> Stated<T, S> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_latest_statement_stands_and_a_segment_without_one_leaves_it() {
+        let mut earlier = Latest::stated(1);
+        earlier.combine(Latest::default());
+        assert_eq!(earlier.get(), Some(1), "a segment that learned nothing");
+        let mut later = Latest::default();
+        later.set(2);
+        earlier.combine(later);
+        assert_eq!(earlier.get(), Some(2), "the later segment's wins");
+        let mut unknown: Latest<u32> = Latest::default();
+        unknown.combine(Latest::stated(3));
+        assert_eq!(unknown.get(), Some(3));
+    }
+
+    #[test]
+    fn the_first_occurrence_stands_whichever_segment_saw_it() {
+        let mut earlier = First::default();
+        earlier.set(1);
+        earlier.set(2);
+        assert_eq!(earlier.get(), Some(1), "a later occurrence is ignored");
+        let mut later = First::default();
+        later.set(3);
+        earlier.combine(later);
+        assert_eq!(earlier.get(), Some(1), "the earlier segment's wins");
+        let mut unknown: First<u32> = First::default();
+        assert!(!unknown.is_set());
+        let mut later = First::default();
+        later.set(4);
+        unknown.combine(later);
+        assert_eq!(
+            unknown.get(),
+            Some(4),
+            "a segment that saw nothing takes the later's"
+        );
+    }
+
+    #[test]
+    fn a_statement_replaces_the_accruals_and_a_segment_without_one_adds_them() {
+        let mut books: Stated<u32, u32> = Stated::with(100);
+        books.since += 5;
+        let mut unstated: Stated<u32, u32> = Stated::default();
+        unstated.since += 7;
+        books.combine(unstated);
+        assert_eq!(
+            (books.value(), books.since),
+            (Some(100), 12),
+            "accruals add"
+        );
+        let mut restated: Stated<u32, u32> = Stated::default();
+        restated.state(200);
+        restated.since += 1;
+        books.combine(restated);
+        assert_eq!(
+            (books.value(), books.since),
+            (Some(200), 1),
+            "a later statement replaces the total and the accruals"
+        );
+        let mut segment: Stated<u32, u32> = Stated::default();
+        segment.since += 3;
+        assert_eq!(
+            segment.value(),
+            None,
+            "a segment never told the total does not invent it"
+        );
+    }
+}
