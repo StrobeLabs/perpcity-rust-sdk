@@ -39,6 +39,37 @@ impl AddAssign for MarginSince {
     }
 }
 
+/// The first transaction a fold saw, and the swap fees it removed in that
+/// transaction before it saw the transaction's `MarginTransferred`. A cut
+/// inside the transaction may have left a withdrawal's transfer in the
+/// segment before, after which the fold of the whole would not have
+/// removed them; `combine` repairs that from the earlier segment.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct Opening {
+    tx: Option<B256>,
+    /// Removed on the strength of no transfer seen; cleared by a statement.
+    provisional: UsdcAtoms,
+}
+
+impl Opening {
+    /// Merge the segment after this one. A statement in `later` cleared
+    /// everything before it. Otherwise `later`'s removals join these only
+    /// when it began inside this fold's first transaction and this fold saw
+    /// no transfer in it; had it seen one, the fold of the whole would not
+    /// have removed them, and `Solvency::combine` takes them back.
+    fn combine(&mut self, later: Self, later_stated: bool, transfer_seen: bool) {
+        let Some(tx) = self.tx else {
+            *self = later;
+            return;
+        };
+        if later_stated {
+            self.provisional = later.provisional;
+        } else if later.tx == Some(tx) && !transfer_seen {
+            self.provisional += later.provisional;
+        }
+    }
+}
+
 /// The margin total and the bad debt, folded from the events that state
 /// them and the swaps that move them silently.
 ///
@@ -56,6 +87,9 @@ pub(super) struct Solvency {
     /// The `MarginTransferred` of the current transaction, if one has been
     /// seen: its transaction and whether it withdrew or moved nothing.
     transfer_in_tx: Latest<(B256, bool)>,
+    /// What this fold removed in its first transaction before seeing that
+    /// transaction's transfer, for a cut that fell between the two.
+    opening: Opening,
     /// The margin total as each `MarginTransferred` stated it.
     pub(super) margin_stated: Series<UsdcAtoms>,
     /// The bad debt as each event stated it.
@@ -77,6 +111,7 @@ impl Solvency {
             margin: Stated::with(read.total_margin),
             debt: Stated::with(read.bad_debt),
             transfer_in_tx: Latest::default(),
+            opening: Opening::default(),
             margin_stated: Series::stated(at.with(read.total_margin)),
             debt_stated: Series::stated(at.with(read.bad_debt)),
             deposited: UsdcAtoms::new(0),
@@ -138,6 +173,7 @@ impl Solvency {
 
 impl Fold for Solvency {
     fn apply(&mut self, event: &TapeEvent) {
+        let opening_tx = *self.opening.tx.get_or_insert(event.tx_hash);
         match event.event {
             MarketEvent::TakerOpened { swap, .. }
             | MarketEvent::TakerAdjusted { swap, .. }
@@ -151,6 +187,18 @@ impl Fold for Solvency {
                 let removed = swap.protocol_fee + swap.creator_fee + swap.insurance_fee;
                 if !removed.is_zero() && self.fees_removed_after_statement(event) {
                     self.margin.since.fees_removed += removed;
+                    // Removed because no transfer was seen in this
+                    // transaction; a segment before the cut may hold one.
+                    let unseen = self
+                        .transfer_in_tx
+                        .get()
+                        .is_none_or(|(tx, _)| tx != event.tx_hash);
+                    if event.tx_hash == opening_tx
+                        && unseen
+                        && !matches!(event.event, MarketEvent::TakerOpened { .. })
+                    {
+                        self.opening.provisional += removed;
+                    }
                 }
             }
             MarketEvent::MarginTransferred {
@@ -158,6 +206,7 @@ impl Fold for Solvency {
                 margin_delta,
             } => {
                 self.margin.state(total_margin);
+                self.opening.provisional = UsdcAtoms::ZERO;
                 self.margin_stated.push(event.sample(total_margin));
                 if !margin_delta.is_negative() {
                     self.deposited += margin_delta.magnitude();
@@ -184,7 +233,29 @@ impl Fold for Solvency {
         }
     }
 
-    fn combine(&mut self, later: Self) {
+    /// A cut between a withdrawal's transfer and its swap, inside one
+    /// transaction, leaves the transfer here and the swap in `later`, which
+    /// removed the fees the statement already had out; take them back, as
+    /// the fold of the whole would never have removed them.
+    fn combine(&mut self, mut later: Self) {
+        let transfer_in_opening = match (self.transfer_in_tx.get(), later.opening.tx) {
+            (Some((tx, nonpositive)), Some(opening)) if tx == opening => Some(nonpositive),
+            _ => None,
+        };
+        if transfer_in_opening == Some(true) {
+            later.margin.since.fees_removed = later
+                .margin
+                .since
+                .fees_removed
+                .saturating_sub(later.opening.provisional);
+        }
+        // A stated total and a statement flag are set together, so a
+        // statement in the later segment is a value in its margin.
+        self.opening.combine(
+            later.opening,
+            later.margin.value().is_some(),
+            transfer_in_opening.is_some(),
+        );
         self.margin.combine(later.margin);
         self.debt.combine(later.debt);
         self.transfer_in_tx.combine(later.transfer_in_tx);

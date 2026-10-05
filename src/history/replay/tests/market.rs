@@ -371,11 +371,20 @@ fn swap_fees_leave_the_margin_total_as_the_build_orders_them() {
     for delta in [-50_000_000, 0] {
         let with_withdrawal: Vec<TapeEvent> =
             open(1).into_iter().chain(adjust_with(delta, 2)).collect();
+        let whole = genesis(&with_withdrawal);
         assert_eq!(
-            genesis(&with_withdrawal).solvency().unwrap().total_margin,
+            whole.solvency().unwrap().total_margin,
             UsdcAtoms::new(500_000_000),
             "adjust with delta {delta}"
         );
+        // A cut between the transfer and the swap leaves the transfer in
+        // one segment and the swap in the other, and the fees it would
+        // remove on its own are the ones the statement already had out.
+        for cut in 0..=with_withdrawal.len() {
+            let mut left = genesis(&with_withdrawal[..cut]);
+            left.combine(Replay::fold(&with_withdrawal[cut..]));
+            assert_eq!(left, whole, "delta {delta}, cut at {cut}");
+        }
     }
 
     // A liquidation closes before it transfers the fee, so the fees
