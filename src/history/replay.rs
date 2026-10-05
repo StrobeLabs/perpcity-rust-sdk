@@ -1369,7 +1369,7 @@ mod tests {
     /// The combine law over positions and the pool's liquidity, at every cut, from
     /// genesis and as segments.
     #[test]
-    fn positions_and_the_book_combine_at_every_cut() {
+    fn positions_and_the_pool_combine_at_every_cut() {
         let tape = lifecycle();
         let whole = genesis(&tape);
         let segments = Replay::fold(&tape);

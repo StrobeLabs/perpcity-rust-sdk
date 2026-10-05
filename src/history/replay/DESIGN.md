@@ -32,55 +32,156 @@ each: the cutover, a seed, or the tape.
 **The state is a monoid.** Every field is a latest-wins total, a sum, or
 a first occurrence, so the fold of a tape cut at any block boundary equals
 the merge of the folds of its pieces. That is what makes a prefix a
-checkpoint, lets segments fold on separate cores, and lets a seed and a
-tail meet in one value.
+checkpoint, lets a seed and a tail meet in one value, and lets segments
+fold on separate cores when a tape is long enough to want it.
 
 ## The mental model
 
+Three pictures: where the events come from and where the answers go; what
+the fold is made of; and the algebra that lets pieces of it meet.
+
+### One fold, every tense
+
 ```text
-          TapeEvent  ─── from the tape, the stamped feed, or an engine
-              │
-              ▼
-   Replay = Sequenced< Market >        an event at or before the last point is refused and counted
-              │
-   ┌──────────┴─────── one event, eight independent folds ───────────────────────────┐
-   │ Prices        pool price · index · stored EMAs             ← swaps, prints, touch │
-   │ Rates         funding · utilization fees · cumulatives     ← the touch, accruals  │
-   │ Utilization   capacity · open interest                     ← their updates        │
-   │ Modules       the six addresses in force                   ← ModuleSet            │
-   │ Solvency      margin and debt, stated, with what moved since ← transfers, swaps,  │
-   │                 and the one live-build rule: when a swap's fees leave the total    │
-   │ Pool          liquidity per tick (signed sums) · the tick  ← ModifyLiquidity,     │
-   │                                                               TicksCrossed        │
-   │ Positions     each position: kind · size or band · margin  ← every position event │
-   │ OwnershipLog  custody over time                            ← PositionTransferred  │
-   └─────────────────────────────────────────────────────────────────────────────────┘
-              │
-              ▼  the accessors return the reads' types, stamped with the caller's block
-   capacity_at → MarketCapacity    mark_at → Mark    solvency → SolvencyState
-   pool_ticks · pool_tick · pool_liquidity → what PoolSnapshot holds
-   position(id) → PositionState { taker_size → PerpDelta, maker_band → MakerBand, margin }
-   gaps → Gaps { silences, unknowns, faults }
-              │
-              ▼
-          == StateAt, the pinned reads at the same block
+   the tape                      the stamped feed                 an engine
+   History::market_tape          MarketFeed::next_stamped         synthetic events
+   the past, over a block range  the present, as each log lands   a counterfactual
+             └──────────────────────────┬──────────────────────────────┘
+                                        ▼
+                             TapeEvent, in chain order
+                                        │  apply
+                                        ▼
+                                     Replay
+                                        │  the accessors, at the caller's block
+                                        ▼
+        MarketCapacity · Mark · SolvencyState · the pool's tick map and tick
+        PositionState per id · Gaps
+                                        │
+                                        ▼
+                     ==  StateAt, the pinned reads at the same block
 ```
 
-Three starts, one driver. `from_genesis` is the market before its first
-event: the totals that are zero before any event are zero and stated. A
-`seeded` fold is the reads at a block: every total stated, the tick map
-whole, every position's level and margin known, standing at the end of
-that block. The trait's `fold` is a segment: it knows what moved and
-nothing of where anything stands. From any start, `catch_up` applies the
-tape from the block after the fold's to the lagged head.
+One `apply` serves all three sources, which is why a fold written against
+the past is correct in the present: the feed and the tape build the same
+row through one constructor. The accessors return the reads' types and
+take the caller's block, so the comparison at the bottom is `==` and not a
+tolerance. That comparison is the test the type exists to pass, and the
+monitor runs it on every live market.
 
-Each component fold is built from the three shapes in `history::fold`:
-`Latest` where the later segment wins, `First` where the earlier does,
-`Stated` for a total with what accrued since it. Hand-written merge logic
-remains in two places only, each because a value depends on more than its
-own field: a position's kind, which a swap or a conversion changes, and a
-maker's deposit price, which is the pool price at the open and so is known
-to the segment that held the price, not the one that saw the open.
+### A composition of folds
+
+```text
+   Replay
+   └─ Sequenced< Market >       an event at or before the last point is refused and counted
+      └─ Market                 hands each event to eight folds; merges each with its twin
+
+         fold           holds                                 shape            fed by
+         ────────────   ───────────────────────────────────   ──────────────   ──────────────────────────
+         Prices         pool price · index · stored EMAs      Latest           swaps, prints, the touch
+         Rates          funding · utilization fees · cumuls   Latest           the touch, accruals
+         Utilization    capacity · open interest              Latest           their updates
+         Modules        the address in force, per kind        Latest, six      ModuleSet
+         Solvency       margin · bad debt                     Stated           transfers, swaps, bookings
+         Pool           liquidity per tick · the tick         sums · Latest    ModifyLiquidity, TicksCrossed
+         Positions      kind · size or band · margin, per id  First/Latest/sums  every position event
+         OwnershipLog   custody over time                     append           PositionTransferred
+```
+
+Eight folds because the market has eight concerns, and a concern's rule
+belongs with its state. The one rule the live build needs that no event
+states, how a swap's fees leave the margin total, lives in `Solvency` and
+nowhere else. The three joins the live build's events force, a maker's
+band from `ModifyLiquidity` by salt, its deposit price from the fold's own
+pool price, a liquidation paired with the action before it, live in
+`Positions` and `Pool`, so the cutover deletes them by removal. `Market`
+itself is a struct of folds whose `apply` and `combine` are eight lines
+each, and `Sequenced` is the chain-order guard any fold a driver feeds
+directly can wear.
+
+### The algebra
+
+```text
+   a tape, cut only between blocks
+
+   ├──── segment a ────┤├──── segment b ────┤├──── segment c ────┤
+         fold(a)              fold(b)              fold(c)          on three cores, or on three days
+            └──── combine ───────┘                    │
+                        └─────────── combine ─────────┘
+                                     ‖
+                              fold(a ++ b ++ c)
+
+   the shapes, each one line of combine
+     Latest<T>     later wins                            a total the contract emits whole
+     First<T>      earlier wins                          an open, a range, a deposit price
+     Stated<T, S>  later statement replaces both;        a stated total and what accrued since
+                   otherwise the accruals add
+     sums          add                                   liquidity per tick, size moved, counters
+
+   three starts, three left operands
+     from_genesis(perp)      zeros stated, tick map whole, modules unknown      ─┐
+     seeded(&StateAt)        the reads at block B, standing at the end of B     ─┼─► apply · combine · catch_up
+     Fold::fold(segment)     what moved, nothing of where anything stands        ─┘
+```
+
+The law is `fold(a ++ b) == combine(fold(a), fold(b))` at any cut between
+blocks, and it holds because every field has one of the four shapes. The
+hand-written merges that remain are two, each because a value depends on
+more than its own field: a position's kind, which a swap or a conversion
+changes, and a maker's deposit price, which is the pool price at the open
+and so is known to the segment that held the price, not the one that saw
+the open.
+
+A start is a left operand. `from_genesis` is the market before its first
+event; a `seeded` fold is the reads at a block, every total stated and
+every level known, standing at the end of that block so the block's own
+events delivered again are refused; the trait's `fold` is a segment that
+knows what moved and nothing of where anything stands. From any of them,
+`catch_up` applies the tape from the block after the fold's to the lagged
+head, and `combine` takes a segment folded elsewhere.
+
+## Efficiency
+
+The algebra is a cost model as much as a correctness one. The benchmark
+in `benches/history_bench.rs` measures the stages apart, over a synthetic
+tape of 200,000 events on a twelve-core laptop:
+
+| stage | events per second |
+|---|---|
+| scan, through the fake node with no network under it | 0.77 M |
+| decode, one thread | 31 M |
+| decode, one thread per core | 170 M |
+| fold, a no-op match per row | 87 M |
+| `Replay`, one pass | 17 M |
+| `Replay`, one segment per core, combined | 14.5 M |
+
+**The fold is not where time goes.** `apply` is eight matches and a few
+field writes; it allocates only for a position first seen, a tick first
+touched and a custody record. On the recorded HORMUZ-SHIPS tape it runs at
+97 M events per second, and a 10 M-event market folds in under a second
+on one core. The scan is three orders slower with no network at all, and
+a provider adds its latency on top, so the work a consumer should avoid
+is re-scanning, not re-folding. That is what the checkpoint half of the
+law buys: a fold of any prefix is a checkpoint, a seed is a checkpoint the
+chain supplies, and `catch_up` scans only the blocks since.
+
+**The decode parallelizes; the fold's segments do not yet pay.** The
+decoder is pure, so one thread per core gives five and a half times the
+throughput. Folding segments on separate cores is slower than one pass
+today, because `combine` on `Positions` merges one map into another,
+proportional to the later segment's positions, and the synthetic tape
+opens a position every four events, so the merge repeats the inserts; on
+a short tape the threads cost more than the fold. Segments pay when a
+tape is long relative to its positions, and the shape is there for that
+day, asserted equal to the one pass in the benchmark. Measure before
+reaching for it.
+
+**Memory is per position, plus the tick map.** Each position is a
+fixed-size state in a map keyed by id, each touched tick a pair of sums,
+each custody record a point and an address. A closed position stays, which
+is the first debt below. Position ids are sequential from the contract's
+counter, so a `Vec` indexed by id is the layout to reach for if a
+benchmark ever asks; one dispatch by event family in place of eight
+matches is the other, and at these throughputs neither is measurable.
 
 ## The type system
 
@@ -123,15 +224,15 @@ to the segment that held the price, not the one that saw the open.
 
 ## Debts
 
+- **`Positions` never forgets.** A closed position stays in the map, so a
+  long-lived fold's memory grows with the market's history. The live cache
+  will want to retain only open positions; that is its call to make, not
+  the fold's to guess.
 - **The feed carries two of the three addresses**, so a fold the feed
   drives would hold a stale tick map and stale maker bands with no count
   saying so. Until the feed carries the PoolManager, or the audited build
   puts the liquidity on the perp's events, a live fold polls through
   `catch_up`.
-- **`Positions` never forgets.** A closed position stays in the map, so a
-  long-lived fold's memory grows with the market's history. The live cache
-  will want to retain only open positions; that is its call to make, not
-  the fold's to guess.
 - **A seeded fold is only ever the left operand of `combine`**, and nothing
   enforces it: merging a segment with a seed on the right would add a whole
   tick map onto partial sums. The sweep that cuts a tape into segments is
