@@ -67,6 +67,17 @@ impl TapeSlice {
         })
     }
 
+    /// The runs either side of row `mid`, each a tape; the cut `combine`
+    /// is checked at.
+    ///
+    /// # Panics
+    ///
+    /// If `mid` is past the end.
+    pub fn split_at(&self, mid: usize) -> (&TapeSlice, &TapeSlice) {
+        let (before, after) = self.0.split_at(mid);
+        (TapeSlice::from_rows(before), TapeSlice::from_rows(after))
+    }
+
     /// The row at `point`, if one is there.
     pub fn at(&self, point: ChainPoint) -> Option<&TapeEvent> {
         let index = self

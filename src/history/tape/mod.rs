@@ -194,9 +194,47 @@ impl Tape {
         Ok(Self(rows))
     }
 
+    /// Append `row` if it follows the last; `false`, and no change, if it
+    /// does not, as `Sequenced` refuses an event.
+    pub fn push(&mut self, row: TapeEvent) -> bool {
+        if let Some(last) = self.0.last()
+            && follows(last, &row).is_err()
+        {
+            return false;
+        }
+        self.0.push(row);
+        true
+    }
+
+    /// Append `later`, the tape of the segment after this one.
+    ///
+    /// # Errors
+    ///
+    /// [`ValidationError::InvalidTape`] at `later`'s first row, if it does
+    /// not follow this tape's last; nothing is appended.
+    pub fn append(&mut self, later: Tape) -> StdResult<(), ValidationError> {
+        if let (Some(last), Some(first)) = (self.0.last(), later.0.first()) {
+            follows(last, first)?;
+        }
+        self.0.extend(later.0);
+        Ok(())
+    }
+
     /// The rows, in chain order.
     pub fn into_vec(self) -> Vec<TapeEvent> {
         self.0
+    }
+}
+
+/// Rows in any order, with repeats: sorted into chain order, the first row
+/// at a point kept, then checked as [`Tape::new`] checks. The collect for
+/// rows gathered from several scans or a feed replayed twice.
+impl FromIterator<TapeEvent> for StdResult<Tape, ValidationError> {
+    fn from_iter<I: IntoIterator<Item = TapeEvent>>(rows: I) -> Self {
+        let mut rows: Vec<TapeEvent> = rows.into_iter().collect();
+        rows.sort_by_key(TapeEvent::point);
+        rows.dedup_by_key(|row| row.point());
+        Tape::new(rows)
     }
 }
 
@@ -379,6 +417,49 @@ mod tests {
             refused(vec![print(1, 0), earlier]),
             (2, 0, "a timestamp before the block before it")
         );
-        let _ = U256::ZERO;
+    }
+
+    #[test]
+    fn a_tape_grows_only_forward_and_joins_only_what_follows() {
+        let mut tape = Tape::new(vec![print(1, 0)]).unwrap();
+        assert!(tape.push(print(1, 1)));
+        assert!(!tape.push(print(1, 1)), "the same point is refused");
+        assert!(!tape.push(print(0, 5)), "an earlier point is refused");
+        assert_eq!(tape.len(), 2);
+
+        let later = Tape::new(vec![print(3, 0), print(4, 0)]).unwrap();
+        tape.append(later).unwrap();
+        assert_eq!(tape.len(), 4);
+        let before = Tape::new(vec![print(2, 0)]).unwrap();
+        assert!(matches!(
+            tape.append(before),
+            Err(ValidationError::InvalidTape { block: 2, .. })
+        ));
+        assert_eq!(tape.len(), 4, "nothing of a refused tape is appended");
+        tape.append(Tape::default()).unwrap();
+        assert!(Tape::default().append(tape.clone()).is_ok());
+    }
+
+    #[test]
+    fn rows_in_any_order_collect_into_the_tape_they_came_from() {
+        let rows = vec![print(1, 0), print(1, 1), print(3, 0), print(7, 0)];
+        let tape = Tape::new(rows.clone()).unwrap();
+        let shuffled = [rows[2], rows[0], rows[3], rows[1], rows[0], rows[2]];
+        let collected: StdResult<Tape, ValidationError> = shuffled.into_iter().collect();
+        assert_eq!(collected.unwrap(), tape, "sorted, the repeats dropped");
+
+        let mut other_hash = print(3, 1);
+        other_hash.block_hash = B256::repeat_byte(0xEE);
+        let collected: StdResult<Tape, ValidationError> =
+            [print(3, 0), other_hash].into_iter().collect();
+        assert!(matches!(
+            collected,
+            Err(ValidationError::InvalidTape {
+                block: 3,
+                log_index: 1,
+                ..
+            })
+        ));
+        assert_eq!(U256::ZERO, U256::from(0u8));
     }
 }
