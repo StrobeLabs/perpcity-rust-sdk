@@ -10,7 +10,7 @@ use crate::events::{MarketEvent, SwapInfo};
 use crate::history::fold::Arrival;
 use crate::units::Price;
 
-use super::{TapeEvent, TapeSlice};
+use super::{Positioned, TapeEvent, TapeSlice};
 
 /// What a taker's swap was for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -48,6 +48,12 @@ impl Swap {
             action,
             info,
         })
+    }
+}
+
+impl Positioned for Swap {
+    fn pos_id(&self) -> U256 {
+        self.pos_id
     }
 }
 

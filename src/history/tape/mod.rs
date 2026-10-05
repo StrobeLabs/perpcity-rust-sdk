@@ -45,7 +45,7 @@ use crate::events::MarketEvent;
 
 use super::fold::{Arrival, Sample};
 
-pub use self::custody::OwnershipLog;
+pub use self::custody::{OwnershipLog, Positioned, Wallets};
 pub use self::lenses::{Swap, SwapAction};
 pub use self::read::{latest_market_events, market_events, market_tape};
 pub(in crate::history) use self::read::{

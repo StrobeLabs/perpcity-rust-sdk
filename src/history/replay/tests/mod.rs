@@ -14,6 +14,7 @@ use crate::client::{MarketRates, PositionRole};
 use crate::contracts::Modules as ContractModules;
 use crate::events::MarketEvent;
 use crate::history::fold::{Change, Window};
+use crate::history::tape::Wallets;
 use crate::history::test_support::tape::{
     assert_combine_law, modify, per_side, price, row, settle, swap,
 };

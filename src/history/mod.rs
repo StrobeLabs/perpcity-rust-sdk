@@ -82,8 +82,8 @@ pub use replay::{
 };
 pub use scan::{ScanStats, get_logs_chunked};
 pub use tape::{
-    ChainPoint, OwnershipLog, Swap, SwapAction, Tape, TapeAddresses, TapeEvent, TapeSlice,
-    latest_market_events, market_events, market_tape,
+    ChainPoint, OwnershipLog, Positioned, Swap, SwapAction, Tape, TapeAddresses, TapeEvent,
+    TapeSlice, Wallets, latest_market_events, market_events, market_tape,
 };
 pub use transfers::{TokenTransfer, token_transfers};
 

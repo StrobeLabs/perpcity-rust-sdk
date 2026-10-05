@@ -24,7 +24,7 @@ use std::time::Duration;
 
 use alloy::primitives::B256;
 
-use crate::history::tape::ChainPoint;
+use crate::history::tape::{ChainPoint, OwnershipLog, Positioned, Wallets};
 
 /// A length of time a question is asked over.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -438,6 +438,24 @@ impl<M> Arrivals<M> {
     pub fn combine(&mut self, later: Self) {
         for arrival in later.arrivals {
             self.push(arrival);
+        }
+    }
+
+    /// The arrivals on positions one of `wallets` held when they arrived,
+    /// as `custody` records it, under this retention: a market's arrivals
+    /// scoped to a cohort or to one agent. One lookup per arrival.
+    pub fn by(&self, wallets: &Wallets, custody: &OwnershipLog) -> Self
+    where
+        M: Positioned + Clone,
+    {
+        Self {
+            arrivals: self
+                .arrivals
+                .iter()
+                .filter(|arrival| custody.held_by_at(arrival.mark.pos_id(), wallets, arrival.point))
+                .cloned()
+                .collect(),
+            retention: self.retention,
         }
     }
 

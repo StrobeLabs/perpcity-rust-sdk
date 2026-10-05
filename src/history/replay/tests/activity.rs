@@ -112,3 +112,148 @@ fn the_replay_keeps_series_and_trims_them_to_a_retention() {
     );
     assert_eq!(short.deposited(), UsdcAtoms::ZERO);
 }
+
+/// Two wallets, two positions; position 1 changes hands mid-life. A
+/// mint lands before the opening trade in the same transaction, as the
+/// contract orders them, so the open is the minter's.
+fn custody_tape() -> Vec<TapeEvent> {
+    let (alice, bob) = (Address::repeat_byte(0x0A), Address::repeat_byte(0x0B));
+    let mint = |block, index, to, pos: u64| {
+        row(
+            block,
+            index,
+            MarketEvent::PositionTransferred {
+                from: Address::ZERO,
+                to,
+                pos_id: U256::from(pos),
+            },
+        )
+    };
+    let open = |block, index, pos: u64, p| {
+        row(
+            block,
+            index,
+            MarketEvent::TakerOpened {
+                pos_id: U256::from(pos),
+                swap: swap(1_000, price(p), 0),
+            },
+        )
+    };
+    vec![
+        mint(10, 0, alice, 1),
+        open(10, 1, 1, 40),
+        mint(11, 0, bob, 2),
+        open(11, 1, 2, 41),
+        row(
+            12,
+            0,
+            MarketEvent::PositionTransferred {
+                from: alice,
+                to: bob,
+                pos_id: U256::from(1),
+            },
+        ),
+        row(
+            13,
+            0,
+            MarketEvent::TakerAdjusted {
+                pos_id: U256::from(1),
+                swap: swap(500, price(42), 0),
+                funding: UsdcDelta::ZERO,
+                util_fees: UsdcAtoms::ZERO,
+            },
+        ),
+        // Position 2 closes, then burns: the close before the burn, as the
+        // contract orders them.
+        row(
+            14,
+            0,
+            MarketEvent::TakerClosed {
+                pos_id: U256::from(2),
+                swap: swap(-1_000, price(43), 0),
+                funding: UsdcDelta::ZERO,
+                util_fees: UsdcAtoms::ZERO,
+                liquidation_fee: UsdcAtoms::ZERO,
+                is_liquidation: false,
+            },
+        ),
+        row(
+            14,
+            1,
+            MarketEvent::PositionTransferred {
+                from: bob,
+                to: Address::ZERO,
+                pos_id: U256::from(2),
+            },
+        ),
+    ]
+}
+
+/// A cohort's arrivals are the market's on positions the cohort held when
+/// they arrived; its book is the open positions it holds now, and a burn
+/// or a close the tape has not yet seen the burn of both end a holding.
+#[test]
+fn the_custody_filter_scopes_arrivals_to_the_holder_then_and_positions_to_the_holder_now() {
+    let tape = custody_tape();
+    let market = genesis(&tape);
+    let (alice, bob) = (Address::repeat_byte(0x0A), Address::repeat_byte(0x0B));
+    let hers = Wallets::one(alice);
+    let his = Wallets::one(bob);
+    let custody = market.custody();
+
+    let blocks = |swaps: &Arrivals<Swap>| swaps.iter().map(|a| a.point.block).collect::<Vec<_>>();
+    assert_eq!(
+        blocks(&market.swaps().by(&hers, custody)),
+        vec![10],
+        "her open; the adjust came after she handed the position over"
+    );
+    assert_eq!(
+        blocks(&market.swaps().by(&his, custody)),
+        vec![11, 13, 14],
+        "his open, the adjust on the position he received, and his close"
+    );
+    assert_eq!(
+        blocks(
+            &market
+                .swaps()
+                .by(&[alice, bob].into_iter().collect(), custody)
+        ),
+        vec![10, 11, 13, 14]
+    );
+    assert!(market.settlements().by(&hers, custody).is_empty());
+    assert_eq!(market.settlements().by(&his, custody).len(), 2);
+
+    let held = |market: &Replay, wallets: &Wallets| {
+        market
+            .positions()
+            .held_by(wallets, market.custody())
+            .map(|(pos_id, _)| pos_id)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        held(&market, &hers),
+        Vec::<U256>::new(),
+        "she holds nothing now"
+    );
+    assert_eq!(
+        held(&market, &his),
+        vec![U256::from(1)],
+        "position 2 is burned; the book is what is held"
+    );
+    assert_eq!(held(&market, &Wallets::default()), Vec::<U256>::new());
+
+    // The tape ends on the close, before its burn: custody still names him,
+    // the fold knows the position closed, and the book agrees with the fold.
+    let before_burn = genesis(&tape[..tape.len() - 1]);
+    assert_eq!(
+        before_burn.custody().holder(U256::from(2)),
+        Some(bob),
+        "custody has not seen the burn"
+    );
+    assert_eq!(held(&before_burn, &his), vec![U256::from(1)]);
+    assert_eq!(
+        held(&genesis(&tape[..tape.len() - 2]), &his),
+        vec![U256::from(1), U256::from(2)],
+        "and before the close, it is his"
+    );
+}

@@ -13,7 +13,7 @@ use alloy::primitives::{B256, U256};
 use crate::client::PositionRole;
 use crate::events::{MakerSettle, MarketEvent, SwapInfo};
 use crate::history::fold::{Arrivals, Fold, Latest, Retention};
-use crate::history::tape::{Swap, SwapAction, TapeEvent};
+use crate::history::tape::{Positioned, Swap, SwapAction, TapeEvent};
 use crate::units::{Price, UsdcAtoms, UsdcDelta};
 
 /// A position liquidated, with the prices standing around it.
@@ -70,6 +70,18 @@ impl Settlement {
             util_fees,
             lp_fees: UsdcAtoms::ZERO,
         }
+    }
+}
+
+impl Positioned for Liquidation {
+    fn pos_id(&self) -> U256 {
+        self.pos_id
+    }
+}
+
+impl Positioned for Settlement {
+    fn pos_id(&self) -> U256 {
+        self.pos_id
     }
 }
 
