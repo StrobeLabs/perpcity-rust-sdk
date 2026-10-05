@@ -5,8 +5,8 @@ use std::collections::BTreeMap;
 use alloy::primitives::{Address, U256};
 
 use crate::events::MarketEvent;
+use crate::history::fold::Fold;
 
-use super::super::fold::Fold;
 use super::{ChainPoint, TapeEvent};
 
 /// Who held each of a market's positions, over time: the custody

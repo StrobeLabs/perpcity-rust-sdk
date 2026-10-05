@@ -12,10 +12,10 @@ use futures_util::TryStreamExt;
 use crate::contracts::IPoolManagerState;
 use crate::errors::{Result, ValidationError};
 use crate::events::{MarketEvent, decode_log};
-
-use super::super::scan::{
+use crate::history::scan::{
     SharedWidths, block_timestamps, check_block_range, scan_all, scan_newest,
 };
+
 use super::{TapeAddresses, TapeEvent};
 
 /// Every market event `perp` emitted in blocks `from_block..=to_block`,

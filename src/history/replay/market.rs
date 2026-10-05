@@ -8,13 +8,12 @@ use crate::client::{MarketRates, OpenInterest};
 use crate::contracts;
 use crate::errors::ValidationError;
 use crate::events::{CumulativesInfo, MarketEvent, ModuleKind};
+use crate::history::fold::{Fold, Latest, Retention, Sample, Series};
+use crate::history::tape::TapeEvent;
 use crate::math::BlockContext;
 use crate::math::capacity::{Capacity, MarketCapacity};
 use crate::math::pricing::{Emas, Mark};
 use crate::units::{FundingRate, PerSide, Price, UtilizationRate};
-
-use super::super::fold::{Fold, Latest, Retention, Sample, Series};
-use super::super::tape::TapeEvent;
 
 /// What the contract marks from: the pool price after each swap, the
 /// beacon's prints, and the stored EMAs as the last touch left them. The

@@ -24,7 +24,7 @@ use std::time::Duration;
 
 use alloy::primitives::B256;
 
-use super::super::tape::ChainPoint;
+use crate::history::tape::ChainPoint;
 
 /// A length of time a question is asked over.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]

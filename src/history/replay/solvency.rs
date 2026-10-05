@@ -16,10 +16,10 @@ use alloy::primitives::B256;
 
 use crate::client::SolvencyState;
 use crate::events::MarketEvent;
+use crate::history::fold::{Fold, Latest, Retention, Sample, Series, Stated};
+use crate::history::tape::TapeEvent;
 use crate::units::UsdcAtoms;
 
-use super::super::fold::{Fold, Latest, Retention, Sample, Series, Stated};
-use super::super::tape::TapeEvent;
 use super::Silences;
 
 /// What moved the margin total since it was last stated.
