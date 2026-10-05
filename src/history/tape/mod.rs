@@ -29,7 +29,10 @@
 mod custody;
 mod read;
 
+use std::borrow::Borrow;
+use std::ops::Deref;
 use std::result::Result as StdResult;
+use std::slice;
 
 use alloy::primitives::{Address, B256};
 use alloy::rpc::types::Log;
@@ -151,4 +154,218 @@ pub struct TapeAddresses {
     pub pool_manager: Address,
     /// The market's pool, as the PoolManager keys it.
     pub pool_id: B256,
+}
+
+/// A market's record: every event in chain order, no two at one point,
+/// one hash and one timestamp per block, and timestamps that never
+/// decrease. Every fold and every reading rests on that; the type owns
+/// it, checked once when the rows arrive, so nothing downstream assumes
+/// it.
+///
+/// Derefs to [`TapeSlice`], a run of rows that answers every question the
+/// whole does, so a segment of a tape is a tape by type.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Tape(Vec<TapeEvent>);
+
+impl Tape {
+    /// `rows`, if they are a tape.
+    ///
+    /// # Errors
+    ///
+    /// [`ValidationError::InvalidTape`] at the first row that does not
+    /// follow the one before it.
+    pub fn new(rows: Vec<TapeEvent>) -> StdResult<Self, ValidationError> {
+        for pair in rows.windows(2) {
+            follows(&pair[0], &pair[1])?;
+        }
+        Ok(Self(rows))
+    }
+
+    /// The rows, in chain order.
+    pub fn into_vec(self) -> Vec<TapeEvent> {
+        self.0
+    }
+}
+
+/// Whether `row` may follow `before` in a tape.
+fn follows(before: &TapeEvent, row: &TapeEvent) -> StdResult<(), ValidationError> {
+    let same_block = row.block_number == before.block_number;
+    let reason = if row.point() <= before.point() {
+        Some("not after the row before it")
+    } else if same_block && row.block_hash != before.block_hash {
+        Some("a second hash for its block")
+    } else if same_block && row.timestamp != before.timestamp {
+        Some("a second timestamp for its block")
+    } else if row.timestamp < before.timestamp {
+        Some("a timestamp before the block before it")
+    } else {
+        None
+    };
+    match reason {
+        Some(reason) => Err(ValidationError::InvalidTape {
+            block: row.block_number,
+            log_index: row.log_index,
+            reason,
+        }),
+        None => Ok(()),
+    }
+}
+
+impl Deref for Tape {
+    type Target = TapeSlice;
+
+    fn deref(&self) -> &TapeSlice {
+        TapeSlice::from_rows(&self.0)
+    }
+}
+
+impl AsRef<TapeSlice> for Tape {
+    fn as_ref(&self) -> &TapeSlice {
+        self
+    }
+}
+
+impl AsRef<[TapeEvent]> for Tape {
+    fn as_ref(&self) -> &[TapeEvent] {
+        &self.0
+    }
+}
+
+impl Borrow<TapeSlice> for Tape {
+    fn borrow(&self) -> &TapeSlice {
+        self
+    }
+}
+
+impl IntoIterator for Tape {
+    type Item = TapeEvent;
+    type IntoIter = std::vec::IntoIter<TapeEvent>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.into_iter()
+    }
+}
+
+impl<'a> IntoIterator for &'a Tape {
+    type Item = &'a TapeEvent;
+    type IntoIter = slice::Iter<'a, TapeEvent>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.iter()
+    }
+}
+
+/// A run of a tape's rows, borrowed: in chain order, as the [`Tape`] they
+/// were cut from. What a fold takes, and what a segment is.
+#[derive(Debug, PartialEq)]
+#[repr(transparent)]
+pub struct TapeSlice([TapeEvent]);
+
+impl TapeSlice {
+    /// `rows` as a slice of a tape; private, since only rows cut from a
+    /// tape are known to be one.
+    fn from_rows(rows: &[TapeEvent]) -> &Self {
+        // SAFETY: `TapeSlice` is `repr(transparent)` over `[TapeEvent]`,
+        // so the two have one layout and one metadata; the cast changes
+        // the type and nothing else, as `Path` is made from `OsStr`.
+        unsafe { &*(rows as *const [TapeEvent] as *const TapeSlice) }
+    }
+
+    /// The rows, as a plain slice.
+    pub fn as_rows(&self) -> &[TapeEvent] {
+        &self.0
+    }
+}
+
+impl Deref for TapeSlice {
+    type Target = [TapeEvent];
+
+    fn deref(&self) -> &[TapeEvent] {
+        &self.0
+    }
+}
+
+impl<'a> IntoIterator for &'a TapeSlice {
+    type Item = &'a TapeEvent;
+    type IntoIter = slice::Iter<'a, TapeEvent>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.iter()
+    }
+}
+
+impl ToOwned for TapeSlice {
+    type Owned = Tape;
+
+    fn to_owned(&self) -> Tape {
+        Tape(self.0.to_vec())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use alloy::primitives::U256;
+
+    use super::*;
+    use crate::history::test_support::tape::{price, row};
+
+    fn print(block: u64, index: u64) -> TapeEvent {
+        row(block, index, MarketEvent::IndexUpdated { index: price(1) })
+    }
+
+    fn refused(rows: Vec<TapeEvent>) -> (u64, u64, &'static str) {
+        match Tape::new(rows) {
+            Err(ValidationError::InvalidTape {
+                block,
+                log_index,
+                reason,
+            }) => (block, log_index, reason),
+            other => panic!("accepted or refused for another reason: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rows_in_chain_order_are_a_tape_and_read_as_their_rows() {
+        let rows = vec![print(1, 0), print(1, 1), print(3, 0)];
+        let tape = Tape::new(rows.clone()).unwrap();
+        assert_eq!(tape.len(), 3);
+        assert_eq!(tape[2].block_number, 3);
+        assert_eq!(tape.iter().count(), 3);
+        assert_eq!((&tape).into_iter().count(), 3);
+        assert_eq!(tape.as_rows(), &rows[..]);
+        assert_eq!(tape[..2].len(), 2, "a slice of the rows is a plain slice");
+        assert_eq!(tape.clone().into_vec(), rows);
+        assert!(Tape::new(Vec::new()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_row_that_does_not_follow_the_one_before_is_refused_by_name() {
+        assert_eq!(
+            refused(vec![print(2, 0), print(1, 0)]),
+            (1, 0, "not after the row before it")
+        );
+        assert_eq!(
+            refused(vec![print(1, 1), print(1, 1)]),
+            (1, 1, "not after the row before it")
+        );
+        let mut other_hash = print(1, 1);
+        other_hash.block_hash = B256::repeat_byte(0xEE);
+        assert_eq!(
+            refused(vec![print(1, 0), other_hash]),
+            (1, 1, "a second hash for its block")
+        );
+        let mut other_time = print(1, 1);
+        other_time.timestamp += 1;
+        assert_eq!(
+            refused(vec![print(1, 0), other_time]),
+            (1, 1, "a second timestamp for its block")
+        );
+        let mut earlier = print(2, 0);
+        earlier.timestamp = 0;
+        assert_eq!(
+            refused(vec![print(1, 0), earlier]),
+            (2, 0, "a timestamp before the block before it")
+        );
+        let _ = U256::ZERO;
+    }
 }

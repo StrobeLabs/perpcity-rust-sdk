@@ -194,7 +194,7 @@ that carries it, the invariant it holds, and the node that owns it.
 | A settle previewed | [`MakerEquityBreakdown`](src/math/maker_equity.rs#L177) | exact atoms, the contract's arithmetic | [`math::maker_equity`](src/math/maker_equity.rs#L1) |
 | A block | [`BlockContext`](src/math/mod.rs#L51) | number, hash, timestamp of one header | [`math`](src/math/DESIGN.md) |
 | An event | [`MarketEvent`](src/events.rs#L156) | the market's vocabulary, human units, either tense | [`events`](src/events/DESIGN.md) |
-| An event in chain order | [`TapeEvent`](src/history/tape/mod.rs#L66), [`ChainPoint`](src/history/tape/mod.rs#L57) | block and log index | [history/tape](src/history/tape/DESIGN.md) |
+| An event in chain order | [`TapeEvent`](src/history/tape/mod.rs#L69), [`ChainPoint`](src/history/tape/mod.rs#L60) | block and log index | [history/tape](src/history/tape/DESIGN.md) |
 | Custody over time | [`OwnershipLog`](src/history/tape/custody.rs#L33) | a fold of transfers; owner at a chain point | [history/tape](src/history/tape/DESIGN.md) |
 | A computation over the tape | [`Fold`](src/history/fold/mod.rs#L34) | the fold of a concatenation is the combination of the folds | [history/fold](src/history/fold/DESIGN.md) |
 | A value over time | [`Series`](src/history/fold/series.rs#L152), [`Arrivals`](src/history/fold/series.rs#L322) | chain order; appends across segments; trimmed to a retention | [history/fold](src/history/fold/DESIGN.md) |

@@ -23,7 +23,7 @@ use crate::errors::{ContractError, Result, ValidationError};
 use crate::events::decode_log;
 
 use super::History;
-use super::tape::{TapeAddresses, TapeEvent, market_logs_with, stamp_timestamps};
+use super::tape::{Tape, TapeAddresses, TapeEvent, market_logs_with, stamp_timestamps};
 
 /// The recording format this crate writes and reads.
 pub const FORMAT: u32 = 1;
@@ -176,8 +176,9 @@ impl Recording {
     /// # Errors
     ///
     /// [`ValidationError::DecodeFailed`] for a log this vocabulary names
-    /// and cannot read, or one with no timestamp.
-    pub fn tape(&self) -> Result<Vec<TapeEvent>> {
+    /// and cannot read, or one with no timestamp;
+    /// [`ValidationError::InvalidTape`] for logs out of chain order.
+    pub fn tape(&self) -> Result<Tape> {
         let mut rows = Vec::with_capacity(self.logs.len());
         for log in &self.logs {
             let Some(event) = decode_log(log)? else {
@@ -194,7 +195,7 @@ impl Recording {
                 })?;
             rows.push(TapeEvent::stamped(log, event, timestamp)?);
         }
-        Ok(rows)
+        Ok(Tape::new(rows)?)
     }
 
     /// Write the recording into `dir`: `manifest.json`, and `logs.jsonl`

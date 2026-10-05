@@ -81,9 +81,10 @@ kept for compatibility.
 
 | Type | Invariant | Produced by | Consumed by |
 |---|---|---|---|
-| [`ChainPoint`](mod.rs#L57) | where an event sits: block number and log index; the total order events are joined on | [`TapeEvent::point`](mod.rs#L84) | [`OwnershipLog::owner_at`](custody.rs#L78), custody at that point. The strategy layer's joins, a print against the fills after it, are on this key, which is why it is a type and not two fields. |
-| [`TapeEvent`](mod.rs#L66) | a [`MarketEvent`](../../events/DESIGN.md) at a chain point, with its block's hash and timestamp and its transaction. Every tense builds it through one constructor, so a scan's row, a feed's and a recording's are the same row; `sample` stamps a value with its point and time | [`History::market_tape`](../DESIGN.md), [`History::market_events`](../DESIGN.md) and [`History::latest_market_events`](../DESIGN.md); [`MarketFeed::next_stamped`](../../feeds/DESIGN.md), the present tense; [`Recording::tape`](../DESIGN.md), from a file with no node | [`OwnershipLog::fold`](custody.rs#L66). The strategy layer's economics, classification and series are folds over a slice of these. |
-| [`TapeAddresses`](mod.rs#L145) | the three addresses a market's record is spread across: its own contract, the beacon it reads, and the chain's PoolManager keyed by its pool id. The PoolManager is every pool on the chain, so it is filtered by the liquidity event and the pool id it indexes, never by address alone | [`MarketReader::tape_addresses`](../../client/DESIGN.md), which knows all three; or a caller that does | [`History::market_tape`](../DESIGN.md) and [`market_tape`](read.rs#L85). |
+| [`ChainPoint`](mod.rs#L60) | where an event sits: block number and log index; the total order events are joined on | [`TapeEvent::point`](mod.rs#L87) | [`OwnershipLog::owner_at`](custody.rs#L78), custody at that point. The strategy layer's joins, a print against the fills after it, are on this key, which is why it is a type and not two fields. |
+| [`Tape`](mod.rs#L168), [`TapeSlice`](mod.rs#L262) | a market's record: rows in chain order, no two at one point, one hash and one timestamp per block, timestamps never decreasing; checked once at `Tape::new`, refused at the first row that breaks it. `TapeSlice` is a run of its rows, what a `Tape` derefs to and a segment is, so a segment is a tape by type | [`History::market_tape`](../DESIGN.md), [`History::market_events`](../DESIGN.md) and [`History::latest_market_events`](../DESIGN.md); [`Recording::tape`](../DESIGN.md), with no node; [`Tape::new`](mod.rs#L177) from rows a caller holds | every fold, through `Fold::fold` over its rows; `Replay::catch_up`. The strategy layer's sources hand one out and its interpreters take a slice of it. |
+| [`TapeEvent`](mod.rs#L69) | a [`MarketEvent`](../../events/DESIGN.md) at a chain point, with its block's hash and timestamp and its transaction. Every tense builds it through one constructor, so a scan's row, a feed's and a recording's are the same row; `sample` stamps a value with its point and time | the rows of a [`Tape`](mod.rs#L168), which every reader returns; [`MarketFeed::next_stamped`](../../feeds/DESIGN.md), the present tense | [`OwnershipLog::fold`](custody.rs#L66). The strategy layer's economics, classification and series are folds over a slice of these. |
+| [`TapeAddresses`](mod.rs#L148) | the three addresses a market's record is spread across: its own contract, the beacon it reads, and the chain's PoolManager keyed by its pool id. The PoolManager is every pool on the chain, so it is filtered by the liquidity event and the pool id it indexes, never by address alone | [`MarketReader::tape_addresses`](../../client/DESIGN.md), which knows all three; or a caller that does | [`History::market_tape`](../DESIGN.md) and [`market_tape`](read.rs#L85). |
 | [`OwnershipLog`](custody.rs#L33) | custody over time: a fold of transfers in chain order; owner at a point, not merely latest. The first instance of [`Fold`](../fold/DESIGN.md): `apply` appends a transfer, `combine` appends a later segment's timelines | [`OwnershipLog::fold`](custody.rs#L66) over the tape, the trait's fold kept inherent so it is reachable without the import | [`Replay`](../replay/DESIGN.md), which folds it in the same pass. The strategy layer's attribution, which asks who held a position when a trade happened, not who holds it now. |
 
 ## Edges
@@ -132,6 +133,10 @@ kept for compatibility.
   searches, and `transfers` hands back the point of every change. A sorted
   index takes its key and returns it, so the cycle is the index relation
   rather than a conversion with two homes.
+- **`Tape` and `TapeEvent` flow both ways by design.** `Tape::new` takes
+  rows in, and `into_vec` and the slice hand them back: one row type, one
+  collection, as `Series` and `Sample` in the fold node. `TapeSlice::to_owned`
+  is how a run of rows becomes a tape of its own, as `str` to `String`.
 
 ## Debts
 
@@ -144,8 +149,3 @@ kept for compatibility.
   the span the swaps give it; until then a fold that meets a swap to a
   beacon other than the one it was given counts the prints before it as a
   gap rather than reading an empty index.
-- **The tape is a bare `Vec<TapeEvent>`.** Every reader returns one and a
-  recording decodes to one, so the things a tape is asked for, its span,
-  its rows by block or by transaction, a cut at a boundary, are written by
-  each caller over a slice. The type that names the tape and answers those
-  is the next piece of this node.

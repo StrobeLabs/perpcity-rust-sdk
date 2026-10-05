@@ -82,8 +82,8 @@ pub use replay::{
 };
 pub use scan::{ScanStats, get_logs_chunked};
 pub use tape::{
-    ChainPoint, OwnershipLog, TapeAddresses, TapeEvent, latest_market_events, market_events,
-    market_tape,
+    ChainPoint, OwnershipLog, Tape, TapeAddresses, TapeEvent, TapeSlice, latest_market_events,
+    market_events, market_tape,
 };
 pub use transfers::{TokenTransfer, token_transfers};
 
@@ -267,7 +267,7 @@ impl<P: Provider> History<P> {
         perp: Address,
         from_block: u64,
         to_block: Option<u64>,
-    ) -> Result<Vec<TapeEvent>> {
+    ) -> Result<Tape> {
         let to = self.resolve(to_block).await?;
         tape::market_events_with(
             &self.provider,
@@ -290,7 +290,7 @@ impl<P: Provider> History<P> {
         addresses: TapeAddresses,
         from_block: u64,
         to_block: Option<u64>,
-    ) -> Result<Vec<TapeEvent>> {
+    ) -> Result<Tape> {
         let to = self.resolve(to_block).await?;
         tape::market_tape_with(
             &self.provider,
@@ -314,7 +314,7 @@ impl<P: Provider> History<P> {
         from_block: u64,
         to_block: Option<u64>,
         limit: usize,
-    ) -> Result<Vec<TapeEvent>> {
+    ) -> Result<Tape> {
         let to = self.resolve(to_block).await?;
         tape::latest_market_events_with(&self.provider, perp, from_block, to, limit, &self.widths)
             .await

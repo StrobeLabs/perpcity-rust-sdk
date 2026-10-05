@@ -94,6 +94,18 @@ pub enum ValidationError {
         to_block: u64,
     },
 
+    /// Rows that are not a tape: one out of chain order, at a point already
+    /// taken, or disagreeing with its block's hash or timestamp.
+    #[error("invalid tape at block {block} log {log_index}: {reason}")]
+    InvalidTape {
+        /// The block of the row refused.
+        block: u64,
+        /// The log index of the row refused.
+        log_index: u64,
+        /// What was wrong with it.
+        reason: &'static str,
+    },
+
     /// A configuration value is invalid or missing.
     #[error("invalid config: {reason}")]
     InvalidConfig {
