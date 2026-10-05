@@ -14,8 +14,7 @@ use crate::client::PositionRole;
 use crate::events::{MakerSettle, MarketEvent, SwapInfo};
 use crate::units::{Price, UsdcAtoms, UsdcDelta};
 
-use super::super::fold::{Fold, Latest};
-use super::super::series::{Arrival, Arrivals, Retention};
+use super::super::fold::{Arrival, Arrivals, Fold, Latest, Retention};
 use super::super::tape::TapeEvent;
 
 /// What a taker's swap was for.

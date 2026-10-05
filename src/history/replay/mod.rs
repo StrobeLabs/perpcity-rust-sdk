@@ -47,8 +47,7 @@ pub use self::positions::{PositionKind, PositionState, Positions};
 use self::seed::Seed;
 use self::solvency::Solvency;
 use super::History;
-use super::fold::{Fold, Latest, Sequenced};
-use super::series::{Arrivals, Retention, Sample, Series};
+use super::fold::{Arrivals, Fold, Latest, Retention, Sample, Sequenced, Series};
 use super::tape::{ChainPoint, OwnershipLog, TapeAddresses, TapeEvent};
 
 /// What the fold does not know, in three kinds, each with its own cure. A

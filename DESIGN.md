@@ -196,7 +196,7 @@ that carries it, the invariant it holds, and the node that owns it.
 | An event | [`MarketEvent`](src/events.rs#L156) | the market's vocabulary, human units, either tense | [`events`](src/events/DESIGN.md) |
 | An event in chain order | [`TapeEvent`](src/history/tape/mod.rs#L66), [`ChainPoint`](src/history/tape/mod.rs#L57) | block and log index | [`history`](src/history/DESIGN.md) |
 | Custody over time | [`OwnershipLog`](src/history/tape/custody.rs#L33) | a fold of transfers; owner at a chain point | [`history`](src/history/DESIGN.md) |
-| A market rebuilt from its events | [`Replay`](src/history/replay/mod.rs#L137) | the reads' types, folded from the tape; equal to the reads at a block | [history/replay](src/history/replay/DESIGN.md) |
+| A market rebuilt from its events | [`Replay`](src/history/replay/mod.rs#L136) | the reads' types, folded from the tape; equal to the reads at a block | [history/replay](src/history/replay/DESIGN.md) |
 | A print | [`IndexPrint`](src/history/beacon.rs#L20) | the index at a chain point and time | [`history`](src/history/DESIGN.md) |
 | A failure | [`PerpCityError`](src/errors/mod.rs#L45) | typed, with a stated transience | [`errors`](src/errors/DESIGN.md) |
 | A transport | [`HftTransport`](src/transport/provider.rs#L523) | many endpoints, one provider, reads and writes classified | [`transport`](src/transport/DESIGN.md) |

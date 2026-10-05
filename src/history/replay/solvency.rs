@@ -18,8 +18,7 @@ use crate::client::SolvencyState;
 use crate::events::MarketEvent;
 use crate::units::UsdcAtoms;
 
-use super::super::fold::{Fold, Latest, Stated};
-use super::super::series::{Retention, Sample, Series};
+use super::super::fold::{Fold, Latest, Retention, Sample, Series, Stated};
 use super::super::tape::TapeEvent;
 use super::Silences;
 

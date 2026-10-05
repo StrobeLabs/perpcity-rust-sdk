@@ -10,7 +10,7 @@
 //! types.
 //!
 //! Both are kept in chain order and refuse a push at or before their last
-//! point, as [`Sequenced`](super::fold::Sequenced) does. Both append when
+//! point, as [`Sequenced`](super::Sequenced) does. Both append when
 //! segments of a tape are combined, so a fold that holds them keeps the law
 //! `fold(a ++ b) == combine(fold(a), fold(b))`. Both trim to a
 //! [`Retention`], so a monitor keeps hours and a forensic fold keeps a life.
@@ -24,7 +24,7 @@ use std::time::Duration;
 
 use alloy::primitives::B256;
 
-use super::tape::ChainPoint;
+use super::super::tape::ChainPoint;
 
 /// A length of time a question is asked over.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]

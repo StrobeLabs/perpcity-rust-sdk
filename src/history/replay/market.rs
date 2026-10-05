@@ -13,8 +13,7 @@ use crate::math::capacity::{Capacity, MarketCapacity};
 use crate::math::pricing::{Emas, Mark};
 use crate::units::{FundingRate, PerSide, Price, UtilizationRate};
 
-use super::super::fold::{Fold, Latest};
-use super::super::series::{Retention, Sample, Series};
+use super::super::fold::{Fold, Latest, Retention, Sample, Series};
 use super::super::tape::TapeEvent;
 
 /// What the contract marks from: the pool price after each swap, the

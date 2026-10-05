@@ -38,7 +38,7 @@ use serde::{Deserialize, Serialize};
 use crate::errors::ValidationError;
 use crate::events::MarketEvent;
 
-use super::series::Sample;
+use super::fold::Sample;
 
 pub use self::custody::OwnershipLog;
 pub use self::read::{latest_market_events, market_events, market_tape};

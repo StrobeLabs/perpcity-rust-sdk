@@ -3,7 +3,7 @@
 
 use alloy::primitives::{B256, I256, U256};
 
-use super::super::series::{Change, Window};
+use super::super::fold::{Change, Window};
 use super::seed::{Seed, SeedPosition};
 use super::*;
 use crate::client::{MarketRates, PositionRole};
