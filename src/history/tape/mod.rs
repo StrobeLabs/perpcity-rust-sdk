@@ -27,6 +27,7 @@
 //! position's transfers arrive strictly increasing.
 
 mod custody;
+mod lenses;
 mod read;
 mod view;
 
@@ -42,9 +43,10 @@ use serde::{Deserialize, Serialize};
 use crate::errors::ValidationError;
 use crate::events::MarketEvent;
 
-use super::fold::Sample;
+use super::fold::{Arrival, Sample};
 
 pub use self::custody::OwnershipLog;
+pub use self::lenses::{Swap, SwapAction};
 pub use self::read::{latest_market_events, market_events, market_tape};
 pub(in crate::history) use self::read::{
     latest_market_events_with, market_events_with, market_logs_with, market_tape_with,
@@ -98,6 +100,16 @@ impl TapeEvent {
             point: self.point(),
             timestamp: self.timestamp,
             value,
+        }
+    }
+
+    /// `mark` as an arrival at this event's point, time and transaction.
+    pub fn arrival<M>(&self, mark: M) -> Arrival<M> {
+        Arrival {
+            point: self.point(),
+            timestamp: self.timestamp,
+            tx: self.tx_hash,
+            mark,
         }
     }
 

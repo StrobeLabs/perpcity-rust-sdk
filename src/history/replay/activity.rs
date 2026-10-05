@@ -12,31 +12,9 @@ use alloy::primitives::{B256, U256};
 
 use crate::client::PositionRole;
 use crate::events::{MakerSettle, MarketEvent, SwapInfo};
-use crate::history::fold::{Arrival, Arrivals, Fold, Latest, Retention};
-use crate::history::tape::TapeEvent;
+use crate::history::fold::{Arrivals, Fold, Latest, Retention};
+use crate::history::tape::{Swap, SwapAction, TapeEvent};
 use crate::units::{Price, UsdcAtoms, UsdcDelta};
-
-/// What a taker's swap was for.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SwapAction {
-    /// The position's opening trade.
-    Opened,
-    /// A change of size on an open position.
-    Adjusted,
-    /// The closing trade, a liquidation's included.
-    Closed,
-}
-
-/// A taker's swap, as the event settled it.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Swap {
-    /// The position that swapped.
-    pub pos_id: U256,
-    /// What the swap was for.
-    pub action: SwapAction,
-    /// What moved, at what price, for what fees.
-    pub info: SwapInfo,
-}
 
 /// A position liquidated, with the prices standing around it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -209,15 +187,6 @@ impl Activity {
         self.prints.retain(retention);
     }
 
-    fn arrival<M>(event: &TapeEvent, mark: M) -> Arrival<M> {
-        Arrival {
-            point: event.point(),
-            timestamp: event.timestamp,
-            tx: event.tx_hash,
-            mark,
-        }
-    }
-
     /// Record `pos_id` liquidated in this event's transaction, once per
     /// transaction however many events say it. The price before is the
     /// one standing when the transaction began; the price after is the
@@ -243,20 +212,17 @@ impl Activity {
             pool_price_after: pool_price_after.or_else(|| self.in_tx.swap_of(pos_id)),
             index_then: self.index.get(),
         };
-        self.liquidations.push(Self::arrival(event, mark));
+        self.liquidations.push(event.arrival(mark));
     }
 
     fn swapped(&mut self, event: &TapeEvent, pos_id: U256, action: SwapAction, info: SwapInfo) {
         self.in_tx.enter(event.tx_hash, self.pool_price.get());
         self.in_tx.swapped(pos_id, info.pool_price);
-        self.swaps.push(Self::arrival(
-            event,
-            Swap {
-                pos_id,
-                action,
-                info,
-            },
-        ));
+        self.swaps.push(event.arrival(Swap {
+            pos_id,
+            action,
+            info,
+        }));
         self.pool_price.set(info.pool_price);
     }
 }
@@ -274,10 +240,8 @@ impl Fold for Activity {
                 util_fees,
             } => {
                 self.swapped(event, pos_id, SwapAction::Adjusted, swap);
-                self.settlements.push(Self::arrival(
-                    event,
-                    Settlement::taker(pos_id, funding, util_fees),
-                ));
+                self.settlements
+                    .push(event.arrival(Settlement::taker(pos_id, funding, util_fees)));
             }
             MarketEvent::TakerClosed {
                 pos_id,
@@ -298,10 +262,8 @@ impl Fold for Activity {
                     );
                 }
                 self.swapped(event, pos_id, SwapAction::Closed, swap);
-                self.settlements.push(Self::arrival(
-                    event,
-                    Settlement::taker(pos_id, funding, util_fees),
-                ));
+                self.settlements
+                    .push(event.arrival(Settlement::taker(pos_id, funding, util_fees)));
             }
             MarketEvent::TakerLiquidated {
                 pos_id,
@@ -314,15 +276,13 @@ impl Fold for Activity {
                 util_fees,
                 ..
             } => {
-                self.settlements.push(Self::arrival(
-                    event,
-                    Settlement::taker(pos_id, funding, util_fees),
-                ));
+                self.settlements
+                    .push(event.arrival(Settlement::taker(pos_id, funding, util_fees)));
             }
             MarketEvent::MakerAdjusted { pos_id, settle }
             | MarketEvent::MakerBackstopped { pos_id, settle, .. } => {
                 self.settlements
-                    .push(Self::arrival(event, Settlement::maker(pos_id, settle)));
+                    .push(event.arrival(Settlement::maker(pos_id, settle)));
             }
             MarketEvent::MakerConverted {
                 pos_id,
@@ -340,7 +300,7 @@ impl Fold for Activity {
                     self.liquidated(event, pos_id, PositionRole::Maker, liquidation_fee, None);
                 }
                 self.settlements
-                    .push(Self::arrival(event, Settlement::maker(pos_id, settle)));
+                    .push(event.arrival(Settlement::maker(pos_id, settle)));
             }
             MarketEvent::MakerLiquidated {
                 pos_id,
@@ -348,7 +308,7 @@ impl Fold for Activity {
                 ..
             } => self.liquidated(event, pos_id, PositionRole::Maker, liquidation_fee, None),
             MarketEvent::IndexUpdated { index } => {
-                self.prints.push(Self::arrival(event, index));
+                self.prints.push(event.arrival(index));
                 self.index.set(index);
             }
             _ => {}

@@ -78,12 +78,12 @@ pub use fold::{
 pub use recording::{FORMAT, Manifest, Recording, TailCheck};
 pub use replay::{
     Faults, Gaps, Liquidation, PositionKind, PositionState, Positions, Replay, Settlement,
-    Silences, Swap, SwapAction, Unknowns,
+    Silences, Unknowns,
 };
 pub use scan::{ScanStats, get_logs_chunked};
 pub use tape::{
-    ChainPoint, OwnershipLog, Tape, TapeAddresses, TapeEvent, TapeSlice, latest_market_events,
-    market_events, market_tape,
+    ChainPoint, OwnershipLog, Swap, SwapAction, Tape, TapeAddresses, TapeEvent, TapeSlice,
+    latest_market_events, market_events, market_tape,
 };
 pub use transfers::{TokenTransfer, token_transfers};
 
