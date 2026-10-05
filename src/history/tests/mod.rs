@@ -20,7 +20,9 @@ use alloy::sol_types::SolEvent;
 use futures_util::TryStreamExt;
 
 use super::scan::{SharedWidths, scan_newest};
-use super::test_support::{CHAIN_ID, FakeNode, Mode, hash_of, mined_log, timestamp_of};
+use super::test_support::{
+    CHAIN_ID, FakeNode, Mode, hash_of, mined_event_log, mined_log, timestamp_of,
+};
 use super::*;
 use crate::constants::Q96;
 use crate::contracts::{IBeacon, IERC20, IPoolManagerState, Perp, SwapResult};
@@ -94,29 +96,6 @@ fn transfer_log(from: Address, to: Address, value: u64, block: u64) -> Log {
 }
 
 const PERP: Address = Address::repeat_byte(0xF0);
-
-/// A mined log carrying a typed event, as a node would return it.
-fn mined_event_log<E: SolEvent>(
-    event: &E,
-    address: Address,
-    block: u64,
-    index: u64,
-    timestamp: Option<u64>,
-) -> Log {
-    Log {
-        inner: PrimitiveLog {
-            address,
-            data: event.encode_log_data(),
-        },
-        block_hash: Some(B256::with_last_byte(1)),
-        block_number: Some(block),
-        block_timestamp: timestamp,
-        transaction_hash: Some(B256::with_last_byte(3)),
-        transaction_index: Some(0),
-        log_index: Some(index),
-        removed: false,
-    }
-}
 
 fn taker_opened(pos_id: u64) -> Perp::TakerOpened {
     Perp::TakerOpened {

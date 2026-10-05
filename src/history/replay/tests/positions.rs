@@ -120,7 +120,7 @@ fn a_taker_is_sized_by_its_swaps_and_its_liquidations_are_counted() {
             0,
             MarketEvent::TakerClosed {
                 pos_id: one,
-                swap: sized_swap(-1_000_000, price(44)),
+                swap: swap(-1_000_000, price(44), 0),
                 funding: UsdcDelta::ZERO,
                 util_fees: UsdcAtoms::ZERO,
                 liquidation_fee: UsdcAtoms::new(500),
@@ -190,15 +190,6 @@ fn a_segment_knows_what_moved_and_not_where_positions_stand() {
 #[test]
 fn positions_and_the_pool_combine_at_every_cut() {
     let tape = lifecycle();
-    let whole = genesis(&tape);
-    let segments = Replay::fold(&tape);
-    for cut in 0..=tape.len() {
-        let mut from_genesis = genesis(&tape[..cut]);
-        from_genesis.combine(Replay::fold(&tape[cut..]));
-        assert_eq!(from_genesis, whole, "genesis cut at {cut}");
-
-        let mut left = Replay::fold(&tape[..cut]);
-        left.combine(Replay::fold(&tape[cut..]));
-        assert_eq!(left, segments, "segment cut at {cut}");
-    }
+    assert_combine_law(Replay::from_genesis(Address::ZERO), &tape);
+    assert_combine_law(Replay::default(), &tape);
 }

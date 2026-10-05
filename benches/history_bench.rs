@@ -16,14 +16,14 @@ use std::env;
 use std::path::Path;
 use std::thread;
 
-use alloy::primitives::{Address, B256, Log as PrimitiveLog, U256};
+use alloy::primitives::{Address, B256, U256};
 use alloy::rpc::types::Log;
 use alloy::sol_types::SolEvent;
 use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
 use perpcity_sdk::constants::Q96;
 use perpcity_sdk::contracts::{Capacity, IBeacon, IPoolManagerState, OpenInterest, Perp};
 use perpcity_sdk::events::{MarketEvent, decode_log};
-use perpcity_sdk::history::test_support::FakeNode;
+use perpcity_sdk::history::test_support::{FakeNode, mined_event_log, timestamp_of};
 use perpcity_sdk::history::{Fold, History, Recording, Replay, TapeAddresses, TapeEvent};
 
 const PERP: Address = Address::repeat_byte(0xF0);
@@ -38,19 +38,7 @@ const EVENTS: u64 = 200_000;
 /// A mined log carrying `event`, as a node that includes block timestamps
 /// returns it.
 fn mined<E: SolEvent>(event: &E, address: Address, block: u64, index: u64) -> Log {
-    Log {
-        inner: PrimitiveLog {
-            address,
-            data: event.encode_log_data(),
-        },
-        block_hash: Some(B256::with_last_byte(1)),
-        block_number: Some(block),
-        block_timestamp: Some(1_700_000_000 + block / 4),
-        transaction_hash: Some(B256::with_last_byte(3)),
-        transaction_index: Some(0),
-        log_index: Some(index),
-        removed: false,
-    }
+    mined_event_log(event, address, block, index, Some(timestamp_of(block)))
 }
 
 /// A market's life in miniature, `EVENTS` logs across three addresses: a

@@ -34,11 +34,7 @@ fn a_liquidation_is_one_arrival_with_the_prices_around_it() {
     assert_eq!(market.settlements().len(), 1);
     assert_eq!(market.prints().len(), 1);
 
-    for cut in 0..=tape.len() {
-        let mut left = genesis(&tape[..cut]);
-        left.combine(Replay::fold(&tape[cut..]));
-        assert_eq!(left, market, "cut at {cut}");
-    }
+    assert_combine_law(Replay::from_genesis(Address::ZERO), &tape);
 }
 
 /// The other build's shape: the close says nothing of a liquidation
@@ -71,11 +67,7 @@ fn a_liquidation_said_only_by_the_dedicated_event_is_the_same_record() {
         "the prices around the transaction, not around the event"
     );
 
-    for cut in 0..=tape.len() {
-        let mut left = genesis(&tape[..cut]);
-        left.combine(Replay::fold(&tape[cut..]));
-        assert_eq!(left, market, "cut at {cut}");
-    }
+    assert_combine_law(Replay::from_genesis(Address::ZERO), &tape);
 }
 
 /// The series keep what the contract stated, and a window of it.

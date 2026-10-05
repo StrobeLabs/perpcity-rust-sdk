@@ -87,6 +87,10 @@ harness = false
 name = "transport_bench"
 harness = false
 
+[[test]]
+name = "replay_properties"
+required-features = ["test-utils"]
+
 [[bench]]
 name = "history_bench"
 harness = false

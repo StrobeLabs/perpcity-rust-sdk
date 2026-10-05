@@ -11,28 +11,17 @@ use alloy::primitives::{B256, I256, U256};
 use super::seed::{Seed, SeedPosition};
 use super::*;
 use crate::client::{MarketRates, PositionRole};
-use crate::constants::Q96;
 use crate::contracts::Modules as ContractModules;
-use crate::events::{MakerSettle, MarketEvent, SwapInfo};
+use crate::events::MarketEvent;
 use crate::history::fold::{Change, Window};
+use crate::history::test_support::tape::{
+    assert_combine_law, modify, per_side, price, row, settle, swap,
+};
 use crate::math::pricing::calculate_emas;
 use crate::math::range::{MakerBand, TickRange};
 use crate::units::{
     Earnings, Funding, FundingPerSqrtPrice, LDelta, PerpAtoms, PerpDelta, UsdcAtoms, UsdcDelta,
 };
-
-/// A row in `block`; the fixtures put one transaction in each block, so
-/// the transaction is the block's.
-fn row(block: u64, log_index: u64, event: MarketEvent) -> TapeEvent {
-    TapeEvent {
-        block_number: block,
-        block_hash: B256::with_last_byte(block as u8),
-        log_index,
-        timestamp: 1_700_000_000 + block * 10,
-        tx_hash: B256::repeat_byte(block as u8),
-        event,
-    }
-}
 
 /// The fixture tape folded as a market from its genesis.
 fn genesis(tape: &[TapeEvent]) -> Replay {
@@ -49,27 +38,6 @@ fn block_of(row: &TapeEvent) -> BlockContext {
         hash: row.block_hash,
         timestamp: row.timestamp,
     }
-}
-
-fn price(units: u64) -> Price {
-    Price::from_x96(Q96 * U256::from(units))
-}
-
-fn swap(pool_price: Price, insurance_fee: u128) -> SwapInfo {
-    SwapInfo {
-        perp_delta: PerpDelta::new(1_000_000),
-        usd_delta: UsdcDelta::new(-40_000_000),
-        pool_price,
-        total_fee: UsdcDelta::new(100_000),
-        lp_fee: UsdcAtoms::new(70_000),
-        protocol_fee: UsdcAtoms::new(10_000),
-        creator_fee: UsdcAtoms::new(10_000),
-        insurance_fee: UsdcAtoms::new(insurance_fee),
-    }
-}
-
-fn per_side(long: u128, short: u128) -> PerSide<PerpAtoms> {
-    PerSide::new(PerpAtoms::new(long), PerpAtoms::new(short))
 }
 
 /// A market's first stretch: a touch, a print, capacity, a maker's
@@ -112,7 +80,7 @@ fn tape() -> Vec<TapeEvent> {
             0,
             MarketEvent::TakerOpened {
                 pos_id: U256::from(2),
-                swap: swap(price(43), 10_000),
+                swap: swap(1_000_000, price(43), 10_000),
             },
         ),
         row(
@@ -158,32 +126,6 @@ fn tape() -> Vec<TapeEvent> {
     ]
 }
 
-fn settle() -> MakerSettle {
-    MakerSettle {
-        funding: UsdcDelta::new(1_000),
-        util_fees: PerSide::new(UsdcAtoms::new(10), UsdcAtoms::new(20)),
-        lp_fees: UsdcAtoms::new(30),
-    }
-}
-
-fn sized_swap(perp_delta: i128, pool_price: Price) -> SwapInfo {
-    SwapInfo {
-        perp_delta: PerpDelta::new(perp_delta),
-        ..swap(pool_price, 0)
-    }
-}
-
-fn modify(pos: u64, lower: i32, upper: i32, delta: i128) -> MarketEvent {
-    MarketEvent::ModifyLiquidity {
-        pool_id: B256::with_last_byte(7),
-        sender: Address::ZERO,
-        tick_lower: lower,
-        tick_upper: upper,
-        liquidity_delta: LDelta::new(delta),
-        salt: B256::from(U256::from(pos)),
-    }
-}
-
 /// Two positions' lives: taker 1 opens, adds, is liquidated in part and
 /// then whole; maker 2 deposits a band, trims it, and is converted when
 /// the rest is pulled, then closes as the taker it became.
@@ -194,7 +136,7 @@ fn lifecycle() -> Vec<TapeEvent> {
             0,
             MarketEvent::TakerOpened {
                 pos_id: U256::from(1),
-                swap: sized_swap(1_000_000, price(43)),
+                swap: swap(1_000_000, price(43), 0),
             },
         ),
         row(21, 0, modify(2, -600, 600, 1_000)),
@@ -219,7 +161,7 @@ fn lifecycle() -> Vec<TapeEvent> {
             1,
             MarketEvent::TakerAdjusted {
                 pos_id: U256::from(1),
-                swap: sized_swap(500_000, price(44)),
+                swap: swap(500_000, price(44), 0),
                 funding: UsdcDelta::ZERO,
                 util_fees: UsdcAtoms::ZERO,
             },
@@ -238,7 +180,7 @@ fn lifecycle() -> Vec<TapeEvent> {
             0,
             MarketEvent::TakerAdjusted {
                 pos_id: U256::from(1),
-                swap: sized_swap(-300_000, price(44)),
+                swap: swap(-300_000, price(44), 0),
                 funding: UsdcDelta::ZERO,
                 util_fees: UsdcAtoms::ZERO,
             },
@@ -268,7 +210,7 @@ fn lifecycle() -> Vec<TapeEvent> {
             0,
             MarketEvent::TakerClosed {
                 pos_id: U256::from(2),
-                swap: sized_swap(-700, price(45)),
+                swap: swap(-700, price(45), 0),
                 funding: UsdcDelta::ZERO,
                 util_fees: UsdcAtoms::ZERO,
                 liquidation_fee: UsdcAtoms::ZERO,
@@ -280,7 +222,7 @@ fn lifecycle() -> Vec<TapeEvent> {
             1,
             MarketEvent::TakerClosed {
                 pos_id: U256::from(1),
-                swap: sized_swap(-1_200_000, price(45)),
+                swap: swap(-1_200_000, price(45), 0),
                 funding: UsdcDelta::ZERO,
                 util_fees: UsdcAtoms::ZERO,
                 liquidation_fee: UsdcAtoms::ZERO,
@@ -386,7 +328,7 @@ fn liquidation_tape() -> Vec<TapeEvent> {
             0,
             MarketEvent::TakerOpened {
                 pos_id: U256::from(1),
-                swap: sized_swap(1_000_000, price(43)),
+                swap: swap(1_000_000, price(43), 0),
             },
         ),
         row(
@@ -394,7 +336,7 @@ fn liquidation_tape() -> Vec<TapeEvent> {
             0,
             MarketEvent::TakerClosed {
                 pos_id: U256::from(1),
-                swap: sized_swap(-1_000_000, price(40)),
+                swap: swap(-1_000_000, price(40), 0),
                 funding: UsdcDelta::ZERO,
                 util_fees: UsdcAtoms::ZERO,
                 liquidation_fee: UsdcAtoms::new(5_000),

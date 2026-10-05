@@ -104,7 +104,7 @@ fn silences_are_counted_until_the_next_statement() {
         0,
         MarketEvent::TakerOpened {
             pos_id: U256::from(3),
-            swap: swap(price(44), 10_000),
+            swap: swap(1_000_000, price(44), 10_000),
         },
     ));
     let market = genesis(&tape);
@@ -173,7 +173,7 @@ fn silences_are_counted_until_the_next_statement() {
         0,
         MarketEvent::TakerOpened {
             pos_id: U256::from(4),
-            swap: swap(price(45), 10_000),
+            swap: swap(1_000_000, price(45), 10_000),
         },
     ));
     assert_eq!(genesis(&clear).gaps().silences.bad_debt_unemitted, 0);
@@ -199,7 +199,7 @@ fn the_fold_of_a_concatenation_is_the_combination_of_the_folds() {
         0,
         MarketEvent::TakerOpened {
             pos_id: U256::from(3),
-            swap: swap(price(44), 10_000),
+            swap: swap(1_000_000, price(44), 10_000),
         },
     ));
     tape.push(row(
@@ -211,12 +211,7 @@ fn the_fold_of_a_concatenation_is_the_combination_of_the_folds() {
             pos_id: U256::from(1),
         },
     ));
-    let whole = Replay::fold(&tape);
-    for cut in 0..=tape.len() {
-        let mut left = Replay::fold(&tape[..cut]);
-        left.combine(Replay::fold(&tape[cut..]));
-        assert_eq!(left, whole, "cut at {cut}");
-    }
+    assert_combine_law(Replay::default(), &tape);
 }
 
 /// From genesis the books, capacity and open interest are zero and
@@ -275,18 +270,7 @@ fn genesis_states_the_zeros_and_leaves_the_creation_log_unknown() {
     );
 
     // Genesis then a segment is genesis over the whole.
-    for cut in 0..=tape.len() {
-        let mut left = Replay::from_genesis(perp);
-        for row in &tape[..cut] {
-            left.apply(row);
-        }
-        left.combine(Replay::fold(&tape[cut..]));
-        let mut whole = Replay::from_genesis(perp);
-        for row in &tape {
-            whole.apply(row);
-        }
-        assert_eq!(left, whole, "cut at {cut}");
-    }
+    assert_combine_law(Replay::from_genesis(perp), &tape);
 }
 
 fn with_tx(mut row: TapeEvent, tx: u8) -> TapeEvent {
@@ -318,7 +302,7 @@ fn swap_fees_leave_the_margin_total_as_the_build_orders_them() {
                     1,
                     MarketEvent::TakerOpened {
                         pos_id: U256::from(1),
-                        swap: swap(price(40), 10_000),
+                        swap: swap(1_000_000, price(40), 10_000),
                     },
                 ),
                 tx,
@@ -349,7 +333,7 @@ fn swap_fees_leave_the_margin_total_as_the_build_orders_them() {
                     1,
                     MarketEvent::TakerAdjusted {
                         pos_id: U256::from(1),
-                        swap: swap(price(41), 10_000),
+                        swap: swap(1_000_000, price(41), 10_000),
                         funding: UsdcDelta::new(0),
                         util_fees: UsdcAtoms::ZERO,
                     },
@@ -380,11 +364,7 @@ fn swap_fees_leave_the_margin_total_as_the_build_orders_them() {
         // A cut between the transfer and the swap leaves the transfer in
         // one segment and the swap in the other, and the fees it would
         // remove on its own are the ones the statement already had out.
-        for cut in 0..=with_withdrawal.len() {
-            let mut left = genesis(&with_withdrawal[..cut]);
-            left.combine(Replay::fold(&with_withdrawal[cut..]));
-            assert_eq!(left, whole, "delta {delta}, cut at {cut}");
-        }
+        assert_combine_law(Replay::from_genesis(Address::ZERO), &with_withdrawal);
     }
 
     // A liquidation closes before it transfers the fee, so the fees
@@ -397,7 +377,7 @@ fn swap_fees_leave_the_margin_total_as_the_build_orders_them() {
                 0,
                 MarketEvent::TakerClosed {
                     pos_id: U256::from(1),
-                    swap: swap(price(42), 10_000),
+                    swap: swap(1_000_000, price(42), 10_000),
                     funding: UsdcDelta::new(0),
                     util_fees: UsdcAtoms::ZERO,
                     liquidation_fee: UsdcAtoms::ZERO,
