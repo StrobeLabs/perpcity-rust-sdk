@@ -96,22 +96,14 @@ async fn latest_prints_read_back_only_as_far_as_the_limit_needs() {
 }
 
 #[tokio::test]
-async fn a_zero_limit_or_zero_beacon_reads_nothing() {
+async fn a_zero_limit_reads_nothing_without_a_request() {
     let node = FakeNode::new(vec![print_log(1, 0, Q96, Some(1))], u64::MAX);
-    let provider = node.provider();
     assert!(
-        latest_beacon_prints(&provider, BEACON, 0, 10, 0)
+        latest_beacon_prints(&node.provider(), BEACON, 0, 10, 0)
             .await
             .unwrap()
             .is_empty()
     );
-    let error = beacon_prints(&provider, Address::ZERO, 0, 10)
-        .await
-        .unwrap_err();
-    assert!(matches!(
-        error,
-        PerpCityError::Validation(ValidationError::InvalidConfig { .. })
-    ));
     assert!(node.requests().is_empty());
 }
 

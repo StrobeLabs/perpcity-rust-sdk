@@ -219,31 +219,3 @@ async fn the_market_tape_reads_three_addresses_in_one_chain_order() {
         "one header read, shared by both scans"
     );
 }
-
-#[tokio::test]
-async fn a_tape_with_a_zero_address_reads_nothing() {
-    let node = FakeNode::new(Vec::new(), u64::MAX);
-    let mut addresses = addresses();
-    addresses.pool_manager = Address::ZERO;
-    let error = market_tape(&node.provider(), addresses, 0, 10)
-        .await
-        .unwrap_err();
-    assert!(matches!(
-        error,
-        PerpCityError::Validation(ValidationError::InvalidConfig { .. })
-    ));
-    assert!(node.requests().is_empty());
-}
-
-#[tokio::test]
-async fn a_zero_perp_reads_no_tape() {
-    let node = FakeNode::new(Vec::new(), u64::MAX);
-    let error = market_events(&node.provider(), Address::ZERO, 0, 10)
-        .await
-        .unwrap_err();
-    assert!(matches!(
-        error,
-        PerpCityError::Validation(ValidationError::InvalidConfig { .. })
-    ));
-    assert!(node.requests().is_empty());
-}

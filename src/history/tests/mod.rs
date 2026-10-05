@@ -5,6 +5,7 @@
 mod beacon;
 mod handle;
 mod recording;
+mod refusals;
 mod scan;
 mod tape;
 mod transfers;

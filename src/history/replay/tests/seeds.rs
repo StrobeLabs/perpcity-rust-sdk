@@ -111,10 +111,8 @@ fn an_event_at_or_before_the_folds_point_is_refused_and_counted() {
     assert_eq!(market.applied(), before.applied() + 1);
 
     // A seed stands at the end of its block.
-    let prefix = genesis(&tape[..3]);
     let mut seeded =
         Replay::from_seed(seed_of(&genesis(&whole_market()[..16]), block_of(&tape[2]))).unwrap();
-    let _ = prefix;
     seeded.apply(&tape[2]);
     assert_eq!(
         seeded.gaps().faults.refused,
