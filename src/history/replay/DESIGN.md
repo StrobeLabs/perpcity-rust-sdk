@@ -1,9 +1,11 @@
 # `history/replay`: a market rebuilt from its events
 
-Up: [`history`](../DESIGN.md), for the tape this folds and the `Fold`
-contract it implements. Sideways: [`client`](../../client/DESIGN.md) for
-the reads it is compared against, [`events`](../../events/DESIGN.md) for
-the vocabulary.
+Up: [`history`](../DESIGN.md), for the scan `catch_up` runs through.
+Sideways: [history/tape](../tape/DESIGN.md) for the rows this folds;
+[history/fold](../fold/DESIGN.md) for the contract it implements, the
+shapes it is built from and the series it keeps its history in;
+[`client`](../../client/DESIGN.md) for the reads it is compared against;
+[`events`](../../events/DESIGN.md) for the vocabulary.
 
 ## Purpose
 
@@ -29,16 +31,16 @@ the fold met mid-life knows what moved and not where it stands, and says
 so. A consumer gates on the counts, and the counts say which lever cures
 each: the cutover, a seed, or the tape.
 
-**The state is a monoid.** Every field is a latest-wins total, a sum, or
-a first occurrence, so the fold of a tape cut at any block boundary equals
-the merge of the folds of its pieces. That is what makes a prefix a
-checkpoint, lets a seed and a tail meet in one value, and lets segments
+**The state is a monoid.** Every field is one of the shapes the
+[fold node](../fold/DESIGN.md) names, so the fold of a tape cut anywhere
+equals the merge of the folds of its pieces. That is what makes a prefix
+a checkpoint, lets a seed and a tail meet in one value, and lets segments
 fold on separate cores when a tape is long enough to want it.
 
 ## The mental model
 
 Three pictures: where the events come from and where the answers go; what
-the fold is made of; and the algebra that lets pieces of it meet.
+the fold is made of; and the three places a fold can start.
 
 ### One fold, every tense
 
@@ -105,38 +107,23 @@ itself is a struct of folds whose `apply` and `combine` are nine lines
 each, and `Sequenced` is the chain-order guard any fold a driver feeds
 directly can wear.
 
-### The algebra
+### Three starts
 
 ```text
-   a tape, cut only between blocks
-
-   ├──── segment a ────┤├──── segment b ────┤├──── segment c ────┤
-         fold(a)              fold(b)              fold(c)          on three cores, or on three days
-            └──── combine ───────┘                    │
-                        └─────────── combine ─────────┘
-                                     ‖
-                              fold(a ++ b ++ c)
-
-   the shapes, each one line of combine
-     Latest<T>     later wins                            a total the contract emits whole
-     First<T>      earlier wins                          an open, a range, a deposit price
-     Stated<T, S>  later statement replaces both;        a stated total and what accrued since
-                   otherwise the accruals add
-     sums          add                                   liquidity per tick, size moved, counters
-
    three starts, three left operands
      from_genesis(perp)      zeros stated, tick map whole, modules unknown      ─┐
      seeded(&StateAt)        the reads at block B, standing at the end of B     ─┼─► apply · combine · catch_up
      Fold::fold(segment)     what moved, nothing of where anything stands        ─┘
 ```
 
-The law is `fold(a ++ b) == combine(fold(a), fold(b))` at any cut between
-blocks, and it holds because every field has one of the four shapes. The
-hand-written merges that remain are two, each because a value depends on
-more than its own field: a position's kind, which a swap or a conversion
-changes, and a maker's deposit price, which is the pool price at the open
-and so is known to the segment that held the price, not the one that saw
-the open.
+The law the [fold node](../fold/DESIGN.md) states holds here because
+every field has one of its shapes. The hand-written merges that remain
+are three, each because a value depends on more than its own field: a
+position's kind, which a swap or a conversion changes; a maker's deposit
+price, which is the pool price at the open and so is known to the segment
+that held the price, not the one that saw the open; and a liquidation's
+record, which a cut inside its transaction splits between the segment
+that saw the close and the one that saw the dedicated event.
 
 A start is a left operand. `from_genesis` is the market before its first
 event; a `seeded` fold is the reads at a block, every total stated and
@@ -201,7 +188,7 @@ matches is the other, and at these throughputs neither is measurable.
 |---|---|---|---|
 | [`Replay`](mod.rs#L136) | the market as its events describe it, in the reads' types, with the history of each figure kept as a series or as arrivals; every field combines across segments, the series by appending; an event at or before the fold's point is refused, never applied | [`Replay::from_genesis`](mod.rs#L218), [`Replay::seeded`](mod.rs#L247) from a [`StateAt`](../../client/DESIGN.md), or the trait's `fold`; `Replay::retaining` sets the `Retention`; then `apply` or `Replay::catch_up` | nothing in the crate; `Replay::deposited`, what bad debt is set against, is the one bare sum. The strategy layer's monitor, live cache and research folds, each driving it from a different source. |
 | [`Positions`](positions.rs#L367), [`PositionState`](positions.rs#L109), [`PositionKind`](positions.rs#L22) | every position the tape mentioned: a taker's size as the sum of its swaps, a maker's band as its first range and the sum of its liquidity changes, the margin a read supplied until an event touches it. A position met mid-life, or a kind the tape never named, is `Unknown` or unsized rather than guessed, so segments merge into the whole | folded inside `Replay`; read through [`Replay::positions`](mod.rs#L466) and `Replay::position` | the strategy layer's live cache, whose own position fold this replaces, and its economics folds. A `MakerBand` here and one read from chain compare with `==`. |
-| [`Liquidation`](activity.rs#L44), [`Swap`](activity.rs#L33), [`SwapAction`](activity.rs#L22), [`Settlement`](activity.rs#L64) | the marks on the market's arrivals. A liquidation is one record per position per liquidating transaction, whichever build's events carried it, with the pool price before and after and the index then; a cut inside the transaction or before the first price is repaired at `combine`, as the fold of both segments would have recorded it. A swap is the event's own settlement; a settlement is what a position paid or earned when touched | the activity fold inside `Replay`, read through `Replay::swaps`, `Replay::liquidations`, `Replay::settlements` | the readings over arrivals in the strategy layer: intensity, a cascade's run, a sweep. |
+| [`Liquidation`](activity.rs#L43), [`Swap`](activity.rs#L32), [`SwapAction`](activity.rs#L21), [`Settlement`](activity.rs#L63) | the marks on the market's arrivals. A liquidation is one record per position per liquidating transaction, whichever build's events carried it, with the pool price before and after and the index then; a cut inside the transaction or before the first price is repaired at `combine`, as the fold of both segments would have recorded it. A swap is the event's own settlement; a settlement is what a position paid or earned when touched | the activity fold inside `Replay`, read through `Replay::swaps`, `Replay::liquidations`, `Replay::settlements` | the readings over arrivals in the strategy layer: intensity, a cascade's run, a sweep. |
 | [`Gaps`](mod.rs#L56), [`Silences`](mod.rs#L70), [`Unknowns`](mod.rs#L86), [`Faults`](mod.rs#L101) | what the fold does not know, in three kinds with three cures: what the contract moved silently, cured by the cutover; what the fold's start did not supply, cured by a seed; what the driver did wrong, cured by `catch_up`. Decided at the read from the latest totals, so the counts combine like the rest | [`Replay::gaps`](mod.rs#L499) | nothing in the crate: the strategy layer's gate, one alarm per part. A reading with a nonzero gap is forensic, not a decision's input. |
 
 ## Accepted structure
