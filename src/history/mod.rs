@@ -61,6 +61,7 @@ mod fold;
 mod recording;
 mod replay;
 pub(crate) mod scan;
+mod series;
 mod tape;
 mod transfers;
 
@@ -74,9 +75,11 @@ pub use beacon::{IndexPrint, beacon_prints, latest_beacon_prints};
 pub use fold::{First, Fold, Latest, Sequenced, Stated};
 pub use recording::{FORMAT, Manifest, Recording, TailCheck};
 pub use replay::{
-    Faults, Gaps, PositionKind, PositionState, Positions, Replay, Silences, Unknowns,
+    Faults, Gaps, Liquidation, PositionKind, PositionState, Positions, Replay, Settlement,
+    Silences, Swap, SwapAction, Unknowns,
 };
 pub use scan::{ScanStats, get_logs_chunked};
+pub use series::{Arrival, Arrivals, Change, Reading, Retention, Sample, Series, Span, Window};
 pub use tape::{
     ChainPoint, OwnershipLog, TapeAddresses, TapeEvent, latest_market_events, market_events,
     market_tape,

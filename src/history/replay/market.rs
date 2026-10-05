@@ -14,25 +14,33 @@ use crate::math::pricing::{Emas, Mark};
 use crate::units::{FundingRate, PerSide, Price, UtilizationRate};
 
 use super::super::fold::{Fold, Latest};
+use super::super::series::{Retention, Sample, Series};
 use super::super::tape::TapeEvent;
 
-/// What the contract marks from: the pool price after the last swap, the
-/// beacon's last print, and the stored EMAs as the last touch left them.
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
+/// What the contract marks from: the pool price after each swap, the
+/// beacon's prints, and the stored EMAs as the last touch left them. The
+/// two prices are kept as series, since what they were is asked as often
+/// as what they are.
+#[derive(Debug, Clone, Default, PartialEq)]
 pub(super) struct Prices {
-    pub(super) pool: Latest<Price>,
-    pub(super) index: Latest<Price>,
+    pub(super) pool: Series<Price>,
+    pub(super) index: Series<Price>,
     pub(super) emas: Latest<Emas>,
 }
 
 impl Prices {
     /// As a read supplied them at one block.
-    pub(super) fn seeded(pool: Price, index: Price, emas: Emas) -> Self {
+    pub(super) fn seeded(at: Sample<()>, pool: Price, index: Price, emas: Emas) -> Self {
         Self {
-            pool: Latest::stated(pool),
-            index: Latest::stated(index),
+            pool: Series::stated(at.with(pool)),
+            index: Series::stated(at.with(index)),
             emas: Latest::stated(emas),
         }
+    }
+
+    pub(super) fn retain(&mut self, retention: Retention) {
+        self.pool.retain(retention);
+        self.index.retain(retention);
     }
 
     /// The mark at `block`, with the EMAs advanced to its timestamp over
@@ -43,7 +51,7 @@ impl Prices {
         ema_window: u64,
     ) -> Result<Option<Mark>, ValidationError> {
         let (Some(pool), Some(index), Some(emas)) =
-            (self.pool.get(), self.index.get(), self.emas.get())
+            (self.pool.value(), self.index.value(), self.emas.get())
         else {
             return Ok(None);
         };
@@ -64,8 +72,12 @@ impl Fold for Prices {
         match event.event {
             MarketEvent::TakerOpened { swap, .. }
             | MarketEvent::TakerAdjusted { swap, .. }
-            | MarketEvent::TakerClosed { swap, .. } => self.pool.set(swap.pool_price),
-            MarketEvent::IndexUpdated { index } => self.index.set(index),
+            | MarketEvent::TakerClosed { swap, .. } => {
+                self.pool.push(event.sample(swap.pool_price));
+            }
+            MarketEvent::IndexUpdated { index } => {
+                self.index.push(event.sample(index));
+            }
             MarketEvent::RatesAndEmasRefreshed {
                 last_touch,
                 pool_price_ema,
@@ -132,35 +144,40 @@ impl Fold for Rates {
 
 /// Capacity and the open interest drawn on it, both totals the contract
 /// emits whole and both zero before a market's first event.
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub(super) struct Utilization {
-    pub(super) capacity: Latest<Capacity>,
-    pub(super) open_interest: Latest<OpenInterest>,
+    pub(super) capacity: Series<Capacity>,
+    pub(super) open_interest: Series<OpenInterest>,
 }
 
 impl Utilization {
     /// Before the first event: nothing supplied, nothing drawn.
     pub(super) fn genesis() -> Self {
         Self {
-            capacity: Latest::stated(PerSide::default()),
-            open_interest: Latest::stated(PerSide::default()),
+            capacity: Series::stated(Sample::origin(PerSide::default())),
+            open_interest: Series::stated(Sample::origin(PerSide::default())),
         }
     }
 
     /// As a read supplied them at one block.
-    pub(super) fn seeded(read: MarketCapacity) -> Self {
+    pub(super) fn seeded(at: Sample<()>, read: MarketCapacity) -> Self {
         Self {
-            capacity: Latest::stated(read.capacity),
-            open_interest: Latest::stated(read.open_interest),
+            capacity: Series::stated(at.with(read.capacity)),
+            open_interest: Series::stated(at.with(read.open_interest)),
         }
+    }
+
+    pub(super) fn retain(&mut self, retention: Retention) {
+        self.capacity.retain(retention);
+        self.open_interest.retain(retention);
     }
 
     /// Both at `block`, as the capacity read returns them.
     pub(super) fn at(&self, block: BlockContext) -> Option<MarketCapacity> {
         Some(MarketCapacity {
             block,
-            capacity: self.capacity.get()?,
-            open_interest: self.open_interest.get()?,
+            capacity: self.capacity.value()?,
+            open_interest: self.open_interest.value()?,
         })
     }
 }
@@ -168,9 +185,11 @@ impl Utilization {
 impl Fold for Utilization {
     fn apply(&mut self, event: &TapeEvent) {
         match event.event {
-            MarketEvent::CapacityUpdated { capacity } => self.capacity.set(capacity),
+            MarketEvent::CapacityUpdated { capacity } => {
+                self.capacity.push(event.sample(capacity));
+            }
             MarketEvent::OpenInterestUpdated { open_interest } => {
-                self.open_interest.set(open_interest);
+                self.open_interest.push(event.sample(open_interest));
             }
             _ => {}
         }

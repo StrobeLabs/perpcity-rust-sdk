@@ -43,6 +43,7 @@ use futures_util::TryStreamExt;
 
 use super::fold::Fold;
 use super::scan::{SharedWidths, block_timestamps, check_block_range, scan_all, scan_newest};
+use super::series::Sample;
 
 /// A position in the chain's total order: a block, then a log's index
 /// within it.
@@ -82,6 +83,15 @@ impl TapeEvent {
         ChainPoint {
             block: self.block_number,
             log_index: self.log_index,
+        }
+    }
+
+    /// `value` as a sample at this event's point and time.
+    pub fn sample<T>(&self, value: T) -> Sample<T> {
+        Sample {
+            point: self.point(),
+            timestamp: self.timestamp,
+            value,
         }
     }
 

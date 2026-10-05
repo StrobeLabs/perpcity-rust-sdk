@@ -19,6 +19,7 @@ use crate::events::MarketEvent;
 use crate::units::UsdcAtoms;
 
 use super::super::fold::{Fold, Latest, Stated};
+use super::super::series::{Retention, Sample, Series};
 use super::super::tape::TapeEvent;
 use super::Silences;
 
@@ -41,7 +42,13 @@ impl AddAssign for MarginSince {
 
 /// The margin total and the bad debt, folded from the events that state
 /// them and the swaps that move them silently.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+///
+/// The two totals are also kept as series of what the contract stated,
+/// statement by statement: the margin total at each `MarginTransferred`,
+/// the bad debt at each booking, socialization or donation. Those are the
+/// contract's own levels, so they append across segments; the fees a swap
+/// removes silently are tracked beside them, not in them.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(super) struct Solvency {
     margin: Stated<UsdcAtoms, MarginSince>,
     /// Swaps that paid an insurance fee since the debt was last stated;
@@ -50,21 +57,41 @@ pub(super) struct Solvency {
     /// The `MarginTransferred` of the current transaction, if one has been
     /// seen: its transaction and whether it withdrew or moved nothing.
     transfer_in_tx: Latest<(B256, bool)>,
+    /// The margin total as each `MarginTransferred` stated it.
+    pub(super) margin_stated: Series<UsdcAtoms>,
+    /// The bad debt as each event stated it.
+    pub(super) debt_stated: Series<UsdcAtoms>,
+    /// USDC that entered as margin since the fold's start: every positive
+    /// `MarginTransferred` delta, summed. What bad debt is set against.
+    pub(super) deposited: UsdcAtoms,
 }
 
 impl Solvency {
     /// Before the first event: no margin, no debt, both stated.
     pub(super) fn genesis() -> Self {
-        Self::seeded(SolvencyState::default())
+        Self::seeded(Sample::origin(()), SolvencyState::default())
     }
 
     /// As a read returned the books at one block.
-    pub(super) fn seeded(read: SolvencyState) -> Self {
+    pub(super) fn seeded(at: Sample<()>, read: SolvencyState) -> Self {
         Self {
             margin: Stated::with(read.total_margin),
             debt: Stated::with(read.bad_debt),
             transfer_in_tx: Latest::default(),
+            margin_stated: Series::stated(at.with(read.total_margin)),
+            debt_stated: Series::stated(at.with(read.bad_debt)),
+            deposited: UsdcAtoms::new(0),
         }
+    }
+
+    pub(super) fn retain(&mut self, retention: Retention) {
+        self.margin_stated.retain(retention);
+        self.debt_stated.retain(retention);
+    }
+
+    fn debt_restated(&mut self, event: &TapeEvent, debt: UsdcAtoms) {
+        self.debt.state(debt);
+        self.debt_stated.push(event.sample(debt));
     }
 
     /// The books: the debt as last stated, the margin total as last stated
@@ -132,18 +159,24 @@ impl Fold for Solvency {
                 margin_delta,
             } => {
                 self.margin.state(total_margin);
+                self.margin_stated.push(event.sample(total_margin));
+                if !margin_delta.is_negative() {
+                    self.deposited += margin_delta.magnitude();
+                }
                 let nonpositive = margin_delta.is_negative() || margin_delta.is_zero();
                 self.transfer_in_tx.set((event.tx_hash, nonpositive));
             }
             MarketEvent::BadDebtAccounted { bad_debt_after, .. } => {
-                self.debt.state(bad_debt_after);
+                self.debt_restated(event, bad_debt_after);
                 // The insurance it consumed was added to the margin total,
                 // and nothing says how much.
                 self.margin.since.unemitted += 1;
             }
-            MarketEvent::LossSocialized { bad_debt_after, .. } => self.debt.state(bad_debt_after),
+            MarketEvent::LossSocialized { bad_debt_after, .. } => {
+                self.debt_restated(event, bad_debt_after);
+            }
             MarketEvent::Donated { bad_debt, .. } => {
-                self.debt.state(bad_debt);
+                self.debt_restated(event, bad_debt);
                 // The debt it repaid was added to the margin total, and
                 // nothing says how much.
                 self.margin.since.unemitted += 1;
@@ -156,5 +189,8 @@ impl Fold for Solvency {
         self.margin.combine(later.margin);
         self.debt.combine(later.debt);
         self.transfer_in_tx.combine(later.transfer_in_tx);
+        self.margin_stated.combine(later.margin_stated);
+        self.debt_stated.combine(later.debt_stated);
+        self.deposited += later.deposited;
     }
 }

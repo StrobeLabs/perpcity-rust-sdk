@@ -2,6 +2,7 @@
 
 use alloy::primitives::{Address, Bytes, U256};
 use alloy::sol_types::SolCall;
+use serde::{Deserialize, Serialize};
 
 use crate::contracts::{Perp, PerpV022};
 use crate::convert::unpack_balance_delta;
@@ -179,11 +180,13 @@ impl MarketReader {
     }
 }
 
-/// The role, maker or taker, of the position a liquidation targets. The
-/// two contract entry points are twins; only the encoded call differs.
-#[derive(Debug, Clone, Copy)]
-pub(super) enum PositionRole {
+/// The role a position plays, maker or taker. The two liquidation entry
+/// points are twins keyed on it; only the encoded call differs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum PositionRole {
+    /// A band of liquidity in the pool.
     Maker,
+    /// A directional position against the pool.
     Taker,
 }
 

@@ -104,6 +104,12 @@ impl<F: Fold> Sequenced<F> {
         &self.inner
     }
 
+    /// The fold behind the guard, to set what is not an event: a retention,
+    /// a configuration. Events go through [`accept`](Self::accept).
+    pub(crate) fn inner_mut(&mut self) -> &mut F {
+        &mut self.inner
+    }
+
     /// The fold behind the guard, the guard dropped.
     pub fn into_inner(self) -> F {
         self.inner
