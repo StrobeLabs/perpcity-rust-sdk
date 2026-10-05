@@ -226,14 +226,15 @@ impl Tape {
     }
 }
 
-/// Rows in any order, with repeats: sorted into chain order, the first row
-/// at a point kept, then checked as [`Tape::new`] checks. The collect for
+/// Rows in any order, with repeats: sorted into chain order, exact repeats
+/// dropped, then checked as [`Tape::new`] checks, so two different rows at
+/// one point are refused rather than one of them chosen. The collect for
 /// rows gathered from several scans or a feed replayed twice.
 impl FromIterator<TapeEvent> for StdResult<Tape, ValidationError> {
     fn from_iter<I: IntoIterator<Item = TapeEvent>>(rows: I) -> Self {
         let mut rows: Vec<TapeEvent> = rows.into_iter().collect();
         rows.sort_by_key(TapeEvent::point);
-        rows.dedup_by_key(|row| row.point());
+        rows.dedup();
         Tape::new(rows)
     }
 }
@@ -241,7 +242,9 @@ impl FromIterator<TapeEvent> for StdResult<Tape, ValidationError> {
 /// Whether `row` may follow `before` in a tape.
 fn follows(before: &TapeEvent, row: &TapeEvent) -> StdResult<(), ValidationError> {
     let same_block = row.block_number == before.block_number;
-    let reason = if row.point() <= before.point() {
+    let reason = if row.point() == before.point() {
+        Some("a second row at its point")
+    } else if row.point() < before.point() {
         Some("not after the row before it")
     } else if same_block && row.block_hash != before.block_hash {
         Some("a second hash for its block")
@@ -397,7 +400,7 @@ mod tests {
         );
         assert_eq!(
             refused(vec![print(1, 1), print(1, 1)]),
-            (1, 1, "not after the row before it")
+            (1, 1, "a second row at its point")
         );
         let mut other_hash = print(1, 1);
         other_hash.block_hash = B256::repeat_byte(0xEE);
@@ -447,6 +450,20 @@ mod tests {
         let shuffled = [rows[2], rows[0], rows[3], rows[1], rows[0], rows[2]];
         let collected: StdResult<Tape, ValidationError> = shuffled.into_iter().collect();
         assert_eq!(collected.unwrap(), tape, "sorted, the repeats dropped");
+
+        // Two different rows at one point are a conflict, not a repeat.
+        let mut other_event = print(3, 0);
+        other_event.tx_hash = B256::repeat_byte(0x33);
+        let collected: StdResult<Tape, ValidationError> =
+            [print(3, 0), other_event].into_iter().collect();
+        assert!(matches!(
+            collected,
+            Err(ValidationError::InvalidTape {
+                block: 3,
+                log_index: 0,
+                reason: "a second row at its point",
+            })
+        ));
 
         let mut other_hash = print(3, 1);
         other_hash.block_hash = B256::repeat_byte(0xEE);
