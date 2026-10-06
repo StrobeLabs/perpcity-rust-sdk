@@ -81,7 +81,7 @@ async fn main() -> perpcity_sdk::Result<()> {
                     b.margin_ratio(),
                     b.liquidation_margin_ratio().fraction(),
                 );
-                candidates.push((pos_id, b));
+                candidates.push((pos_id, b.as_ref()));
             }
             MakerEquityKind::NotAMaker => println!("pos {pos_id}: not an open maker"),
             MakerEquityKind::Failed(e) => println!("pos {pos_id}: read failed: {e}"),

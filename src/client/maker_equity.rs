@@ -67,8 +67,10 @@ pub struct MakerEquityOutcome {
 /// What a maker-equity batch read produced for one position id.
 #[derive(Debug)]
 pub enum MakerEquityKind {
-    /// An open maker position, with its settle preview.
-    Computed(MakerEquityBreakdown),
+    /// An open maker position, with its settle preview. Boxed because most
+    /// ids in a sweep are not makers, and an inline preview would make every
+    /// outcome its size.
+    Computed(Box<MakerEquityBreakdown>),
     /// Zero liquidity at the pinned block: a taker, a burned position, or
     /// a never-minted id. Nothing to compute — not an error.
     NotAMaker,
@@ -524,7 +526,7 @@ impl StateAt {
         let equities = self.pending_equities(market, pool_id, &pending).await;
         for (maker, equity) in pending.iter().zip(equities) {
             kinds[maker.input_index] = match equity {
-                Ok(breakdown) => MakerEquityKind::Computed(breakdown),
+                Ok(breakdown) => MakerEquityKind::Computed(Box::new(breakdown)),
                 Err(e) => MakerEquityKind::Failed(e),
             };
         }
@@ -957,10 +959,10 @@ mod tests {
             }))
         };
         let kinds = vec![
-            MakerEquityKind::Computed(MakerEquityBreakdown::placeholder()),
+            MakerEquityKind::Computed(Box::new(MakerEquityBreakdown::placeholder())),
             MakerEquityKind::NotAMaker,
             failed(),
-            MakerEquityKind::Computed(MakerEquityBreakdown::placeholder()),
+            MakerEquityKind::Computed(Box::new(MakerEquityBreakdown::placeholder())),
             failed(),
             failed(),
         ];

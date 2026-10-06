@@ -218,16 +218,21 @@ impl Exposure {
 /// Where the health test turns along a price shock, on each side of the
 /// mark it was searched from.
 ///
-/// A maker's equity along the shock is the LP curve, concave, so it can
-/// cross the test's line below the mark, above it, both, or neither; a
-/// side is `None` when the position stays healthy as far as the search
-/// looks, a hundredfold of the mark either way. A position liquidatable at
-/// the mark has both sides at the mark.
+/// The shock moves the pool price and the mark by one factor from where
+/// each stood, so the gap between them carries through it. A maker's equity
+/// along the shock is the LP curve, concave, so it can cross the test's
+/// line below the mark, above it, both, or neither; a side is `None` when
+/// the position stays healthy as far as the search looks, a hundredfold of
+/// the mark either way. A position liquidatable now has both sides at the
+/// mark. The deployed mark follows the pool only in part, so the shock
+/// moves the mark faster than a trade would.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LiquidationPrices {
-    /// The first price below the mark at which the position is liquidatable.
+    /// The first mark below the current one at which the position is
+    /// liquidatable.
     pub below: Option<Price>,
-    /// The first price above the mark at which the position is liquidatable.
+    /// The first mark above the current one at which the position is
+    /// liquidatable.
     pub above: Option<Price>,
 }
 
@@ -257,10 +262,10 @@ impl LiquidationPrices {
 /// ([`Self::settled_margin`], [`Self::equity`],
 /// [`Self::accrued_income`]) can never overflow `i128`.
 ///
-/// The preview also carries the mark it was priced at and the legs that
-/// move with the price, so it can be revalued along a price shock with
-/// nothing else in hand: [`Self::equity_at`], [`Self::is_liquidatable_at`]
-/// and [`Self::liquidation_prices`].
+/// The preview also carries the mark and the pool price it was priced at
+/// and the legs that move with them, so it can be revalued along a price
+/// shock with nothing else in hand: [`Self::equity_at`],
+/// [`Self::is_liquidatable_at`] and [`Self::liquidation_prices`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "RawMakerEquityBreakdown")]
 pub struct MakerEquityBreakdown {
@@ -273,6 +278,7 @@ pub struct MakerEquityBreakdown {
     liquidation_margin_ratio: Ratio,
     liquidation_fee: Ratio,
     mark: Price,
+    sqrt_price: SqrtPrice,
     exposure: Exposure,
 }
 
@@ -290,6 +296,7 @@ struct RawMakerEquityBreakdown {
     liquidation_margin_ratio: Ratio,
     liquidation_fee: Ratio,
     mark: Price,
+    sqrt_price: SqrtPrice,
     exposure: Exposure,
 }
 
@@ -335,6 +342,7 @@ impl TryFrom<RawMakerEquityBreakdown> for MakerEquityBreakdown {
             liquidation_margin_ratio: raw.liquidation_margin_ratio,
             liquidation_fee: raw.liquidation_fee,
             mark: raw.mark,
+            sqrt_price: raw.sqrt_price,
             exposure: raw.exposure,
         })
     }
@@ -355,6 +363,7 @@ impl MakerEquityBreakdown {
             liquidation_margin_ratio: Ratio::ZERO,
             liquidation_fee: Ratio::ZERO,
             mark: Price::from_x96(Q96),
+            sqrt_price: SqrtPrice::from_x96(Q96),
             exposure: Exposure {
                 sqrt_lower: SqrtPrice::from_x96(Q96),
                 sqrt_upper: SqrtPrice::from_x96(Q96),
@@ -471,11 +480,20 @@ impl MakerEquityBreakdown {
         self.mark
     }
 
-    /// The band's value and the unrealized PnL along a price shock to
-    /// `price`: the band's composition at the price's root, valued at the
-    /// price, with the deposit residual at the price.
-    fn valued_at(&self, price: Price) -> Result<(UsdcAtoms, UsdcDelta), ValidationError> {
-        let (value, unrealized) = self.exposure.valued(SqrtPrice::try_from(price)?, price)?;
+    /// The band's value and the unrealized PnL along a price shock that
+    /// takes the mark to `mark`: the pool moves by the same factor, its root
+    /// by the root of it, so the band's composition is read at the shocked
+    /// pool price and valued, with the deposit residual, at the shocked
+    /// mark. The factor is exactly one at the preview's own mark, where the
+    /// pool's root comes back unrounded.
+    fn valued_at(&self, mark: Price) -> Result<(UsdcAtoms, UsdcDelta), ValidationError> {
+        let sqrt_price = SqrtPrice::from_x96(mul_div(
+            self.sqrt_price.x96(),
+            SqrtPrice::try_from(mark)?.x96(),
+            SqrtPrice::try_from(self.mark)?.x96(),
+            Rounding::TowardZero,
+        )?);
+        let (value, unrealized) = self.exposure.valued(sqrt_price, mark)?;
         Ok((
             UsdcAtoms::new(
                 atoms(to_i256(value, "position value")?, "position value")?.unsigned_abs(),
@@ -484,17 +502,19 @@ impl MakerEquityBreakdown {
         ))
     }
 
-    /// Equity if the pool price and the mark both stood at `price`, the
-    /// accrued legs as they are: the shock a maker is liquidated along,
-    /// takers trading the pool to the price and the mark following. At the
-    /// mark it is [`Self::equity`] when the pool stands at the mark.
+    /// Equity if the mark stood at `mark` and the pool price had moved by
+    /// the same factor from where it stood, the accrued legs as they are:
+    /// the shock a maker is liquidated along, takers trading the pool and
+    /// the mark following. At the preview's own mark it is exactly
+    /// [`Self::equity`].
     ///
     /// # Errors
     ///
-    /// [`ValidationError::InvalidPrice`] for a zero price, and
-    /// [`ValidationError::Overflow`] when a leg leaves its domain.
-    pub fn equity_at(&self, price: Price) -> Result<UsdcDelta, ValidationError> {
-        Ok(self.settled_margin() + self.valued_at(price)?.1)
+    /// [`ValidationError::InvalidPrice`] for a mark whose root is outside
+    /// the protocol's range, and [`ValidationError::Overflow`] when a leg
+    /// leaves its domain.
+    pub fn equity_at(&self, mark: Price) -> Result<UsdcDelta, ValidationError> {
+        Ok(self.settled_margin() + self.valued_at(mark)?.1)
     }
 
     /// The band's value along the same shock, the test's denominator.
@@ -502,22 +522,23 @@ impl MakerEquityBreakdown {
     /// # Errors
     ///
     /// As [`Self::equity_at`].
-    pub fn position_value_at(&self, price: Price) -> Result<UsdcAtoms, ValidationError> {
-        Ok(self.valued_at(price)?.0)
+    pub fn position_value_at(&self, mark: Price) -> Result<UsdcAtoms, ValidationError> {
+        Ok(self.valued_at(mark)?.0)
     }
 
-    /// [`Self::is_liquidatable`] along the same shock.
+    /// [`Self::is_liquidatable`] along the same shock; at the preview's own
+    /// mark, the same answer.
     ///
     /// # Errors
     ///
     /// As [`Self::equity_at`].
-    pub fn is_liquidatable_at(&self, price: Price) -> Result<bool, ValidationError> {
-        let (value, unrealized) = self.valued_at(price)?;
+    pub fn is_liquidatable_at(&self, mark: Price) -> Result<bool, ValidationError> {
+        let (value, unrealized) = self.valued_at(mark)?;
         Ok(self.fails_health(self.settled_margin() + unrealized, value))
     }
 
     /// Where the test turns on each side of the mark along the shock: the
-    /// first Q96 atom at which the position is liquidatable, found by a
+    /// first mark, to the Q96 atom, at which the position is liquidatable, found by a
     /// bracket that steps outward from a quarter of a percent, doubling to
     /// a hundredfold, then a bisection. A pocket narrower than a bracket
     /// step is not seen, so a side is the nearest turn the search saw.
@@ -840,6 +861,7 @@ impl AccruedMakerSnapshot {
             liquidation_margin_ratio: maker.liquidation_margin_ratio,
             liquidation_fee: self.0.liquidation_fee,
             mark: self.0.mark,
+            sqrt_price: self.0.sqrt_price,
             exposure,
         })
     }
@@ -1136,12 +1158,31 @@ mod tests {
         assert!(thin.is_liquidatable());
     }
 
+    /// The golden maker's band, wholly above the golden price, so it holds
+    /// one asset wherever the pool sits below it.
+    const GOLDEN_BAND: (i32, i32) = (33_810, 34_710);
+
+    /// A band the golden price, near tick 28,544, sits inside, so where the
+    /// pool stands decides what the band holds.
+    const BAND_AROUND_THE_PRICE: (i32, i32) = (28_200, 28_860);
+
     /// The golden maker with the pool standing at the mark and a margin
     /// that leaves it at one and a half times its band's value.
     fn healthy_maker_at_the_mark() -> MakerEquityBreakdown {
+        healthy_maker(1000, GOLDEN_BAND)
+    }
+
+    /// The golden maker in `band`, with the pool's root at `pool_root_e3`
+    /// thousandths of the mark's, and a margin that leaves it at one and a
+    /// half times its band's value.
+    fn healthy_maker(pool_root_e3: u16, (lower, upper): (i32, i32)) -> MakerEquityBreakdown {
         let (market, accrual, mut maker) = golden_market_and_maker();
+        (maker.tick_lower, maker.tick_upper) = (lower, upper);
+        let mark_root = SqrtPrice::try_from(market.mark).unwrap().x96();
         let market = MakerMarketSnapshot {
-            sqrt_price: SqrtPrice::try_from(market.mark).unwrap(),
+            sqrt_price: SqrtPrice::from_x96(
+                mark_root * U256::from(pool_root_e3) / U256::from(1000u16),
+            ),
             ..market
         }
         .accrued(&accrual)
@@ -1189,6 +1230,37 @@ mod tests {
         let expected = f64::from(above.x96()) / f64::from(b.mark().x96()) - 1.0;
         assert!((distance - expected).abs() < 1e-12);
         assert!(distance > 0.0);
+    }
+
+    /// With the pool off the mark, as it is on a live market, the shock
+    /// still starts at the preview: at the preview's own mark the band is
+    /// valued at the real pool price, so equity, value and the verdict agree
+    /// exactly, and the search measures a price move rather than the gap
+    /// between the pool and the mark. The band straddles the price, so
+    /// where the pool stands changes what the band holds, which is the only
+    /// case in which putting the pool at the mark would show.
+    #[test]
+    fn the_shock_starts_where_the_pool_stands() {
+        let b = healthy_maker(1010, BAND_AROUND_THE_PRICE);
+        assert!(!b.is_liquidatable());
+        assert_eq!(b.equity_at(b.mark()).unwrap(), b.equity());
+        assert_eq!(b.position_value_at(b.mark()).unwrap(), b.position_value());
+        assert_eq!(b.is_liquidatable_at(b.mark()).unwrap(), b.is_liquidatable());
+
+        let prices = b.liquidation_prices().unwrap();
+        let one = U256::from(1u8);
+        let turns = [
+            prices.below.map(|p| (p, Price::from_x96(p.x96() + one))),
+            prices.above.map(|p| (p, Price::from_x96(p.x96() - one))),
+        ];
+        assert!(turns.iter().any(Option::is_some), "{prices:?}");
+        for (turn, inside) in turns.into_iter().flatten() {
+            assert!(b.is_liquidatable_at(turn).unwrap());
+            assert!(
+                !b.is_liquidatable_at(inside).unwrap(),
+                "the atom before the turn is healthy"
+            );
+        }
     }
 
     /// A position liquidatable at the mark has no distance left: both
