@@ -212,6 +212,25 @@ impl Exposure {
         )?;
         Ok((liquidity_val, unrealized))
     }
+
+    /// [`Self::valued`] narrowed to the breakdown's units and bounded to the
+    /// token supply: the band's value and the unrealized PnL, as a preview
+    /// stores them and every revaluation computes them.
+    fn valued_atoms(
+        &self,
+        sqrt_price: SqrtPrice,
+        mark: Price,
+    ) -> Result<(UsdcAtoms, UsdcDelta), ValidationError> {
+        let (value, unrealized) = self.valued(sqrt_price, mark)?;
+        Ok((
+            // A band's value is a sum of non-negative legs, so the count's
+            // own floor is the only bound left to assert.
+            UsdcAtoms::new(
+                atoms(to_i256(value, "position value")?, "position value")?.unsigned_abs(),
+            ),
+            UsdcDelta::new(atoms(unrealized, "unrealized PnL")?),
+        ))
+    }
 }
 
 /// What the contract would settle if the position were touched now.
@@ -228,7 +247,9 @@ impl Exposure {
 /// The preview also carries the mark and the pool price it was priced at
 /// and the legs that move with them, so it can be revalued along a price
 /// shock with nothing else in hand: [`Self::equity_at`],
-/// [`Self::is_liquidatable_at`] and [`Self::liquidation_prices`].
+/// [`Self::is_liquidatable_at`] and [`Self::liquidation_prices`]. Its value
+/// and PnL are that revaluation at its own prices, which deserialization
+/// recomputes and requires.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "RawMakerEquityBreakdown")]
 pub struct MakerEquityBreakdown {
@@ -274,6 +295,19 @@ impl TryFrom<RawMakerEquityBreakdown> for MakerEquityBreakdown {
                 })
             }
         };
+        // The value and PnL a preview stores are its own valuation at the
+        // prices it carries, so they are checked the way they were made: a
+        // breakdown whose band and residual do not reproduce them would
+        // revalue to something other than itself.
+        let (position_value, unrealized_pnl) =
+            raw.exposure.valued_atoms(raw.sqrt_price, raw.mark)?;
+        if (position_value, unrealized_pnl) != (raw.position_value, raw.unrealized_pnl) {
+            return Err(ValidationError::DecodeFailed {
+                context: "a maker breakdown whose band and residual do not reproduce its \
+                          value and PnL at its own prices"
+                    .into(),
+            });
+        }
         Ok(Self {
             margin: bounded(raw.margin, "deserialized margin")?,
             funding_owed: bounded(raw.funding_owed, "deserialized funding")?,
@@ -288,16 +322,8 @@ impl TryFrom<RawMakerEquityBreakdown> for MakerEquityBreakdown {
                 )?,
             ),
             lp_fees: bounded(raw.lp_fees, "deserialized LP fees")?,
-            unrealized_pnl: bounded(raw.unrealized_pnl, "deserialized unrealized PnL")?,
-            // A position value cannot be negative, which its type already
-            // says; only the supply bound is left to check.
-            position_value: if raw.position_value.atoms() <= MAX_COMPONENT_ATOMS {
-                raw.position_value
-            } else {
-                return Err(ValidationError::Overflow {
-                    context: "deserialized position value".into(),
-                });
-            },
+            unrealized_pnl,
+            position_value,
             // The ratio's own domain, the contract's `uint24`, is checked
             // where a `Ratio` is deserialised.
             liquidation_margin_ratio: raw.liquidation_margin_ratio,
@@ -451,13 +477,7 @@ impl MakerEquityBreakdown {
             own_root.x96(),
             Rounding::TowardZero,
         )?);
-        let (value, unrealized) = self.exposure.valued(sqrt_price, mark)?;
-        Ok((
-            UsdcAtoms::new(
-                atoms(to_i256(value, "position value")?, "position value")?.unsigned_abs(),
-            ),
-            UsdcDelta::new(atoms(unrealized, "unrealized PnL")?),
-        ))
+        self.exposure.valued_atoms(sqrt_price, mark)
     }
 
     /// The contract's test at a shocked mark, the roots in hand.
@@ -826,7 +846,8 @@ impl AccruedMakerSnapshot {
             delta_perp: maker.delta_perp,
             delta_usd: maker.delta_usd,
         };
-        let (liquidity_val, unrealized) = exposure.valued(self.0.sqrt_price, self.0.mark)?;
+        let (position_value, unrealized_pnl) =
+            exposure.valued_atoms(self.0.sqrt_price, self.0.mark)?;
 
         let delta = |value, what| atoms(value, what).map(UsdcDelta::new);
         Ok(MakerEquityBreakdown {
@@ -846,12 +867,8 @@ impl AccruedMakerSnapshot {
                 )?,
             ),
             lp_fees: delta(to_i256(lp_fees, "LP fees")?, "LP fees")?,
-            unrealized_pnl: delta(unrealized, "unrealized PnL")?,
-            // A band's value at the mark is a sum of non-negative legs, so
-            // the count's own floor is the only bound left to assert.
-            position_value: UsdcAtoms::new(
-                atoms(to_i256(liquidity_val, "position value")?, "position value")?.unsigned_abs(),
-            ),
+            unrealized_pnl,
+            position_value,
             liquidation_margin_ratio: maker.liquidation_margin_ratio,
             mark: self.0.mark,
             sqrt_price: self.0.sqrt_price,
@@ -1559,6 +1576,41 @@ mod tests {
             serde_json::from_str::<MakerEquityBreakdown>(&wide_ratio).is_err(),
             "the ratio is a uint24 on chain"
         );
+    }
+
+    /// A breakdown deserializes only if its band and residual reproduce its
+    /// stored value and PnL at the prices it carries, so it can never
+    /// revalue to something other than itself: a nudged PnL within every
+    /// bound, or a mark it was not priced at, is refused.
+    #[test]
+    fn breakdown_deserialization_recomputes_its_own_valuation() {
+        let b = healthy_maker(1010, BAND_AROUND_THE_PRICE);
+        let json = serde_json::to_string(&b).unwrap();
+        assert_eq!(
+            serde_json::from_str::<MakerEquityBreakdown>(&json).unwrap(),
+            b
+        );
+
+        let pnl = b.unrealized_pnl().atoms();
+        let nudged = json.replace(
+            &format!("\"unrealized_pnl\":{pnl}"),
+            &format!("\"unrealized_pnl\":{}", pnl + 1),
+        );
+        assert_ne!(json, nudged, "replacement must have applied");
+        assert!(matches!(
+            serde_json::from_str::<MakerEquityBreakdown>(&nudged),
+            Err(e) if e.to_string().contains("do not reproduce")
+        ));
+
+        let mark = serde_json::to_string(&b.mark()).unwrap();
+        let other_mark =
+            serde_json::to_string(&Price::from_x96(b.mark().x96() * U256::from(2u8))).unwrap();
+        let repriced = json.replace(
+            &format!("\"mark\":{mark}"),
+            &format!("\"mark\":{other_mark}"),
+        );
+        assert_ne!(json, repriced, "replacement must have applied");
+        assert!(serde_json::from_str::<MakerEquityBreakdown>(&repriced).is_err());
     }
 
     /// The component bound is the accounting-token supply, not a magic
