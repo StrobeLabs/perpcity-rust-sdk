@@ -106,6 +106,9 @@ pub use math::maker_equity::{
 };
 
 #[doc(inline)]
+pub use math::taker::{TakerHealth, TakerMarketSnapshot, TakerState};
+
+#[doc(inline)]
 pub use math::tick::{
     align_tick_down, align_tick_up, get_sqrt_ratio_at_tick, get_tick_at_sqrt_ratio, price_to_tick,
     tick_to_price,

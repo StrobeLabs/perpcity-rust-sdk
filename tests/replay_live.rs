@@ -164,7 +164,7 @@ async fn agrees(replay: &Replay, state: &StateAt, ema_window: u64) {
     );
 
     // Every position minted: the fold's view against the row the contract
-    // holds. A taker's size is its row's `amount0`; a maker's band is
+    // holds. A taker's two legs are its row's `amount0` and `amount1`; a maker's band is
     // `makerDetails`; a closed position has no row. A position the fold
     // never met is one that closed before a seed, which has no row either.
     let ids: Vec<U256> = (1..minted).map(U256::from).collect();
@@ -195,8 +195,13 @@ async fn agrees(replay: &Replay, state: &StateAt, ema_window: u64) {
         match folded.kind() {
             PositionKind::Taker { .. } => match folded.taker_size() {
                 Some(size) => {
-                    let (perp, _) = unpack_balance_delta(row.delta);
+                    let (perp, usd) = unpack_balance_delta(row.delta);
                     assert_eq!(size.atoms(), perp, "position {pos_id}'s size");
+                    assert_eq!(
+                        folded.taker_usd().map(|leg| leg.atoms()),
+                        Some(usd),
+                        "position {pos_id}'s USD leg"
+                    );
                     takers += 1;
                 }
                 None => unknown += 1,

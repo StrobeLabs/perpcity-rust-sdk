@@ -63,6 +63,7 @@ fn a_makers_band_and_the_pools_book_are_the_sum_of_liquidity_changes() {
     let taker = converted.position(U256::from(2)).unwrap();
     assert_eq!(taker.maker_band(), None);
     assert_eq!(taker.taker_size(), None);
+    assert_eq!(taker.taker_usd(), None, "no event carries the inventory");
     assert!(matches!(
         taker.kind(),
         PositionKind::Taker { sized: false, .. }
@@ -89,13 +90,17 @@ fn a_taker_is_sized_by_its_swaps_and_its_liquidations_are_counted() {
     let opened = genesis(&tape[..1]);
     let taker = opened.position(one).unwrap();
     assert_eq!(taker.taker_size(), Some(PerpDelta::new(1_000_000)));
+    assert_eq!(taker.taker_usd(), Some(UsdcDelta::new(-40_000_000)));
     assert_eq!(taker.opened(), Some(tape[0].point()));
     assert_eq!(taker.liquidations(), 0);
 
     let added = genesis(&tape[..5]);
+    let taker = added.position(one).unwrap();
+    assert_eq!(taker.taker_size(), Some(PerpDelta::new(1_500_000)));
     assert_eq!(
-        added.position(one).unwrap().taker_size(),
-        Some(PerpDelta::new(1_500_000))
+        taker.taker_usd(),
+        Some(UsdcDelta::new(-80_000_000)),
+        "the USD leg is the sum of the swaps' usd deltas"
     );
 
     let partly = genesis(&tape[..9]);
@@ -146,6 +151,7 @@ fn a_segment_knows_what_moved_and_not_where_positions_stand() {
         taker.kind(),
         PositionKind::Taker {
             moved: PerpDelta::new(200_000),
+            usd: UsdcDelta::new(-80_000_000),
             sized: false,
         }
     );

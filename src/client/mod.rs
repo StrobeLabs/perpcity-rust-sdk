@@ -43,6 +43,7 @@ mod market;
 mod mock;
 mod queries;
 mod state;
+mod taker_health;
 mod trades;
 mod transactions;
 

@@ -183,7 +183,7 @@ that carries it, the invariant it holds, and the node that owns it.
 | A chain | [`ChainReader`](src/client/chain.rs#L56) | one transport, one deployment set, shared caches | [`client`](src/client/DESIGN.md) |
 | A market, now | [`MarketReader`](src/client/market.rs#L26) | one `Perp` over a `ChainReader`; every read is current | [`client`](src/client/DESIGN.md) |
 | A market, at a block | [`StateAt`](src/client/state.rs#L70) | the handle is the block; every read pinned to its hash | [`client`](src/client/DESIGN.md) |
-| A market with a signer | [`PerpClient`](src/client/mod.rs#L182) | a `MarketReader` plus the send pipeline | [`client`](src/client/DESIGN.md) |
+| A market with a signer | [`PerpClient`](src/client/mod.rs#L183) | a `MarketReader` plus the send pipeline | [`client`](src/client/DESIGN.md) |
 | A send | [`TxBuilder`](src/client/transactions.rs#L40) | one transaction, one nonce, one outcome | [`client`](src/client/DESIGN.md) |
 | A tick interval | [`TickRange`](src/math/range.rs#L25) | `lower < upper`, both in the V4 domain, checked at construction | [`math::range`](src/math/range.rs#L1) |
 | A maker's geometry | [`MakerBand`](src/math/range.rs#L140) | a `TickRange` with liquidity | [`math::range`](src/math/range.rs#L1) |
@@ -192,14 +192,15 @@ that carries it, the invariant it holds, and the node that owns it.
 | Capacity and its draw | [`MarketCapacity`](src/math/capacity.rs#L59) | capacity and open interest from one block | [`math::capacity`](src/math/capacity.rs#L1) |
 | The pool at a block | [`PoolSnapshot`](src/math/swap.rs#L71) | price, liquidity and a tick map that reconciles with it | [`math::swap`](src/math/swap.rs#L1) |
 | A settle previewed | [`MakerEquityBreakdown`](src/math/maker_equity.rs#L177) | exact atoms, the contract's arithmetic | [`math::maker_equity`](src/math/maker_equity.rs#L1) |
-| A block | [`BlockContext`](src/math/mod.rs#L51) | number, hash, timestamp of one header | [`math`](src/math/DESIGN.md) |
+| A taker's health | [`TakerHealth`](src/math/taker.rs#L75) | the deployed liquidation test in exact atoms, and the mark it turns at | [`math::taker`](src/math/taker.rs#L1) |
+| A block | [`BlockContext`](src/math/mod.rs#L52) | number, hash, timestamp of one header | [`math`](src/math/DESIGN.md) |
 | An event | [`MarketEvent`](src/events.rs#L156) | the market's vocabulary, human units, either tense | [`events`](src/events/DESIGN.md) |
 | An event in chain order | [`TapeEvent`](src/history/tape/mod.rs#L72), [`ChainPoint`](src/history/tape/mod.rs#L63) | block and log index | [history/tape](src/history/tape/DESIGN.md) |
 | A market's record | [`Tape`](src/history/tape/mod.rs#L181), [`TapeSlice`](src/history/tape/mod.rs#L316) | rows in strict chain order, checked once; a run of it is a tape by type | [history/tape](src/history/tape/DESIGN.md) |
 | Custody over time | [`OwnershipLog`](src/history/tape/custody.rs#L102) | a fold of transfers; owner at a chain point | [history/tape](src/history/tape/DESIGN.md) |
 | A computation over the tape | [`Fold`](src/history/fold/mod.rs#L34) | the fold of a concatenation is the combination of the folds | [history/fold](src/history/fold/DESIGN.md) |
 | A value over time | [`Series`](src/history/fold/series.rs#L152), [`Arrivals`](src/history/fold/series.rs#L322) | chain order; appends across segments; trimmed to a retention | [history/fold](src/history/fold/DESIGN.md) |
-| A market rebuilt from its events | [`Replay`](src/history/replay/mod.rs#L136) | the reads' types, folded from the tape; equal to the reads at a block | [history/replay](src/history/replay/DESIGN.md) |
+| A market rebuilt from its events | [`Replay`](src/history/replay/mod.rs#L143) | the reads' types, folded from the tape; equal to the reads at a block | [history/replay](src/history/replay/DESIGN.md) |
 | A print | [`IndexPrint`](src/history/beacon.rs#L20) | the index at a chain point and time | [`history`](src/history/DESIGN.md) |
 | A failure | [`PerpCityError`](src/errors/mod.rs#L45) | typed, with a stated transience | [`errors`](src/errors/DESIGN.md) |
 | A transport | [`HftTransport`](src/transport/provider.rs#L523) | many endpoints, one provider, reads and writes classified | [`transport`](src/transport/DESIGN.md) |

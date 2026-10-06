@@ -1,7 +1,7 @@
 //! Positions as the tape describes them, folded beside the market's
-//! totals. A taker's size is the sum of its swaps' perp deltas; a maker's
-//! band is the range its first liquidity change named and the sum of the
-//! changes since. Both are sums, so a segment that did not see a
+//! totals. A taker's size and USD leg are the sums of its swaps' two
+//! deltas; a maker's band is the range its first liquidity change named
+//! and the sum of the changes since. All are sums, so a segment that did not see a
 //! position's open knows what moved and not where it stands, and says so.
 
 use std::collections::BTreeMap;
@@ -9,11 +9,11 @@ use std::collections::btree_map::Entry;
 
 use alloy::primitives::U256;
 
-use crate::events::MarketEvent;
+use crate::events::{MarketEvent, SwapInfo};
 use crate::history::fold::{First, Fold, Latest};
 use crate::history::tape::{ChainPoint, OwnershipLog, TapeEvent, Wallets};
 use crate::math::range::{MakerBand, TickRange};
-use crate::units::{LDelta, LUnits, PerpDelta, Price, UsdcAtoms};
+use crate::units::{LDelta, LUnits, PerpDelta, Price, UsdcAtoms, UsdcDelta};
 
 use super::seed::SeedPosition;
 
@@ -28,8 +28,11 @@ pub enum PositionKind {
     Taker {
         /// The perp its swaps moved since the fold first saw it.
         moved: PerpDelta,
-        /// Whether `moved` is the size, because the fold saw the position's
-        /// first swap. A position first seen mid-life, or a maker converted
+        /// The USDC its swaps moved since the fold first saw it, the
+        /// position's `amount1`: paid for a long, received for a short.
+        usd: UsdcDelta,
+        /// Whether `moved` and `usd` are the position's two legs, because
+        /// the fold saw the position's first swap. A position first seen mid-life, or a maker converted
         /// to a taker, has a size no live event carries.
         sized: bool,
     },
@@ -59,13 +62,15 @@ impl PositionKind {
             // other's answer standing.
             (kind, Self::Unknown) | (Self::Unknown, kind) => kind,
             (
-                Self::Taker { moved, sized },
+                Self::Taker { moved, usd, sized },
                 Self::Taker {
                     moved: later_moved,
+                    usd: later_usd,
                     sized: later_sized,
                 },
             ) => Self::Taker {
                 moved: moved + later_moved,
+                usd: usd + later_usd,
                 sized: sized || later_sized,
             },
             (
@@ -173,7 +178,23 @@ impl PositionState {
     /// mid-life, or a maker converted to a taker.
     pub fn taker_size(&self) -> Option<PerpDelta> {
         match self.kind {
-            PositionKind::Taker { moved, sized: true } => Some(moved),
+            PositionKind::Taker {
+                moved, sized: true, ..
+            } => Some(moved),
+            _ => None,
+        }
+    }
+
+    /// The taker's USD leg, as the contract's `delta.amount1`, when the
+    /// fold saw the swap that set it: what the position paid for its perp
+    /// if long, received for it if short, so that with [`Self::taker_size`]
+    /// and a mark the position's PnL is a multiplication. `None` exactly
+    /// when the size is.
+    pub fn taker_usd(&self) -> Option<UsdcDelta> {
+        match self.kind {
+            PositionKind::Taker {
+                usd, sized: true, ..
+            } => Some(usd),
             _ => None,
         }
     }
@@ -223,9 +244,10 @@ impl PositionState {
     /// known, no event seen.
     fn seeded(position: SeedPosition) -> Self {
         let (kind, margin) = match position {
-            SeedPosition::Taker { size, margin } => (
+            SeedPosition::Taker { size, usd, margin } => (
                 PositionKind::Taker {
                     moved: size,
+                    usd,
                     sized: true,
                 },
                 margin,
@@ -255,16 +277,18 @@ impl PositionState {
         }
     }
 
-    /// A swap moved the position's perp by `delta`; `opens` when it was the
+    /// A swap moved the position's two legs; `opens` when it was the
     /// position's first. Whatever swaps is a taker from then on.
-    fn swapped(&mut self, delta: PerpDelta, opens: bool) {
+    fn swapped(&mut self, swap: SwapInfo, opens: bool) {
         self.kind = match self.kind {
-            PositionKind::Taker { moved, sized } => PositionKind::Taker {
-                moved: moved + delta,
+            PositionKind::Taker { moved, usd, sized } => PositionKind::Taker {
+                moved: moved + swap.perp_delta,
+                usd: usd + swap.usd_delta,
                 sized: sized || opens,
             },
             PositionKind::Maker { .. } | PositionKind::Unknown => PositionKind::Taker {
-                moved: delta,
+                moved: swap.perp_delta,
+                usd: swap.usd_delta,
                 sized: opens,
             },
         };
@@ -341,6 +365,7 @@ impl PositionState {
         if let PositionKind::Maker { .. } | PositionKind::Unknown = self.kind {
             self.kind = PositionKind::Taker {
                 moved: PerpDelta::ZERO,
+                usd: UsdcDelta::ZERO,
                 sized: false,
             };
         }
@@ -489,12 +514,12 @@ impl Fold for Positions {
             MarketEvent::TakerOpened { pos_id, swap } => {
                 self.pool_price.set(swap.pool_price);
                 let state = self.touch(pos_id, at);
-                state.swapped(swap.perp_delta, true);
+                state.swapped(swap, true);
                 state.opened.set(at);
             }
             MarketEvent::TakerAdjusted { pos_id, swap, .. } => {
                 self.pool_price.set(swap.pool_price);
-                self.touch(pos_id, at).swapped(swap.perp_delta, false);
+                self.touch(pos_id, at).swapped(swap, false);
             }
             MarketEvent::TakerClosed {
                 pos_id,
@@ -504,7 +529,7 @@ impl Fold for Positions {
             } => {
                 self.pool_price.set(swap.pool_price);
                 let state = self.touch(pos_id, at);
-                state.swapped(swap.perp_delta, false);
+                state.swapped(swap, false);
                 state.closed.set(at);
                 state.liquidations += u32::from(is_liquidation);
             }

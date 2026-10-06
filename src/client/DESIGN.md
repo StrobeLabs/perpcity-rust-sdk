@@ -94,7 +94,7 @@ chunk's shared read was serving, or the market-wide read that everything
 depends on. A batch never silently drops an id; every input gets an
 outcome, and the outcome says whether a retry can help. The shape is one
 type, `RowOutcome`, and one driver that chunks, fans out and classifies;
-`positions` and the maker rows are the same read with different views.
+`positions`, the maker and the taker rows are one read, three views.
 
 ## The mental model
 
@@ -114,22 +114,21 @@ other tense through `state()` and `state_at(number)`.
 `StateAt` is that market at one block. Constructing it resolves the
 header once; every read on it is pinned to the hash, and the results
 carry the block. Its reads have no prefix: `capacity`, `pool`, `mark`,
-`solvency`, `position`, `maker_band`, and the batches, `positions` and
-`maker_equities`. Every read that once pinned its own block (capacity,
+`solvency`, `position`, `maker_band`, and the batches, `positions`,
+`maker_equities` and `taker_healths`. Every read that once pinned its own block (capacity,
 margin ratios, the pool, the maker-equity batch) lives here, and
 `MarketReader` keeps one-line conveniences over a fresh lagged handle
 for callers that want one value and do not care about agreement:
-`get_capacity`, `get_margin_ratios`, `get_pool_snapshot`, `get_mark` and
-`get_maker_equities`. Those are the `get_*` reads whose block is the
+`get_capacity`, `get_margin_ratios`, `get_pool_snapshot`, `get_mark`,
+`get_maker_equities` and `get_taker_healths`. Those are the `get_*` reads whose block is the
 lagged snapshot block rather than the head; their results carry it.
 
-Underneath the batches sit the crate's three raw storage reads: the
-maker rows, the V4 fee-growth `extsload`, and the tick-funding
-`eth_getProof` with its `eth_getStorageAt` fallback. They are a fourth
-kind of source beside range scans, key lookups and view calls at a
-block, and they live on the handle like any other pinned read, but
-crate-private: they exist to compensate for contracts that expose no
-settle preview, and the cutover deletes them.
+Underneath the maker batch sit the crate's raw storage reads: the V4
+fee-growth `extsload` and the tick-funding `eth_getProof` with its
+`eth_getStorageAt` fallback, a fourth kind of source beside range scans,
+key lookups and view calls at a block. They live on the handle like any
+pinned read but crate-private: compensation for contracts that expose no
+settle preview, deleted at the cutover.
 
 `PerpClient` is a signer on a market: a `MarketReader` plus the wallet
 and the transaction pipeline. Every write goes through it, and it is
@@ -230,11 +229,11 @@ send would ask.
 | Type | Invariant | Produced by | Consumed by |
 |---|---|---|---|
 | [`ChainReader`](chain.rs#L56) | one chain: one transport, one deployment set, one set of caches shared by everything built over it | [`ChainReader::new`](chain.rs#L103) over an [`HftTransport`](../transport/DESIGN.md) and a [`ChainDeployments`](chain.rs#L38); [`ChainReader::arbitrum`](chain.rs#L111) and [`ChainReader::arbitrum_sepolia`](chain.rs#L124) for the known chains | [`ChainReader::market`](market.rs#L33), which is how every market reader is made; [`ChainReader::history`](chain.rs#L186), which hands out the scanning handle; the wallet and index reads; any helper bounded on `AsRef<ChainReader>`. The strategy layer builds one per process, and that sharing is why the caches live here and not on a market. |
-| [`MarketReader`](market.rs#L26) | one market, read now: a `Perp` over a `ChainReader`; every read is independently current; no read takes a block; every read is named for what it returns, so the market it reads is never in the name. `tape_addresses` is the one read that answers a question for the past tense: the three addresses to scan for a market's record, the perp, the beacon it is configured with at the call, and the PoolManager with its pool id, which only the client knows and the scanning handle must be told; a beacon the market used before a swap is not among them, as the `history` node's debt records | [`ChainReader::market`](market.rs#L33) | [`MarketReader::state`](state.rs#L215) and [`MarketReader::state_at`](state.rs#L235), the door to the other tense; [`PerpClient::new`](mod.rs#L235), as the market a signer trades; [`LiveTakerMarket::subscribe`](../feeds/DESIGN.md), as the reader a publisher refreshes through; [`TapeAddresses`](../history/tape/DESIGN.md), which it fills for `History::market_tape`; any helper bounded on `AsRef<MarketReader>`. It is the reader a live cache seeds from and the one a research process holds without a signer, which is why it exists apart from `PerpClient`. |
-| [`StateAt`](state.rs#L70) | one market at one block: the handle resolved one header; every read is pinned to its hash; results carry the block | [`MarketReader::state`](state.rs#L215), at the lagged snapshot block; [`MarketReader::state_at`](state.rs#L235), at a block the caller names | its own reads, which fill the snapshots in `math` and the state types below, and are where the tense rule is enforced; its batches, [`StateAt::positions`](state.rs#L363) and [`StateAt::maker_equities`](maker_equity.rs#L322), which fan one block out over many ids; the replay's seed, which takes every figure the fold holds at one block through `StateAt::emas`, `StateAt::rates`, `StateAt::cumulatives`, `StateAt::modules`, `StateAt::solvency`, `StateAt::pool`, `StateAt::positions` and `StateAt::maker_bands`; the strategy layer's block-pinned sources, which hold it behind a trait so a forensic read can be stubbed. |
-| [`RowOutcome`](state.rs#L138) | one id's row in a batch: exactly one per input id, in input order; `Ok(None)` is an id with no row; `Err` is that id's failure and says whether to retry | [`StateAt::positions`](state.rs#L363), one row multicall per chunk | nothing in the crate but the maker-equity batch, which reads its rows through the same driver. The strategy layer's solvency folds, which sweep every id a market ever minted and need an answer for each. |
+| [`MarketReader`](market.rs#L26) | one market, read now: a `Perp` over a `ChainReader`; every read is current, takes no block and is named for what it returns. `tape_addresses` answers for the past tense: the perp, the beacon configured at the call and the PoolManager with its pool id; an earlier beacon is the `history` node's debt | [`ChainReader::market`](market.rs#L33) | [`MarketReader::state`](state.rs#L215) and [`MarketReader::state_at`](state.rs#L235), the door to the other tense, and the `get_*` conveniences over a fresh lagged handle, `get_taker_healths` the newest; [`PerpClient::new`](mod.rs#L236), the market a signer trades; [`LiveTakerMarket::subscribe`](../feeds/DESIGN.md); [`TapeAddresses`](../history/tape/DESIGN.md). Held by a live cache and by research, without a signer. |
+| [`StateAt`](state.rs#L70) | one market at one block: the handle resolved one header; every read is pinned to its hash; results carry the block | [`MarketReader::state`](state.rs#L215), at the lagged snapshot block; [`MarketReader::state_at`](state.rs#L235), at a block the caller names | its own reads, which fill the snapshots in `math` and the state types below and enforce the tense rule; its batches, [`StateAt::positions`](state.rs#L363), [`StateAt::maker_equities`](maker_equity.rs#L322) and [`StateAt::taker_healths`](taker_health.rs#L58), one block over many ids; the replay's seed, every figure the fold holds at one block; the strategy layer's block-pinned sources, which hold it behind a trait so a read can be stubbed. |
+| [`RowOutcome`](state.rs#L138) | one id's row in a batch: exactly one per input id, in input order; `Ok(None)` is an id with no row; `Err` is that id's failure and says whether to retry | [`StateAt::positions`](state.rs#L363) and [`StateAt::taker_healths`](taker_health.rs#L58), one row multicall per chunk, the second's row a taker's health at the handle's mark; [`MarketReader::get_taker_healths`](taker_health.rs#L27) as the convenience | the maker-equity batch, on the same driver. The strategy layer's solvency folds, which sweep every id a market ever minted, and its liquidation sweep, which retries the transient failures and probes the rest. |
 | [`PositionRole`](market.rs#L186) | the role a position plays, maker or taker: a band in the pool, or a directional position against it. The liquidation twins are keyed on it, and the replay's liquidation and settlement records carry it | the liquidation probes and sends choose it; the replay's activity fold reads it off the event family | [`Liquidation`](../history/replay/DESIGN.md) and `Settlement` in the replay; the strategy layer, when it splits a reading by side. |
-| [`PerpClient`](mod.rs#L182) | one signer on one market: a `MarketReader` plus a wallet and a pipeline; the pipeline owns the next nonce. `close_maker` takes the band's depth as [`LUnits`](../units/DESIGN.md), negates it through the type, which is where a depth past the signed range is refused, and submits through `adjust_maker_exact` with no float on the path | [`PerpClient::new`](mod.rs#L235) from a [`MarketReader`](market.rs#L26) and any alloy signer | [`PerpClient::tx`](transactions.rs#L379) for a raw call, and the trades, probes and transfers over it, each a builder plus a decode of the receipt; the [`TxBuilder`](transactions.rs#L40) borrows it for the pipeline and the wallet. The strategy layer holds one per wallet; a helper that only reads should not take it. |
+| [`PerpClient`](mod.rs#L183) | one signer on one market: a `MarketReader` plus a wallet and a pipeline; the pipeline owns the next nonce. `close_maker` takes the band's depth as [`LUnits`](../units/DESIGN.md), negates it through the type, which is where a depth past the signed range is refused, and submits through `adjust_maker_exact` with no float on the path | [`PerpClient::new`](mod.rs#L236) from a [`MarketReader`](market.rs#L26) and any alloy signer | [`PerpClient::tx`](transactions.rs#L379) for a raw call, and the trades, probes and transfers over it, each a builder plus a decode of the receipt; the [`TxBuilder`](transactions.rs#L40) borrows it for the pipeline and the wallet. The strategy layer holds one per wallet; a helper that only reads should not take it. |
 | [`TxBuilder`](transactions.rs#L40) | one transaction, not yet sent: one nonce, one hash, one typed outcome | [`PerpClient::tx`](transactions.rs#L379) | [`TxBuilder::send`](transactions.rs#L81), the only way out, which drives the pipeline and returns the receipt. Every trade on `PerpClient` goes through it, and the strategy layer uses it directly for a call the trades do not cover. Its shape, parameters first and one `send`, is what makes every failure variant a stage. |
 | [`MakerEquityOutcome`](maker_equity.rs#L59), [`MakerEquityKind`](maker_equity.rs#L68) | one position's result in a batch: one outcome per input id, in input order; `Computed` carries a [`MakerEquityBreakdown`](../math/DESIGN.md); `Failed` carries an error whose transience says whether to retry | [`StateAt::maker_equities`](maker_equity.rs#L322), [`StateAt::maker_equities_at_mark`](maker_equity.rs#L330); [`MarketReader::get_maker_equities`](maker_equity.rs#L261) and [`MarketReader::get_maker_equities_at_mark`](maker_equity.rs#L269) as the conveniences | nothing in the crate. The strategy layer's liquidation scanners and equity audits, which retry the transient failures and act on the rest; the per-position shape exists so one bad row cannot fail the batch, and it is kept so that the next era's settle preview lands under the same name and shape. |
 | [`OpenTakerParams`](trades.rs#L28) | what a caller wants to do, in human units: none beyond field types; scaled once at the call | the caller | [`PerpClient::open_taker`](trades.rs#L327), which scales it once into the exact form. |
@@ -328,7 +327,7 @@ views it batches.
 | `get_snapshot` | 1 multicall + 1 pinned index, plus the slow layer on a miss | one lagged block | slow layer for fees and bounds |
 | `state()` | 2 (block number, header) | lagged | no |
 | `state_at(n)` | 1 (header) | named | no |
-| `get_capacity`, `get_margin_ratios`, `get_pool_snapshot`, `get_mark`, `get_maker_equities` | `state()` plus the pinned read below | lagged | as the pinned read |
+| `get_capacity`, `get_margin_ratios`, `get_pool_snapshot`, `get_mark`, `get_maker_equities`, `get_taker_healths` | `state()` plus the pinned read below | lagged | as the pinned read |
 | `StateAt::solvency`, `next_pos_id`, `position`, `maker_band`, `pool_tick`, `collateral` | 1 each | pinned | no |
 | `StateAt::capacity` | 1 multicall | pinned | no |
 | `StateAt::margin_ratios` | 3 | pinned | no |
@@ -336,6 +335,7 @@ views it batches.
 | `StateAt::pool` | 1 multicall + index + bounds + bitmap, + tick words when any tick is set: 4 or 5; plus 2 for the immutables once per market per process | pinned | immutables, forever |
 | `StateAt::positions` | 1 row multicall per chunk of at most 500 ids; 4 chunks in flight | pinned | no |
 | `StateAt::maker_equities` | 1 market-wide multicall + 1 pinned index; per chunk of at most 500 ids: 1 row multicall + 1 `extsload` + 1 `eth_getProof` (or, where proofs are not served, 2 `eth_getStorageAt` per distinct band tick, 16 ticks at a time, so 32 requests in flight per chunk); 4 chunks in flight, so up to 128 storage reads at once on the fallback; plus 2 for the immutables once per market per process | pinned | immutables, forever |
+| `StateAt::taker_healths` | 1 market-wide multicall + 1 pinned index; per chunk of at most 500 ids: 1 row multicall of 3 rows per id; 4 chunks in flight | pinned | no |
 | `get_positions_by_owner` | 1 + one `ownerOf` per id ever minted | head | no |
 | `get_balances_batch` | 1 multicall | head | fast layer |
 | liquidation probes | 1 `eth_call` at the liquidation gas cap | head | no |
@@ -366,8 +366,7 @@ Two costs in this table are not what they should be and are debts:
   send's machinery; the state cache is what now-reads serve from. The
   client is their only caller.
 - To `transport`: every request goes through `HftTransport`, whose
-  read/write classification is what makes a read retryable and a write
-  not.
+  read/write classification makes a read retryable and a write not.
 - To `errors`: the variants this module produces are defined there with
   their transience; this module decides which variant a node's answer is.
 - To `contracts` and `storage`: the bindings the reads call and the slots
@@ -453,4 +452,5 @@ Two costs in this table are not what they should be and are debts:
 - **Two row shapes for one idea.** `RowOutcome` and `MakerEquityKind`
   both say "one id's answer: a value, no row, or a failure". The second
   predates the first and is kept so the cutover moves its three consumers
-  once; it should fold into `RowOutcome` then.
+  once; it should fold into `RowOutcome` then. The taker batch, which
+  came after both, is on `RowOutcome`.
