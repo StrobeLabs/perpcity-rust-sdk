@@ -541,22 +541,12 @@ impl MakerEquityBreakdown {
     /// The first liquidatable price from the mark in one direction, or
     /// `None` when the position is healthy out to a hundredfold.
     fn first_turn(&self, up: bool) -> Result<Option<Price>, ValidationError> {
-        const GRAIN: u32 = 512;
-        let mark = self.mark.x96();
-        let stepped = |k: u32| {
-            let factor = U256::from(GRAIN + (1u32 << k));
-            Price::from_x96(if up {
-                mark * factor / U256::from(GRAIN)
-            } else {
-                mark * U256::from(GRAIN) / factor
-            })
-        };
         // Bracket: the last healthy price and the first liquidatable one,
         // at factors 1 + 2^k / 512 for k up to 16, a hundredfold and more.
         let mut healthy = self.mark;
         let mut liquidatable = None;
         for k in 0..=16 {
-            let price = stepped(k);
+            let price = stepped(self.mark, k, up)?;
             if self.is_liquidatable_at(price)? {
                 liquidatable = Some(price);
                 break;
@@ -566,10 +556,11 @@ impl MakerEquityBreakdown {
         let Some(liquidatable) = liquidatable else {
             return Ok(None);
         };
-        // Bisect to the atom.
+        // Bisect to the atom. The midpoint is taken from the lower end so
+        // the sum of two words near the top of the range cannot wrap.
         let (mut healthy, mut liquidatable) = (healthy.x96(), liquidatable.x96());
         while healthy.abs_diff(liquidatable) > U256::from(1u8) {
-            let mid = (healthy + liquidatable) / U256::from(2u8);
+            let mid = healthy.min(liquidatable) + healthy.abs_diff(liquidatable) / U256::from(2u8);
             if self.is_liquidatable_at(Price::from_x96(mid))? {
                 liquidatable = mid;
             } else {
@@ -578,6 +569,18 @@ impl MakerEquityBreakdown {
         }
         Ok(Some(Price::from_x96(liquidatable)))
     }
+}
+
+/// `mark` scaled by `(512 + 2^k) / 512`, up or down: the search's `k`th
+/// step, as the exact quotient or an overflow, never a wrapped product.
+fn stepped(mark: Price, k: u32, up: bool) -> Result<Price, ValidationError> {
+    const GRAIN: u32 = 512;
+    let (grain, factor) = (U256::from(GRAIN), U256::from(GRAIN + (1u32 << k)));
+    Ok(Price::from_x96(if up {
+        mul_div(mark.x96(), factor, grain, Rounding::TowardZero)?
+    } else {
+        mul_div(mark.x96(), grain, factor, Rounding::TowardZero)?
+    }))
 }
 
 impl MakerMarketSnapshot {
@@ -1221,6 +1224,20 @@ mod tests {
                 .distance_from(covered.mark()),
             None
         );
+    }
+
+    /// A step is the exact quotient in both directions, and a step past the
+    /// top of the range is an overflow rather than a wrapped product.
+    #[test]
+    fn a_step_is_exact_or_refused_never_wrapped() {
+        let one = Price::from_x96(Q96);
+        let (q, up, down) = (Q96, U256::from(513u16), U256::from(512u16));
+        assert_eq!(stepped(one, 0, true).unwrap().x96(), q * up / down);
+        assert_eq!(stepped(one, 0, false).unwrap().x96(), q * down / up);
+        assert!(matches!(
+            stepped(Price::from_x96(U256::MAX), 0, true),
+            Err(ValidationError::Overflow { .. })
+        ));
     }
 
     /// Without the accrual replay the funding is stale to lastTouch — the
