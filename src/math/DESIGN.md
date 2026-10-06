@@ -162,12 +162,11 @@ the map reconciles with the pool's active liquidity; a quote is the
 trade's deltas, the price it ends at, and which constraint stopped it.
 
 **Settlement** (`maker_equity`): what the contract would credit a maker
-if it were touched now. Funding accrued through the tick checkpoints,
-utilization earnings from the capacity-weighted checkpoints, LP fees from
-the pool's fee growth, and inventory marked at the mark, all in exact
-atoms, from a `MakerMarketSnapshot` and per-position `MakerState` rows.
-This is the port that reproduces a real liquidation to the atom, and it is
-the port the next contract era makes unnecessary.
+touched now: funding through the tick checkpoints, utilization earnings,
+LP fees from the pool's fee growth, inventory marked at the mark, exact
+atoms from a `MakerMarketSnapshot` and `MakerState` rows. The preview
+keeps the legs that move with the price, so its distance to liquidation is
+a search along a price shock; it reproduces a real liquidation to the atom.
 
 **Taker health** (`taker`): the deployed `liquidateTaker` eligibility
 test, exact, from a `TakerMarketSnapshot` and a `TakerState` row: value
@@ -197,11 +196,12 @@ no snapshot, no exactness claim, f64 out; `taker` supersedes it.
 | [`PoolSnapshot`](swap.rs#L71), [`TickLiquidity`](swap.rs#L25) | the pool at a block: price, active liquidity as [`LUnits`](../units/DESIGN.md), a tick map whose gross is an `LUnits` and whose net is an [`LDelta`](../units/DESIGN.md) — a tick's crossing adds or removes depth, so it is the only one of the two that is signed — and the swap bounds. The map must reconcile with the active liquidity the pool reports, which is the sum of the nets at or below the tick | [`StateAt::pool`](../client/DESIGN.md); [`MarketReader::get_pool_snapshot`](../client/DESIGN.md); [`with_liquidity_delta`](swap.rs#L281), the same pool with a band added or removed | its own quotes, [`quote_perp`](swap.rs#L201) and [`quote_to_price`](swap.rs#L220); [`LiveTakerMarket::from_snapshot`](../feeds/DESIGN.md) and [`LiveTakerMarketPublisher::publish`](../feeds/DESIGN.md), which share it block-atomically. The strategy layer's depth probes and in-memory quoting hold one, which is why a quote needs no provider. |
 | [`QuoteConstraints`](swap.rs#L51) | a quote's stopping rules: max size, max impact, the bounds | the caller; `Default` is no constraint | [`quote_to_price`](swap.rs#L220), which stops at whichever rule binds first and names it. |
 | [`TakerQuote`](swap.rs#L113), [`QuoteLimit`](swap.rs#L34) | a swap's outcome and the rule that stopped it: the limit that bound the trade is named, not inferred, and the depth it ends on is an [`LUnits`](../units/DESIGN.md) rather than a bare integer beside the atom counts | [`quote_perp`](swap.rs#L201) and [`quote_to_price`](swap.rs#L220) on a [`PoolSnapshot`](swap.rs#L71) | nothing in the crate. The strategy layer turns [`amt1_limit`](swap.rs#L148) into a trade's limit and reads the `QuoteLimit` it carries to know why a size was cut. |
-| [`MakerMarketSnapshot`](maker_equity.rs#L65) | the settle's market-wide inputs from one block: the four accumulators as [`Funding`](../units/DESIGN.md), [`FundingPerSqrtPrice`](../units/DESIGN.md) and a [`PerSide`](../units/DESIGN.md) of [`Earnings`](../units/DESIGN.md), beside the tick, the pool price, the mark and the liquidation fee rate the health test deducts | the market-wide multicall of the maker-equity batch on the state handle in `client` | [`accrued`](maker_equity.rs#L372), which advances each accumulator by the growth the elapsed seconds imply, the two utilization legs in one loop over the sides. It is separate from the accrued snapshot so that a what-if mark cannot be applied before the replay. |
-| [`AccrualInputs`](maker_equity.rs#L95) | what the accrual replay needs: the rates, and the open interest and capacity each as a [`PerSide`](../units/DESIGN.md), so the replay reads both legs of a side with one key | the same multicall | [`MakerMarketSnapshot::accrued`](maker_equity.rs#L372), and nothing else. |
-| [`AccruedMakerSnapshot`](maker_equity.rs#L442) | a market snapshot advanced to its block: the accrual replay has run; a what-if mark applies only after it | [`MakerMarketSnapshot::accrued`](maker_equity.rs#L372); [`with_mark`](maker_equity.rs#L460) for a what-if | [`AccruedMakerSnapshot::maker_equity`](maker_equity.rs#L473), once per position. The order accrue, then mark, then settle is the contract's, and the two types make it the only order available. |
-| [`MakerState`](maker_equity.rs#L121), [`TickFunding`](maker_equity.rs#L50) | one position's settle inputs: its two ticks and the depth standing in them as [`LUnits`](../units/DESIGN.md), its margin, its stored capacity as a [`PerSide`](../units/DESIGN.md), and its checkpoint of every accumulator the market keeps — four [`Funding`](../units/DESIGN.md) counting the two ticks', a [`FundingPerSqrtPrice`](../units/DESIGN.md), a [`PerSide`](../units/DESIGN.md) of [`Earnings`](../units/DESIGN.md) and two [`FeeGrowth`](../units/DESIGN.md). A checkpoint is only ever read as the thing the market's level is measured against | the batch's maker rows and the two storage reads on the state handle in `client` | [`AccruedMakerSnapshot::maker_equity`](maker_equity.rs#L473), the settle preview, which takes each difference with that accumulator's own rule. |
-| [`MakerEquityBreakdown`](maker_equity.rs#L181) | a settle previewed: exact atoms in the contract's units, the utilization earnings a [`PerSide`](../units/DESIGN.md) whose `total` is what the settle credits; the fee rate it was tested under beside the ratio, so `is_liquidatable` takes nothing; f64 only in accessors | [`AccruedMakerSnapshot::maker_equity`](maker_equity.rs#L473) | [`MakerEquityKind`](../client/DESIGN.md), as the `Computed` payload of an outcome; the strategy layer's equity audits and liquidation decisions, which key on `is_liquidatable` and the margin ratio. Exact atoms so that a preview can be checked against a real settle to the atom. |
+| [`MakerMarketSnapshot`](maker_equity.rs#L65) | the settle's market-wide inputs from one block: the four accumulators as [`Funding`](../units/DESIGN.md), [`FundingPerSqrtPrice`](../units/DESIGN.md) and a [`PerSide`](../units/DESIGN.md) of [`Earnings`](../units/DESIGN.md), beside the tick, the pool price, the mark and the liquidation fee rate the health test deducts | the market-wide multicall of the maker-equity batch on the state handle in `client` | [`accrued`](maker_equity.rs#L608), which advances each accumulator by the growth the elapsed seconds imply, the two utilization legs in one loop over the sides. It is separate from the accrued snapshot so that a what-if mark cannot be applied before the replay. |
+| [`AccrualInputs`](maker_equity.rs#L95) | what the accrual replay needs: the rates, and the open interest and capacity each as a [`PerSide`](../units/DESIGN.md), so the replay reads both legs of a side with one key | the same multicall | [`MakerMarketSnapshot::accrued`](maker_equity.rs#L608), and nothing else. |
+| [`AccruedMakerSnapshot`](maker_equity.rs#L678) | a market snapshot advanced to its block: the accrual replay has run; a what-if mark applies only after it | [`MakerMarketSnapshot::accrued`](maker_equity.rs#L608); [`with_mark`](maker_equity.rs#L696) for a what-if | [`AccruedMakerSnapshot::maker_equity`](maker_equity.rs#L709), once per position. The order accrue, then mark, then settle is the contract's, and the two types make it the only order available. |
+| [`MakerState`](maker_equity.rs#L121), [`TickFunding`](maker_equity.rs#L50) | one position's settle inputs: its two ticks and the depth standing in them as [`LUnits`](../units/DESIGN.md), its margin, its stored capacity as a [`PerSide`](../units/DESIGN.md), and its checkpoint of every accumulator the market keeps — four [`Funding`](../units/DESIGN.md) counting the two ticks', a [`FundingPerSqrtPrice`](../units/DESIGN.md), a [`PerSide`](../units/DESIGN.md) of [`Earnings`](../units/DESIGN.md) and two [`FeeGrowth`](../units/DESIGN.md). A checkpoint is only ever read as the thing the market's level is measured against | the batch's maker rows and the two storage reads on the state handle in `client` | [`AccruedMakerSnapshot::maker_equity`](maker_equity.rs#L709), the settle preview, which takes each difference with that accumulator's own rule. |
+| [`MakerEquityBreakdown`](maker_equity.rs#L266) | a settle previewed: exact atoms in the contract's units, the utilization earnings a [`PerSide`](../units/DESIGN.md) whose `total` is what the settle credits; the fee rate it was tested under beside the ratio, so `is_liquidatable` takes nothing; the mark and the legs that move with the price, so the preview revalues itself along a price shock; f64 only in accessors | [`AccruedMakerSnapshot::maker_equity`](maker_equity.rs#L709) | [`MakerEquityKind`](../client/DESIGN.md), as the `Computed` payload of an outcome; [`LiquidationPrices`](maker_equity.rs#L227), its search; the strategy layer's equity audits and liquidation decisions, which key on `is_liquidatable`, the margin ratio and the distance. |
+| [`LiquidationPrices`](maker_equity.rs#L227) | where the health test turns along a price shock, pool price and mark moving together: the first liquidatable Q96 atom below the mark and above it, `None` for a side healthy out to a hundredfold, both the mark when liquidatable now | [`MakerEquityBreakdown::liquidation_prices`](maker_equity.rs#L528), a geometric bracket then a bisection over the shock valuation | `distance_from`, the nearer side as a fraction of the mark. The strategy layer's maker fragility reading and an agent's own bound, the twin of the taker's `distance_to_liquidation`. |
 | [`TakerMarketSnapshot`](taker.rs#L37), [`TakerState`](taker.rs#L54) | a taker health's inputs from one block: the funding and utilization cumulatives and the mark, market-wide; one position's exposure, USD leg, margin, stored liquidation ratio and checkpoints. Fields named after the contract's | the taker batch on the state handle in `client` fills both from pinned reads: `cumulatives` and the mark for the snapshot; `positions`, `takerDetails` and `makerDetails` for the row, the last to tell a taker from a band | [`TakerMarketSnapshot::taker_health`](taker.rs#L98), the one computation over them. |
 | [`TakerHealth`](taker.rs#L75) | one taker's standing at a block in exact atoms: value, PnL, funding and utilization owed, settled margin, equity; `is_liquidatable` is the contract's integer test; `liquidation_mark` and `distance_to_liquidation` are the mark the test turns at and the mark's distance from it, the latter an f64 for a monitor's bound | [`TakerMarketSnapshot::taker_health`](taker.rs#L98); [`StateAt::taker_healths`](../client/DESIGN.md) and [`MarketReader::get_taker_healths`](../client/DESIGN.md), one per open taker among a batch's ids | the strategy layer's fragility reading and an agent's own distance to liquidation; the liquidation sweep, which the `eth_call` probe confirms before a send. |
 
@@ -228,9 +228,9 @@ with no allocation on the hot path beyond the tick map a snapshot owns.
 - **The mark is one exponential.** Advancing the EMAs is a Solady
   `expWad` and two weighted sums; the fair price is an average. Cheap
   enough to compute at every read rather than cache.
-- **A settle or health preview is constant per position**: a fixed number
-  of checkpoint differences and one valuation at the mark. A batch's cost
-  is in the reads that fill the snapshot, not the arithmetic.
+- **A preview is constant per position**: a fixed number of checkpoint
+  differences and one valuation at the mark. A maker's liquidating prices
+  are a search, two hundred valuations, run only when asked.
 - **Geometry is closed-form.** Capacity, band amounts and liquidity
   sizing are single formulas in square-root prices; the inverse for a
   capacity target is a division, not a search.
@@ -285,19 +285,19 @@ with no allocation on the hot path beyond the tick map a snapshot owns.
   contract's width. One is the wire shape and the other the same two
   numbers as the types the rest of the crate speaks; neither direction is
   a conversion with two homes.
-- **`TakerHealth` hands back its inputs' units.** `delta_perp`,
-  `liquidation_margin_ratio` and `liquidation_mark` return the
-  `PerpDelta`, `Ratio` and `Price` the health was computed from or at,
-  as `MakerEquityBreakdown`'s accessors do; a reading, not a conversion.
+- **`TakerHealth` and `MakerEquityBreakdown` speak their inputs' units.**
+  `delta_perp`, `liquidation_margin_ratio` and `liquidation_mark` return
+  the `PerpDelta`, `Ratio` and `Price` a health was computed from or at;
+  `is_liquidatable_at`, `equity_at` and `distance_from` take the `Price` a
+  maker is revalued at or measured from. A reading, not a conversion.
 
 ## Debts
 
 - **`position` is superseded.** `taker` answers its questions exactly and
   snapshot-fed; it goes when the strategy layer's last call to it does.
 - **`liquidity_for_target_ratio` cannot express the deployed maker
-  case.** Makers on the deployed markets are fully collateralised, a
-  ratio of 1.0, which the function's domain excludes; callers size makers
-  through `estimate_liquidity` and a buffer instead.
+  case.** Deployed makers are fully collateralised, ratio 1.0, outside the
+  function's domain; callers size through `estimate_liquidity` and a buffer.
 - **The settle preview is deployed-era compensation.** The next contract
   era exposes `previewPosition`; when it ships, `maker_equity` and the
   storage reads behind it are deleted rather than migrated.

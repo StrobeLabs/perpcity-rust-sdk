@@ -191,7 +191,7 @@ that carries it, the invariant it holds, and the node that owns it.
 | A price pair | [`PricePair`](src/math/pricing.rs#L41) | the contract's `uint128` pair, spot or EMA | [`math::pricing`](src/math/pricing.rs#L1) |
 | Capacity and its draw | [`MarketCapacity`](src/math/capacity.rs#L59) | capacity and open interest from one block | [`math::capacity`](src/math/capacity.rs#L1) |
 | The pool at a block | [`PoolSnapshot`](src/math/swap.rs#L71) | price, liquidity and a tick map that reconciles with it | [`math::swap`](src/math/swap.rs#L1) |
-| A settle previewed | [`MakerEquityBreakdown`](src/math/maker_equity.rs#L181) | exact atoms, the contract's arithmetic | [`math::maker_equity`](src/math/maker_equity.rs#L1) |
+| A settle previewed | [`MakerEquityBreakdown`](src/math/maker_equity.rs#L266) | exact atoms, the contract's arithmetic | [`math::maker_equity`](src/math/maker_equity.rs#L1) |
 | A taker's health | [`TakerHealth`](src/math/taker.rs#L75) | the deployed liquidation test in exact atoms, and the mark it turns at | [`math::taker`](src/math/taker.rs#L1) |
 | A block | [`BlockContext`](src/math/mod.rs#L52) | number, hash, timestamp of one header | [`math`](src/math/DESIGN.md) |
 | An event | [`MarketEvent`](src/events.rs#L156) | the market's vocabulary, human units, either tense | [`events`](src/events/DESIGN.md) |

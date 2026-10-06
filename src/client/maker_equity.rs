@@ -957,10 +957,10 @@ mod tests {
             }))
         };
         let kinds = vec![
-            MakerEquityKind::Computed(MakerEquityBreakdown::default()),
+            MakerEquityKind::Computed(MakerEquityBreakdown::placeholder()),
             MakerEquityKind::NotAMaker,
             failed(),
-            MakerEquityKind::Computed(MakerEquityBreakdown::default()),
+            MakerEquityKind::Computed(MakerEquityBreakdown::placeholder()),
             failed(),
             failed(),
         ];

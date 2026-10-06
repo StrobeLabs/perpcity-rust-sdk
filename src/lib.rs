@@ -101,8 +101,8 @@ pub use math::pricing::{Emas, Mark, PricePair, calculate_emas, fair_price, fair_
 
 #[doc(inline)]
 pub use math::maker_equity::{
-    AccrualInputs, AccruedMakerSnapshot, MakerEquityBreakdown, MakerMarketSnapshot, MakerState,
-    TickFunding,
+    AccrualInputs, AccruedMakerSnapshot, LiquidationPrices, MakerEquityBreakdown,
+    MakerMarketSnapshot, MakerState, TickFunding,
 };
 
 #[doc(inline)]
