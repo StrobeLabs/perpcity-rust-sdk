@@ -20,7 +20,7 @@ use alloy::sol_types::SolCall;
 use alloy::transports::{TransportError, TransportErrorKind};
 use futures_util::stream::{self, StreamExt};
 
-use crate::contracts::{IFees, IPoolManagerState, Maker, Perp, Position};
+use crate::contracts::{IPoolManagerState, Maker, Perp, Position};
 use crate::convert::unpack_balance_delta;
 use crate::errors::{ContractError, PerpCityError, Result, ValidationError};
 use crate::math::maker_equity::{
@@ -38,7 +38,6 @@ use crate::units::{
 };
 
 use super::market::MarketReader;
-use super::queries::registered_module;
 use super::state::{
     CHUNK_READ_CONCURRENCY, ChunkReadFailure, MAX_ROW_BATCH, PerpViews, RowOutcome, StateAt,
     decode_row, ema_window_secs,
@@ -408,9 +407,8 @@ impl StateAt {
     }
 
     /// The market-wide settle inputs at this block, accrued to its
-    /// timestamp: one multicall over the `Perp`, then the beacon's index,
-    /// the stored EMAs' word and the fees module's liquidation fee, all
-    /// pinned here.
+    /// timestamp: one multicall over the `Perp`, then the beacon's index
+    /// and the stored EMAs' word, all pinned here.
     ///
     /// The accrual replay always runs at the contract's mark for the block
     /// — `fairPrice(ammPrice, index, emas)` with the stored EMAs advanced to
@@ -440,7 +438,6 @@ impl StateAt {
             ema_window: ema_window_secs(ema_window)?,
         };
         let mark = self.mark_from(&views).await?;
-        let liquidation_fee = self.liquidation_fee(views.modules.fees).await?;
         let block = self.block();
 
         let market = MakerMarketSnapshot {
@@ -454,7 +451,6 @@ impl StateAt {
             tick: i24_to_i32(views.pool_state.tick),
             sqrt_price: SqrtPrice::from_x96(views.pool_state.sqrtPrice.to::<U256>()),
             mark: mark.fair_price(),
-            liquidation_fee,
         }
         .accrued(&AccrualInputs {
             funding_per_day: FundingRate::from_wad(
@@ -476,19 +472,6 @@ impl StateAt {
             Some(mark) => market.with_mark(mark),
             None => market,
         })
-    }
-
-    /// The fees module's `liqFee` at this block, the rate the health test
-    /// deducts from equity.
-    async fn liquidation_fee(&self, fees: Address) -> Result<Ratio> {
-        let module = registered_module(fees, "IFees")?;
-        let fee = IFees::new(module, self.market().chain().provider())
-            .liqFee()
-            .block(self.id())
-            .call()
-            .await
-            .map_err(|e| self.read_error(e))?;
-        Ok(Ratio::from_e6(u24_to_u32(fee))?)
     }
 
     /// One chunk of the batch: its maker rows, then the slot reads and
@@ -1111,7 +1094,6 @@ mod tests {
         );
         rpc.call::<IBeacon::indexCall>(&one);
         rpc.storage(mock::emas_word(one.to::<u128>(), one.to::<u128>()));
-        rpc.call::<IFees::liqFeeCall>(&mock::e6(10_000));
     }
 
     /// The two funding words of each of `ticks`, all zero, as one
@@ -1156,7 +1138,7 @@ mod tests {
         assert!(matches!(outcomes[2].kind, MakerEquityKind::NotAMaker));
         assert!(
             rpc.is_drained(),
-            "immutables, one multicall, the index, the EMAs, the fee, the rows, the extsload, the proof"
+            "immutables, one multicall, the index, the EMAs, the rows, the extsload, the proof"
         );
     }
 
