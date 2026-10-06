@@ -80,10 +80,14 @@ pub struct LiquidationPrices {
 impl LiquidationPrices {
     /// The nearer side's distance from the mark, as a fraction of it: a
     /// monitor's bound. `None` when neither side turns; zero when the
-    /// position is liquidatable now. Lossy; the tests themselves are exact.
+    /// position is liquidatable now, and positive whenever it is not. Lossy
+    /// in its last digits; the tests themselves are exact.
     pub fn distance(&self) -> Option<f64> {
         let mark = f64::from(self.mark.x96());
-        let relative = |price: Price| (f64::from(price.x96()) / mark - 1.0).abs();
+        // The gap is taken in integers first: a price one atom from a mark
+        // near 2^101 is the same `f64` as the mark, and a ratio less one
+        // would read it as no distance at all.
+        let relative = |price: Price| f64::from(price.x96().abs_diff(self.mark.x96())) / mark;
         [self.below, self.above]
             .into_iter()
             .flatten()

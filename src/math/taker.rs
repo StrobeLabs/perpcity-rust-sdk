@@ -240,17 +240,25 @@ impl TakerHealth {
     /// so one side is the turn and the other `None`. Both are `None` for a
     /// long whose settled margin covers its USD leg, which no fall of the
     /// mark can liquidate, and for a position with no exposure; both are
-    /// the mark when [`Self::is_liquidatable`] says so now. The turn is
-    /// solved on the contract's arithmetic without its floors, so the exact
-    /// test can differ within an atom of it, and it is kept on its side of
-    /// the mark.
+    /// the mark when [`Self::is_liquidatable`] says so now, and only then.
+    /// The turn is solved on the contract's arithmetic without its floors,
+    /// so the exact test can differ within an atom of it: a short the test
+    /// calls healthy can have its closed-form turn at the mark itself. So
+    /// the turn is kept at least one atom on its side of the mark.
     pub fn liquidation_prices(&self) -> LiquidationPrices {
+        let one = U256::from(1u8);
         let (below, above) = if self.is_liquidatable() {
             (Some(self.mark), Some(self.mark))
         } else {
             match self.liquidation_mark() {
-                Some(turn) if self.delta_perp.atoms() > 0 => (Some(turn.min(self.mark)), None),
-                Some(turn) => (None, Some(turn.max(self.mark))),
+                Some(turn) if self.delta_perp.atoms() > 0 => (
+                    Some(turn.min(Price::from_x96(self.mark.x96().saturating_sub(one)))),
+                    None,
+                ),
+                Some(turn) => (
+                    None,
+                    Some(turn.max(Price::from_x96(self.mark.x96().saturating_add(one)))),
+                ),
                 None => (None, None),
             }
         };
@@ -501,6 +509,41 @@ mod tests {
             market(42).taker_health(&flat).unwrap().liquidation_mark(),
             None
         );
+    }
+
+    /// Both sides at the mark means liquidatable now, and only that. The
+    /// floor on a short's value can leave the exact test calling it healthy
+    /// at its closed-form turn; the turn then sits an atom above the mark,
+    /// with a distance that is small but not zero.
+    #[test]
+    fn a_healthy_short_at_its_turn_keeps_a_distance() {
+        let short = TakerState {
+            delta_perp: PerpDelta::new(-10_000_000),
+            delta_usd: UsdcDelta::new(400_000_000),
+            ..long()
+        };
+        let at = |mark: Price| {
+            TakerMarketSnapshot {
+                util_payments: PerSide::new(
+                    Earnings::from_x96(U256::ZERO),
+                    Earnings::from_x96(Q96 / U256::from(4u8)),
+                ),
+                mark,
+                ..market(42)
+            }
+            .taker_health(&short)
+            .unwrap()
+        };
+        let turn = at(price(42)).liquidation_mark().unwrap();
+        let health = at(turn);
+        assert!(
+            !health.is_liquidatable(),
+            "the floors leave it healthy at the closed form"
+        );
+        let prices = health.liquidation_prices();
+        assert_eq!(prices.below, None);
+        assert!(prices.above.unwrap() > prices.mark, "{prices:?}");
+        assert!(prices.distance().unwrap() > 0.0);
     }
 
     #[test]
