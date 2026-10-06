@@ -304,9 +304,9 @@ fn seed_of(market: &Replay, at: BlockContext) -> Seed {
             .open()
             .map(|(pos_id, state)| {
                 let margin = UsdcAtoms::new(1_000_000 + pos_id.to::<u128>());
-                let position = match (state.taker_size(), state.maker_band()) {
-                    (Some(size), _) => SeedPosition::Taker { size, margin },
-                    (_, Some(band)) => SeedPosition::Maker {
+                let position = match (state.taker_size(), state.taker_usd(), state.maker_band()) {
+                    (Some(size), Some(usd), _) => SeedPosition::Taker { size, usd, margin },
+                    (_, _, Some(band)) => SeedPosition::Maker {
                         range: band.range,
                         liquidity: LDelta::new(band.liquidity.units() as i128),
                         margin,

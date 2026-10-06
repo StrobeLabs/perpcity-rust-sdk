@@ -16,7 +16,7 @@ use crate::math::capacity::MarketCapacity;
 use crate::math::pricing::Emas;
 use crate::math::range::TickRange;
 use crate::math::swap::TickLiquidity;
-use crate::units::{LDelta, PerpDelta, Price, UsdcAtoms};
+use crate::units::{LDelta, PerpDelta, Price, UsdcAtoms, UsdcDelta};
 
 /// Every figure the fold holds, as the reads returned it at one block.
 #[derive(Clone)]
@@ -42,6 +42,7 @@ pub(super) struct Seed {
 pub(super) enum SeedPosition {
     Taker {
         size: PerpDelta,
+        usd: UsdcDelta,
         margin: UsdcAtoms,
     },
     Maker {
@@ -51,9 +52,7 @@ pub(super) enum SeedPosition {
     },
     /// A row with neither size nor band, which the contract does not
     /// leave standing; kept as unknown rather than guessed.
-    Unknown {
-        margin: UsdcAtoms,
-    },
+    Unknown { margin: UsdcAtoms },
 }
 
 impl Seed {
@@ -96,12 +95,13 @@ impl Seed {
                     margin,
                 },
                 None => {
-                    let (perp, _) = unpack_balance_delta(row.delta);
+                    let (perp, usd) = unpack_balance_delta(row.delta);
                     if perp == 0 {
                         SeedPosition::Unknown { margin }
                     } else {
                         SeedPosition::Taker {
                             size: PerpDelta::new(perp),
+                            usd: UsdcDelta::new(usd),
                             margin,
                         }
                     }

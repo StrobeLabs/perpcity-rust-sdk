@@ -55,6 +55,7 @@ fn a_seed_is_a_checkpoint() {
         let actual = seeded.position(pos_id).unwrap();
         assert_eq!(actual.is_open(), expected.is_open(), "{pos_id} open");
         assert_eq!(actual.taker_size(), expected.taker_size(), "{pos_id} size");
+        assert_eq!(actual.taker_usd(), expected.taker_usd(), "{pos_id} USD leg");
         assert_eq!(actual.maker_band(), expected.maker_band(), "{pos_id} band");
         assert_eq!(actual.closed(), expected.closed(), "{pos_id} close");
     }
