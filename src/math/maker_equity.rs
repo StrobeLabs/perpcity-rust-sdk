@@ -489,10 +489,12 @@ impl MakerEquityBreakdown {
     /// found by a bracket that steps outward from a quarter of a percent,
     /// doubling to a hundredfold, then a bisection. Equity along the shock
     /// is the LP curve, concave, so it can turn below, above, both or
-    /// neither. A pocket narrower than a bracket step is not seen, so a
-    /// side is the nearest turn the search saw. The deployed mark follows
-    /// the pool only in part, so the shock moves the mark faster than a
-    /// trade would.
+    /// neither. A side is `None` when no turn lies within a hundredfold or
+    /// before the edge of the protocol's price range, whichever comes
+    /// first. A pocket narrower than a bracket step is not seen, so a side
+    /// is the nearest turn the search saw. The deployed mark follows the
+    /// pool only in part, so the shock moves the mark faster than a trade
+    /// would.
     ///
     /// # Errors
     ///
@@ -511,7 +513,8 @@ impl MakerEquityBreakdown {
     }
 
     /// The first liquidatable price from the mark in one direction, or
-    /// `None` when the position is healthy out to a hundredfold.
+    /// `None` when the position is healthy out to a hundredfold or to the
+    /// edge of the price range.
     fn first_turn(&self, up: bool) -> Result<Option<Price>, ValidationError> {
         // Bracket: the last healthy price and the first liquidatable one,
         // at factors 1 + 2^k / 512 for k up to 16, a hundredfold and more.
@@ -519,6 +522,11 @@ impl MakerEquityBreakdown {
         let mut liquidatable = None;
         for k in 0..=16 {
             let price = stepped(self.mark, k, up)?;
+            // No pool can stand past the protocol's root bounds, so a step
+            // beyond them ends this side's search without a turn.
+            if SqrtPrice::try_from(price).is_err() {
+                break;
+            }
             if self.is_liquidatable_at(price)? {
                 liquidatable = Some(price);
                 break;
@@ -1260,6 +1268,24 @@ mod tests {
             stepped(Price::from_x96(U256::MAX), 0, true),
             Err(ValidationError::Overflow { .. })
         ));
+    }
+
+    /// On a market priced near the top of the protocol's range, the search
+    /// upward reaches the edge before a hundredfold. Past it no pool can
+    /// stand, so that side ends without a turn rather than failing the call
+    /// and discarding the side already found.
+    #[test]
+    fn the_search_stops_at_the_edge_of_the_price_range() {
+        let high = Price::from_x96(Q96 * U256::from(100_000u32));
+        let covered = MakerEquityBreakdown {
+            margin: UsdcDelta::new(MAX_COMPONENT_ATOMS as i128 / 8),
+            mark: high,
+            sqrt_price: SqrtPrice::try_from(high).unwrap(),
+            ..healthy_maker_at_the_mark()
+        };
+        assert!(!covered.is_liquidatable());
+        let prices = covered.liquidation_prices().unwrap();
+        assert_eq!((prices.below, prices.above), (None, None));
     }
 
     /// Without the accrual replay the funding is stale to lastTouch — the
