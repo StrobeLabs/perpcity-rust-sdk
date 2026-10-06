@@ -535,8 +535,8 @@ impl MakerEquityBreakdown {
 
     /// Where the test turns on each side of the mark along the shock: the
     /// first mark, to the Q96 atom, at which the position is liquidatable,
-    /// found by a bracket that steps outward from a quarter of a percent,
-    /// doubling to a hundredfold, then a bisection. Equity along the shock
+    /// found by a bracket that steps outward from 1/512, about a fifth of a
+    /// percent, doubling to a hundredfold, then a bisection. Equity along the shock
     /// is the LP curve, concave, so it can turn below, above, both or
     /// neither. A side is `None` when no turn lies within a hundredfold or
     /// before the edge of the protocol's price range, whichever comes
