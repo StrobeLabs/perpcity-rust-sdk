@@ -82,6 +82,10 @@ pub struct MakerMarketSnapshot {
     /// index, and block-advanced EMAs, as `PerpLogic.accrue` sets
     /// `markPrice`.
     pub mark: Price,
+    /// The fees module's `liqFee` at the block: the rate the health test
+    /// deducts from equity, as a share of the band's value, before it
+    /// compares against the position's ratio.
+    pub liquidation_fee: Ratio,
 }
 
 /// Raw rates + accrual context for replaying `accrue()` from `lastTouch` to
@@ -182,6 +186,7 @@ pub struct MakerEquityBreakdown {
     unrealized_pnl: UsdcDelta,
     position_value: UsdcAtoms,
     liquidation_margin_ratio: Ratio,
+    liquidation_fee: Ratio,
 }
 
 /// Deserialization shadow of [`MakerEquityBreakdown`]: identical fields,
@@ -196,6 +201,7 @@ struct RawMakerEquityBreakdown {
     unrealized_pnl: UsdcDelta,
     position_value: UsdcAtoms,
     liquidation_margin_ratio: Ratio,
+    liquidation_fee: Ratio,
 }
 
 impl TryFrom<RawMakerEquityBreakdown> for MakerEquityBreakdown {
@@ -238,6 +244,7 @@ impl TryFrom<RawMakerEquityBreakdown> for MakerEquityBreakdown {
             // The ratio's own domain, the contract's `uint24`, is checked
             // where a `Ratio` is deserialised.
             liquidation_margin_ratio: raw.liquidation_margin_ratio,
+            liquidation_fee: raw.liquidation_fee,
         })
     }
 }
@@ -307,23 +314,23 @@ impl MakerEquityBreakdown {
         Self::health_ratio(self.equity().atoms() as f64, self.position_value)
     }
 
-    /// Whether the contract would liquidate the position now, given the
-    /// market's liquidation fee *rate*
-    /// ([`Fees::liquidation_fee`](crate::Fees::liquidation_fee)): the
-    /// negation of
-    /// `isHealthy(equity − posVal·liqFee, posVal, liqMarginRatio)`.
-    ///
-    /// The parameter is a [`Ratio`] because the fee a liquidation *settles*
-    /// is a USDC amount carried under the same name, and as two `f64` the two
-    /// substituted for each other: passing the amount made the fee leg a
-    /// multiple of the whole position and every position read as
-    /// liquidatable.
+    /// The market's liquidation fee rate at the block, the share of the
+    /// band's value the health test deducts from equity. Carried here so
+    /// the test has every input it needs: the fee a liquidation *settles*
+    /// is a USDC amount under the same name, and when the rate was a
+    /// parameter the two substituted for each other.
+    pub fn liquidation_fee(&self) -> Ratio {
+        self.liquidation_fee
+    }
+
+    /// Whether the contract would liquidate the position now: the negation
+    /// of `isHealthy(equity − posVal·liqFee, posVal, liqMarginRatio)`.
     ///
     /// A screening gate, not the oracle: the fee leg is applied in `f64`,
     /// so a position within an atom of the boundary can go either way.
     /// Confirm with `simulate_liquidate_maker` before sending.
-    pub fn is_liquidatable(&self, liquidation_fee: Ratio) -> bool {
-        let fee_atoms = self.position_value.atoms() as f64 * liquidation_fee.fraction();
+    pub fn is_liquidatable(&self) -> bool {
+        let fee_atoms = self.position_value.atoms() as f64 * self.liquidation_fee.fraction();
         let equity_after_fee = self.equity().atoms() as f64 - fee_atoms;
         Self::health_ratio(equity_after_fee, self.position_value)
             < self.liquidation_margin_ratio.fraction()
@@ -611,6 +618,7 @@ impl AccruedMakerSnapshot {
                 atoms(to_i256(liquidity_val, "position value")?, "position value")?.unsigned_abs(),
             ),
             liquidation_margin_ratio: maker.liquidation_margin_ratio,
+            liquidation_fee: self.0.liquidation_fee,
         })
     }
 }
@@ -746,6 +754,7 @@ mod tests {
             tick: 28543,
             sqrt_price: SqrtPrice::from_x96(u("330115084885190701587787251116")),
             mark: Price::from_x96(u("1375470108235016714305503507110")),
+            liquidation_fee: ratio(10_000),
         };
         let accrual = AccrualInputs {
             funding_per_day: FundingRate::from_wad(840374978539967329),
@@ -868,8 +877,12 @@ mod tests {
         assert_eq!(b.liquidation_margin_ratio().fraction(), 0.05);
         assert!(b.equity().is_negative());
         assert_eq!(b.margin_ratio(), 0.0);
-        assert!(b.is_liquidatable(Ratio::ZERO));
-        assert!(b.is_liquidatable(ratio(10_000)));
+        assert!(b.is_liquidatable());
+        let unfeed = MakerEquityBreakdown {
+            liquidation_fee: Ratio::ZERO,
+            ..b
+        };
+        assert!(unfeed.is_liquidatable(), "under any fee");
 
         // Same band, no accrued liabilities, a fat margin: healthy, and the
         // fee leg alone must not flip it.
@@ -882,17 +895,22 @@ mod tests {
             unrealized_pnl: UsdcDelta::ZERO,
             position_value: value,
             liquidation_margin_ratio: ratio(50_000),
+            liquidation_fee: ratio(10_000),
         };
         assert!((healthy.margin_ratio() - 1.0).abs() < 1e-12);
-        assert!(!healthy.is_liquidatable(ratio(10_000)));
+        assert!(!healthy.is_liquidatable());
         // Equity of 5.5% of value: healthy at a 0% fee, liquidatable once
         // a 1% fee takes it under the 5% line.
         let thin = MakerEquityBreakdown {
             margin: UsdcDelta::new(value.atoms() as i128 * 55 / 1000),
             ..healthy
         };
-        assert!(!thin.is_liquidatable(Ratio::ZERO));
-        assert!(thin.is_liquidatable(ratio(10_000)));
+        let thin_unfeed = MakerEquityBreakdown {
+            liquidation_fee: Ratio::ZERO,
+            ..thin
+        };
+        assert!(!thin_unfeed.is_liquidatable());
+        assert!(thin.is_liquidatable());
     }
 
     /// Without the accrual replay the funding is stale to lastTouch — the
@@ -1032,6 +1050,7 @@ mod tests {
             tick,
             sqrt_price: SqrtPrice::from_x96(Q96),
             mark: Price::from_x96(Q96),
+            liquidation_fee: Ratio::ZERO,
         };
         let (_, _, mut maker) = golden_market_and_maker();
         maker.tick_lower = 0;
