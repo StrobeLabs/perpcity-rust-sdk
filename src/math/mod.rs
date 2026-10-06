@@ -34,6 +34,7 @@ pub mod position;
 pub mod pricing;
 pub mod range;
 pub mod swap;
+pub mod taker;
 pub mod tick;
 
 /// The block a market snapshot's state was read at.

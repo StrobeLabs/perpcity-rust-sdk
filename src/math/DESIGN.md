@@ -15,25 +15,23 @@ trade cost", "what is this maker worth", "how much can this band back",
 trusting a number the chain did not produce.
 
 It is deliberately provider-free. Nothing in `math` sees a network, a
-block, or a cache; a function here takes a snapshot and returns a result,
-and the same call with the same snapshot returns the same result on any
-machine at any time. That is what makes it testable against the chain: a
-port is right when it reproduces a real on-chain outcome from the chain
-state before it, and the golden tests are those reproductions.
+block, or a cache; the same call with the same snapshot returns the same
+result on any machine at any time, which is what makes it testable against
+the chain: a port is right when it reproduces a real on-chain outcome from
+the chain state before it, and the golden tests are those reproductions.
 
 ## What matters
 
 **Exactness is binary.** The contract settles in integers with defined
-rounding. A port that is off by an atom is wrong: it disagrees with the
-health check, the liquidation test, or the settle the chain will actually
-perform. So the contract's arithmetic is transcribed one-to-one in `U256`
-and `I256`, with the contract's rounding, the contract's overflow
-behaviour, and the contract's order of operations, and every port is
-anchored to a golden vector from real chain state: a maker settle
-reproduced to the atom, a fair price matched against the deployed
-module's `eth_call`, an EMA advance matched against a live accrue. The
-f64 twins exist for simulators and dashboards and are named so that
-nothing exact can be built on them by accident.
+rounding, so a port off by an atom disagrees with the health check, the
+liquidation test or the settle the chain will perform. The arithmetic is
+transcribed one-to-one in `U256` and `I256` with the contract's rounding,
+overflow behaviour and order of operations, and every port is anchored to
+a golden vector from real chain state: a maker settle reproduced to the
+atom, a fair price matched against the deployed module's `eth_call`, an
+EMA advance matched against a live accrue. The f64 twins exist for
+simulators and dashboards and are named so that nothing exact can be
+built on them by accident.
 
 **A snapshot is a contract between a read and a computation.** The read
 fills it at one block; the math trusts it completely. Every input a port
@@ -44,9 +42,8 @@ value.
 **Invariants are checked once, at the boundary.** A tick range with
 `lower >= upper` is not a range, and every function that took two loose
 ticks used to check it, or forgot to. `TickRange` is constructed once,
-where the ticks entered, and the math downstream takes it and trusts it.
-The same principle applies to every validated value: the check has one
-home, the constructor, and the types make an unchecked value unavailable.
+where the ticks entered, and the math downstream trusts it; every
+validated value has one check, its constructor, and no unchecked twin.
 
 **Geometry is in pool-price space; value is at the mark.** A band's
 capacity, a swap's path through the tick map, and the token amounts a
@@ -58,7 +55,7 @@ nothing here converts one into the other silently.
 
 ## The mental model
 
-There are five kinds of computation here, and each is a submodule.
+There are six kinds of computation here, and each is a submodule.
 
 **Geometry** (`tick`, `range`, `liquidity`): the pool's price grid and a
 maker's place on it. Ticks map to sqrt prices exactly as Uniswap defines
@@ -108,12 +105,9 @@ those inputs at one block, and its fair price is what every health check
 prices at. `fair_price_f64` is the lossy twin for simulators, marked
 because the exact one is the default. `Emas` is the stored pair with its
 touch, for a cache that follows the feed and must keep marking between
-touches: it and `PricePair` convert both ways (`stored`, `pair`) because
-one is the contract's two words and the other is the same two words as
-prices that know when they were stored, and it and `Price` flow both ways
-(`advanced` takes the spots in, `mark` hands the fair price out) because
-advancing is a function of the spots and marking is a price. Neither
-cycle is a conversion with two homes.
+touches; it and `Price` flow both ways because `advanced` takes the spots
+in and `mark` hands the fair price out, a function of prices and a price
+rather than a conversion with two homes.
 
 ```text
       the pool                      the beacon
@@ -163,10 +157,9 @@ twin for simulators.
 **The swap** (`swap`): what a taker trade does, computed by walking the
 pool's tick map exactly as V4 does, in Q64.96 with V4's rounding, for the
 two paths Perp City uses (exact-output buy, exact-input sell). A
-`PoolSnapshot` is the pool at a block with its tick map; a quote is the
+`PoolSnapshot` is the pool at a block with its tick map, rejected unless
+the map reconciles with the pool's active liquidity; a quote is the
 trade's deltas, the price it ends at, and which constraint stopped it.
-The tick map reconciles with the pool's active liquidity or the snapshot
-is rejected, because a map that does not add up is not this pool's.
 
 **Settlement** (`maker_equity`): what the contract would credit a maker
 if it were touched now. Funding accrued through the tick checkpoints,
@@ -176,20 +169,28 @@ atoms, from a `MakerMarketSnapshot` and per-position `MakerState` rows.
 This is the port that reproduces a real liquidation to the atom, and it is
 the port the next contract era makes unnecessary.
 
+**Taker health** (`taker`): the deployed `liquidateTaker` eligibility
+test, exact, from a `TakerMarketSnapshot` and a `TakerState` row: value
+and PnL at the mark, funding and utilization owed since the checkpoints,
+settled margin, equity, `isHealthy` in the contract's integers. It ports
+the live builds, not the contracts repository's main, so no fee enters
+eligibility and the ratio is the position's own. The liquidating mark is
+the same arithmetic without its floors, an atom off the test at most.
+
 **Position arithmetic** (`position`): the taker-side derived values,
 entry price, size, value, leverage, liquidation price, as plain functions
 over the position's deltas. Older than the rest and shaped differently:
-no snapshot, no exactness claim, f64 out.
+no snapshot, no exactness claim, f64 out; `taker` supersedes it.
 
 ## The type system
 
 | Type | Invariant | Produced by | Consumed by |
 |---|---|---|---|
-| [`BlockContext`](mod.rs#L51) | one header: number, hash, timestamp; what every snapshot carries | [`StateAt::block`](../client/DESIGN.md), the handle's resolved header | every snapshot here carries one, so a caller can pin further reads to its hash: [`PoolSnapshot`](swap.rs#L71), [`MarketCapacity`](capacity.rs#L59), [`Mark`](pricing.rs#L114), [`TakerQuote`](swap.rs#L113), [`MakerMarketSnapshot`](maker_equity.rs#L65), and [`MarketSnapshot`](../client/DESIGN.md) in `client`; [`Mark::advanced`](pricing.rs#L134) advances the EMAs to its timestamp. |
+| [`BlockContext`](mod.rs#L52) | one header: number, hash, timestamp; what every snapshot carries | [`StateAt::block`](../client/DESIGN.md), the handle's resolved header | every snapshot here carries one, so a caller can pin further reads to its hash: [`PoolSnapshot`](swap.rs#L71), [`MarketCapacity`](capacity.rs#L59), [`Mark`](pricing.rs#L114), [`TakerQuote`](swap.rs#L113), [`MakerMarketSnapshot`](maker_equity.rs#L65), and [`MarketSnapshot`](../client/DESIGN.md) in `client`; [`Mark::advanced`](pricing.rs#L134) advances the EMAs to its timestamp. |
 | [`TickRange`](range.rs#L25) | `lower < upper`, both in the V4 domain, checked once at construction so every formula downstream trusts it. Built from two ticks, or from two [`Price`](../units/DESIGN.md)s through `between`, which widens them to the enclosing ticks on the pool's spacing — the band a landing zone or a corridor becomes. `geomean` is its centre, the price at which a band's two legs are worth the same | [`TickRange::new`](range.rs#L37); [`TickRange::between`](range.rs#L55), from prices; a chain read, a config, an event | [`estimate_liquidity`](liquidity.rs#L32), [`margin_for_liquidity`](liquidity.rs#L60), [`liquidity_for_capacity`](capacity.rs#L137), every formula over a band — `band_capacity` takes the range inside a `MakerBand`; [`MakerBand`](range.rs#L140), as its range; [`ExactOpenMakerParams`](../client/DESIGN.md). The strategy layer's ladders, which build one per slot. |
 | [`MakerBand`](range.rs#L140) | a range with liquidity: the shape `makerDetails` stores; the one type for a band wherever it appears | [`MakerBand::new`](range.rs#L149) from a [`TickRange`](range.rs#L25); [`StateAt::maker_band`](../client/DESIGN.md), one position's band at a block | [`band_capacity`](capacity.rs#L118), what the band can back at a pool price; [`band_amounts`](liquidity.rs#L240), the tokens standing in it. The strategy layer's maker views and discovered positions carry one, so a band read from the chain and a band a strategy plans are the same type. |
 | [`PricePair`](pricing.rs#L41) | the contract's `(amm, index)` pair, `uint128` each, spot or EMA; narrowed from X96 with the contract's overflow rule | [`PricePair::try_from_x96`](pricing.rs#L56) from two X96 prices; [`calculate_emas`](pricing.rs#L71), the pair advanced | [`calculate_emas`](pricing.rs#L71), as the stored and the spot pair; [`Mark::advanced`](pricing.rs#L134), as the stored EMAs. The pair is one storage word on chain and advances as one value, so it is one type here. |
-| [`Mark`](pricing.rs#L114) | what the contract marks from at a block: pool price, index and EMAs advanced to that block's timestamp; [`fair_price`](pricing.rs#L247) is the mark | [`Mark::advanced`](pricing.rs#L134) from the stored [`PricePair`](pricing.rs#L41) and a [`BlockContext`](mod.rs#L51); [`StateAt::mark`](../client/DESIGN.md) and [`MarketReader::get_mark`](../client/DESIGN.md), which read the views and advance them | the impact bounds inside the pool read and the maker-equity batch, which price at the mark; the strategy layer, whose health checks and basis must value at the mark and not the pool price. It exists so the three prices travel as one value from one block. |
+| [`Mark`](pricing.rs#L114) | what the contract marks from at a block: pool price, index and EMAs advanced to that block's timestamp; [`fair_price`](pricing.rs#L247) is the mark | [`Mark::advanced`](pricing.rs#L134) from the stored [`PricePair`](pricing.rs#L41) and a [`BlockContext`](mod.rs#L52); [`StateAt::mark`](../client/DESIGN.md) and [`MarketReader::get_mark`](../client/DESIGN.md), which read the views and advance them | the impact bounds inside the pool read and the maker-equity batch, which price at the mark; the strategy layer, whose health checks and basis must value at the mark and not the pool price. It exists so the three prices travel as one value from one block. |
 | [`Emas`](pricing.rs#L168) | the stored EMA pair as two [`Price`](../units/DESIGN.md)s with the touch it is current as of: a [`PricePair`](pricing.rs#L41) that knows when it was stored; advancing it moves the touch, exactly as the contract would | [`Emas::stored`](pricing.rs#L179), from the contract's pair at its touch; [`Emas::advanced`](pricing.rs#L206), the pair at a later time against the spot prices, by the exact advance; the snapshot read in `client` carries one | [`Emas::mark`](pricing.rs#L224), the fair price of the spots and the advanced pair; [`Emas::pair`](pricing.rs#L192), the contract's `uint128` words back. The strategy layer's live cache, which holds one, replaces it on every touch the feed reports, and marks with it between touches; it is why a now-tense cache can price at the contract's mark and not the pool price. |
 | [`Capacity`](capacity.rs#L48) | one band's or the market's backing, as `calcCapacity` computes it: a [`PerSide`](../units/DESIGN.md) of [`PerpAtoms`](../units/DESIGN.md), so a side is read with `on` and the two legs are one field rather than two names. An alias rather than a struct: capacity and open interest are the same quantity in two roles, and the field that holds each names the role | [`band_capacity`](capacity.rs#L118) for a band; the market-wide read narrows the contract's struct | [`MarketCapacity`](capacity.rs#L59), as its capacity leg; the strategy layer's sizing, which asks what a planned band would back before placing it. |
 | [`MarketCapacity`](capacity.rs#L59) | capacity and its draw at a block: two [`PerSide`](../units/DESIGN.md) pairs of [`PerpAtoms`](../units/DESIGN.md) from one block; headroom and utilization derived by [`headroom`](capacity.rs#L73) and [`utilization_e6`](capacity.rs#L88) for a [`Side`](../units/DESIGN.md), never stored | [`StateAt::capacity`](../client/DESIGN.md), one multicall; [`MarketReader::get_capacity`](../client/DESIGN.md) as the convenience | nothing in the crate. The strategy layer's capacity gauges and utilization tiers, which need both legs from one block for the ratio to mean anything. |
@@ -201,21 +202,22 @@ no snapshot, no exactness claim, f64 out.
 | [`AccruedMakerSnapshot`](maker_equity.rs#L435) | a market snapshot advanced to its block: the accrual replay has run; a what-if mark applies only after it | [`MakerMarketSnapshot::accrued`](maker_equity.rs#L365); [`with_mark`](maker_equity.rs#L453) for a what-if | [`AccruedMakerSnapshot::maker_equity`](maker_equity.rs#L466), once per position. The order accrue, then mark, then settle is the contract's, and the two types make it the only order available. |
 | [`MakerState`](maker_equity.rs#L117), [`TickFunding`](maker_equity.rs#L50) | one position's settle inputs: its two ticks and the depth standing in them as [`LUnits`](../units/DESIGN.md), its margin, its stored capacity as a [`PerSide`](../units/DESIGN.md), and its checkpoint of every accumulator the market keeps — four [`Funding`](../units/DESIGN.md) counting the two ticks', a [`FundingPerSqrtPrice`](../units/DESIGN.md), a [`PerSide`](../units/DESIGN.md) of [`Earnings`](../units/DESIGN.md) and two [`FeeGrowth`](../units/DESIGN.md). A checkpoint is only ever read as the thing the market's level is measured against | the batch's maker rows and the two storage reads on the state handle in `client` | [`AccruedMakerSnapshot::maker_equity`](maker_equity.rs#L466), the settle preview, which takes each difference with that accumulator's own rule. |
 | [`MakerEquityBreakdown`](maker_equity.rs#L177) | a settle previewed: exact atoms in the contract's units, the utilization earnings a [`PerSide`](../units/DESIGN.md) whose `total` is what the settle credits; f64 only in accessors | [`AccruedMakerSnapshot::maker_equity`](maker_equity.rs#L466) | [`MakerEquityKind`](../client/DESIGN.md), as the `Computed` payload of an outcome; the strategy layer's equity audits and liquidation decisions, which key on `is_liquidatable` and the margin ratio. Exact atoms so that a preview can be checked against a real settle to the atom. |
+| [`TakerMarketSnapshot`](taker.rs#L39), [`TakerState`](taker.rs#L56) | a taker health's inputs from one block: the funding and utilization cumulatives and the mark, market-wide; one position's exposure, USD leg, margin, stored liquidation ratio and checkpoints. Fields named after the contract's | the client fills both from the pinned reads: `cumulatives` and `mark` for the snapshot, `positions` and `takerDetails` for the row | [`TakerMarketSnapshot::taker_health`](taker.rs#L100), the one computation over them. |
+| [`TakerHealth`](taker.rs#L77) | one taker's standing at a block in exact atoms: value, PnL, funding and utilization owed, settled margin, equity; `is_liquidatable` is the contract's integer test; `liquidation_mark` and `distance_to_liquidation` are the mark the test turns at and the mark's distance from it, the latter an f64 for a monitor's bound | [`TakerMarketSnapshot::taker_health`](taker.rs#L100) | the strategy layer's fragility reading and an agent's own distance to liquidation; the liquidation sweep, which the `eth_call` probe confirms before a send. |
 
-Two conventions carry the exactness claim. The type is the first: a
-quantity's unit is its type, taken from [`units`](../units/DESIGN.md), and
-the `f64` twin is the one that names itself so — `fair_price_f64` beside
-`fair_price`, `usdc()` beside `atoms()`. Where a quantity has no unit type
-yet, a wire suffix (`_x96`, `_x128`, `_atoms`, `_e6`) stands in and means
-the same thing, exact in the contract's own encoding, which is why those
-suffixes disappear as the types land. And every port names the contract
-function it transcribes in its doc, with the commit it was transcribed
-from, so that a contract change is a search rather than a hunt.
+Two conventions carry the exactness claim. A quantity's unit is its type,
+from [`units`](../units/DESIGN.md), and the `f64` twin names itself so:
+`fair_price_f64` beside `fair_price`, `usdc()` beside `atoms()`; where no
+unit type exists yet a wire suffix (`_x96`, `_e6`) stands in, exact in the
+contract's encoding, and disappears as the type lands. And every port's
+doc names the contract function and commit it transcribes, so a contract
+change is a search rather than a hunt.
 
 ## Efficiency
 
-This module spends no requests; its currency is time on the caller's
-thread, and everything here is integer arithmetic in `U256` and `I256`.
+This module spends no requests and reads no clock; its currency is time
+on the caller's thread, all of it integer arithmetic in `U256` and `I256`,
+with no allocation on the hot path beyond the tick map a snapshot owns.
 
 - **A swap quote walks the tick map.** Cost is linear in the initialized
   ticks the trade crosses, each step a few 512-bit multiply-divides. The
@@ -226,16 +228,12 @@ thread, and everything here is integer arithmetic in `U256` and `I256`.
 - **The mark is one exponential.** Advancing the EMAs is a Solady
   `expWad` and two weighted sums; the fair price is an average. Cheap
   enough to compute at every read rather than cache.
-- **A settle preview is constant per position** over its chunk's rows:
-  a fixed number of checkpoint differences and one valuation at the
-  mark. The batch's cost is in the reads that fill the snapshot, not in
-  the arithmetic.
+- **A settle or health preview is constant per position**: a fixed number
+  of checkpoint differences and one valuation at the mark. A batch's cost
+  is in the reads that fill the snapshot, not the arithmetic.
 - **Geometry is closed-form.** Capacity, band amounts and liquidity
   sizing are single formulas in square-root prices; the inverse for a
   capacity target is a division, not a search.
-
-Nothing here allocates on the hot path beyond the tick map a snapshot
-already owns, and nothing reads a clock.
 
 ## Edges
 
@@ -266,9 +264,8 @@ already owns, and nothing reads a clock.
   capacity less open interest. **Utilization**: open interest over
   capacity.
 - **Pool price, index, EMAs, mark, fair price**: as the root defines them;
-  this module is their home.
-- **Advance**: moving the stored EMAs from the last touch to a timestamp
-  by the contract's exponential.
+  this module is their home. **Advance**: moving the stored EMAs from the
+  last touch to a timestamp by the contract's exponential.
 - **Tick map**: the pool's initialized ticks with their gross and net
   liquidity; **reconcile**: the check that the map's net up to the current
   tick equals the pool's active liquidity.
@@ -288,13 +285,15 @@ already owns, and nothing reads a clock.
   contract's width. One is the wire shape and the other the same two
   numbers as the types the rest of the crate speaks; neither direction is
   a conversion with two homes.
+- **`TakerHealth` hands back its inputs' units.** `delta_perp`,
+  `liquidation_margin_ratio` and `liquidation_mark` return the
+  `PerpDelta`, `Ratio` and `Price` the health was computed from or at,
+  as `MakerEquityBreakdown`'s accessors do; a reading, not a conversion.
 
 ## Debts
 
-- **`position` is from an earlier era of the crate.** It takes loose
-  deltas, returns f64, claims no exactness and has no snapshot. It should
-  either become exact and snapshot-fed like its siblings or be moved to
-  the f64 surface where its claims are honest.
+- **`position` is superseded.** `taker` answers its questions exactly and
+  snapshot-fed; it goes when the strategy layer's last call to it does.
 - **`liquidity_for_target_ratio` cannot express the deployed maker
   case.** Makers on the deployed markets are fully collateralised, a
   ratio of 1.0, which the function's domain excludes; callers size makers

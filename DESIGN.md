@@ -192,7 +192,7 @@ that carries it, the invariant it holds, and the node that owns it.
 | Capacity and its draw | [`MarketCapacity`](src/math/capacity.rs#L59) | capacity and open interest from one block | [`math::capacity`](src/math/capacity.rs#L1) |
 | The pool at a block | [`PoolSnapshot`](src/math/swap.rs#L71) | price, liquidity and a tick map that reconciles with it | [`math::swap`](src/math/swap.rs#L1) |
 | A settle previewed | [`MakerEquityBreakdown`](src/math/maker_equity.rs#L177) | exact atoms, the contract's arithmetic | [`math::maker_equity`](src/math/maker_equity.rs#L1) |
-| A block | [`BlockContext`](src/math/mod.rs#L51) | number, hash, timestamp of one header | [`math`](src/math/DESIGN.md) |
+| A block | [`BlockContext`](src/math/mod.rs#L52) | number, hash, timestamp of one header | [`math`](src/math/DESIGN.md) |
 | An event | [`MarketEvent`](src/events.rs#L156) | the market's vocabulary, human units, either tense | [`events`](src/events/DESIGN.md) |
 | An event in chain order | [`TapeEvent`](src/history/tape/mod.rs#L72), [`ChainPoint`](src/history/tape/mod.rs#L63) | block and log index | [history/tape](src/history/tape/DESIGN.md) |
 | A market's record | [`Tape`](src/history/tape/mod.rs#L181), [`TapeSlice`](src/history/tape/mod.rs#L316) | rows in strict chain order, checked once; a run of it is a tape by type | [history/tape](src/history/tape/DESIGN.md) |
