@@ -3,8 +3,6 @@
 //! state without an `eth_call`, and the distance to its liquidation can be
 //! read off the same arithmetic.
 //!
-//! The deployed rule, identical on both live builds:
-//!
 //! ```text
 //! (val, pnl)     = valPnl(delta, mark)            perpVal = ⌊amount0 · mark / Q96⌉₀; val = |perpVal|; pnl = perpVal + amount1
 //! accrued        = takerFeesAccrued(cumls, taker, pos)

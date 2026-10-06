@@ -21,6 +21,7 @@ mod pool;
 mod positions;
 mod seed;
 mod solvency;
+
 #[cfg(test)]
 mod tests;
 
@@ -52,6 +53,12 @@ use super::tape::{ChainPoint, OwnershipLog, Swap, TapeAddresses, TapeEvent};
 
 /// What the fold does not know, in three kinds, each with its own cure. A
 /// reading with a nonzero gap is forensic, not a decision's input.
+///
+/// TODO: audit the gaps. One thing that we want to do is make sure that we
+/// are being relatively completionist about the types of imperfections that
+/// are liable to appear in the tape. These imperfections can accumulate,
+/// poisoning our monitoring. This is definitely a bad scenario, since it
+/// may mean that we emit false alarms.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Gaps {
     /// What the contract moved without saying so. Cured by the cutover.
