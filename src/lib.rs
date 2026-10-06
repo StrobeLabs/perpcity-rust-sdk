@@ -94,15 +94,15 @@ pub use units::{
 };
 
 #[doc(inline)]
-pub use math::BlockContext;
+pub use math::{BlockContext, LiquidationPrices};
 
 #[doc(inline)]
 pub use math::pricing::{Emas, Mark, PricePair, calculate_emas, fair_price, fair_price_f64};
 
 #[doc(inline)]
 pub use math::maker_equity::{
-    AccrualInputs, AccruedMakerSnapshot, LiquidationPrices, MakerEquityBreakdown,
-    MakerMarketSnapshot, MakerState, TickFunding,
+    AccrualInputs, AccruedMakerSnapshot, MakerEquityBreakdown, MakerMarketSnapshot, MakerState,
+    TickFunding,
 };
 
 #[doc(inline)]

@@ -22,7 +22,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::constants::Q96;
 use crate::errors::ValidationError;
-use crate::math::BlockContext;
+use crate::math::{BlockContext, LiquidationPrices};
 use crate::units::fixed_point::{Rounding, add_i, mul_div, s_full_mul_div, to_i256};
 use crate::units::{
     Earnings, Funding, PerSide, PerpDelta, Price, Ratio, Side, UsdcAtoms, UsdcDelta,
@@ -244,14 +244,36 @@ impl TakerHealth {
         equity as f64 / (self.position_value.atoms() as f64 + 1.0)
     }
 
-    /// The mark the health test turns at, with the exposure and the margin
-    /// as they stand: below it a long is liquidatable, above it a short.
-    /// `None` for a long whose settled margin covers its USD leg, which no
-    /// fall of the mark can liquidate, and for a position with no
-    /// exposure. Solved on the contract's arithmetic without its floors,
-    /// so the test itself can differ within an atom of this mark;
-    /// [`Self::is_liquidatable`] at a mark is exact.
-    pub fn liquidation_mark(&self) -> Option<Price> {
+    /// Where the test turns as the mark moves, in the shape a maker's search
+    /// answers in: a long is liquidated from below and a short from above,
+    /// so one side is the turn and the other `None`. Both are `None` for a
+    /// long whose settled margin covers its USD leg, which no fall of the
+    /// mark can liquidate, and for a position with no exposure; both are
+    /// the mark when [`Self::is_liquidatable`] says so now. The turn is
+    /// solved on the contract's arithmetic without its floors, so the exact
+    /// test can differ within an atom of it, and it is kept on its side of
+    /// the mark.
+    pub fn liquidation_prices(&self) -> LiquidationPrices {
+        let (below, above) = if self.is_liquidatable() {
+            (Some(self.mark), Some(self.mark))
+        } else {
+            match self.liquidation_mark() {
+                Some(turn) if self.delta_perp.atoms() > 0 => (Some(turn.min(self.mark)), None),
+                Some(turn) => (None, Some(turn.max(self.mark))),
+                None => (None, None),
+            }
+        };
+        LiquidationPrices {
+            mark: self.mark,
+            below,
+            above,
+        }
+    }
+
+    /// The closed form behind [`Self::liquidation_prices`]: the mark at
+    /// which equity over value meets the position's ratio, with the
+    /// exposure and the margin as they stand.
+    fn liquidation_mark(&self) -> Option<Price> {
         let perp = self.delta_perp.atoms();
         if perp == 0 {
             return None;
@@ -277,24 +299,6 @@ impl TakerHealth {
         let mark_x96 = mul_div(numerator * E6, Q96, size * scale, Rounding::TowardZero).ok()?;
         Some(Price::from_x96(mark_x96))
     }
-
-    /// How far the mark is from the liquidating one, as a fraction of the
-    /// mark: positive while the position stands, negative once it is
-    /// liquidatable, `None` when no mark liquidates it. Lossy, for a
-    /// monitor's bound; the exact answer is [`Self::is_liquidatable`].
-    pub fn distance_to_liquidation(&self) -> Option<f64> {
-        let liquidating = x96_to_f64(self.liquidation_mark()?.x96());
-        let mark = x96_to_f64(self.mark.x96());
-        if mark == 0.0 {
-            return None;
-        }
-        let gap = if self.delta_perp.atoms() > 0 {
-            mark - liquidating
-        } else {
-            liquidating - mark
-        };
-        Some(gap / mark)
-    }
 }
 
 fn usdc_atoms(value: U256, context: &'static str) -> Result<UsdcAtoms, ValidationError> {
@@ -313,13 +317,13 @@ fn usdc_delta(value: I256, context: &'static str) -> Result<UsdcDelta, Validatio
         })
 }
 
-fn x96_to_f64(x96: U256) -> f64 {
-    f64::from(x96) / 2f64.powi(96)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn x96_to_f64(x96: U256) -> f64 {
+        f64::from(x96) / 2f64.powi(96)
+    }
 
     fn q96(units: u64) -> U256 {
         Q96 * U256::from(units)
@@ -411,20 +415,21 @@ mod tests {
         };
         assert!(at(9_999).is_liquidatable());
         assert!(!at(10_001).is_liquidatable());
-        let distance = market(42)
-            .taker_health(&long())
-            .unwrap()
-            .distance_to_liquidation()
-            .unwrap();
-        assert!((distance - (42.0 - expected) / 42.0).abs() < 1e-6);
-        assert!(
-            market(30)
-                .taker_health(&long())
-                .unwrap()
-                .distance_to_liquidation()
-                .unwrap()
-                < 0.0
+
+        // A long turns from below only, at the closed form, and its distance
+        // is the mark's from there; once liquidatable both sides are the mark.
+        let healthy = market(42).taker_health(&long()).unwrap();
+        let prices = healthy.liquidation_prices();
+        assert_eq!(prices.mark, healthy.mark);
+        assert_eq!((prices.below, prices.above), (Some(liquidating), None));
+        assert!((prices.distance().unwrap() - (42.0 - expected) / 42.0).abs() < 1e-6);
+        let under = market(30).taker_health(&long()).unwrap();
+        let prices = under.liquidation_prices();
+        assert_eq!(
+            (prices.below, prices.above),
+            (Some(under.mark), Some(under.mark))
         );
+        assert_eq!(prices.distance(), Some(0.0));
     }
 
     #[test]
@@ -456,6 +461,9 @@ mod tests {
         );
         let expected = (102.5 + 400.0) / (10.0 * 1.05);
         assert!((x96_to_f64(health.liquidation_mark().unwrap().x96()) - expected).abs() < 1e-6);
+        let prices = health.liquidation_prices();
+        assert_eq!(prices.below, None, "a fall never liquidates a short");
+        assert_eq!(prices.above, health.liquidation_mark());
         assert!(
             !market_short(46)
                 .taker_health(&short)
@@ -477,7 +485,9 @@ mod tests {
         };
         let health = market(1).taker_health(&covered).unwrap();
         assert_eq!(health.liquidation_mark(), None);
-        assert_eq!(health.distance_to_liquidation(), None);
+        let prices = health.liquidation_prices();
+        assert_eq!((prices.below, prices.above), (None, None));
+        assert_eq!(prices.distance(), None);
         assert!(!health.is_liquidatable());
 
         // No exposure: nothing to liquidate at any mark.

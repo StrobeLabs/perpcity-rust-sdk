@@ -32,10 +32,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::constants::{ACCOUNTING_TOKEN_SUPPLY, INTERVAL, Q96, WAD};
 use crate::errors::ValidationError;
-use crate::math::BlockContext;
 use crate::math::liquidity::amounts_for_liquidity;
 use crate::math::swap::amount0_delta;
 use crate::math::tick::get_sqrt_ratio_at_tick;
+use crate::math::{BlockContext, LiquidationPrices};
 use crate::units::fixed_point::{
     Rounding, add_i, add_u, mul_div, s_full_mul_div, sub_i, to_i256, u512_to_u256,
 };
@@ -212,42 +212,6 @@ impl Exposure {
             "unrealized PnL",
         )?;
         Ok((liquidity_val, unrealized))
-    }
-}
-
-/// Where the health test turns along a price shock, on each side of the
-/// mark it was searched from.
-///
-/// The shock moves the pool price and the mark by one factor from where
-/// each stood, so the gap between them carries through it. A maker's equity
-/// along the shock is the LP curve, concave, so it can cross the test's
-/// line below the mark, above it, both, or neither; a side is `None` when
-/// the position stays healthy as far as the search looks, a hundredfold of
-/// the mark either way. A position liquidatable now has both sides at the
-/// mark. The deployed mark follows the pool only in part, so the shock
-/// moves the mark faster than a trade would.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct LiquidationPrices {
-    /// The first mark below the current one at which the position is
-    /// liquidatable.
-    pub below: Option<Price>,
-    /// The first mark above the current one at which the position is
-    /// liquidatable.
-    pub above: Option<Price>,
-}
-
-impl LiquidationPrices {
-    /// The nearer side's distance from `mark`, as a fraction of it: a
-    /// monitor's bound. `None` when neither side turns; zero when the
-    /// position is liquidatable at the mark.
-    pub fn distance_from(&self, mark: Price) -> Option<f64> {
-        let relative = |price: Price| (f64::from(price.x96()) / f64::from(mark.x96()) - 1.0).abs();
-        match (self.below, self.above) {
-            (None, None) => None,
-            (Some(below), None) => Some(relative(below)),
-            (None, Some(above)) => Some(relative(above)),
-            (Some(below), Some(above)) => Some(relative(below).min(relative(above))),
-        }
     }
 }
 
@@ -538,24 +502,28 @@ impl MakerEquityBreakdown {
     }
 
     /// Where the test turns on each side of the mark along the shock: the
-    /// first mark, to the Q96 atom, at which the position is liquidatable, found by a
-    /// bracket that steps outward from a quarter of a percent, doubling to
-    /// a hundredfold, then a bisection. A pocket narrower than a bracket
-    /// step is not seen, so a side is the nearest turn the search saw.
+    /// first mark, to the Q96 atom, at which the position is liquidatable,
+    /// found by a bracket that steps outward from a quarter of a percent,
+    /// doubling to a hundredfold, then a bisection. Equity along the shock
+    /// is the LP curve, concave, so it can turn below, above, both or
+    /// neither. A pocket narrower than a bracket step is not seen, so a
+    /// side is the nearest turn the search saw. The deployed mark follows
+    /// the pool only in part, so the shock moves the mark faster than a
+    /// trade would.
     ///
     /// # Errors
     ///
     /// As [`Self::equity_at`], at any price the search valued.
     pub fn liquidation_prices(&self) -> Result<LiquidationPrices, ValidationError> {
-        if self.is_liquidatable() {
-            return Ok(LiquidationPrices {
-                below: Some(self.mark),
-                above: Some(self.mark),
-            });
-        }
+        let (below, above) = if self.is_liquidatable() {
+            (Some(self.mark), Some(self.mark))
+        } else {
+            (self.first_turn(false)?, self.first_turn(true)?)
+        };
         Ok(LiquidationPrices {
-            below: self.first_turn(false)?,
-            above: self.first_turn(true)?,
+            mark: self.mark,
+            below,
+            above,
         })
     }
 
@@ -1226,7 +1194,8 @@ mod tests {
                 .unwrap(),
             "the atom before the turn is healthy"
         );
-        let distance = prices.distance_from(b.mark()).unwrap();
+        assert_eq!(prices.mark, b.mark(), "measured from the preview's mark");
+        let distance = prices.distance().unwrap();
         let expected = f64::from(above.x96()) / f64::from(b.mark().x96()) - 1.0;
         assert!((distance - expected).abs() < 1e-12);
         assert!(distance > 0.0);
@@ -1278,24 +1247,23 @@ mod tests {
         let prices = b.liquidation_prices().unwrap();
         assert_eq!(prices.below, Some(b.mark()));
         assert_eq!(prices.above, Some(b.mark()));
-        assert_eq!(prices.distance_from(b.mark()), Some(0.0));
+        assert_eq!(prices.distance(), Some(0.0));
 
         let covered = MakerEquityBreakdown {
             margin: UsdcDelta::new(MAX_COMPONENT_ATOMS as i128 / 8),
             ..healthy_maker_at_the_mark()
         };
+        let prices = covered.liquidation_prices().unwrap();
         assert_eq!(
-            covered.liquidation_prices().unwrap(),
-            LiquidationPrices::default(),
+            prices,
+            LiquidationPrices {
+                mark: covered.mark(),
+                below: None,
+                above: None,
+            },
             "healthy out to a hundredfold either way"
         );
-        assert_eq!(
-            covered
-                .liquidation_prices()
-                .unwrap()
-                .distance_from(covered.mark()),
-            None
-        );
+        assert_eq!(prices.distance(), None);
     }
 
     /// A step is the exact quotient in both directions, and a step past the

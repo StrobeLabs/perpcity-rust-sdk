@@ -27,6 +27,8 @@
 use alloy::primitives::B256;
 use serde::{Deserialize, Serialize};
 
+use crate::units::Price;
+
 pub mod capacity;
 pub mod liquidity;
 pub mod maker_equity;
@@ -56,4 +58,35 @@ pub struct BlockContext {
     pub hash: B256,
     /// Block timestamp (seconds since the Unix epoch).
     pub timestamp: u64,
+}
+
+/// Where a position's health test turns as the mark moves, on each side of
+/// the mark it was measured from: the one shape a taker's closed form and
+/// a maker's search both answer "how far" in.
+///
+/// A side is `None` when no move that way within reach liquidates the
+/// position; both sides are the mark when it is liquidatable now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LiquidationPrices {
+    /// The mark the turns are measured from.
+    pub mark: Price,
+    /// The first mark below `mark` at which the position is liquidatable.
+    pub below: Option<Price>,
+    /// The first mark above `mark` at which the position is liquidatable.
+    pub above: Option<Price>,
+}
+
+impl LiquidationPrices {
+    /// The nearer side's distance from the mark, as a fraction of it: a
+    /// monitor's bound. `None` when neither side turns; zero when the
+    /// position is liquidatable now. Lossy; the tests themselves are exact.
+    pub fn distance(&self) -> Option<f64> {
+        let mark = f64::from(self.mark.x96());
+        let relative = |price: Price| (f64::from(price.x96()) / mark - 1.0).abs();
+        [self.below, self.above]
+            .into_iter()
+            .flatten()
+            .map(relative)
+            .reduce(f64::min)
+    }
 }

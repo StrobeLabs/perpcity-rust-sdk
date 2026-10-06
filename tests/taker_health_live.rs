@@ -98,7 +98,7 @@ async fn the_ports_verdict_is_the_contracts() {
             "{}: margin ratio {:.4}, distance {:?}, port {} chain {}",
             outcome.pos_id,
             health.margin_ratio(),
-            health.distance_to_liquidation(),
+            health.liquidation_prices().distance(),
             health.is_liquidatable(),
             chain_says,
         );
