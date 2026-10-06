@@ -13,23 +13,21 @@
 //! isHealthy(e, v, r) = (e <= 0 ? 0 : ⌊e · E6 / (v + 1)⌋) >= r
 //! ```
 //!
-//! No fee enters eligibility and the ratio is the one stored on the
-//! position at open; the contracts repository's main branch has since
-//! changed both, and this port follows what is deployed.
+//! This is the rule of the deployed contracts, `v0.2.2-upgradeable`
+//! (`198559ae`): no fee enters eligibility, and the ratio is the one stored
+//! on the position at open. The contracts repository's main branch has
+//! since changed both.
 
 use alloy::primitives::{I256, U256};
 use serde::{Deserialize, Serialize};
 
 use crate::constants::Q96;
 use crate::errors::ValidationError;
-use crate::math::{BlockContext, LiquidationPrices};
+use crate::math::{BlockContext, LiquidationPrices, is_healthy};
 use crate::units::fixed_point::{Rounding, add_i, mul_div, s_full_mul_div, to_i256};
 use crate::units::{
-    Earnings, Funding, PerSide, PerpDelta, Price, Ratio, Side, UsdcAtoms, UsdcDelta,
+    BIGINT_1E6, Earnings, Funding, PerSide, PerpDelta, Price, Ratio, Side, UsdcAtoms, UsdcDelta,
 };
-
-/// The contract's ratio scale: a `uint24` margin ratio is parts per million.
-const E6: U256 = U256::from_limbs([1_000_000, 0, 0, 0]);
 
 /// Block-pinned market-wide inputs shared by every taker's computation.
 /// Fields named after the contract's.
@@ -219,18 +217,11 @@ impl TakerHealth {
     /// integers. The oracle `simulate_liquidate_taker` agrees with this at
     /// the same block.
     pub fn is_liquidatable(&self) -> bool {
-        let equity = self.equity().atoms();
-        if equity <= 0 {
-            return true;
-        }
-        let ratio = mul_div(
-            U256::from(equity.unsigned_abs()),
-            E6,
-            U256::from(self.position_value.atoms()) + U256::from(1u8),
-            Rounding::TowardZero,
+        !is_healthy(
+            self.equity(),
+            self.position_value,
+            self.liquidation_margin_ratio,
         )
-        .expect("E6 times an equity that fits i128 fits U256");
-        ratio < U256::from(self.liquidation_margin_ratio.e6())
     }
 
     /// The position's margin ratio as `isHealthy` computes it, equity over
@@ -288,15 +279,26 @@ impl TakerHealth {
             if fixed >= 0 {
                 return None;
             }
-            (U256::from(fixed.unsigned_abs()), E6 - ratio)
+            // A ratio of 100% or more has no turn: such a long fails the test
+            // at every mark.
+            (
+                U256::from(fixed.unsigned_abs()),
+                BIGINT_1E6.checked_sub(ratio)?,
+            )
         } else {
             if fixed <= 0 {
                 return Some(Price::from_x96(U256::ZERO));
             }
-            (U256::from(fixed.unsigned_abs()), E6 + ratio)
+            (U256::from(fixed.unsigned_abs()), BIGINT_1E6 + ratio)
         };
         // m · Q96 = numerator · E6 · Q96 / (size · scale)
-        let mark_x96 = mul_div(numerator * E6, Q96, size * scale, Rounding::TowardZero).ok()?;
+        let mark_x96 = mul_div(
+            numerator * BIGINT_1E6,
+            Q96,
+            size * scale,
+            Rounding::TowardZero,
+        )
+        .ok()?;
         Some(Price::from_x96(mark_x96))
     }
 }

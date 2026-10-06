@@ -38,7 +38,7 @@ use crate::errors::ValidationError;
 use crate::math::liquidity::amounts_for_liquidity;
 use crate::math::swap::amount0_delta;
 use crate::math::tick::get_sqrt_ratio_at_tick;
-use crate::math::{BlockContext, LiquidationPrices};
+use crate::math::{BlockContext, LiquidationPrices, is_healthy};
 use crate::units::fixed_point::{
     Rounding, add_i, add_u, mul_div, s_full_mul_div, sub_i, to_i256, u512_to_u256,
 };
@@ -401,20 +401,14 @@ impl MakerEquityBreakdown {
 
     /// Whether the contract would liquidate the position now: the negation
     /// of `isHealthy(equity, posVal, liqMarginRatio)`, the deployed
-    /// `liquidateMaker` eligibility test. No fee enters it; the liquidation
-    /// fee is charged after the test passes.
-    ///
-    /// A screening gate, not the oracle: the ratio is compared in `f64`, so
-    /// a position within an atom of the boundary can go either way.
-    /// Confirm with `simulate_liquidate_maker` before sending.
+    /// `liquidateMaker` eligibility test, in the contract's integers. No fee
+    /// enters it; the liquidation fee is charged after the test passes.
     pub fn is_liquidatable(&self) -> bool {
-        self.fails_health(self.equity(), self.position_value)
-    }
-
-    /// The contract's test on an equity and a band value.
-    fn fails_health(&self, equity: UsdcDelta, position_value: UsdcAtoms) -> bool {
-        Self::health_ratio(equity.atoms() as f64, position_value)
-            < self.liquidation_margin_ratio.fraction()
+        !is_healthy(
+            self.equity(),
+            self.position_value,
+            self.liquidation_margin_ratio,
+        )
     }
 
     fn health_ratio(equity_atoms: f64, position_value: UsdcAtoms) -> f64 {
@@ -483,7 +477,11 @@ impl MakerEquityBreakdown {
     /// As [`Self::equity_at`].
     pub fn is_liquidatable_at(&self, mark: Price) -> Result<bool, ValidationError> {
         let (value, unrealized) = self.valued_at(mark)?;
-        Ok(self.fails_health(self.settled_margin() + unrealized, value))
+        Ok(!is_healthy(
+            self.settled_margin() + unrealized,
+            value,
+            self.liquidation_margin_ratio,
+        ))
     }
 
     /// Where the test turns on each side of the mark along the shock: the
@@ -1096,6 +1094,18 @@ mod tests {
         };
         assert!(!thin(55).is_liquidatable());
         assert!(thin(45).is_liquidatable());
+
+        // At the line itself the contract's integers decide: on a
+        // million-atom band the plus-one atom and the floor put it between
+        // 50,000 and 50,001 of equity, where a ratio in floating point
+        // calls 50,000 healthy.
+        let at = |equity: i128| MakerEquityBreakdown {
+            margin: UsdcDelta::new(equity),
+            position_value: UsdcAtoms::new(1_000_000),
+            ..healthy
+        };
+        assert!(at(50_000).is_liquidatable());
+        assert!(!at(50_001).is_liquidatable());
     }
 
     /// The golden maker's band, wholly above the golden price, so it holds

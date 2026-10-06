@@ -186,8 +186,10 @@ pub(super) fn multicall_error(e: MulticallError) -> PerpCityError {
 }
 
 /// Which contract build a market runs. The two live builds share every
-/// view and trade selector; they differ in how a liquidation is called and
-/// in what a close event carries, and the SDK picks by era where it must.
+/// view and trade selector; they differ in how a liquidation is called, in
+/// what a close event carries, and in what their liquidation tests check,
+/// and the SDK picks by era where it must. The health ports in `math` are
+/// the upgradeable build's.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Era {
     /// Build `58b42b7`: whole-position 2-arg liquidations, tailed close

@@ -24,10 +24,11 @@
 
 #![doc = "\n\nThe design of this module: [`src/math/DESIGN.md`](https://github.com/StrobeLabs/perpcity-rust-sdk/blob/main/src/math/DESIGN.md)."]
 
-use alloy::primitives::B256;
+use alloy::primitives::{B256, U256};
 use serde::{Deserialize, Serialize};
 
-use crate::units::Price;
+use crate::units::fixed_point::{Rounding, mul_div};
+use crate::units::{BIGINT_1E6, Price, Ratio, UsdcAtoms, UsdcDelta};
 
 pub mod capacity;
 pub mod liquidity;
@@ -88,5 +89,49 @@ impl LiquidationPrices {
             .flatten()
             .map(relative)
             .reduce(f64::min)
+    }
+}
+
+/// `PerpLogic.isHealthy` of the deployed contracts: equity over the
+/// position's value plus one atom, in millionths and floored, at least its
+/// ratio, with non-positive equity counting as zero. Both roles'
+/// liquidation tests are its negation.
+pub(crate) fn is_healthy(equity: UsdcDelta, value: UsdcAtoms, ratio: Ratio) -> bool {
+    let equity = equity.atoms();
+    let held = if equity <= 0 {
+        U256::ZERO
+    } else {
+        mul_div(
+            U256::from(equity.unsigned_abs()),
+            BIGINT_1E6,
+            U256::from(value.atoms()) + U256::from(1u8),
+            Rounding::TowardZero,
+        )
+        .expect("an i128 equity times a million fits U256, over a nonzero divisor")
+    };
+    held >= U256::from(ratio.e6())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The test is the contract's integers: the plus-one atom and the floor
+    /// put the 5% line on a million-atom position between 50,000 and
+    /// 50,001 of equity, where an equity-over-value ratio in floating point
+    /// would call 50,000 healthy. Non-positive equity counts as zero, so it
+    /// is healthy only against a zero ratio, as in the contract.
+    #[test]
+    fn healthy_is_the_contracts_integer_test() {
+        let (value, five) = (UsdcAtoms::new(1_000_000), Ratio::from_e6(50_000).unwrap());
+        assert!(!is_healthy(UsdcDelta::new(50_000), value, five));
+        assert!(is_healthy(UsdcDelta::new(50_001), value, five));
+        assert!(!is_healthy(UsdcDelta::ZERO, value, five));
+        assert!(!is_healthy(UsdcDelta::new(-1), value, five));
+        assert!(is_healthy(UsdcDelta::new(-1), value, Ratio::ZERO));
+        assert!(
+            is_healthy(UsdcDelta::new(1), UsdcAtoms::ZERO, Ratio::ONE),
+            "a zero value counts as one atom"
+        );
     }
 }
