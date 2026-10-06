@@ -79,10 +79,14 @@ pub struct LiquidationPrices {
 
 impl LiquidationPrices {
     /// The nearer side's distance from the mark, as a fraction of it: a
-    /// monitor's bound. `None` when neither side turns; zero when the
-    /// position is liquidatable now, and positive whenever it is not. Lossy
-    /// in its last digits; the tests themselves are exact.
+    /// monitor's bound. `None` when neither side turns, or when the mark is
+    /// zero and there is no fraction of it; zero when the position is
+    /// liquidatable now, and positive whenever it is not. Lossy in its last
+    /// digits; the tests themselves are exact.
     pub fn distance(&self) -> Option<f64> {
+        if self.mark.is_zero() {
+            return None;
+        }
         let mark = f64::from(self.mark.x96());
         // The gap is taken in integers first: a price one atom from a mark
         // near 2^101 is the same `f64` as the mark, and a ratio less one
@@ -137,5 +141,19 @@ mod tests {
             is_healthy(UsdcDelta::new(1), UsdcAtoms::ZERO, Ratio::ONE),
             "a zero value counts as one atom"
         );
+    }
+
+    /// A zero mark has no fraction to measure a distance in, so the reading
+    /// is `None` rather than a `NaN` a monitor's comparison would silently
+    /// pass.
+    #[test]
+    fn a_zero_mark_has_no_distance() {
+        let zero = Price::from_x96(U256::ZERO);
+        let prices = LiquidationPrices {
+            mark: zero,
+            below: Some(zero),
+            above: Some(zero),
+        };
+        assert_eq!(prices.distance(), None);
     }
 }
