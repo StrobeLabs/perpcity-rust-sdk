@@ -430,10 +430,25 @@ impl MakerEquityBreakdown {
     /// mark. The factor is exactly one at the preview's own mark, where the
     /// pool's root comes back unrounded.
     fn valued_at(&self, mark: Price) -> Result<(UsdcAtoms, UsdcDelta), ValidationError> {
+        self.valued(
+            SqrtPrice::try_from(self.mark)?,
+            mark,
+            SqrtPrice::try_from(mark)?,
+        )
+    }
+
+    /// [`Self::valued_at`] with the roots in hand: the preview mark's, which
+    /// a search takes once, and the shocked mark's.
+    fn valued(
+        &self,
+        own_root: SqrtPrice,
+        mark: Price,
+        mark_root: SqrtPrice,
+    ) -> Result<(UsdcAtoms, UsdcDelta), ValidationError> {
         let sqrt_price = SqrtPrice::from_x96(mul_div(
             self.sqrt_price.x96(),
-            SqrtPrice::try_from(mark)?.x96(),
-            SqrtPrice::try_from(self.mark)?.x96(),
+            mark_root.x96(),
+            own_root.x96(),
             Rounding::TowardZero,
         )?);
         let (value, unrealized) = self.exposure.valued(sqrt_price, mark)?;
@@ -442,6 +457,21 @@ impl MakerEquityBreakdown {
                 atoms(to_i256(value, "position value")?, "position value")?.unsigned_abs(),
             ),
             UsdcDelta::new(atoms(unrealized, "unrealized PnL")?),
+        ))
+    }
+
+    /// The contract's test at a shocked mark, the roots in hand.
+    fn liquidatable(
+        &self,
+        own_root: SqrtPrice,
+        mark: Price,
+        mark_root: SqrtPrice,
+    ) -> Result<bool, ValidationError> {
+        let (value, unrealized) = self.valued(own_root, mark, mark_root)?;
+        Ok(!is_healthy(
+            self.settled_margin() + unrealized,
+            value,
+            self.liquidation_margin_ratio,
         ))
     }
 
@@ -476,12 +506,11 @@ impl MakerEquityBreakdown {
     ///
     /// As [`Self::equity_at`].
     pub fn is_liquidatable_at(&self, mark: Price) -> Result<bool, ValidationError> {
-        let (value, unrealized) = self.valued_at(mark)?;
-        Ok(!is_healthy(
-            self.settled_margin() + unrealized,
-            value,
-            self.liquidation_margin_ratio,
-        ))
+        self.liquidatable(
+            SqrtPrice::try_from(self.mark)?,
+            mark,
+            SqrtPrice::try_from(mark)?,
+        )
     }
 
     /// Where the test turns on each side of the mark along the shock: the
@@ -503,7 +532,11 @@ impl MakerEquityBreakdown {
         let (below, above) = if self.is_liquidatable() {
             (Some(self.mark), Some(self.mark))
         } else {
-            (self.first_turn(false)?, self.first_turn(true)?)
+            let own_root = SqrtPrice::try_from(self.mark)?;
+            (
+                self.first_turn(own_root, false)?,
+                self.first_turn(own_root, true)?,
+            )
         };
         Ok(LiquidationPrices {
             mark: self.mark,
@@ -515,7 +548,7 @@ impl MakerEquityBreakdown {
     /// The first liquidatable price from the mark in one direction, or
     /// `None` when the position is healthy out to a hundredfold or to the
     /// edge of the price range.
-    fn first_turn(&self, up: bool) -> Result<Option<Price>, ValidationError> {
+    fn first_turn(&self, own_root: SqrtPrice, up: bool) -> Result<Option<Price>, ValidationError> {
         // Bracket: the last healthy price and the first liquidatable one,
         // at factors 1 + 2^k / 512 for k up to 16, a hundredfold and more.
         let mut healthy = self.mark;
@@ -524,10 +557,10 @@ impl MakerEquityBreakdown {
             let price = stepped(self.mark, k, up)?;
             // No pool can stand past the protocol's root bounds, so a step
             // beyond them ends this side's search without a turn.
-            if SqrtPrice::try_from(price).is_err() {
+            let Ok(root) = SqrtPrice::try_from(price) else {
                 break;
-            }
-            if self.is_liquidatable_at(price)? {
+            };
+            if self.liquidatable(own_root, price, root)? {
                 liquidatable = Some(price);
                 break;
             }
@@ -541,7 +574,9 @@ impl MakerEquityBreakdown {
         let (mut healthy, mut liquidatable) = (healthy.x96(), liquidatable.x96());
         while healthy.abs_diff(liquidatable) > U256::from(1u8) {
             let mid = healthy.min(liquidatable) + healthy.abs_diff(liquidatable) / U256::from(2u8);
-            if self.is_liquidatable_at(Price::from_x96(mid))? {
+            let price = Price::from_x96(mid);
+            // Between two prices inside the range, so inside it too.
+            if self.liquidatable(own_root, price, SqrtPrice::try_from(price)?)? {
                 liquidatable = mid;
             } else {
                 healthy = mid;
