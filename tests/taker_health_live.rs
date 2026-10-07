@@ -8,9 +8,14 @@
 //! Ignored by default: it reads every position a market ever minted and
 //! probes each open taker over RPC.
 //!
+//! The market must run `v0.2.2-upgradeable`, the build the port follows.
+//! A legacy market's pool key names no hook, and its `liquidateTaker` tests
+//! after swapping the position closed, net of the swap and liquidation
+//! fees, so a comparison there says nothing about the port.
+//!
 //! ```bash
 //! RPC_URL=https://arb1.arbitrum.io/rpc \
-//! PERPCITY_PERP=0xea3f47e8…10dd \
+//! PERPCITY_PERP=<a v0.2.2-upgradeable market> \
 //! cargo test --test taker_health_live -- --ignored --nocapture
 //! ```
 
