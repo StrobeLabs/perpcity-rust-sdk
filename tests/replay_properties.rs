@@ -7,7 +7,9 @@ use std::collections::BTreeSet;
 
 use alloy::primitives::{Address, B256, I256, U256};
 use perpcity_sdk::events::{CumulativesInfo, MarketEvent, ModuleKind};
-use perpcity_sdk::history::test_support::tape::{per_side, price, row, settle, swap};
+use perpcity_sdk::history::test_support::tape::{
+    per_side, pool_initialized, pool_swapped, price, row, settle, swap,
+};
 use perpcity_sdk::history::{Fold, Replay, Tape, TapeEvent};
 use perpcity_sdk::{
     Earnings, Funding, FundingPerSqrtPrice, FundingRate, LDelta, LUnits, PerSide, PerpAtoms,
@@ -91,6 +93,8 @@ fn event() -> impl Strategy<Value = MarketEvent> {
                 salt: B256::from(pos_id),
             }
         ),
+        tick().prop_map(pool_initialized),
+        tick().prop_map(pool_swapped),
         pos_id().prop_map(|pos_id| MarketEvent::MakerOpened { pos_id }),
         pos_id().prop_map(|pos_id| MarketEvent::MakerAdjusted {
             pos_id,
@@ -237,6 +241,8 @@ fn name_of(event: &MarketEvent) -> &'static str {
         MarketEvent::LossSocialized { .. } => "LossSocialized",
         MarketEvent::MarginTransferred { .. } => "MarginTransferred",
         MarketEvent::IndexUpdated { .. } => "IndexUpdated",
+        MarketEvent::PoolInitialized { .. } => "PoolInitialized",
+        MarketEvent::PoolSwapped { .. } => "PoolSwapped",
         MarketEvent::ModifyLiquidity { .. } => "ModifyLiquidity",
         MarketEvent::PositionTransferred { .. } => "PositionTransferred",
         MarketEvent::ModuleSet { .. } => "ModuleSet",
@@ -244,7 +250,7 @@ fn name_of(event: &MarketEvent) -> &'static str {
 }
 
 /// Every name `name_of` can return.
-const VOCABULARY: [&str; 26] = [
+const VOCABULARY: [&str; 28] = [
     "MakerOpened",
     "MakerAdjusted",
     "MakerConverted",
@@ -268,6 +274,8 @@ const VOCABULARY: [&str; 26] = [
     "LossSocialized",
     "MarginTransferred",
     "IndexUpdated",
+    "PoolInitialized",
+    "PoolSwapped",
     "ModifyLiquidity",
     "PositionTransferred",
     "ModuleSet",

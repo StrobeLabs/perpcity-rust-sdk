@@ -15,7 +15,8 @@ use crate::constants::Q96;
 use crate::events::{MakerSettle, MarketEvent, SwapInfo};
 use crate::history::fold::Fold;
 use crate::history::tape::TapeEvent;
-use crate::units::{LDelta, PerSide, PerpAtoms, PerpDelta, Price, UsdcAtoms, UsdcDelta};
+use crate::math::tick::get_sqrt_ratio_at_tick;
+use crate::units::{LDelta, LUnits, PerSide, PerpAtoms, PerpDelta, Price, UsdcAtoms, UsdcDelta};
 
 use super::hash_of;
 
@@ -81,6 +82,34 @@ pub fn modify(pos: u64, lower: i32, upper: i32, delta: i128) -> MarketEvent {
         tick_upper: upper,
         liquidity_delta: LDelta::new(delta),
         salt: B256::from(U256::from(pos)),
+    }
+}
+
+/// The pool created at `tick`'s exact price.
+///
+/// # Panics
+///
+/// For a tick outside the pool's domain.
+pub fn pool_initialized(tick: i32) -> MarketEvent {
+    MarketEvent::PoolInitialized {
+        pool_id: B256::with_last_byte(7),
+        sqrt_price: get_sqrt_ratio_at_tick(tick).expect("a tick in the pool's domain"),
+        tick,
+    }
+}
+
+/// A swap that left the pool at `tick`'s exact price.
+///
+/// # Panics
+///
+/// For a tick outside the pool's domain.
+pub fn pool_swapped(tick: i32) -> MarketEvent {
+    MarketEvent::PoolSwapped {
+        pool_id: B256::with_last_byte(7),
+        sender: Address::ZERO,
+        sqrt_price: get_sqrt_ratio_at_tick(tick).expect("a tick in the pool's domain"),
+        liquidity: LUnits::ZERO,
+        tick,
     }
 }
 

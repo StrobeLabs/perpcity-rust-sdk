@@ -64,12 +64,12 @@ pub(in crate::history) async fn market_events_with<P: Provider>(
 
 /// Everything the chain said about a market in blocks
 /// `from_block..=to_block`, in one chain order: the perp's own events, the
-/// beacon's prints and the PoolManager's liquidity changes for the market's
-/// pool.
+/// beacon's prints and the PoolManager's events for the market's pool: its
+/// creation, its swaps and its liquidity changes.
 ///
 /// One range walk serves all three. The perp and the beacon share a filter
 /// by address; the PoolManager is every pool on the chain, so its filter
-/// names `ModifyLiquidity` and the pool id it indexes by. The two scans
+/// names the three pool events and the pool id they index by. The two scans
 /// share the learned width, and the rows are merged on chain point.
 ///
 /// The beacon is the one in `addresses`, for the whole range. A market
@@ -116,8 +116,8 @@ pub(in crate::history) async fn market_tape_with<P: Provider>(
 }
 
 /// The raw logs a market's tape is decoded from, in chain order: the
-/// perp's and the beacon's by address, the PoolManager's by the liquidity
-/// event and the pool id. As the node returned them: a tape stamps only
+/// perp's and the beacon's by address, the PoolManager's by its pool
+/// events and the pool id. As the node returned them: a tape stamps only
 /// the logs it decodes, a recording stamps them all with
 /// [`stamp_timestamps`].
 pub(in crate::history) async fn market_logs_with<P: Provider>(
@@ -128,14 +128,12 @@ pub(in crate::history) async fn market_logs_with<P: Provider>(
     widths: &SharedWidths,
     in_flight: usize,
 ) -> Result<Vec<Log>> {
-    let (market, liquidity) = tape_filters(addresses)?;
-    let (mut logs, liquidity_logs) = futures_util::try_join!(
+    let (market, pool) = tape_filters(addresses)?;
+    let (mut logs, pool_logs) = futures_util::try_join!(
         scan_all(provider, &market, from_block, to_block, widths, in_flight),
-        scan_all(
-            provider, &liquidity, from_block, to_block, widths, in_flight
-        ),
+        scan_all(provider, &pool, from_block, to_block, widths, in_flight),
     )?;
-    logs.extend(liquidity_logs);
+    logs.extend(pool_logs);
     logs.sort_by_key(|log| (log.block_number, log.log_index));
     Ok(logs)
 }
@@ -230,7 +228,7 @@ fn perp_filter(perp: Address) -> StdResult<Filter, ValidationError> {
 }
 
 /// The market's two filters: the perp and its beacon by address; the
-/// PoolManager by the liquidity event and the pool id it indexes by.
+/// PoolManager by its three pool events and the pool id they index by.
 fn tape_filters(addresses: TapeAddresses) -> StdResult<(Filter, Filter), ValidationError> {
     let TapeAddresses {
         perp,
@@ -250,11 +248,15 @@ fn tape_filters(addresses: TapeAddresses) -> StdResult<(Filter, Filter), Validat
         }
     }
     let market = Filter::new().address(vec![perp, beacon]);
-    let liquidity = Filter::new()
+    let pool = Filter::new()
         .address(pool_manager)
-        .event_signature(IPoolManagerState::ModifyLiquidity::SIGNATURE_HASH)
+        .event_signature(vec![
+            IPoolManagerState::Initialize::SIGNATURE_HASH,
+            IPoolManagerState::Swap::SIGNATURE_HASH,
+            IPoolManagerState::ModifyLiquidity::SIGNATURE_HASH,
+        ])
         .topic1(pool_id);
-    Ok((market, liquidity))
+    Ok((market, pool))
 }
 
 /// Decodes the logs this vocabulary recognizes, each kept with its log.

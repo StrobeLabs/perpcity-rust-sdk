@@ -90,9 +90,9 @@ impl MarketFeed {
     /// logs of one transaction: each row is the [`TapeEvent`] a scan would
     /// have built from the same log, so the fold never knows which tense fed
     /// it. The event *set* is the subscription's, the perp and its beacon;
-    /// the PoolManager's liquidity changes that
+    /// the PoolManager's events that
     /// [`History::market_tape`](crate::history::History::market_tape) also
-    /// carries are not on this feed, so a fold that needs the pool's liquidity live
+    /// carries are not on this feed, so a fold that needs the pool live
     /// follows the lagged tail through the handle until a feed over all
     /// three addresses exists. When the subscription's log omits its block
     /// timestamp, the header is read from `provider`, once, as a scan reads

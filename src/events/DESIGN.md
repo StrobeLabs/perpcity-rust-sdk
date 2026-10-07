@@ -89,11 +89,13 @@ reconstructs the market's live state without a read: the pool price from
 the last swap, the index from the beacon, funding and the EMAs from the
 last touch, open interest and capacity from their updates.
 
-**Two events from outside the Perp** belong to the market anyway: the
+**Events from outside the Perp** belong to the market anyway: the
 PoolManager's `ModifyLiquidity`, since a maker's liquidity change is
-logged by the pool with the position id as its salt, and the position
-NFT's `Transfer`, since custody is the only way to attribute a position
-to an address.
+logged by the pool with the position id as its salt; its `Initialize` and
+`Swap`, as `PoolInitialized` and `PoolSwapped`, since they state the
+pool's exact price and tick, which a liquidity change moves its amounts
+at; and the position NFT's `Transfer`, since custody is the only way to
+attribute a position to an address.
 
 **Governance events** say which rules were in force. A market prices,
 funds, fees and bounds by six modules governance can swap, and each swap
@@ -149,7 +151,7 @@ transport, only against the vocabulary.
 
 | Type | Invariant | Produced by | Consumed by |
 |---|---|---|---|
-| [`MarketEvent`](../events.rs#L156) | one event, either tense: the same value from the same log, however delivered. **Every quantity carries its unit as a type**, with no `f64` left on the vocabulary: USDC as [`UsdcAtoms`](../units/DESIGN.md) or [`UsdcDelta`](../units/DESIGN.md) by whether the contract's word is signed, a perp amount as [`PerpAtoms`](../units/DESIGN.md) or [`PerpDelta`](../units/DESIGN.md), a price as [`Price`](../units/DESIGN.md), the two rates as [`FundingRate`](../units/DESIGN.md) and [`UtilizationRate`](../units/DESIGN.md) holding the contract's WAD exactly, liquidity as [`LUnits`](../units/DESIGN.md) and [`LDelta`](../units/DESIGN.md), a tick's checkpoints as [`Funding`](../events.rs#L348) and [`FundingPerSqrtPrice`](../units/DESIGN.md), and every long/short pair — capacity, open interest, the utilization rates — as one [`PerSide`](../units/DESIGN.md) field a side keys. The vocabulary now reaches governance: a module swap is `ModuleSet` with a [`ModuleKind`](../events.rs#L342), so a fold knows which rules a market ran under at each point. The decoder converted to `f64` before, so the exact word was gone upstream of every consumer and a fold over a million fee legs accumulated rounding it could not avoid; now it sums integers and converts once at the end. A settled fee is spelled `liquidation_fee` rather than `liq_fee`, because the abbreviation also named a fee *rate* and the two are different quantities; a log of another vocabulary is `None`, and a log of *this* one that will not decode is an error naming the field or the signature — the two were one `None` until now, which is how a tape lost events without saying so | [`decode_log`](../events.rs#L370), the one decoder, which knows every era's shape; delivered live by [`MarketFeed::next`](../feeds/DESIGN.md) | [`TapeEvent`](../history/tape/DESIGN.md), which stamps it with its chain point; the trades on `PerpClient`, which decode a receipt's logs with the same decoder to report a swap's deltas from the event rather than the request. The strategy layer's live cache and research folds match on it, and the ownership fold in `history` is the model: one `match`, either tense. |
+| [`MarketEvent`](../events.rs#L156) | one event, either tense: the same value from the same log, however delivered. Every quantity is its unit's type holding the contract's own integer: a pool's exact price a [`SqrtPrice`](../units/DESIGN.md), a long/short pair one [`PerSide`](../units/DESIGN.md). A module swap is `ModuleSet` with a [`ModuleKind`](../events.rs#L342); the pool's creation and swaps are `PoolInitialized` and `PoolSwapped` | [`decode_log`](../events.rs#L370), the one decoder, every served era's shape; live by [`MarketFeed::next`](../feeds/DESIGN.md) | [`TapeEvent`](../history/tape/DESIGN.md), which stamps it with its chain point; `PerpClient`'s trades, which report a swap from its receipt's logs. The strategy layer's live cache and folds match on it. |
 | [`SwapInfo`](../events.rs#L81) | a taker swap's outcome: the four fee legs sum to the total; deltas are the swap's, signed as V4 signs them, and every field now carries its unit — the deltas as [`PerpDelta`](../units/DESIGN.md) and [`UsdcDelta`](../units/DESIGN.md), the four shares as [`UsdcAtoms`](../units/DESIGN.md), the total as a `UsdcDelta` because the contract's `totalFeeAmt` is signed while its shares are not. The price is spelled `pool_price` and typed [`Price`](../units/DESIGN.md), and the rename is the substance: it is the pool's price, not the one the contract marks at, so a basis taken against it is not the basis a liquidation uses | the decoder, inside `TakerOpened`, `TakerAdjusted` and `TakerClosed` | the taker trades' results, which report the realised deltas; the strategy layer's economics, which attribute each fee leg exactly rather than by a ratio on an aggregate. |
 | [`MakerSettle`](../events.rs#L126) | what a touch credited a maker: the settle the chain performed, not a preview. `funding` is a [`UsdcDelta`](../units/DESIGN.md) positive when the position **pays** — the same direction as the equity preview's `funding_owed` — so it is subtracted from the earnings rather than added, which is why the type's own doc no longer claims a settle's parts all point one way; the utilization fees are a [`PerSide`](../units/DESIGN.md) of [`UsdcAtoms`](../units/DESIGN.md), as the preview's are | the decoder, inside the maker events | nothing in the crate. The strategy layer's maker income folds; the settle preview in `math` is checked against these. |
 | [`ModuleKind`](../events.rs#L342) | which of the six modules a `ModuleSet` names: beacon, fees, funding, margin ratios, price impact, pricing. Exhaustive, so a seventh module is a compile error in every consumer rather than an unnamed address | the decoder, from the six `Set*Module` topics, each locked in the ABI test | nothing in the crate. A fold that rebuilds a market's state keeps the six current addresses and derives the rules in force from them. |
@@ -195,15 +197,11 @@ one kind may.
 
 ## Debts
 
-- **Maker events carry no price.** A maker's inventory PnL is therefore
-  not on the tape; only its income is. The next contract era's events
-  are the fix, and the strategy layer's reconciliation names the gap
-  until then.
-- **`ModifyLiquidity` and `IndexUpdated` are in the vocabulary but not on
-  a market's tape**, because they are emitted by other addresses. A tape
-  is one address's logs; the beacon's series and the pool's liquidity
-  changes are separate scans. A market-shaped scan across addresses is
-  SDK #101.
+- **Maker events carry no price and no amounts.** What a band moved is on
+  the tape only through the pool's own events: each liquidity change
+  priced at the exact price and tick the last `PoolSwapped` stated, which
+  is what a maker converted to a taker is left holding. The next contract
+  era's events carry it on the perp's own.
 - **The path `feeds::events` still re-exports this module** from before it
   moved to the crate root. It should go once downstream imports from the
   new path.

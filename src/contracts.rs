@@ -247,7 +247,8 @@ sol! {
     /// block-pinned storage. `ModifyLiquidity` is the pool's liquidity
     /// event: perp pools are vanilla V4 pools, so a maker open/adjust emits
     /// it from the PoolManager with `sender` = the Perp and `salt` = the
-    /// position id.
+    /// position id. `Initialize` and `Swap` state the pool's exact price and
+    /// tick, which a liquidity change's amounts are computed at.
     #[sol(rpc)]
     interface IPoolManagerState {
         /// Liquidity added to (`liquidityDelta > 0`) or removed from a pool's
@@ -259,6 +260,30 @@ sol! {
             int24 tickUpper,
             int256 liquidityDelta,
             bytes32 salt
+        );
+
+        /// The pool created, at its first price and tick.
+        event Initialize(
+            bytes32 indexed id,
+            address indexed currency0,
+            address indexed currency1,
+            uint24 fee,
+            int24 tickSpacing,
+            address hooks,
+            uint160 sqrtPriceX96,
+            int24 tick
+        );
+
+        /// A swap, with the pool's price, active liquidity and tick after it.
+        event Swap(
+            bytes32 indexed id,
+            address indexed sender,
+            int128 amount0,
+            int128 amount1,
+            uint160 sqrtPriceX96,
+            uint128 liquidity,
+            int24 tick,
+            uint24 fee
         );
 
         function extsload(bytes32 slot) external view returns (bytes32 value);
@@ -1025,6 +1050,20 @@ mod abi_lock {
             IPoolManagerState::ModifyLiquidity::SIGNATURE_HASH,
             alloy::primitives::b256!(
                 "f208f4912782fd25c7f114ca3723a2d5dd6f3bcc3ac8db5af63baa85f711d5ec"
+            )
+        );
+        // And for a pool's creation and its swaps (NYCRT's pool on
+        // v0.2.2-upgradeable, 0xa9a68832…f0b84e).
+        assert_eq!(
+            IPoolManagerState::Initialize::SIGNATURE_HASH,
+            alloy::primitives::b256!(
+                "dd466e674ea557f56295e2d0218a125ea4b4f0f6f3307b95f85e6110838d6438"
+            )
+        );
+        assert_eq!(
+            IPoolManagerState::Swap::SIGNATURE_HASH,
+            alloy::primitives::b256!(
+                "40e9cecb9f5f1f1c5b9c97dec2917b7ee92e57ba5563708daca94dd84ad7112f"
             )
         );
         // ERC721 Transfer shares its topic0 with ERC20 Transfer (the

@@ -125,5 +125,6 @@ pub use math::range::{MakerBand, TickRange};
 
 #[doc(inline)]
 pub use math::liquidity::{
-    amounts_for_liquidity, estimate_liquidity, liquidity_for_target_ratio, margin_for_liquidity,
+    amounts_for_liquidity, estimate_liquidity, liquidity_change_delta, liquidity_for_target_ratio,
+    margin_for_liquidity,
 };

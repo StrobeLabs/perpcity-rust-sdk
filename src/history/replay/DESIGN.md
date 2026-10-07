@@ -85,7 +85,8 @@ monitor runs it on every live market.
          Modules        the address in force, per kind        Latest, six      ModuleSet
          Solvency       margin · bad debt, and as stated      Stated · Series  transfers, swaps, bookings
          Pool           liquidity per tick · the tick         sums · Latest    ModifyLiquidity, TicksCrossed
-         Positions      kind · size or band · margin, per id  First/Latest/sums  every position event
+         Positions      kind · size or band · margin, per id  First/Latest/sums  every position event,
+                                                                               the pool's swaps
          OwnershipLog   custody over time                     append           PositionTransferred
          Activity       swaps · liquidations · settlements    Arrivals         the trades, the closes,
                         · prints                                               the prints
@@ -99,9 +100,10 @@ answer; the trades, the liquidations, the settlements and the prints are
 `Arrivals`. All of them append when segments combine, so the law holds
 with them, and all trim to the replay's `Retention`. The one rule the live build needs that no event
 states, how a swap's fees leave the margin total, lives in `Solvency` and
-nowhere else. The three joins the live build's events force, a maker's
-band from `ModifyLiquidity` by salt, its deposit price from the fold's own
-pool price, a liquidation paired with the action before it, live in
+nowhere else. The joins the live build's events force, a maker's band
+from `ModifyLiquidity` by salt, what each change moved priced at the
+pool's last swap, its deposit price from the fold's own pool price, a
+liquidation paired with the action before it, live in
 `Positions` and `Pool`, so the cutover deletes them by removal. `Market`
 itself is a struct of folds whose `apply` and `combine` are nine lines
 each, and `Sequenced` is the chain-order guard any fold a driver feeds
@@ -189,7 +191,7 @@ matches is the other, and at these throughputs neither is measurable.
 | Type | Invariant | Produced by | Consumed by |
 |---|---|---|---|
 | [`Replay`](mod.rs#L143) | the market as its events describe it, in the reads' types, with each figure's history kept as a series or arrivals, known through the last block read; every field combines across segments, the series by appending; an event at or before the fold's point is refused, never applied | [`Replay::from_genesis`](mod.rs#L233), [`Replay::seeded`](mod.rs#L263) from a [`StateAt`](../../client/DESIGN.md), or the trait's `fold`; `Replay::retaining` sets the `Retention`; then `apply`, `Replay::catch_up`, or `Replay::read_through` (see accepted structure) | nothing in the crate; `Replay::deposited`, what bad debt is set against, is the one bare sum. The strategy layer's monitor, live cache and research folds, each driving it from a different source. |
-| [`Positions`](positions.rs#L392), [`PositionState`](positions.rs#L114), [`PositionKind`](positions.rs#L22) | every position on the tape: a taker's size and USD leg, the sums of its swaps' deltas; a maker's band, its first range plus its liquidity changes; the margin a read supplied until an event touches it. Met mid-life or unnamed, a position is `Unknown` or unsized, never guessed, so segments merge | folded inside `Replay`; read through [`Replay::positions`](mod.rs#L473) and `Replay::position` | the strategy layer's live cache and economics, which price a taker's two legs at a mark; a `MakerBand` here and one read compare with `==`. |
+| [`Positions`](positions.rs#L392), [`PositionState`](positions.rs#L114), [`PositionKind`](positions.rs#L22) | every position on the tape: its two legs, the contract's delta, summed from its swaps and its priced liquidity changes; a maker's band; the margin a read supplied until an event touches it. Met mid-life or unpriced, a position is `Unknown` or unsized, never guessed, so segments merge | folded inside `Replay`; read through [`Replay::positions`](mod.rs#L473) and `Replay::position` | the strategy layer's live cache and economics, which price a taker's two legs at a mark; a `MakerBand` here and one read compare with `==`. |
 | [`Liquidation`](activity.rs#L21), [`Settlement`](activity.rs#L41) | the marks the replay alone can make. A liquidation is one record per position per liquidating transaction, whichever build's events carried it, with the pool price before and after and the index then; a cut inside the transaction or before the first price is repaired at `combine`. A settlement is what a position paid or earned when touched. Both are `Positioned`, so custody scopes them; the swap mark is the tape's | the activity fold inside `Replay`, read through `Replay::liquidations` and `Replay::settlements` | the readings over arrivals in the strategy layer: intensity, a cascade's run, a sweep. |
 | [`Gaps`](mod.rs#L63), [`Silences`](mod.rs#L77), [`Unknowns`](mod.rs#L93), [`Faults`](mod.rs#L108) | what the fold does not know, in three kinds with three cures: what the contract moved silently, cured by the cutover; what the fold's start did not supply, cured by a seed; what the driver did wrong, cured by `catch_up`. Decided at the read from the latest totals, so the counts combine like the rest | [`Replay::gaps`](mod.rs#L506) | nothing in the crate: the strategy layer's gate, one alarm per part. A reading with a nonzero gap is forensic, not a decision's input. |
 
@@ -220,15 +222,23 @@ matches is the other, and at these throughputs neither is measurable.
   one the fold stands at: the fold's cursor, remembered, not converted,
   as `Sequenced` takes and returns its `ChainPoint`.
 
-- **Three parts of the pool's liquidity are compensation.** `maker_band`
+- **Four parts of the pool's liquidity are compensation.** `maker_band`
   comes from `ModifyLiquidity` joined to the maker by its salt, which the
-  live build sets to the position id; the deposit price is the fold's own
-  pool price at `MakerOpened`; a liquidation is paired with the action
-  before it in the same transaction by the dedicated event that follows.
-  The audited build emits range, liquidity and mark on `MakerOpened`, every
-  change on the maker's own events, and liquidations as their own events,
-  so the join, the recovery and the pairing are deleted at the cutover. They
-  sit in the positions fold and the pool fold so the deletion is a removal.
+  live build sets to the position id; what each change moved is
+  `liquidity_change_delta` at the pool's last `PoolSwapped` price and
+  tick, which is how a converted maker is sized; the deposit price is
+  the fold's own pool price at `MakerOpened`; a liquidation is paired with
+  the action before it in the same transaction by the dedicated event that
+  follows. The audited build emits range, liquidity and mark on
+  `MakerOpened`, every change on the maker's own events, and liquidations
+  as their own events, so the join, the pricing, the recovery and the
+  pairing are deleted at the cutover. They sit in the positions fold and
+  the pool fold so the deletion is a removal.
+
+- **A position's legs are the contract's delta, whatever its role.**
+  Every swap and every priced liquidity change adds to them, and an open
+  of either kind sizes them, so the merge is a sum and a sequence the
+  contract never emits, a taker's liquidity change, still combines.
 
 ## Debts
 
@@ -237,8 +247,8 @@ matches is the other, and at these throughputs neither is measurable.
   will want to retain only open positions; that is its call to make, not
   the fold's to guess.
 - **The feed carries two of the three addresses**, so a fold the feed
-  drives would hold a stale tick map and stale maker bands with no count
-  saying so. Until the feed carries the PoolManager, or the audited build
+  drives would hold a stale tick map, stale maker bands and unpriced
+  liquidity changes, with only the last counted. Until the feed carries the PoolManager, or the audited build
   puts the liquidity on the perp's events, a live fold polls through
   `catch_up`.
 - **A seeded fold is only ever the left operand of `combine`**, and nothing

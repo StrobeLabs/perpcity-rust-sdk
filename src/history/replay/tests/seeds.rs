@@ -9,12 +9,13 @@ use super::*;
 #[test]
 fn a_seed_is_a_checkpoint() {
     let tape = whole_market();
-    // After block 22: a taker sized, a maker banded, the tick known.
+    // After block 22: two takers sized, a maker banded and its deposit
+    // priced, the tick known.
     let cut = tape.iter().position(|row| row.block_number > 22).unwrap();
     let prefix = genesis(&tape[..cut]);
     let at = block_of(&tape[cut - 1]);
     let seed = seed_of(&prefix, at);
-    assert_eq!(seed.positions.len(), 2);
+    assert_eq!(seed.positions.len(), 3);
 
     let mut seeded = Replay::from_seed(seed).unwrap();
     assert_eq!(seeded.block(), Some(at));
@@ -59,7 +60,19 @@ fn a_seed_is_a_checkpoint() {
         assert_eq!(actual.maker_band(), expected.maker_band(), "{pos_id} band");
         assert_eq!(actual.closed(), expected.closed(), "{pos_id} close");
     }
-    assert_eq!(seeded.gaps(), whole.gaps());
+    // Taker 9 is untouched since the read, so the seed still knows its
+    // margin; the fold from genesis never did.
+    let whole_gaps = whole.gaps();
+    assert_eq!(
+        seeded.gaps(),
+        Gaps {
+            unknowns: Unknowns {
+                margin_unknown: whole_gaps.unknowns.margin_unknown - 1,
+                ..whole_gaps.unknowns
+            },
+            ..whole_gaps
+        }
+    );
 }
 
 /// A seeded position's margin is the read's until an event touches the
@@ -112,8 +125,10 @@ fn an_event_at_or_before_the_folds_point_is_refused_and_counted() {
     assert_eq!(market.applied(), before.applied() + 1);
 
     // A seed stands at the end of its block.
+    let whole = whole_market();
+    let tick_known = whole.iter().position(|row| row.block_number > 22).unwrap();
     let mut seeded =
-        Replay::from_seed(seed_of(&genesis(&whole_market()[..16]), block_of(&tape[2]))).unwrap();
+        Replay::from_seed(seed_of(&genesis(&whole[..tick_known]), block_of(&tape[2]))).unwrap();
     seeded.apply(&tape[2]);
     assert_eq!(
         seeded.gaps().faults.refused,
