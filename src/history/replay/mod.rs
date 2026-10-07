@@ -44,6 +44,7 @@ use self::activity::Activity;
 pub use self::activity::{Liquidation, Settlement};
 use self::market::{Modules, Prices, Rates, Utilization};
 use self::pool::Pool;
+use self::positions::PoolPoint;
 pub use self::positions::{PositionKind, PositionState, Positions};
 use self::seed::Seed;
 use self::solvency::Solvency;
@@ -95,8 +96,10 @@ pub struct Unknowns {
     /// and no read to supply it, so their size or band is what moved since,
     /// not where they stand. Includes `taker_size_unknown`.
     pub partial_positions: u32,
-    /// Open takers whose size no event stated: first seen mid-life, or
-    /// converted from a maker, whose inventory the live builds never emit.
+    /// Open takers whose size the fold does not know: first seen mid-life,
+    /// or converted from a maker with a liquidity change the fold could not
+    /// price ([`PositionState::unpriced`]), as on a tape without the pool's
+    /// swaps.
     pub taker_size_unknown: u32,
     /// Open positions whose margin the fold does not know: every position a
     /// read did not supply, and every one an event has touched since.
@@ -281,7 +284,14 @@ impl Replay {
             solvency: Solvency::seeded(at, seed.solvency),
             modules: Modules::seeded(seed.modules),
             pool: Pool::seeded(seed.ticks, seed.tick)?,
-            positions: Positions::seeded(seed.pool_price, seed.positions),
+            positions: Positions::seeded(
+                seed.pool_price,
+                PoolPoint {
+                    sqrt_price: seed.sqrt_price,
+                    tick: seed.tick,
+                },
+                seed.positions,
+            ),
             custody: OwnershipLog::default(),
             activity: Activity::seeded(at, seed.pool_price, seed.index),
         };
@@ -546,7 +556,9 @@ impl Replay {
         for (_, position) in market.positions.open() {
             unknowns.margin_unknown += u32::from(position.margin().is_none());
             unknowns.partial_positions += u32::from(!position.level_known());
-            if let PositionKind::Taker { sized: false, .. } = position.kind() {
+            if let PositionKind::Taker { .. } = position.kind()
+                && position.taker_size().is_none()
+            {
                 unknowns.taker_size_unknown += 1;
             }
         }

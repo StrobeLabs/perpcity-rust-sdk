@@ -16,12 +16,13 @@ use crate::events::MarketEvent;
 use crate::history::fold::{Change, Window};
 use crate::history::tape::Wallets;
 use crate::history::test_support::tape::{
-    assert_combine_law, modify, per_side, price, row, settle, swap,
+    assert_combine_law, modify, per_side, pool_initialized, pool_swapped, price, row, settle, swap,
 };
 use crate::math::pricing::calculate_emas;
 use crate::math::range::{MakerBand, TickRange};
 use crate::units::{
-    Earnings, Funding, FundingPerSqrtPrice, LDelta, PerpAtoms, PerpDelta, UsdcAtoms, UsdcDelta,
+    Earnings, Funding, FundingPerSqrtPrice, LDelta, PerpAtoms, PerpDelta, SqrtPrice, UsdcAtoms,
+    UsdcDelta,
 };
 
 /// The fixture tape folded as a market from its genesis.
@@ -80,7 +81,7 @@ fn tape() -> Vec<TapeEvent> {
             12,
             0,
             MarketEvent::TakerOpened {
-                pos_id: U256::from(2),
+                pos_id: U256::from(9),
                 swap: swap(1_000_000, price(43), 10_000),
             },
         ),
@@ -242,7 +243,24 @@ fn lifecycle() -> Vec<TapeEvent> {
     ]
 }
 
-/// The base fixture, an accrual, then the two positions' lives.
+/// The lifecycle with the pool's own events: created at tick 0, then each
+/// taker swap's pool swap, which leaves the maker's three liquidity changes
+/// at ticks 5, 10 and 8.
+fn priced_lifecycle() -> Vec<TapeEvent> {
+    let mut tape = lifecycle();
+    tape.extend([
+        row(19, 0, pool_initialized(0)),
+        row(20, 1, pool_swapped(5)),
+        row(22, 2, pool_swapped(10)),
+        row(24, 2, pool_swapped(8)),
+        row(26, 3, pool_swapped(2)),
+    ]);
+    tape.sort_by_key(TapeEvent::point);
+    tape
+}
+
+/// The base fixture, an accrual, then the two positions' lives with the
+/// pool's events.
 fn whole_market() -> Vec<TapeEvent> {
     let mut tape = tape();
     tape.push(row(
@@ -265,7 +283,7 @@ fn whole_market() -> Vec<TapeEvent> {
             },
         },
     ));
-    tape.extend(lifecycle());
+    tape.extend(priced_lifecycle());
     tape
 }
 
@@ -299,18 +317,33 @@ fn seed_of(market: &Replay, at: BlockContext) -> Seed {
         },
         ticks: market.pool_ticks().unwrap(),
         tick: market.pool_tick().unwrap(),
+        // A tape without the pool's own events stands at the root of the
+        // price its swaps printed.
+        sqrt_price: market.market().positions.pool().map_or_else(
+            || SqrtPrice::try_from(market.pool_price().value().unwrap()).unwrap(),
+            |pool| pool.sqrt_price,
+        ),
         positions: market
             .positions()
             .open()
             .map(|(pos_id, state)| {
                 let margin = UsdcAtoms::new(1_000_000 + pos_id.to::<u128>());
-                let position = match (state.taker_size(), state.taker_usd(), state.maker_band()) {
-                    (Some(size), Some(usd), _) => SeedPosition::Taker { size, usd, margin },
-                    (_, _, Some(band)) => SeedPosition::Maker {
-                        range: band.range,
-                        liquidity: LDelta::new(band.liquidity.units() as i128),
-                        margin,
-                    },
+                let position = match (
+                    state.taker_size(),
+                    state.taker_usd(),
+                    state.maker_band(),
+                    state.kind(),
+                ) {
+                    (Some(size), Some(usd), _, _) => SeedPosition::Taker { size, usd, margin },
+                    (_, _, Some(band), PositionKind::Maker { moved, usd, .. }) => {
+                        SeedPosition::Maker {
+                            range: band.range,
+                            liquidity: LDelta::new(band.liquidity.units() as i128),
+                            moved,
+                            usd,
+                            margin,
+                        }
+                    }
                     _ => SeedPosition::Unknown { margin },
                 };
                 (pos_id, position)

@@ -3,6 +3,8 @@
 //! that starts mid-life knows.
 
 use super::*;
+use crate::math::liquidity::liquidity_change_delta;
+use crate::math::tick::get_sqrt_ratio_at_tick;
 
 fn tick(gross: u128, net: i128) -> TickLiquidity {
     TickLiquidity {
@@ -58,16 +60,15 @@ fn a_makers_band_and_the_pools_book_are_the_sum_of_liquidity_changes() {
     assert_eq!(trimmed.pool_liquidity(), Some(LUnits::new(600)));
 
     // Pulled and converted: the band is gone, the tick map is empty, and
-    // the position is a taker of a size no event carries.
+    // the position is a taker of a size no perp event carries, and this
+    // tape has none of the pool's to price it.
     let converted = genesis(&tape[..11]);
     let taker = converted.position(U256::from(2)).unwrap();
     assert_eq!(taker.maker_band(), None);
     assert_eq!(taker.taker_size(), None);
     assert_eq!(taker.taker_usd(), None, "no event carries the inventory");
-    assert!(matches!(
-        taker.kind(),
-        PositionKind::Taker { sized: false, .. }
-    ));
+    assert!(!taker.level_known());
+    assert_eq!(taker.unpriced(), 3, "every change the band made");
     assert!(taker.is_open());
     assert_eq!(converted.pool_ticks(), Some(BTreeMap::new()));
     assert_eq!(converted.pool_liquidity(), Some(LUnits::ZERO));
@@ -168,8 +169,11 @@ fn a_segment_knows_what_moved_and_not_where_positions_stand() {
             liquidity: LDelta::new(-400),
             sized: false,
             deposit_pool_price: None,
+            moved: PerpDelta::ZERO,
+            usd: UsdcDelta::ZERO,
         }
     );
+    assert_eq!(maker.unpriced(), 1, "the tape has no pool price");
 
     assert_eq!(
         segment.pool_ticks(),
@@ -196,6 +200,72 @@ fn a_segment_knows_what_moved_and_not_where_positions_stand() {
 #[test]
 fn positions_and_the_pool_combine_at_every_cut() {
     let tape = lifecycle();
+    assert_combine_law(Replay::from_genesis(Address::ZERO), &tape);
+    assert_combine_law(Replay::default(), &tape);
+}
+
+/// What the maker's three changes moved, each at the pool's price then.
+fn band_moved() -> (PerpDelta, UsdcDelta) {
+    let range = TickRange::new(-600, 600).unwrap();
+    [(5, 1_000), (10, -400), (8, -600)]
+        .into_iter()
+        .map(|(tick, delta)| {
+            let sqrt_price = get_sqrt_ratio_at_tick(tick).unwrap();
+            liquidity_change_delta(sqrt_price, tick, &range, LDelta::new(delta)).unwrap()
+        })
+        .fold((PerpDelta::ZERO, UsdcDelta::ZERO), |(perp, usd), moved| {
+            (perp + moved.0, usd + moved.1)
+        })
+}
+
+/// A maker converted to a taker holds what its liquidity changes moved,
+/// each priced at the pool's exact price and tick then, so the pool's own
+/// events size it where no perp event does.
+#[test]
+fn a_converted_maker_holds_what_its_liquidity_changes_moved() {
+    let tape = priced_lifecycle();
+    let (perp, usd) = band_moved();
+    assert!(!perp.is_zero(), "the price moved between the changes");
+
+    let converted_at = tape
+        .iter()
+        .position(|row| matches!(row.event, MarketEvent::MakerConverted { .. }))
+        .unwrap();
+    let converted = genesis(&tape[..=converted_at]);
+    let taker = converted.position(U256::from(2)).unwrap();
+    assert_eq!(taker.taker_size(), Some(perp));
+    assert_eq!(taker.taker_usd(), Some(usd));
+    assert!(taker.level_known());
+    assert_eq!(taker.unpriced(), 0);
+    assert_eq!(converted.gaps().unknowns.taker_size_unknown, 0);
+
+    // Its close is a swap on top of what it held.
+    let closed = genesis(&tape);
+    assert_eq!(
+        closed.position(U256::from(2)).unwrap().taker_size(),
+        Some(perp + PerpDelta::new(-700))
+    );
+}
+
+/// A segment prices the changes it saw after its first pool price, and
+/// holds those before it until it is combined after the segment that saw
+/// the price they were made at.
+#[test]
+fn a_segment_prices_its_first_changes_at_the_cut() {
+    let tape = priced_lifecycle();
+    let cut = tape.iter().position(|row| row.block_number == 21).unwrap();
+    let later = Replay::fold(&tape[cut..]);
+    assert_eq!(
+        later.position(U256::from(2)).unwrap().unpriced(),
+        1,
+        "the deposit came before the segment's first pool swap"
+    );
+
+    let mut whole = genesis(&tape[..cut]);
+    whole.combine(later);
+    assert_eq!(whole.position(U256::from(2)).unwrap().unpriced(), 0);
+    assert_eq!(whole, genesis(&tape));
+
     assert_combine_law(Replay::from_genesis(Address::ZERO), &tape);
     assert_combine_law(Replay::default(), &tape);
 }

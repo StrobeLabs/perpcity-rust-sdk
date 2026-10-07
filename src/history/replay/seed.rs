@@ -16,7 +16,7 @@ use crate::math::capacity::MarketCapacity;
 use crate::math::pricing::Emas;
 use crate::math::range::TickRange;
 use crate::math::swap::TickLiquidity;
-use crate::units::{LDelta, PerpDelta, Price, UsdcAtoms, UsdcDelta};
+use crate::units::{LDelta, PerpDelta, Price, SqrtPrice, UsdcAtoms, UsdcDelta};
 
 /// Every figure the fold holds, as the reads returned it at one block.
 #[derive(Clone)]
@@ -33,6 +33,7 @@ pub(super) struct Seed {
     pub(super) modules: Modules,
     pub(super) ticks: BTreeMap<i32, TickLiquidity>,
     pub(super) tick: i32,
+    pub(super) sqrt_price: SqrtPrice,
     pub(super) positions: Vec<(U256, SeedPosition)>,
 }
 
@@ -45,9 +46,13 @@ pub(super) enum SeedPosition {
         usd: UsdcDelta,
         margin: UsdcAtoms,
     },
+    /// A band, and the two legs its liquidity changes moved, which a
+    /// conversion leaves it holding.
     Maker {
         range: TickRange,
         liquidity: LDelta,
+        moved: PerpDelta,
+        usd: UsdcDelta,
         margin: UsdcAtoms,
     },
     /// A row with neither size nor band, which the contract does not
@@ -84,6 +89,7 @@ impl Seed {
                 continue;
             };
             let margin = UsdcAtoms::new(row.margin);
+            let (perp, usd) = unpack_balance_delta(row.delta);
             let position = match band.row? {
                 Some(band) => SeedPosition::Maker {
                     range: band.range,
@@ -92,10 +98,11 @@ impl Seed {
                             context: "a band's liquidity as a signed sum".into(),
                         },
                     )?),
+                    moved: PerpDelta::new(perp),
+                    usd: UsdcDelta::new(usd),
                     margin,
                 },
                 None => {
-                    let (perp, usd) = unpack_balance_delta(row.delta);
                     if perp == 0 {
                         SeedPosition::Unknown { margin }
                     } else {
@@ -123,6 +130,7 @@ impl Seed {
             modules,
             ticks: pool.ticks,
             tick: pool.tick,
+            sqrt_price: pool.sqrt_price,
             positions,
         })
     }
