@@ -1,10 +1,13 @@
 //! Live maker equity: what the contract would settle for an OPEN maker
 //! position if it were touched now.
 //!
-//! Ports the deployed-era `PerpLogic` maker settlement math (commit
-//! `83d90aea` of perpcity-contracts — the fee/funding math is unchanged
-//! through the deployed window `#165..#168`). For an open maker position the
-//! math produces exactly what the contract would settle on a touch:
+//! Ports the `PerpLogic` maker settlement math of the deployed contracts,
+//! perpcity-contracts `v0.2.2-upgradeable` (`198559ae`), and its
+//! `liquidateMaker` eligibility test. The settle math there differs from the
+//! commit the port was first transcribed from, `83d90aea`, only in
+//! `unchecked` blocks and in `valPnl`'s signed residual, which this follows.
+//! For an open maker position the math produces exactly what the contract
+//! would settle on a touch:
 //!
 //! - accrued range funding (`makerCumlFunding` + `makerFeesAccrued`),
 //! - utilization earnings (capacity × earnings-checkpoint delta),
@@ -32,10 +35,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::constants::{ACCOUNTING_TOKEN_SUPPLY, INTERVAL, Q96, WAD};
 use crate::errors::ValidationError;
-use crate::math::BlockContext;
 use crate::math::liquidity::amounts_for_liquidity;
 use crate::math::swap::amount0_delta;
 use crate::math::tick::get_sqrt_ratio_at_tick;
+use crate::math::{BlockContext, LiquidationPrices, is_healthy};
 use crate::units::fixed_point::{
     Rounding, add_i, add_u, mul_div, s_full_mul_div, sub_i, to_i256, u512_to_u256,
 };
@@ -162,6 +165,74 @@ pub struct MakerState {
     pub fee_growth_inside1_last: FeeGrowth,
 }
 
+/// The legs of a maker's equity that move with the price: the band, and
+/// the deposit residual the contract recorded against it. Kept on the
+/// breakdown so a preview can be revalued along a price shock without the
+/// market it was computed from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+struct Exposure {
+    sqrt_lower: SqrtPrice,
+    sqrt_upper: SqrtPrice,
+    liquidity: LUnits,
+    delta_perp: PerpDelta,
+    delta_usd: UsdcDelta,
+}
+
+impl Exposure {
+    /// `valPnl` at a pool price and a mark: the band's value, and the
+    /// unrealized PnL as that value plus the deposit residual, both the
+    /// signed sums the contract computes.
+    fn valued(&self, sqrt_price: SqrtPrice, mark: Price) -> Result<(U256, I256), ValidationError> {
+        let (perps, usd) =
+            amounts_for_liquidity(sqrt_price, self.sqrt_lower, self.sqrt_upper, self.liquidity)?;
+        let liquidity_val = add_u(
+            mul_div(
+                U256::from(perps.atoms()),
+                mark.x96(),
+                Q96,
+                Rounding::TowardZero,
+            )?,
+            U256::from(usd.atoms()),
+            "band liquidity value",
+        )?;
+        let residual_val = add_i(
+            s_full_mul_div(
+                I256::unchecked_from(self.delta_perp.atoms()),
+                to_i256(mark.x96(), "mark price")?,
+                Q96,
+                Rounding::TowardZero,
+            )?,
+            I256::unchecked_from(self.delta_usd.atoms()),
+            "deposit residual value",
+        )?;
+        let unrealized = add_i(
+            to_i256(liquidity_val, "band liquidity value")?,
+            residual_val,
+            "unrealized PnL",
+        )?;
+        Ok((liquidity_val, unrealized))
+    }
+
+    /// [`Self::valued`] narrowed to the breakdown's units and bounded to the
+    /// token supply: the band's value and the unrealized PnL, as a preview
+    /// stores them and every revaluation computes them.
+    fn valued_atoms(
+        &self,
+        sqrt_price: SqrtPrice,
+        mark: Price,
+    ) -> Result<(UsdcAtoms, UsdcDelta), ValidationError> {
+        let (value, unrealized) = self.valued(sqrt_price, mark)?;
+        Ok((
+            // A band's value is a sum of non-negative legs, so the count's
+            // own floor is the only bound left to assert.
+            UsdcAtoms::new(
+                atoms(to_i256(value, "position value")?, "position value")?.unsigned_abs(),
+            ),
+            UsdcDelta::new(atoms(unrealized, "unrealized PnL")?),
+        ))
+    }
+}
+
 /// What the contract would settle if the position were touched now.
 ///
 /// Every component is exact USDC, the units the contract settles in; the
@@ -172,7 +243,14 @@ pub struct MakerState {
 /// which rejects out-of-bound values — so the derived sums
 /// ([`Self::settled_margin`], [`Self::equity`],
 /// [`Self::accrued_income`]) can never overflow `i128`.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// The preview also carries the mark and the pool price it was priced at
+/// and the legs that move with them, so it can be revalued along a price
+/// shock with nothing else in hand: [`Self::equity_at`],
+/// [`Self::is_liquidatable_at`] and [`Self::liquidation_prices`]. Its value
+/// and PnL are that revaluation at its own prices, which deserialization
+/// recomputes and requires.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "RawMakerEquityBreakdown")]
 pub struct MakerEquityBreakdown {
     margin: UsdcDelta,
@@ -182,6 +260,9 @@ pub struct MakerEquityBreakdown {
     unrealized_pnl: UsdcDelta,
     position_value: UsdcAtoms,
     liquidation_margin_ratio: Ratio,
+    mark: Price,
+    sqrt_price: SqrtPrice,
+    exposure: Exposure,
 }
 
 /// Deserialization shadow of [`MakerEquityBreakdown`]: identical fields,
@@ -196,6 +277,9 @@ struct RawMakerEquityBreakdown {
     unrealized_pnl: UsdcDelta,
     position_value: UsdcAtoms,
     liquidation_margin_ratio: Ratio,
+    mark: Price,
+    sqrt_price: SqrtPrice,
+    exposure: Exposure,
 }
 
 impl TryFrom<RawMakerEquityBreakdown> for MakerEquityBreakdown {
@@ -211,6 +295,19 @@ impl TryFrom<RawMakerEquityBreakdown> for MakerEquityBreakdown {
                 })
             }
         };
+        // The value and PnL a preview stores are its own valuation at the
+        // prices it carries, so they are checked the way they were made: a
+        // breakdown whose band and residual do not reproduce them would
+        // revalue to something other than itself.
+        let (position_value, unrealized_pnl) =
+            raw.exposure.valued_atoms(raw.sqrt_price, raw.mark)?;
+        if (position_value, unrealized_pnl) != (raw.position_value, raw.unrealized_pnl) {
+            return Err(ValidationError::DecodeFailed {
+                context: "a maker breakdown whose band and residual do not reproduce its \
+                          value and PnL at its own prices"
+                    .into(),
+            });
+        }
         Ok(Self {
             margin: bounded(raw.margin, "deserialized margin")?,
             funding_owed: bounded(raw.funding_owed, "deserialized funding")?,
@@ -225,20 +322,41 @@ impl TryFrom<RawMakerEquityBreakdown> for MakerEquityBreakdown {
                 )?,
             ),
             lp_fees: bounded(raw.lp_fees, "deserialized LP fees")?,
-            unrealized_pnl: bounded(raw.unrealized_pnl, "deserialized unrealized PnL")?,
-            // A position value cannot be negative, which its type already
-            // says; only the supply bound is left to check.
-            position_value: if raw.position_value.atoms() <= MAX_COMPONENT_ATOMS {
-                raw.position_value
-            } else {
-                return Err(ValidationError::Overflow {
-                    context: "deserialized position value".into(),
-                });
-            },
+            unrealized_pnl,
+            position_value,
             // The ratio's own domain, the contract's `uint24`, is checked
             // where a `Ratio` is deserialised.
             liquidation_margin_ratio: raw.liquidation_margin_ratio,
+            mark: raw.mark,
+            sqrt_price: raw.sqrt_price,
+            exposure: raw.exposure,
         })
+    }
+}
+
+#[cfg(test)]
+impl MakerEquityBreakdown {
+    /// A breakdown of nothing, for a test that needs a `Computed` payload
+    /// and reads none of it.
+    pub(crate) fn placeholder() -> Self {
+        Self {
+            margin: UsdcDelta::ZERO,
+            funding_owed: UsdcDelta::ZERO,
+            util_earnings: PerSide::default(),
+            lp_fees: UsdcDelta::ZERO,
+            unrealized_pnl: UsdcDelta::ZERO,
+            position_value: UsdcAtoms::ZERO,
+            liquidation_margin_ratio: Ratio::ZERO,
+            mark: Price::from_x96(Q96),
+            sqrt_price: SqrtPrice::from_x96(Q96),
+            exposure: Exposure {
+                sqrt_lower: SqrtPrice::from_x96(Q96),
+                sqrt_upper: SqrtPrice::from_x96(Q96),
+                liquidity: LUnits::ZERO,
+                delta_perp: PerpDelta::ZERO,
+                delta_usd: UsdcDelta::ZERO,
+            },
+        }
     }
 }
 
@@ -307,26 +425,16 @@ impl MakerEquityBreakdown {
         Self::health_ratio(self.equity().atoms() as f64, self.position_value)
     }
 
-    /// Whether the contract would liquidate the position now, given the
-    /// market's liquidation fee *rate*
-    /// ([`Fees::liquidation_fee`](crate::Fees::liquidation_fee)): the
-    /// negation of
-    /// `isHealthy(equity − posVal·liqFee, posVal, liqMarginRatio)`.
-    ///
-    /// The parameter is a [`Ratio`] because the fee a liquidation *settles*
-    /// is a USDC amount carried under the same name, and as two `f64` the two
-    /// substituted for each other: passing the amount made the fee leg a
-    /// multiple of the whole position and every position read as
-    /// liquidatable.
-    ///
-    /// A screening gate, not the oracle: the fee leg is applied in `f64`,
-    /// so a position within an atom of the boundary can go either way.
-    /// Confirm with `simulate_liquidate_maker` before sending.
-    pub fn is_liquidatable(&self, liquidation_fee: Ratio) -> bool {
-        let fee_atoms = self.position_value.atoms() as f64 * liquidation_fee.fraction();
-        let equity_after_fee = self.equity().atoms() as f64 - fee_atoms;
-        Self::health_ratio(equity_after_fee, self.position_value)
-            < self.liquidation_margin_ratio.fraction()
+    /// Whether the contract would liquidate the position now: the negation
+    /// of `isHealthy(equity, posVal, liqMarginRatio)`, the deployed
+    /// `liquidateMaker` eligibility test, in the contract's integers. No fee
+    /// enters it; the liquidation fee is charged after the test passes.
+    pub fn is_liquidatable(&self) -> bool {
+        !is_healthy(
+            self.equity(),
+            self.position_value,
+            self.liquidation_margin_ratio,
+        )
     }
 
     fn health_ratio(equity_atoms: f64, position_value: UsdcAtoms) -> f64 {
@@ -335,6 +443,179 @@ impl MakerEquityBreakdown {
         }
         equity_atoms / position_value.atoms().max(1) as f64
     }
+
+    /// The mark the preview was priced at: where a price shock starts.
+    pub fn mark(&self) -> Price {
+        self.mark
+    }
+
+    /// The band's value and the unrealized PnL along a price shock that
+    /// takes the mark to `mark`: the pool moves by the same factor, its root
+    /// by the root of it, so the band's composition is read at the shocked
+    /// pool price and valued, with the deposit residual, at the shocked
+    /// mark. The factor is exactly one at the preview's own mark, where the
+    /// pool's root comes back unrounded.
+    fn valued_at(&self, mark: Price) -> Result<(UsdcAtoms, UsdcDelta), ValidationError> {
+        self.valued(
+            SqrtPrice::try_from(self.mark)?,
+            mark,
+            SqrtPrice::try_from(mark)?,
+        )
+    }
+
+    /// [`Self::valued_at`] with the roots in hand: the preview mark's, which
+    /// a search takes once, and the shocked mark's.
+    fn valued(
+        &self,
+        own_root: SqrtPrice,
+        mark: Price,
+        mark_root: SqrtPrice,
+    ) -> Result<(UsdcAtoms, UsdcDelta), ValidationError> {
+        let sqrt_price = SqrtPrice::from_x96(mul_div(
+            self.sqrt_price.x96(),
+            mark_root.x96(),
+            own_root.x96(),
+            Rounding::TowardZero,
+        )?);
+        self.exposure.valued_atoms(sqrt_price, mark)
+    }
+
+    /// The contract's test at a shocked mark, the roots in hand.
+    fn liquidatable(
+        &self,
+        own_root: SqrtPrice,
+        mark: Price,
+        mark_root: SqrtPrice,
+    ) -> Result<bool, ValidationError> {
+        let (value, unrealized) = self.valued(own_root, mark, mark_root)?;
+        Ok(!is_healthy(
+            self.settled_margin() + unrealized,
+            value,
+            self.liquidation_margin_ratio,
+        ))
+    }
+
+    /// Equity if the mark stood at `mark` and the pool price had moved by
+    /// the same factor from where it stood, the accrued legs as they are:
+    /// the shock a maker is liquidated along, takers trading the pool and
+    /// the mark following. At the preview's own mark it is exactly
+    /// [`Self::equity`].
+    ///
+    /// # Errors
+    ///
+    /// [`ValidationError::InvalidPrice`] for a mark whose root is outside
+    /// the protocol's range, and [`ValidationError::Overflow`] when a leg
+    /// leaves its domain.
+    pub fn equity_at(&self, mark: Price) -> Result<UsdcDelta, ValidationError> {
+        Ok(self.settled_margin() + self.valued_at(mark)?.1)
+    }
+
+    /// The band's value along the same shock, the test's denominator.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::equity_at`].
+    pub fn position_value_at(&self, mark: Price) -> Result<UsdcAtoms, ValidationError> {
+        Ok(self.valued_at(mark)?.0)
+    }
+
+    /// [`Self::is_liquidatable`] along the same shock; at the preview's own
+    /// mark, the same answer.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::equity_at`].
+    pub fn is_liquidatable_at(&self, mark: Price) -> Result<bool, ValidationError> {
+        self.liquidatable(
+            SqrtPrice::try_from(self.mark)?,
+            mark,
+            SqrtPrice::try_from(mark)?,
+        )
+    }
+
+    /// Where the test turns on each side of the mark along the shock: the
+    /// first mark, to the Q96 atom, at which the position is liquidatable,
+    /// found by a bracket that steps outward from 1/512, about a fifth of a
+    /// percent, doubling to a hundredfold, then a bisection. Equity along the shock
+    /// is the LP curve, concave, so it can turn below, above, both or
+    /// neither. A side is `None` when no turn lies within a hundredfold or
+    /// before the edge of the protocol's price range, whichever comes
+    /// first. A pocket narrower than a bracket step is not seen, so a side
+    /// is the nearest turn the search saw. The deployed mark follows the
+    /// pool only in part, so the shock moves the mark faster than a trade
+    /// would.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::equity_at`], at any price the search valued.
+    pub fn liquidation_prices(&self) -> Result<LiquidationPrices, ValidationError> {
+        let (below, above) = if self.is_liquidatable() {
+            (Some(self.mark), Some(self.mark))
+        } else {
+            let own_root = SqrtPrice::try_from(self.mark)?;
+            (
+                self.first_turn(own_root, false)?,
+                self.first_turn(own_root, true)?,
+            )
+        };
+        Ok(LiquidationPrices {
+            mark: self.mark,
+            below,
+            above,
+        })
+    }
+
+    /// The first liquidatable price from the mark in one direction, or
+    /// `None` when the position is healthy out to a hundredfold or to the
+    /// edge of the price range.
+    fn first_turn(&self, own_root: SqrtPrice, up: bool) -> Result<Option<Price>, ValidationError> {
+        // Bracket: the last healthy price and the first liquidatable one,
+        // at factors 1 + 2^k / 512 for k up to 16, a hundredfold and more.
+        let mut healthy = self.mark;
+        let mut liquidatable = None;
+        for k in 0..=16 {
+            let price = stepped(self.mark, k, up)?;
+            // No pool can stand past the protocol's root bounds, so a step
+            // beyond them ends this side's search without a turn.
+            let Ok(root) = SqrtPrice::try_from(price) else {
+                break;
+            };
+            if self.liquidatable(own_root, price, root)? {
+                liquidatable = Some(price);
+                break;
+            }
+            healthy = price;
+        }
+        let Some(liquidatable) = liquidatable else {
+            return Ok(None);
+        };
+        // Bisect to the atom. The midpoint is taken from the lower end so
+        // the sum of two words near the top of the range cannot wrap.
+        let (mut healthy, mut liquidatable) = (healthy.x96(), liquidatable.x96());
+        while healthy.abs_diff(liquidatable) > U256::from(1u8) {
+            let mid = healthy.min(liquidatable) + healthy.abs_diff(liquidatable) / U256::from(2u8);
+            let price = Price::from_x96(mid);
+            // Between two prices inside the range, so inside it too.
+            if self.liquidatable(own_root, price, SqrtPrice::try_from(price)?)? {
+                liquidatable = mid;
+            } else {
+                healthy = mid;
+            }
+        }
+        Ok(Some(Price::from_x96(liquidatable)))
+    }
+}
+
+/// `mark` scaled by `(512 + 2^k) / 512`, up or down: the search's `k`th
+/// step, as the exact quotient or an overflow, never a wrapped product.
+fn stepped(mark: Price, k: u32, up: bool) -> Result<Price, ValidationError> {
+    const GRAIN: u32 = 512;
+    let (grain, factor) = (U256::from(GRAIN), U256::from(GRAIN + (1u32 << k)));
+    Ok(Price::from_x96(if up {
+        mul_div(mark.x96(), factor, grain, Rounding::TowardZero)?
+    } else {
+        mul_div(mark.x96(), grain, factor, Rounding::TowardZero)?
+    }))
 }
 
 impl MakerMarketSnapshot {
@@ -558,33 +839,15 @@ impl AccruedMakerSnapshot {
         //       + delta.amount1();
         // (For an open maker both deltas are usually negative — owed to the
         // pool — but a mixed-sign delta must not collapse to magnitudes.)
-        let (perps, usd) =
-            amounts_for_liquidity(self.0.sqrt_price, sqrt_l, sqrt_u, maker.liquidity)?;
-        let liquidity_val = add_u(
-            mul_div(
-                U256::from(perps.atoms()),
-                self.0.mark.x96(),
-                Q96,
-                Rounding::TowardZero,
-            )?,
-            U256::from(usd.atoms()),
-            "band liquidity value",
-        )?;
-        let residual_val = add_i(
-            s_full_mul_div(
-                I256::unchecked_from(maker.delta_perp.atoms()),
-                to_i256(self.0.mark.x96(), "mark price")?,
-                Q96,
-                Rounding::TowardZero,
-            )?,
-            I256::unchecked_from(maker.delta_usd.atoms()),
-            "deposit residual value",
-        )?;
-        let unrealized = add_i(
-            to_i256(liquidity_val, "band liquidity value")?,
-            residual_val,
-            "unrealized PnL",
-        )?;
+        let exposure = Exposure {
+            sqrt_lower: sqrt_l,
+            sqrt_upper: sqrt_u,
+            liquidity: maker.liquidity,
+            delta_perp: maker.delta_perp,
+            delta_usd: maker.delta_usd,
+        };
+        let (position_value, unrealized_pnl) =
+            exposure.valued_atoms(self.0.sqrt_price, self.0.mark)?;
 
         let delta = |value, what| atoms(value, what).map(UsdcDelta::new);
         Ok(MakerEquityBreakdown {
@@ -604,13 +867,12 @@ impl AccruedMakerSnapshot {
                 )?,
             ),
             lp_fees: delta(to_i256(lp_fees, "LP fees")?, "LP fees")?,
-            unrealized_pnl: delta(unrealized, "unrealized PnL")?,
-            // A band's value at the mark is a sum of non-negative legs, so
-            // the count's own floor is the only bound left to assert.
-            position_value: UsdcAtoms::new(
-                atoms(to_i256(liquidity_val, "position value")?, "position value")?.unsigned_abs(),
-            ),
+            unrealized_pnl,
+            position_value,
             liquidation_margin_ratio: maker.liquidation_margin_ratio,
+            mark: self.0.mark,
+            sqrt_price: self.0.sqrt_price,
+            exposure,
         })
     }
 }
@@ -849,10 +1111,10 @@ mod tests {
     }
 
     /// The health gate mirrors `PerpLogic.isHealthy`: equity over the
-    /// band's liquidity value against the POSITION's stored ratio, with the
-    /// liquidation fee taken off equity first. Pos 54 was fee-insolvent
-    /// (negative equity), so its ratio floors at zero and it is
-    /// liquidatable under any fee; a healthy synthetic sibling is not.
+    /// band's liquidity value against the POSITION's stored ratio, with no
+    /// fee taken off first. Pos 54 was insolvent (negative equity), so its
+    /// ratio floors at zero and it is liquidatable; healthy synthetic
+    /// siblings either side of the 5% line are judged by the line alone.
     #[test]
     fn health_gate_mirrors_the_contracts_is_healthy() {
         let (market, accrual, maker) = golden_market_and_maker();
@@ -868,11 +1130,9 @@ mod tests {
         assert_eq!(b.liquidation_margin_ratio().fraction(), 0.05);
         assert!(b.equity().is_negative());
         assert_eq!(b.margin_ratio(), 0.0);
-        assert!(b.is_liquidatable(Ratio::ZERO));
-        assert!(b.is_liquidatable(ratio(10_000)));
+        assert!(b.is_liquidatable());
 
-        // Same band, no accrued liabilities, a fat margin: healthy, and the
-        // fee leg alone must not flip it.
+        // Same band, no accrued liabilities, a fat margin: healthy.
         let value = b.position_value();
         let healthy = MakerEquityBreakdown {
             margin: UsdcDelta::from(value),
@@ -882,17 +1142,202 @@ mod tests {
             unrealized_pnl: UsdcDelta::ZERO,
             position_value: value,
             liquidation_margin_ratio: ratio(50_000),
+            ..b
         };
         assert!((healthy.margin_ratio() - 1.0).abs() < 1e-12);
-        assert!(!healthy.is_liquidatable(ratio(10_000)));
-        // Equity of 5.5% of value: healthy at a 0% fee, liquidatable once
-        // a 1% fee takes it under the 5% line.
-        let thin = MakerEquityBreakdown {
-            margin: UsdcDelta::new(value.atoms() as i128 * 55 / 1000),
+        assert!(!healthy.is_liquidatable());
+        // Equity of 5.5% of value stands above the 5% line, 4.5% below it:
+        // no fee moves the line, as the legacy build's did.
+        let thin = |per_mille: i128| MakerEquityBreakdown {
+            margin: UsdcDelta::new(value.atoms() as i128 * per_mille / 1000),
             ..healthy
         };
-        assert!(!thin.is_liquidatable(Ratio::ZERO));
-        assert!(thin.is_liquidatable(ratio(10_000)));
+        assert!(!thin(55).is_liquidatable());
+        assert!(thin(45).is_liquidatable());
+
+        // At the line itself the contract's integers decide: on a
+        // million-atom band the plus-one atom and the floor put it between
+        // 50,000 and 50,001 of equity, where a ratio in floating point
+        // calls 50,000 healthy.
+        let at = |equity: i128| MakerEquityBreakdown {
+            margin: UsdcDelta::new(equity),
+            position_value: UsdcAtoms::new(1_000_000),
+            ..healthy
+        };
+        assert!(at(50_000).is_liquidatable());
+        assert!(!at(50_001).is_liquidatable());
+    }
+
+    /// The golden maker's band, wholly above the golden price, so it holds
+    /// one asset wherever the pool sits below it.
+    const GOLDEN_BAND: (i32, i32) = (33_810, 34_710);
+
+    /// A band the golden price, near tick 28,544, sits inside, so where the
+    /// pool stands decides what the band holds.
+    const BAND_AROUND_THE_PRICE: (i32, i32) = (28_200, 28_860);
+
+    /// The golden maker with the pool standing at the mark and a margin
+    /// that leaves it at one and a half times its band's value.
+    fn healthy_maker_at_the_mark() -> MakerEquityBreakdown {
+        healthy_maker(1000, GOLDEN_BAND)
+    }
+
+    /// The golden maker in `band`, with the pool's root at `pool_root_e3`
+    /// thousandths of the mark's, and a margin that leaves it at one and a
+    /// half times its band's value.
+    fn healthy_maker(pool_root_e3: u16, (lower, upper): (i32, i32)) -> MakerEquityBreakdown {
+        let (market, accrual, mut maker) = golden_market_and_maker();
+        (maker.tick_lower, maker.tick_upper) = (lower, upper);
+        let mark_root = SqrtPrice::try_from(market.mark).unwrap().x96();
+        let market = MakerMarketSnapshot {
+            sqrt_price: SqrtPrice::from_x96(
+                mark_root * U256::from(pool_root_e3) / U256::from(1000u16),
+            ),
+            ..market
+        }
+        .accrued(&accrual)
+        .unwrap();
+        let thin = market.maker_equity(&maker).unwrap();
+        let target = thin.position_value().atoms() as i128 * 3 / 2;
+        let top_up = u128::try_from(target - thin.equity().atoms()).unwrap();
+        maker.margin = UsdcAtoms::new(maker.margin.atoms() + top_up);
+        market.maker_equity(&maker).unwrap()
+    }
+
+    /// Along a price shock the test turns where the search says: the first
+    /// Q96 atom on each side at which the position is liquidatable, with
+    /// the atom before it still healthy. At the mark, with the pool
+    /// standing there, the shock valuation is the preview itself.
+    #[test]
+    fn the_liquidating_prices_are_where_the_test_turns() {
+        let b = healthy_maker_at_the_mark();
+        assert!(!b.is_liquidatable());
+        assert_eq!(b.equity_at(b.mark()).unwrap(), b.equity());
+        assert_eq!(b.position_value_at(b.mark()).unwrap(), b.position_value());
+        assert!(!b.is_liquidatable_at(b.mark()).unwrap());
+
+        let prices = b.liquidation_prices().unwrap();
+        // Both deposit legs are owed to the pool, so a rally values the
+        // residual ever lower against a band that is all USD past its
+        // upper tick: the test turns above. A fall shrinks both the band's
+        // value and the residual toward zero while the margin stands, so
+        // it never turns below.
+        let above = prices
+            .above
+            .expect("a long residual is liquidated from above");
+        assert_eq!(
+            prices.below, None,
+            "the margin covers a fall of a hundredfold"
+        );
+        assert!(above > b.mark());
+        assert!(b.is_liquidatable_at(above).unwrap());
+        assert!(
+            !b.is_liquidatable_at(Price::from_x96(above.x96() - U256::from(1u8)))
+                .unwrap(),
+            "the atom before the turn is healthy"
+        );
+        assert_eq!(prices.mark, b.mark(), "measured from the preview's mark");
+        let distance = prices.distance().unwrap();
+        let expected = f64::from(above.x96()) / f64::from(b.mark().x96()) - 1.0;
+        assert!((distance - expected).abs() < 1e-12);
+        assert!(distance > 0.0);
+    }
+
+    /// With the pool off the mark, as it is on a live market, the shock
+    /// still starts at the preview: at the preview's own mark the band is
+    /// valued at the real pool price, so equity, value and the verdict agree
+    /// exactly, and the search measures a price move rather than the gap
+    /// between the pool and the mark. The band straddles the price, so
+    /// where the pool stands changes what the band holds, which is the only
+    /// case in which putting the pool at the mark would show.
+    #[test]
+    fn the_shock_starts_where_the_pool_stands() {
+        let b = healthy_maker(1010, BAND_AROUND_THE_PRICE);
+        assert!(!b.is_liquidatable());
+        assert_eq!(b.equity_at(b.mark()).unwrap(), b.equity());
+        assert_eq!(b.position_value_at(b.mark()).unwrap(), b.position_value());
+        assert_eq!(b.is_liquidatable_at(b.mark()).unwrap(), b.is_liquidatable());
+
+        let prices = b.liquidation_prices().unwrap();
+        let one = U256::from(1u8);
+        let turns = [
+            prices.below.map(|p| (p, Price::from_x96(p.x96() + one))),
+            prices.above.map(|p| (p, Price::from_x96(p.x96() - one))),
+        ];
+        assert!(turns.iter().any(Option::is_some), "{prices:?}");
+        for (turn, inside) in turns.into_iter().flatten() {
+            assert!(b.is_liquidatable_at(turn).unwrap());
+            assert!(
+                !b.is_liquidatable_at(inside).unwrap(),
+                "the atom before the turn is healthy"
+            );
+        }
+    }
+
+    /// A position liquidatable at the mark has no distance left: both
+    /// sides are the mark and the distance is zero. A margin large enough
+    /// never turns within the search's reach, and says so with `None`.
+    #[test]
+    fn no_distance_when_liquidatable_and_none_when_covered() {
+        let (market, accrual, maker) = golden_market_and_maker();
+        let b = market
+            .accrued(&accrual)
+            .unwrap()
+            .maker_equity(&maker)
+            .unwrap();
+        assert!(b.is_liquidatable());
+        let prices = b.liquidation_prices().unwrap();
+        assert_eq!(prices.below, Some(b.mark()));
+        assert_eq!(prices.above, Some(b.mark()));
+        assert_eq!(prices.distance(), Some(0.0));
+
+        let covered = MakerEquityBreakdown {
+            margin: UsdcDelta::new(MAX_COMPONENT_ATOMS as i128 / 8),
+            ..healthy_maker_at_the_mark()
+        };
+        let prices = covered.liquidation_prices().unwrap();
+        assert_eq!(
+            prices,
+            LiquidationPrices {
+                mark: covered.mark(),
+                below: None,
+                above: None,
+            },
+            "healthy out to a hundredfold either way"
+        );
+        assert_eq!(prices.distance(), None);
+    }
+
+    /// A step is the exact quotient in both directions, and a step past the
+    /// top of the range is an overflow rather than a wrapped product.
+    #[test]
+    fn a_step_is_exact_or_refused_never_wrapped() {
+        let one = Price::from_x96(Q96);
+        let (q, up, down) = (Q96, U256::from(513u16), U256::from(512u16));
+        assert_eq!(stepped(one, 0, true).unwrap().x96(), q * up / down);
+        assert_eq!(stepped(one, 0, false).unwrap().x96(), q * down / up);
+        assert!(matches!(
+            stepped(Price::from_x96(U256::MAX), 0, true),
+            Err(ValidationError::Overflow { .. })
+        ));
+    }
+
+    /// On a market priced near the top of the protocol's range, the search
+    /// upward reaches the edge before a hundredfold. Past it no pool can
+    /// stand, so that side ends without a turn rather than failing the call
+    /// and discarding the side already found.
+    #[test]
+    fn the_search_stops_at_the_edge_of_the_price_range() {
+        let high = Price::from_x96(Q96 * U256::from(100_000u32));
+        let covered = MakerEquityBreakdown {
+            margin: UsdcDelta::new(MAX_COMPONENT_ATOMS as i128 / 8),
+            mark: high,
+            sqrt_price: SqrtPrice::try_from(high).unwrap(),
+            ..healthy_maker_at_the_mark()
+        };
+        assert!(!covered.is_liquidatable());
+        let prices = covered.liquidation_prices().unwrap();
+        assert_eq!((prices.below, prices.above), (None, None));
     }
 
     /// Without the accrual replay the funding is stale to lastTouch — the
@@ -1131,6 +1576,41 @@ mod tests {
             serde_json::from_str::<MakerEquityBreakdown>(&wide_ratio).is_err(),
             "the ratio is a uint24 on chain"
         );
+    }
+
+    /// A breakdown deserializes only if its band and residual reproduce its
+    /// stored value and PnL at the prices it carries, so it can never
+    /// revalue to something other than itself: a nudged PnL within every
+    /// bound, or a mark it was not priced at, is refused.
+    #[test]
+    fn breakdown_deserialization_recomputes_its_own_valuation() {
+        let b = healthy_maker(1010, BAND_AROUND_THE_PRICE);
+        let json = serde_json::to_string(&b).unwrap();
+        assert_eq!(
+            serde_json::from_str::<MakerEquityBreakdown>(&json).unwrap(),
+            b
+        );
+
+        let pnl = b.unrealized_pnl().atoms();
+        let nudged = json.replace(
+            &format!("\"unrealized_pnl\":{pnl}"),
+            &format!("\"unrealized_pnl\":{}", pnl + 1),
+        );
+        assert_ne!(json, nudged, "replacement must have applied");
+        assert!(matches!(
+            serde_json::from_str::<MakerEquityBreakdown>(&nudged),
+            Err(e) if e.to_string().contains("do not reproduce")
+        ));
+
+        let mark = serde_json::to_string(&b.mark()).unwrap();
+        let other_mark =
+            serde_json::to_string(&Price::from_x96(b.mark().x96() * U256::from(2u8))).unwrap();
+        let repriced = json.replace(
+            &format!("\"mark\":{mark}"),
+            &format!("\"mark\":{other_mark}"),
+        );
+        assert_ne!(json, repriced, "replacement must have applied");
+        assert!(serde_json::from_str::<MakerEquityBreakdown>(&repriced).is_err());
     }
 
     /// The component bound is the accounting-token supply, not a magic

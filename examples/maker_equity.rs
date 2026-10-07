@@ -81,7 +81,7 @@ async fn main() -> perpcity_sdk::Result<()> {
                     b.margin_ratio(),
                     b.liquidation_margin_ratio().fraction(),
                 );
-                candidates.push((pos_id, b));
+                candidates.push((pos_id, b.as_ref()));
             }
             MakerEquityKind::NotAMaker => println!("pos {pos_id}: not an open maker"),
             MakerEquityKind::Failed(e) => println!("pos {pos_id}: read failed: {e}"),
@@ -91,18 +91,14 @@ async fn main() -> perpcity_sdk::Result<()> {
     // ── 2. Pick candidates from the equities just computed ──────────
     // Coarse pre-filter so the health probe only runs where the numbers
     // already look thin. `is_liquidatable` mirrors the contract's own
-    // check (`PerpLogic.isHealthy`): live equity net of the liquidation
-    // fee, over the band's value, against the ratio stored on THAT
-    // position — not the market-wide taker ratio, and not the margin.
-    // The contract remains the oracle — the filter only saves eth_calls on
-    // obviously healthy positions, so it keeps anything near the line.
-    // The fee *rate*, which is what the health check applies to the
-    // position's value. The USDC a liquidation settles is a different
-    // quantity, and the types keep them apart.
-    let liquidation_fee = client.market().get_config().await?.fees.liquidation_fee;
+    // check (`PerpLogic.isHealthy`): live equity over the band's value,
+    // against the ratio stored on that position, not the market-wide taker
+    // ratio and not the margin; the liquidation fee is charged after the
+    // check, so it does not enter it. The contract remains the oracle: the
+    // filter only saves eth_calls on obviously healthy positions, so it
+    // keeps anything near the line.
     candidates.retain(|(_, b)| {
-        b.is_liquidatable(liquidation_fee)
-            || b.margin_ratio() < b.liquidation_margin_ratio().fraction() * 1.1
+        b.is_liquidatable() || b.margin_ratio() < b.liquidation_margin_ratio().fraction() * 1.1
     });
     println!(
         "\n{} candidate(s) at or near their liquidation ratio — probing the contract",

@@ -94,7 +94,7 @@ pub use units::{
 };
 
 #[doc(inline)]
-pub use math::BlockContext;
+pub use math::{BlockContext, LiquidationPrices};
 
 #[doc(inline)]
 pub use math::pricing::{Emas, Mark, PricePair, calculate_emas, fair_price, fair_price_f64};

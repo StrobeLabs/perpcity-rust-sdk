@@ -143,39 +143,45 @@ LP fees, and inventory PnL (validated against a real on-chain liquidation
 settle). Every input id gets exactly one outcome, in input order:
 `Computed(breakdown)`, `NotAMaker`, or `Failed(error)`.
 
-Three conventions to know:
+Four conventions to know:
 
-- **Atoms vs USD.** The breakdown's primary representation is exact signed
-  6-decimal USDC atoms — the integer units the contract settles in — via
-  the `*_atoms()` getters. The matching `*_usd()` accessors (and
-  `equity()`, `settled_margin()`, `accrued_income()`) convert to `f64` at
-  the display boundary. Do accounting in atoms; print in USD.
-- **Funding sign.** `funding_owed_atoms()` / `funding_owed_usd()` are what
-  the position OWES since its last settle: positive = the position pays
-  (it is subtracted when settling margin). All the earnings components
-  (utilization, LP fees) are positive when the position receives.
-- **Health is per position.** The contract liquidates when
-  `(equity − posVal·liqFee) / posVal` drops under the ratio stored on THAT
-  position (`PerpLogic.isHealthy`) — not under a market-wide ratio, and not
-  relative to margin. The breakdown carries both sides:
-  `position_value_usd()`, `liq_margin_ratio()`, `margin_ratio()`, and
-  `is_liquidatable(liquidation_fee)` as a screening gate. The contract stays
-  the oracle: confirm with `simulate_liquidate_maker` before sending.
-- **Pinning is automatic.** Every read in a batch — including the mark
-  that prices `valPnl` (the contract's own fair price for the block:
-  `fair_price_x96` of the pool price, beacon index, and block-advanced
-  EMAs, exact X96) — comes from one reorg-safe block a few blocks behind
-  the head. There is no mark to supply and no way to mix state from
-  different blocks;
-  `get_maker_equities_at_mark(pos_ids, mark_price_x96)` exists for
-  what-if pricing at a caller-chosen X96 mark over the same pinned state.
+- **Exact atoms, `f64` at the edge.** Every figure is a units type: the
+  signed components (`margin()`, `funding_owed()`, `lp_fees()`,
+  `unrealized_pnl()`, `settled_margin()`, `equity()`, `accrued_income()`)
+  are `UsdcDelta`, and `position_value()` is `UsdcAtoms`. `.atoms()` is the
+  exact integer the contract settles in; `.usdc()` is the `f64` for a
+  display. Do accounting in atoms; print in USDC.
+- **Funding sign.** `funding_owed()` is what the position owes since its
+  last settle: positive means the position pays, and it is subtracted when
+  settling margin. The earnings components, utilization and LP fees, are
+  positive when the position receives.
+- **Health is per position.** The deployed contracts liquidate a maker when
+  equity over position value plus one atom, in millionths and floored,
+  falls under the ratio stored on that position (`PerpLogic.isHealthy`):
+  not a market-wide ratio, not relative to margin, and with no fee taken
+  first. `is_liquidatable()` is that test in the contract's integers, over
+  `position_value()` and `liquidation_margin_ratio()`; `margin_ratio()` is
+  the same ratio as an `f64` for a display. `liquidation_prices()` finds
+  the marks the test turns at as the price moves, and its `distance()` is
+  the nearer one as a fraction of the mark. Confirm with
+  `simulate_liquidate_maker` before sending, from the address that will
+  send: a liquidation can still revert after the test passes.
+- **Pinning is automatic.** Every read in a batch, including the mark that
+  prices `valPnl` (the contract's own fair price for the block, of the pool
+  price, beacon index and block-advanced EMAs), comes from one reorg-safe
+  block a few blocks behind the head. There is no mark to supply and no way
+  to mix state from different blocks; `get_maker_equities_at_mark(pos_ids,
+  mark)` takes a `Price` for what-if pricing over the same pinned state.
 
 ```rust
 for outcome in client.market().get_maker_equities(&pos_ids).await? {
     if let MakerEquityKind::Computed(b) = outcome.kind {
         println!(
-            "pos {}: equity {:.6} (accrued {:+.6})",
-            outcome.pos_id, b.equity(), b.accrued_income(),
+            "pos {}: equity {:.6} (accrued {:+.6}), distance {:?}",
+            outcome.pos_id,
+            b.equity().usdc(),
+            b.accrued_income().usdc(),
+            b.liquidation_prices()?.distance(),
         );
     }
 }
