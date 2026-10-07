@@ -219,3 +219,51 @@ async fn the_market_tape_reads_three_addresses_in_one_chain_order() {
         "one header read, shared by both scans"
     );
 }
+
+/// A poll over blocks with no events still moves the fold to the end of
+/// the range: its windows end there, and the next poll scans from the
+/// block after it, not from the last event's.
+#[tokio::test]
+async fn catch_up_stands_at_the_end_of_the_range_it_read() {
+    let print = IBeacon::IndexUpdated {
+        index: Q96 * U256::from(3),
+    };
+    let node = FakeNode::new(vec![mined_event_log(&print, BEACON, 10, 0, None)], u64::MAX);
+    let history = History::new(node.provider());
+    let mut market = Replay::from_genesis(PERP);
+    market.read_through(history.block(0).await.unwrap());
+    let minute = Window::seconds(60);
+
+    assert_eq!(
+        market
+            .catch_up(&history, addresses(), Some(10))
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(market.prints().count_in(minute).map(|r| r.value), Some(1));
+
+    assert_eq!(
+        market
+            .catch_up(&history, addresses(), Some(400))
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(market.block().map(|b| b.number), Some(400));
+    assert_eq!(
+        market.prints().count_in(minute).map(|r| r.value),
+        Some(0),
+        "a hundred quiet seconds later, the print has left the window"
+    );
+
+    market
+        .catch_up(&history, addresses(), Some(500))
+        .await
+        .unwrap();
+    assert_eq!(
+        node.requests().last().map(|(from, _)| *from),
+        Some(401),
+        "the next poll starts after the quiet range"
+    );
+}

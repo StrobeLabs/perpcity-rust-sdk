@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Breaking
+
+- **A series knows how far it is known, and its windows end there.** `Series` and `Arrivals` record the last point they are known through, which a fold advances on every event it reads and a driver advances over a range it read without events. `window`, `count_in`, `change_over` and `peak` end there, not at the last sample, so a burst leaves its window and a quiet window answers: zero arrivals, or an unchanged value. Before, every window ended at the series' own latest sample, so a count never fell and an alarm on it never cleared. `Arrivals::window` returns `Option`, and `count_in` answers `None` only for a window the process is not complete over: one reaching before its fold began watching, before what retention kept, or past the point it is known through. `Reading::moved_by` is `Option<Span>`, `None` for a window nothing arrived in; a reading over a window holds at the window's end. `peak` counts the value standing at the window's start.
+
+- **`Replay::catch_up` stands at the end of the range it read.** It reads that block's header, one request per call, and stands the fold at its end whether or not the range held events, so a poll over a quiet market moves every window on and the next poll scans from the block after. `Replay::block` and `Replay::point` report it.
+
+### Added
+
+- **`Series::until` and `Arrivals::until`**, the same questions asked as of a point taken from the tape, for the past: `market.liquidations().until(close.sample(())).count_in(window)`. `Until` is the view they return.
+- **`Series::advance`, `Arrivals::advance`, `Series::through`, `Arrivals::through`**, for a fold or driver of its own; `Arrivals::from_genesis` and `Arrivals::after` for a process complete from the start or from the end of a seed's block.
+- **`Replay::read_through`**, what `catch_up` does after its scan, for a driver that read a range itself; **`Sequenced::stand_at`**, the guard's half of it; and **`History::block`**, a block's context by number.
+
 ## [0.12.0] - 2026-10-06
 
 The scope and health release. The tape is a type: every reader returned a

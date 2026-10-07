@@ -70,6 +70,60 @@ fn a_liquidation_said_only_by_the_dedicated_event_is_the_same_record() {
     assert_combine_law(Replay::from_genesis(Address::ZERO), &tape);
 }
 
+/// A range read through with nothing in it moves every window on, so a
+/// burst leaves the window and its count falls to zero; the fold then
+/// refuses what it has already read past.
+#[test]
+fn reading_through_a_quiet_range_moves_the_windows_on() {
+    let tape = liquidation_tape();
+    let mut market = genesis(&tape);
+    let minute = Window::seconds(60);
+    assert_eq!(
+        market.liquidations().count_in(minute).map(|r| r.value),
+        Some(1)
+    );
+
+    // Mid-block: the close's own block, read to its end, is not past it.
+    market.read_through(block_of(&tape[3]));
+    assert_eq!(
+        market.liquidations().count_in(minute).map(|r| r.value),
+        Some(1)
+    );
+
+    let quiet = row(40, 0, MarketEvent::IndexUpdated { index: price(1) });
+    market.read_through(block_of(&quiet));
+    assert_eq!(market.block().map(|b| b.number), Some(40));
+    let burst = market.liquidations().count_in(minute).unwrap();
+    assert_eq!(
+        (burst.value, burst.moved_by),
+        (0, None),
+        "the burst has left"
+    );
+    assert_eq!(burst.point.block, 40);
+    assert_eq!(
+        market.index().change_over(minute).map(|r| r.value),
+        Some(Change {
+            from: price(42),
+            to: price(42)
+        }),
+        "the index held through the quiet range"
+    );
+    assert_eq!(
+        market
+            .liquidations()
+            .until(tape[2].sample(()))
+            .count_in(minute)
+            .map(|r| r.value),
+        Some(1),
+        "the burst, asked about as of the close"
+    );
+
+    market.apply(&quiet);
+    assert_eq!(market.gaps().faults.refused, 1, "already read past");
+    market.apply(&row(41, 0, MarketEvent::IndexUpdated { index: price(44) }));
+    assert_eq!(market.index().value(), Some(price(44)));
+}
+
 /// The series keep what the contract stated, and a window of it.
 #[test]
 fn the_replay_keeps_series_and_trims_them_to_a_retention() {

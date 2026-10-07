@@ -131,7 +131,9 @@ every level known, standing at the end of that block so the block's own
 events delivered again are refused; the trait's `fold` is a segment that
 knows what moved and nothing of where anything stands. From any of them,
 `catch_up` applies the tape from the block after the fold's to the lagged
-head, and `combine` takes a segment folded elsewhere.
+head and stands the fold at the end of that block, events or none, so
+every series is known through it; `combine` takes a segment folded
+elsewhere.
 
 ## Efficiency
 
@@ -186,7 +188,7 @@ matches is the other, and at these throughputs neither is measurable.
 
 | Type | Invariant | Produced by | Consumed by |
 |---|---|---|---|
-| [`Replay`](mod.rs#L143) | the market as its events describe it, in the reads' types, with the history of each figure kept as a series or as arrivals; every field combines across segments, the series by appending; an event at or before the fold's point is refused, never applied | [`Replay::from_genesis`](mod.rs#L225), [`Replay::seeded`](mod.rs#L254) from a [`StateAt`](../../client/DESIGN.md), or the trait's `fold`; `Replay::retaining` sets the `Retention`; then `apply` or `Replay::catch_up` | nothing in the crate; `Replay::deposited`, what bad debt is set against, is the one bare sum. The strategy layer's monitor, live cache and research folds, each driving it from a different source. |
+| [`Replay`](mod.rs#L143) | the market as its events describe it, in the reads' types, with each figure's history kept as a series or arrivals, known through the last block read; every field combines across segments, the series by appending; an event at or before the fold's point is refused, never applied | [`Replay::from_genesis`](mod.rs#L233), [`Replay::seeded`](mod.rs#L263) from a [`StateAt`](../../client/DESIGN.md), or the trait's `fold`; `Replay::retaining` sets the `Retention`; then `apply`, `Replay::catch_up`, or `Replay::read_through` (see accepted structure) | nothing in the crate; `Replay::deposited`, what bad debt is set against, is the one bare sum. The strategy layer's monitor, live cache and research folds, each driving it from a different source. |
 | [`Positions`](positions.rs#L392), [`PositionState`](positions.rs#L114), [`PositionKind`](positions.rs#L22) | every position on the tape: a taker's size and USD leg, the sums of its swaps' deltas; a maker's band, its first range plus its liquidity changes; the margin a read supplied until an event touches it. Met mid-life or unnamed, a position is `Unknown` or unsized, never guessed, so segments merge | folded inside `Replay`; read through [`Replay::positions`](mod.rs#L473) and `Replay::position` | the strategy layer's live cache and economics, which price a taker's two legs at a mark; a `MakerBand` here and one read compare with `==`. |
 | [`Liquidation`](activity.rs#L21), [`Settlement`](activity.rs#L41) | the marks the replay alone can make. A liquidation is one record per position per liquidating transaction, whichever build's events carried it, with the pool price before and after and the index then; a cut inside the transaction or before the first price is repaired at `combine`. A settlement is what a position paid or earned when touched. Both are `Positioned`, so custody scopes them; the swap mark is the tape's | the activity fold inside `Replay`, read through `Replay::liquidations` and `Replay::settlements` | the readings over arrivals in the strategy layer: intensity, a cascade's run, a sweep. |
 | [`Gaps`](mod.rs#L63), [`Silences`](mod.rs#L77), [`Unknowns`](mod.rs#L93), [`Faults`](mod.rs#L108) | what the fold does not know, in three kinds with three cures: what the contract moved silently, cured by the cutover; what the fold's start did not supply, cured by a seed; what the driver did wrong, cured by `catch_up`. Decided at the read from the latest totals, so the counts combine like the rest | [`Replay::gaps`](mod.rs#L506) | nothing in the crate: the strategy layer's gate, one alarm per part. A reading with a nonzero gap is forensic, not a decision's input. |
@@ -212,6 +214,11 @@ matches is the other, and at these throughputs neither is measurable.
   stands at the end of its block, so that block's events delivered again
   are refused rather than counted twice, and a seeded fold continued over
   the tape equals the fold from genesis on every read-shaped question.
+
+- **The block flows both ways.** `Replay::read_through` takes the
+  `BlockContext` a driver read through and `Replay::block` hands back the
+  one the fold stands at: the fold's cursor, remembered, not converted,
+  as `Sequenced` takes and returns its `ChainPoint`.
 
 - **Three parts of the pool's liquidity are compensation.** `maker_band`
   comes from `ModifyLiquidity` joined to the maker by its salt, which the

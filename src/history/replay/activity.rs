@@ -12,7 +12,7 @@ use alloy::primitives::{B256, U256};
 
 use crate::client::PositionRole;
 use crate::events::{MakerSettle, MarketEvent, SwapInfo};
-use crate::history::fold::{Arrivals, Fold, Latest, Retention};
+use crate::history::fold::{Arrivals, Fold, Latest, Retention, Sample};
 use crate::history::tape::{Positioned, Swap, SwapAction, TapeEvent};
 use crate::units::{Price, UsdcAtoms, UsdcDelta};
 
@@ -183,9 +183,26 @@ impl InTx {
 }
 
 impl Activity {
-    /// As a read supplied the prices at one block.
-    pub(super) fn seeded(pool_price: Price, index: Price) -> Self {
+    /// Before the market's first event: every process complete from the
+    /// start.
+    pub(super) fn genesis() -> Self {
         Self {
+            swaps: Arrivals::from_genesis(),
+            liquidations: Arrivals::from_genesis(),
+            settlements: Arrivals::from_genesis(),
+            prints: Arrivals::from_genesis(),
+            ..Self::default()
+        }
+    }
+
+    /// As a read supplied the prices at the end of a block, `at`: every
+    /// process complete after it.
+    pub(super) fn seeded(at: Sample<()>, pool_price: Price, index: Price) -> Self {
+        Self {
+            swaps: Arrivals::after(at),
+            liquidations: Arrivals::after(at),
+            settlements: Arrivals::after(at),
+            prints: Arrivals::after(at),
             pool_price: Latest::stated(pool_price),
             index: Latest::stated(index),
             ..Self::default()
@@ -197,6 +214,13 @@ impl Activity {
         self.liquidations.retain(retention);
         self.settlements.retain(retention);
         self.prints.retain(retention);
+    }
+
+    pub(super) fn advance(&mut self, at: Sample<()>) {
+        self.swaps.advance(at);
+        self.liquidations.advance(at);
+        self.settlements.advance(at);
+        self.prints.advance(at);
     }
 
     /// Record `pos_id` liquidated in this event's transaction, once per
@@ -325,6 +349,7 @@ impl Fold for Activity {
             }
             _ => {}
         }
+        self.advance(event.sample(()));
     }
 
     /// What a cut inside a transaction or before a price would have known,

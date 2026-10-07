@@ -73,7 +73,7 @@ mod tests;
 pub use beacon::{IndexPrint, beacon_prints, latest_beacon_prints};
 pub use fold::{
     Arrival, Arrivals, Change, First, Fold, Latest, Reading, Retention, Sample, Sequenced, Series,
-    Span, Stated, Window,
+    Span, Stated, Until, Window,
 };
 pub use recording::{FORMAT, Manifest, Recording, TailCheck};
 pub use replay::{
@@ -92,7 +92,8 @@ use alloy::providers::Provider;
 use alloy::rpc::types::{Filter, Log};
 
 use crate::constants::SNAPSHOT_BLOCK_LAG;
-use crate::errors::Result;
+use crate::errors::{ContractError, Result};
+use crate::math::BlockContext;
 
 /// Window requests a [`History`] handle keeps in flight by default: a
 /// meaningful pipeline against typical provider latency while staying
@@ -178,6 +179,26 @@ impl<P: Provider> History<P> {
     pub async fn tip(&self) -> Result<u64> {
         let head = self.provider.get_block_number().await?;
         Ok(head.saturating_sub(self.lag))
+    }
+
+    /// Block `number`'s context: what a fold that read through it stands
+    /// at.
+    ///
+    /// # Errors
+    ///
+    /// [`ContractError::BlockUnavailable`] for a header the provider does
+    /// not hold, or the transport error from the header read.
+    pub async fn block(&self, number: u64) -> Result<BlockContext> {
+        let block = self
+            .provider
+            .get_block_by_number(number.into())
+            .await?
+            .ok_or(ContractError::BlockUnavailable { number })?;
+        Ok(BlockContext {
+            number: block.header.number,
+            hash: block.header.hash,
+            timestamp: block.header.timestamp,
+        })
     }
 
     async fn resolve(&self, to_block: Option<u64>) -> Result<u64> {
