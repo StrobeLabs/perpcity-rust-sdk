@@ -229,8 +229,8 @@ with no allocation on the hot path beyond the tick map a snapshot owns.
   `expWad` and two weighted sums; the fair price is an average. Cheap
   enough to compute at every read rather than cache.
 - **A preview is constant per position**: a fixed number of checkpoint
-  differences and one valuation at the mark. A maker's liquidating prices
-  are a search, two hundred valuations, run only when asked.
+  differences and one valuation at the mark; a maker's liquidating prices,
+  searched when asked, take up to seventeen steps a side, then a bisection.
 - **Geometry is closed-form.** Capacity, band amounts and liquidity
   sizing are single formulas in square-root prices; the inverse for a
   capacity target is a division, not a search.
