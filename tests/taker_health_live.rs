@@ -15,7 +15,7 @@
 //!
 //! ```bash
 //! RPC_URL=https://arb1.arbitrum.io/rpc \
-//! PERPCITY_PERP=<a v0.2.2-upgradeable market> \
+//! PERPCITY_PERP=0xYOUR_V0_2_2_MARKET \
 //! cargo test --test taker_health_live -- --ignored --nocapture
 //! ```
 
