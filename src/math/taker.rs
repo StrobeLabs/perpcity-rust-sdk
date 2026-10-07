@@ -241,24 +241,19 @@ impl TakerHealth {
     /// long whose settled margin covers its USD leg, which no fall of the
     /// mark can liquidate, and for a position with no exposure; both are
     /// the mark when [`Self::is_liquidatable`] says so now, and only then.
-    /// The turn is solved on the contract's arithmetic without its floors,
-    /// so the exact test can differ within an atom of it: a short the test
-    /// calls healthy can have its closed-form turn at the mark itself. So
-    /// the turn is kept at least one atom on its side of the mark.
+    /// The turn is the first mark the integer test fails, found from the
+    /// closed form by a gallop and a bisection to the atom.
     pub fn liquidation_prices(&self) -> LiquidationPrices {
-        let one = U256::from(1u8);
         let (below, above) = if self.is_liquidatable() {
             (Some(self.mark), Some(self.mark))
         } else {
-            match self.liquidation_mark() {
-                Some(turn) if self.delta_perp.atoms() > 0 => (
-                    Some(turn.min(Price::from_x96(self.mark.x96().saturating_sub(one)))),
-                    None,
-                ),
-                Some(turn) => (
-                    None,
-                    Some(turn.max(Price::from_x96(self.mark.x96().saturating_add(one)))),
-                ),
+            let up = self.delta_perp.atoms() < 0;
+            match self
+                .liquidation_mark()
+                .and_then(|turn| self.first_failing(turn, up))
+            {
+                Some(turn) if up => (None, Some(turn)),
+                Some(turn) => (Some(turn), None),
                 None => (None, None),
             }
         };
@@ -308,6 +303,87 @@ impl TakerHealth {
         )
         .ok()?;
         Some(Price::from_x96(mark_x96))
+    }
+
+    /// The first mark past `turn`, moving away from a healthy mark in the
+    /// direction `up` names, at which the integer test fails: a gallop from
+    /// `turn` to bracket it, then a bisection. Equity over value is monotone
+    /// in the mark, so the bracket holds. `None` when the price range's end
+    /// is reached first, or a mark's value leaves the range atoms can hold.
+    fn first_failing(&self, turn: Price, up: bool) -> Option<Price> {
+        let mark = self.mark.x96();
+        let away = |x: U256, width: U256| {
+            if up {
+                x.saturating_add(width)
+            } else {
+                x.saturating_sub(width)
+            }
+        };
+        let toward = |x: U256, width: U256| {
+            if up {
+                x.saturating_sub(width).max(mark)
+            } else {
+                x.saturating_add(width).min(mark)
+            }
+        };
+        let fails = |x: U256| self.is_liquidatable_at(Price::from_x96(x));
+
+        let start = if up {
+            turn.x96().max(mark.saturating_add(U256::from(1u8)))
+        } else {
+            turn.x96().min(mark.saturating_sub(U256::from(1u8)))
+        };
+        let mut width = U256::from(1u8);
+        let (mut healthy, mut failing) = if fails(start)? {
+            let mut failing = start;
+            loop {
+                let next = toward(start, width);
+                if !fails(next)? {
+                    break (next, failing);
+                }
+                failing = next;
+                width <<= 1;
+            }
+        } else {
+            let mut healthy = start;
+            loop {
+                let next = away(start, width);
+                if next == healthy {
+                    return None;
+                }
+                if fails(next)? {
+                    break (healthy, next);
+                }
+                healthy = next;
+                width <<= 1;
+            }
+        };
+        while healthy.abs_diff(failing) > U256::from(1u8) {
+            let mid = healthy.min(failing) + healthy.abs_diff(failing) / U256::from(2u8);
+            if fails(mid)? {
+                failing = mid;
+            } else {
+                healthy = mid;
+            }
+        }
+        Some(Price::from_x96(failing))
+    }
+
+    /// [`Self::is_liquidatable`] with the mark moved and everything else as
+    /// it stands; `None` where the value leaves the range atoms can hold.
+    fn is_liquidatable_at(&self, mark: Price) -> Option<bool> {
+        let perp = I256::try_from(self.delta_perp.atoms()).ok()?;
+        let perp_val = s_full_mul_div(
+            perp,
+            to_i256(mark.x96(), "mark").ok()?,
+            Q96,
+            Rounding::TowardZero,
+        )
+        .ok()?;
+        let fixed = I256::try_from(self.settled_margin().atoms() + self.delta_usd.atoms()).ok()?;
+        let equity = usdc_delta(add_i(fixed, perp_val, "equity").ok()?, "equity").ok()?;
+        let value = usdc_atoms(perp_val.unsigned_abs(), "position value").ok()?;
+        Some(!is_healthy(equity, value, self.liquidation_margin_ratio))
     }
 }
 
@@ -425,13 +501,25 @@ mod tests {
         };
         assert!(at(9_999).is_liquidatable());
         assert!(!at(10_001).is_liquidatable());
+        let at_x96 = |mark: U256| {
+            TakerMarketSnapshot {
+                mark: Price::from_x96(mark),
+                ..market(42)
+            }
+            .taker_health(&long())
+            .unwrap()
+        };
 
-        // A long turns from below only, at the closed form, and its distance
-        // is the mark's from there; once liquidatable both sides are the mark.
+        // A long turns from below only, at the highest mark the test fails,
+        // and its distance is the mark's from there; once liquidatable both
+        // sides are the mark.
         let healthy = market(42).taker_health(&long()).unwrap();
         let prices = healthy.liquidation_prices();
         assert_eq!(prices.mark, healthy.mark);
-        assert_eq!((prices.below, prices.above), (Some(liquidating), None));
+        assert_eq!(prices.above, None);
+        let below = prices.below.unwrap().x96();
+        assert!(at_x96(below).is_liquidatable());
+        assert!(!at_x96(below + U256::from(1u8)).is_liquidatable());
         assert!((prices.distance().unwrap() - (42.0 - expected) / 42.0).abs() < 1e-6);
         let under = market(30).taker_health(&long()).unwrap();
         let prices = under.liquidation_prices();
@@ -473,7 +561,7 @@ mod tests {
         assert!((x96_to_f64(health.liquidation_mark().unwrap().x96()) - expected).abs() < 1e-6);
         let prices = health.liquidation_prices();
         assert_eq!(prices.below, None, "a fall never liquidates a short");
-        assert_eq!(prices.above, health.liquidation_mark());
+        assert!((x96_to_f64(prices.above.unwrap().x96()) - expected).abs() < 1e-6);
         assert!(
             !market_short(46)
                 .taker_health(&short)
@@ -513,8 +601,8 @@ mod tests {
 
     /// Both sides at the mark means liquidatable now, and only that. The
     /// floor on a short's value can leave the exact test calling it healthy
-    /// at its closed-form turn; the turn then sits an atom above the mark,
-    /// with a distance that is small but not zero.
+    /// at its closed-form turn; the reported turn is then the first mark
+    /// above it that the test fails.
     #[test]
     fn a_healthy_short_at_its_turn_keeps_a_distance() {
         let short = TakerState {
@@ -542,7 +630,10 @@ mod tests {
         );
         let prices = health.liquidation_prices();
         assert_eq!(prices.below, None);
-        assert!(prices.above.unwrap() > prices.mark, "{prices:?}");
+        let above = prices.above.unwrap();
+        assert!(above > prices.mark, "{prices:?}");
+        assert!(at(above).is_liquidatable());
+        assert!(!at(Price::from_x96(above.x96() - U256::from(1u8))).is_liquidatable());
         assert!(prices.distance().unwrap() > 0.0);
     }
 

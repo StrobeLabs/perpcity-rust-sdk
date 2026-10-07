@@ -62,8 +62,8 @@ pub struct BlockContext {
 }
 
 /// Where a position's health test turns as the mark moves, on each side of
-/// the mark it was measured from: the one shape a taker's closed form and
-/// a maker's search both answer "how far" in.
+/// the mark it was measured from: the one shape both roles answer "how
+/// far" in.
 ///
 /// A side is `None` when no move that way within reach liquidates the
 /// position; both sides are the mark when it is liquidatable now.
