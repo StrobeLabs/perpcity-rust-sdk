@@ -123,6 +123,11 @@ impl Solvency {
         self.debt_stated.retain(retention);
     }
 
+    pub(super) fn advance(&mut self, at: Sample<()>) {
+        self.margin_stated.advance(at);
+        self.debt_stated.advance(at);
+    }
+
     fn debt_restated(&mut self, event: &TapeEvent, debt: UsdcAtoms) {
         self.debt.state(debt);
         self.debt_stated.push(event.sample(debt));
@@ -231,6 +236,7 @@ impl Fold for Solvency {
             }
             _ => {}
         }
+        self.advance(event.sample(()));
     }
 
     /// A cut between a withdrawal's transfer and its swap, inside one

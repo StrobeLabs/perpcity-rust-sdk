@@ -171,6 +171,14 @@ impl Market {
         self.solvency.retain(retention);
         self.activity.retain(retention);
     }
+
+    /// Every series known through `at`, with nothing stated since.
+    fn advance(&mut self, at: Sample<()>) {
+        self.prices.advance(at);
+        self.utilization.advance(at);
+        self.solvency.advance(at);
+        self.activity.advance(at);
+    }
 }
 
 impl Fold for Market {
@@ -231,6 +239,7 @@ impl Replay {
                 utilization: Utilization::genesis(),
                 solvency: Solvency::genesis(),
                 pool: Pool::genesis(),
+                activity: Activity::genesis(),
                 ..Market::default()
             }),
         }
@@ -274,7 +283,7 @@ impl Replay {
             pool: Pool::seeded(seed.ticks, seed.tick)?,
             positions: Positions::seeded(seed.pool_price, seed.positions),
             custody: OwnershipLog::default(),
-            activity: Activity::seeded(seed.pool_price, seed.index),
+            activity: Activity::seeded(at, seed.pool_price, seed.index),
         };
         Ok(Self {
             perp: seed.perp,
@@ -289,11 +298,15 @@ impl Replay {
     /// that follows a market by polling, and the way a fold heals after a
     /// feed dropped or refused events. Returns how many events it applied.
     ///
+    /// The fold then stands at the end of the block it read to, events or
+    /// none, so a window over a quiet market moves on and the next call
+    /// scans from the block after.
+    ///
     /// # Errors
     ///
     /// [`ValidationError::InvalidConfig`] for a fold with no block to
     /// continue from: fold a tape from the market's first block, or seed
-    /// from a read. Otherwise the scan's errors.
+    /// from a read. Otherwise the scan's errors, and the header read's.
     pub async fn catch_up<P: Provider>(
         &mut self,
         history: &History<P>,
@@ -320,7 +333,30 @@ impl Replay {
         for row in &tape {
             self.apply(row);
         }
+        self.read_through(history.block(to).await?);
         Ok(tape.len())
+    }
+
+    /// Stand at the end of `block`, every event in it and before it
+    /// applied: what a driver says after reading a range, so every series
+    /// is known through it whether or not anything happened. Events at or
+    /// before it are refused from here on. A block the fold already stands
+    /// at the end of, or past, changes nothing.
+    pub fn read_through(&mut self, block: BlockContext) {
+        let end_of_block = ChainPoint {
+            block: block.number,
+            log_index: u64::MAX,
+        };
+        if self.point().is_some_and(|point| point >= end_of_block) {
+            return;
+        }
+        self.block.set(block);
+        self.market.stand_at(end_of_block);
+        self.market.inner_mut().advance(Sample {
+            point: end_of_block,
+            timestamp: block.timestamp,
+            value: (),
+        });
     }
 
     /// The market this is a replay of.
@@ -334,12 +370,13 @@ impl Replay {
     }
 
     /// Where the fold stands: the last event's chain point, or the end of
-    /// the seed's block.
+    /// the last block read through.
     pub fn point(&self) -> Option<ChainPoint> {
         self.market.point()
     }
 
-    /// The block of the last event applied, or the seed's.
+    /// The last block the fold has read: the last event's, or the last
+    /// read through.
     pub fn block(&self) -> Option<BlockContext> {
         self.block.get()
     }

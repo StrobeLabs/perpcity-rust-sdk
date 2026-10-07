@@ -131,7 +131,9 @@ every level known, standing at the end of that block so the block's own
 events delivered again are refused; the trait's `fold` is a segment that
 knows what moved and nothing of where anything stands. From any of them,
 `catch_up` applies the tape from the block after the fold's to the lagged
-head, and `combine` takes a segment folded elsewhere.
+head and stands the fold at the end of that block, events or none, so
+every series is known through it; `combine` takes a segment folded
+elsewhere.
 
 ## Efficiency
 

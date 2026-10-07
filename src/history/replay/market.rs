@@ -41,6 +41,11 @@ impl Prices {
         self.index.retain(retention);
     }
 
+    pub(super) fn advance(&mut self, at: Sample<()>) {
+        self.pool.advance(at);
+        self.index.advance(at);
+    }
+
     /// The mark at `block`, with the EMAs advanced to its timestamp over
     /// `ema_window`; `None` until a swap, a print and a touch have been seen.
     pub(super) fn mark_at(
@@ -88,6 +93,7 @@ impl Fold for Prices {
             }),
             _ => {}
         }
+        self.advance(event.sample(()));
     }
 
     fn combine(&mut self, later: Self) {
@@ -170,6 +176,11 @@ impl Utilization {
         self.open_interest.retain(retention);
     }
 
+    pub(super) fn advance(&mut self, at: Sample<()>) {
+        self.capacity.advance(at);
+        self.open_interest.advance(at);
+    }
+
     /// Both at `block`, as the capacity read returns them.
     pub(super) fn at(&self, block: BlockContext) -> Option<MarketCapacity> {
         Some(MarketCapacity {
@@ -191,6 +202,7 @@ impl Fold for Utilization {
             }
             _ => {}
         }
+        self.advance(event.sample(()));
     }
 
     fn combine(&mut self, later: Self) {

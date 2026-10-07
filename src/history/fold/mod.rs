@@ -21,7 +21,7 @@ mod shapes;
 use super::tape::{ChainPoint, TapeEvent};
 
 pub use self::series::{
-    Arrival, Arrivals, Change, Reading, Retention, Sample, Series, Span, Window,
+    Arrival, Arrivals, Change, Reading, Retention, Sample, Series, Span, Until, Window,
 };
 pub use self::shapes::{First, Latest, Stated};
 
@@ -95,9 +95,19 @@ impl<F: Fold> Sequenced<F> {
         true
     }
 
-    /// Where the fold stands: the last event's chain point.
+    /// Where the fold stands: the last event's chain point, or the point a
+    /// driver stood it at.
     pub fn point(&self) -> Option<ChainPoint> {
         self.last.get()
+    }
+
+    /// Stand at `point`, as a driver does after reading through it with
+    /// nothing more to apply: events at or before it are refused from
+    /// here on. A point at or before the fold's changes nothing.
+    pub fn stand_at(&mut self, point: ChainPoint) {
+        if self.last.get().is_none_or(|last| point > last) {
+            self.last.set(point);
+        }
     }
 
     /// Events refused for arriving at or before the fold's point.
