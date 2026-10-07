@@ -20,9 +20,10 @@
 //! `delta` is a packed Uniswap V4 `BalanceDelta` (`int128 amount0` = perp,
 //! `int128 amount1` = USD), unpacked here into the two delta types.
 //!
-//! Two events come from outside the `Perp`'s own event library: the
+//! Some events come from outside the `Perp`'s own event library: the
 //! PoolManager's `ModifyLiquidity` (perp pools are vanilla V4 pools, so a
-//! maker's liquidity change is logged by the PoolManager, `salt == posId`)
+//! maker's liquidity change is logged by the PoolManager, `salt == posId`),
+//! its `Initialize` and `Swap`, which state the pool's exact price and tick,
 //! and the position NFT's ERC721 `Transfer`. The ERC721 `Transfer` shares
 //! its `topic0` with ERC20 `Transfer`; an ERC20-shaped log (two indexed
 //! fields, the value in data) fails the ERC721 decode and returns `None`.
@@ -69,7 +70,7 @@ use crate::convert::unpack_balance_delta;
 use crate::errors::ValidationError;
 use crate::units::{
     Earnings, Funding, FundingPerSqrtPrice, FundingRate, LDelta, LUnits, PerSide, PerpAtoms,
-    PerpDelta, Price, UsdcAtoms, UsdcDelta, UtilizationRate,
+    PerpDelta, Price, SqrtPrice, UsdcAtoms, UsdcDelta, UtilizationRate,
 };
 
 /// An ERC-20 `Transfer` indexes two of its three fields, so topic0 plus two.
@@ -302,6 +303,24 @@ pub enum MarketEvent {
     },
 
     // ── Pool (Uniswap V4 PoolManager) ────────────────────────────────
+    /// The pool created, at its first exact price and tick. Emitted by the
+    /// PoolManager, in the factory's creation transaction.
+    PoolInitialized {
+        pool_id: B256,
+        sqrt_price: SqrtPrice,
+        tick: i32,
+    },
+    /// A swap through the pool, with its exact price, active liquidity and
+    /// tick after it: the state a later liquidity change's amounts are
+    /// computed at. Emitted by the PoolManager; for a perp's own swap
+    /// `sender` is the Perp, whose taker event carries the amounts.
+    PoolSwapped {
+        pool_id: B256,
+        sender: Address,
+        sqrt_price: SqrtPrice,
+        liquidity: LUnits,
+        tick: i32,
+    },
     /// Liquidity added to (`liquidity_delta > 0`) or removed from a pool's
     /// tick range. Emitted by the PoolManager, not the Perp — it reaches a
     /// consumer only through a subscription to the PoolManager address.
@@ -591,6 +610,22 @@ pub fn decode_log(log: &Log) -> Result<Option<MarketEvent>, ValidationError> {
         })
 
     // ── Pool / position NFT ──────────────────────────────────────────
+    } else if topic0 == IPoolManagerState::Initialize::SIGNATURE_HASH {
+        let d = decode_raw::<IPoolManagerState::Initialize>(log)?;
+        Some(MarketEvent::PoolInitialized {
+            pool_id: d.id,
+            sqrt_price: SqrtPrice::from_x96(U256::from(d.sqrtPriceX96)),
+            tick: d.tick.as_i32(),
+        })
+    } else if topic0 == IPoolManagerState::Swap::SIGNATURE_HASH {
+        let d = decode_raw::<IPoolManagerState::Swap>(log)?;
+        Some(MarketEvent::PoolSwapped {
+            pool_id: d.id,
+            sender: d.sender,
+            sqrt_price: SqrtPrice::from_x96(U256::from(d.sqrtPriceX96)),
+            liquidity: LUnits::new(d.liquidity),
+            tick: d.tick.as_i32(),
+        })
     } else if topic0 == IPoolManagerState::ModifyLiquidity::SIGNATURE_HASH {
         let d = decode_raw::<IPoolManagerState::ModifyLiquidity>(log)?;
         Some(MarketEvent::ModifyLiquidity {

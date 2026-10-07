@@ -11,7 +11,8 @@ for the fold that rebuilds the market from them.
 The tape is everything the chain said about one market, in the order it
 said it. A market's record is spread over three addresses: its own
 contract, the beacon it reads its index from, and the chain's PoolManager,
-which logs every pool's liquidity under the pool's id. This module names
+which logs every pool's creation, swaps and liquidity under the pool's id.
+This module names
 the row, `TapeEvent`; the coordinate rows are ordered and joined by,
 `ChainPoint`; the three addresses, `TapeAddresses`; the readers that
 produce rows from a block range; and custody, `OwnershipLog`, the first
@@ -45,8 +46,8 @@ the crate.
 ## The mental model
 
 ```text
-   the perp                the beacon                the PoolManager
-   every market event      IndexUpdated              ModifyLiquidity, for this pool id
+   the perp                the beacon                the PoolManager, for this pool id
+   every market event      IndexUpdated              Initialize · Swap · ModifyLiquidity
          └─────────────────────┬──────────────────────────────┘
                                │  two filters over one range, one learned width
                                ▼
@@ -64,7 +65,7 @@ the crate.
 A reader is a range, a filter, the decoder, chain order. `market_events`
 is the one-address scan, the perp alone. `market_tape` is the whole
 record: the perp and the beacon share a filter by address, the PoolManager
-is filtered by the liquidity event and the pool id it indexes, and the two
+is filtered by its three pool events and the pool id they index, and the two
 scans merge on chain point. `latest_market_events` reads newest-first and
 stops when it holds enough. The `History` handle offers the same three
 reads with the learned width, concurrency and telemetry added, and a
@@ -97,7 +98,7 @@ row, which is what the combine law is checked at.
 | [`Tape`](mod.rs#L181), [`TapeSlice`](mod.rs#L316) | a market's record: rows in strict chain order with one hash and a monotone timestamp per block, checked once at `Tape::new`; grows only forward. `TapeSlice` is a run of its rows, what a `Tape` derefs to and a segment is, with the groupings, lookups and lenses the prose above names | [`History::market_tape`](../DESIGN.md), [`History::market_events`](../DESIGN.md) and [`History::latest_market_events`](../DESIGN.md); [`Recording::tape`](../DESIGN.md), with no node; [`Tape::new`](mod.rs#L190) from rows a caller holds, or a collect of rows in any order | every fold, through `Fold::fold`; `Replay::catch_up`. The strategy layer's sources hand one out and its interpreters take a slice. |
 | [`TapeEvent`](mod.rs#L72) | a [`MarketEvent`](../../events/DESIGN.md) at a chain point, with its block's hash and timestamp and its transaction. Every tense builds it through one constructor, so a scan's row, a feed's and a recording's are the same row; `sample` stamps a value with its point and time, `arrival` a mark with its transaction too | the rows of a [`Tape`](mod.rs#L181), which every reader returns; [`MarketFeed::next_stamped`](../../feeds/DESIGN.md), the present tense | [`OwnershipLog::fold`](custody.rs#L135). The strategy layer's economics, classification and series are folds over a slice of these. |
 | [`Swap`](lenses.rs#L28), [`SwapAction`](lenses.rs#L17) | a taker's swap as the event settled it: the position, whether it opened, adjusted or closed, and the `SwapInfo`; `Positioned`, so custody attributes it. The one mark a tape yields unaided, so the lens and the replay's activity fold speak one record | [`Swap::of`](lenses.rs#L39) from a taker's event; the `swaps` lens, as arrivals | `Replay::swaps`, the arrivals the replay keeps. The strategy layer's flow readings, over either. |
-| [`TapeAddresses`](mod.rs#L161) | the three addresses a market's record is spread across: its own contract, the beacon it reads, and the chain's PoolManager keyed by its pool id. The PoolManager is every pool on the chain, so it is filtered by the liquidity event and the pool id it indexes, never by address alone | [`MarketReader::tape_addresses`](../../client/DESIGN.md), which knows all three; or a caller that does | [`History::market_tape`](../DESIGN.md) and [`market_tape`](read.rs#L85). |
+| [`TapeAddresses`](mod.rs#L161) | the three addresses a market's record is spread across: its own contract, the beacon it reads, and the chain's PoolManager keyed by its pool id. The PoolManager is every pool on the chain, so it is filtered by its pool events and the pool id they index, never by address alone | [`MarketReader::tape_addresses`](../../client/DESIGN.md), which knows all three; or a caller that does | [`History::market_tape`](../DESIGN.md) and [`market_tape`](read.rs#L85). |
 | [`OwnershipLog`](custody.rs#L102) | custody over time: a fold of transfers in chain order; owner at a point, not merely latest, and whether a `Wallets` held a position then or holds it now. The first instance of [`Fold`](../fold/DESIGN.md): `apply` appends a transfer, `combine` appends a later segment's timelines | [`OwnershipLog::fold`](custody.rs#L135) over the tape, the trait's fold kept inherent so it is reachable without the import | [`Replay`](../replay/DESIGN.md), which folds it in the same pass; the custody filters on `Arrivals` and `Positions`. The strategy layer's attribution, which asks who held a position when a trade happened. |
 | [`Wallets`](custody.rs#L19), [`Positioned`](custody.rs#L76) | the scope a question is asked at: a set of addresses, one agent's or a cohort's, with no memory of how it was drawn. A `Positioned` mark names the position it is about, which is what custody attributes to a holder | `Wallets::one`, or a collect of addresses; the strategy layer draws a cohort's from its fleet file or a walk of the master's transfers. `Swap`, `Liquidation` and `Settlement` are `Positioned` | `Arrivals::by` and `Positions::held_by`, with the custody fold. An outside market maker asks the same question of their own wallets. |
 
@@ -139,14 +140,18 @@ row, which is what the combine law is checked at.
 
 - **The market's tape is two filters over one range.** The perp and its
   beacon share a filter by address; the PoolManager, being every pool on
-  the chain, is filtered by the liquidity event's signature and the pool
-  id it indexes. The two scans share the learned width and their rows
-  merge on chain point. One filter would either miss the pool's liquidity
-  or pull every pool's on the chain. The PoolManager filter is compensation
-  for the live builds, whose maker events carry no geometry: the next
-  contracts emit a band's range, liquidity and every change to it on the
-  perp's own events, so the pool's liquidity becomes a fold of one address
-  and the second filter goes with the cutover.
+  the chain, is filtered by its three pool events' signatures
+  (`Initialize`, `Swap`, `ModifyLiquidity`) and the pool id they index.
+  The two scans share the learned width and their rows merge on chain
+  point. One filter would either miss the pool's events or pull every
+  pool's on the chain. The PoolManager filter is compensation for the live
+  builds, whose maker events carry no geometry and no amounts, and whose
+  swap results carry the pool price squared from its root and floored: the
+  pool's own swaps state the exact price and tick a liquidity change's
+  amounts are computed at. The next contracts emit a band's range,
+  liquidity and every change to it on the perp's own events, so the pool
+  becomes a fold of one address and the second filter goes with the
+  cutover.
 - **`ChainPoint` goes into `OwnershipLog` and comes back out of it.** It
   is the coordinate the fold is sorted by: `owner_at` takes one and
   searches, and `transfers` hands back the point of every change. A sorted
