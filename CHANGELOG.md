@@ -7,7 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-The changes below break the public API, so the next release is 0.12.0 (a minor bump, as for any breaking change before 1.0). The tape is a type: every reader returned a vector whose chain order every fold assumed and nothing checked. And a taker's health is exact: the deployed liquidation test ported, read in a batch at one block, and the replay keeping the leg the test prices. And a maker's distance to liquidation is a search along a price shock, since its equity along that path is a curve, not a line.
+## [0.12.0] - 2026-10-06
+
+The scope and health release. The tape is a type: every reader returned a
+vector whose chain order every fold assumed and nothing checked. A
+question is asked at a scope: a set of wallets, and the custody filters
+that turn a market's arrivals and positions into a cohort's or an agent's.
+And a position's distance to liquidation is answered for both roles, in
+the deployed contracts' own integers: a taker's health ported exactly and
+read in a batch at one block, its turn the first mark the test fails; a
+maker's found by a search along a price shock, since its equity along that
+path is a curve, not a line; both in one `LiquidationPrices` shape.
+Breaking, so a minor bump, as for any breaking change before 1.0.
 
 ### Breaking
 
@@ -579,7 +590,8 @@ and why none of it changes a value on the wire.
 - Examples: quickstart, open_position, open_maker, market_maker, hft_bot
 - Benchmarks: math, HFT pipeline, transport
 
-[Unreleased]: https://github.com/StrobeLabs/perpcity-rust-sdk/compare/v0.11.0...HEAD
+[Unreleased]: https://github.com/StrobeLabs/perpcity-rust-sdk/compare/v0.12.0...HEAD
+[0.12.0]: https://github.com/StrobeLabs/perpcity-rust-sdk/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/StrobeLabs/perpcity-rust-sdk/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/StrobeLabs/perpcity-rust-sdk/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/StrobeLabs/perpcity-rust-sdk/compare/v0.8.0...v0.9.0
