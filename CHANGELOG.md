@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-10-07
+
+The known-through release. A series now knows how far it is known, which
+is not its last sample, so a window ends there: a burst leaves its window,
+a quiet one answers zero, and an alarm on it clears. A replay that polls
+stands at the end of each range it read, events or none. Breaking, so a
+minor bump.
+
 ### Breaking
 
 - **A series knows how far it is known, and its windows end there.** `Series` and `Arrivals` record the last point they are known through, which a fold advances on every event it reads and a driver advances over a range it read without events. `window`, `count_in`, `change_over` and `peak` end there, not at the last sample, so a burst leaves its window and a quiet window answers: zero arrivals, or an unchanged value. Before, every window ended at the series' own latest sample, so a count never fell and an alarm on it never cleared. `Arrivals::window` returns `Option`, and `count_in` answers `None` only for a window the process is not complete over: one reaching before its fold began watching, before what retention kept, or past the point it is known through. `Reading::moved_by` is `Option<Span>`, `None` for a window nothing arrived in; a reading over a window holds at the window's end. `peak` counts the value standing at the window's start.
@@ -602,7 +610,8 @@ and why none of it changes a value on the wire.
 - Examples: quickstart, open_position, open_maker, market_maker, hft_bot
 - Benchmarks: math, HFT pipeline, transport
 
-[Unreleased]: https://github.com/StrobeLabs/perpcity-rust-sdk/compare/v0.12.0...HEAD
+[Unreleased]: https://github.com/StrobeLabs/perpcity-rust-sdk/compare/v0.13.0...HEAD
+[0.13.0]: https://github.com/StrobeLabs/perpcity-rust-sdk/compare/v0.12.0...v0.13.0
 [0.12.0]: https://github.com/StrobeLabs/perpcity-rust-sdk/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/StrobeLabs/perpcity-rust-sdk/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/StrobeLabs/perpcity-rust-sdk/compare/v0.9.0...v0.10.0
