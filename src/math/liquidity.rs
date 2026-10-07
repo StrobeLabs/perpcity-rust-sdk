@@ -12,7 +12,7 @@ use crate::errors::ValidationError;
 use crate::math::range::{MakerBand, TickRange};
 use crate::math::swap::{amount0_delta, amount1_delta};
 use crate::units::fixed_point::{Rounding, mul_div};
-use crate::units::{LUnits, PerpAtoms, SqrtPrice, UsdcAtoms};
+use crate::units::{LDelta, LUnits, PerpAtoms, PerpDelta, SqrtPrice, UsdcAtoms, UsdcDelta};
 
 /// Estimate the liquidity needed to deploy `usd_amount` of value across
 /// `range`.
@@ -231,6 +231,98 @@ fn narrow(amount: U256, what: &str) -> Result<u128, ValidationError> {
     })
 }
 
+/// Uniswap `Pool.modifyLiquidity`'s principal: what changing `range`'s
+/// liquidity by `delta` moves, as the caller's two legs, the position's
+/// `delta` in the contract. An add pays both legs in, each rounded up, and
+/// comes back negative; a removal takes them out, rounded down, and comes
+/// back positive. So a band added and then removed whole is left a few
+/// atoms short.
+///
+/// Which legs move is the pool's `tick` against the bounds, as V4 decides
+/// it, and the amounts are taken at `sqrt_price`: both are the pool's own,
+/// from its last swap or its creation.
+///
+/// # Examples
+///
+/// A band added and removed at the same price comes back an atom short of
+/// each leg it held:
+///
+/// ```
+/// use perpcity_sdk::{LDelta, TickRange, get_sqrt_ratio_at_tick, liquidity_change_delta};
+///
+/// let range = TickRange::new(38_670, 38_760)?;
+/// let sqrt_price = get_sqrt_ratio_at_tick(38_692)?;
+/// let (perp_in, usd_in) = liquidity_change_delta(sqrt_price, 38_692, &range, LDelta::new(317_573_271))?;
+/// let (perp_out, usd_out) = liquidity_change_delta(sqrt_price, 38_692, &range, LDelta::new(-317_573_271))?;
+/// assert_eq!((perp_in + perp_out).atoms(), -1);
+/// assert_eq!((usd_in + usd_out).atoms(), -1);
+/// # Ok::<(), perpcity_sdk::ValidationError>(())
+/// ```
+///
+/// # Errors
+///
+/// - [`ValidationError::InvalidPrice`] if `sqrt_price` is zero
+/// - [`ValidationError::Overflow`] if a leg exceeds the `int128` a balance
+///   delta holds
+pub fn liquidity_change_delta(
+    sqrt_price: SqrtPrice,
+    tick: i32,
+    range: &TickRange,
+    delta: LDelta,
+) -> Result<(PerpDelta, UsdcDelta), ValidationError> {
+    if sqrt_price.is_zero() {
+        return Err(ValidationError::InvalidPrice {
+            reason: "zero sqrt price".into(),
+        });
+    }
+    let (sqrt_lower, sqrt_upper) = range.sqrt_bounds();
+    let (sa, sb, sp) = (sqrt_lower.x96(), sqrt_upper.x96(), sqrt_price.x96());
+    let (perp, usd) = if tick < range.lower() {
+        (amount0_change(sa, sb, delta)?, 0)
+    } else if tick < range.upper() {
+        (
+            amount0_change(sp, sb, delta)?,
+            amount1_change(sa, sp, delta)?,
+        )
+    } else {
+        (0, amount1_change(sa, sb, delta)?)
+    };
+    Ok((PerpDelta::new(perp), UsdcDelta::new(usd)))
+}
+
+/// `SqrtPriceMath.getAmount0Delta` over a signed liquidity change, from the
+/// caller's side: paid in (negative, rounded up) on an add, taken out
+/// (positive, rounded down) on a removal.
+fn amount0_change(a: U256, b: U256, delta: LDelta) -> Result<i128, ValidationError> {
+    let (units, rounding) = change_rounding(delta);
+    signed_leg(amount0_delta(a, b, units, rounding)?, delta, "perp leg")
+}
+
+/// `SqrtPriceMath.getAmount1Delta`, signed as [`amount0_change`].
+fn amount1_change(a: U256, b: U256, delta: LDelta) -> Result<i128, ValidationError> {
+    let (units, rounding) = change_rounding(delta);
+    signed_leg(amount1_delta(a, b, units, rounding)?, delta, "USDC leg")
+}
+
+/// The change's size, and the rounding that leaves the pool never short.
+fn change_rounding(delta: LDelta) -> (u128, Rounding) {
+    let units = delta.units().unsigned_abs();
+    if delta.units() < 0 {
+        (units, Rounding::TowardZero)
+    } else {
+        (units, Rounding::Up)
+    }
+}
+
+/// An amount signed from the caller's side: taken out on a removal, paid
+/// in on an add.
+fn signed_leg(amount: U256, delta: LDelta, what: &str) -> Result<i128, ValidationError> {
+    let amount = i128::try_from(amount).map_err(|_| ValidationError::Overflow {
+        context: format!("{what} {amount} exceeds int128"),
+    })?;
+    Ok(if delta.units() < 0 { amount } else { -amount })
+}
+
 /// What `band` holds at `sqrt_price`: [`amounts_for_liquidity`] over the
 /// band's own bounds.
 ///
@@ -250,6 +342,53 @@ pub fn band_amounts(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Three of one Arbitrum band's changes (NYCRT v0.2.2, position 29,
+    /// range 38670..38760), each at the pool's price and tick then: an add
+    /// in range, an add with the price below the band, a removal in range.
+    /// The amounts are what the contract added to the position's delta.
+    #[test]
+    fn a_liquidity_change_moves_what_the_pool_moved() {
+        let range = TickRange::new(38_670, 38_760).unwrap();
+        let cases = [
+            (
+                "548325480008142788545567093195",
+                38_692,
+                317_573_271,
+                (-154_189, -2_490_753),
+            ),
+            // Below the band the price does not enter.
+            ("1", 37_719, 797_278_127, (-517_795, 0)),
+            (
+                "549974192257810920237436044902",
+                38_752,
+                -316_422_905,
+                (16_569, 9_066_387),
+            ),
+        ];
+        for (sqrt, tick, delta, (perp, usd)) in cases {
+            let sqrt = SqrtPrice::from_x96(sqrt.parse().unwrap());
+            let moved = liquidity_change_delta(sqrt, tick, &range, LDelta::new(delta)).unwrap();
+            assert_eq!(
+                moved,
+                (PerpDelta::new(perp), UsdcDelta::new(usd)),
+                "{delta} at tick {tick}"
+            );
+        }
+    }
+
+    /// The legs follow the tick, not the price: at a bound's tick the band
+    /// is in range on the lower bound and out of it on the upper.
+    #[test]
+    fn the_tick_decides_which_legs_move() {
+        let range = TickRange::new(38_670, 38_760).unwrap();
+        let (lower, upper) = range.sqrt_bounds();
+        let add = LDelta::new(1_000_000_000);
+        let at_lower = liquidity_change_delta(lower, 38_670, &range, add).unwrap();
+        assert!(at_lower.0.is_negative() && at_lower.1.is_zero());
+        let at_upper = liquidity_change_delta(upper, 38_760, &range, add).unwrap();
+        assert!(at_upper.0.is_zero() && at_upper.1.is_negative());
+    }
 
     /// The margin a depth requires is the inverse of sizing a depth from a
     /// margin, rounded so the round trip never comes back short.
