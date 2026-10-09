@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`MarketReader::liquidation_calldata`** is public: the era's call that liquidates a position whole, for a signer that liquidates across markets through its own pipeline. On `v0.2.2` it is the 3-arg call with the position's size, read at the head.
+
 - **`liquidity_change_delta`**, Uniswap V4's `Pool.modifyLiquidity` principal: what a liquidity change moves as the caller's two legs, at a pool price and tick.
 
 - **`Series::until` and `Arrivals::until`**, the same questions asked as of a point taken from the tape, for the past: `market.liquidations().until(close.sample(())).count_in(window)`. `Until` is the view they return.
