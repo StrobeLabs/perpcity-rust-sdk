@@ -139,7 +139,9 @@ impl MarketReader {
         Ok(())
     }
 
-    /// The calldata that liquidates `pos_id` whole on this market's era.
+    /// The calldata that liquidates `pos_id` whole on this market's era, for
+    /// a sender not bound to this market (one signer liquidating across
+    /// several); send it to this market's perp at [`GasLimits::LIQUIDATE`].
     ///
     /// Build `58b42b7` takes the id and the recipient. `v0.2.2` takes an
     /// amount too, so the position's whole size is read now, at the head:
@@ -147,12 +149,13 @@ impl MarketReader {
     /// `makerDetails` for a maker. A size the chain moves between this read
     /// and the send reverts `MaxAmtExceeded`, one block wide at most; a zero
     /// size is a position that is gone or not of this role.
-    pub(super) async fn liquidation_calldata(
+    pub async fn liquidation_calldata(
         &self,
         role: PositionRole,
         pos_id: U256,
         fee_recipient: Address,
     ) -> Result<Bytes> {
+        validate_fee_recipient(fee_recipient)?;
         match self.immutables().await?.era {
             Era::Legacy => Ok(role.whole_calldata(pos_id, fee_recipient)),
             Era::Upgradeable => {
