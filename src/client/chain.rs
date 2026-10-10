@@ -99,7 +99,8 @@ impl AsRef<ChainReader> for ChainReader {
 
 impl ChainReader {
     /// A reader over `transport` for the chain `deployments` describe.
-    /// Makes no network calls.
+    /// Makes no network calls, so `chain_id` is taken on trust;
+    /// [`Self::checked`] asks the endpoint.
     pub fn new(transport: HftTransport, deployments: ChainDeployments, chain_id: u64) -> Self {
         let rpc_client = RpcClient::new(BoxTransport::new(transport.clone()), false);
         let provider = RootProvider::<Ethereum>::new(rpc_client);
@@ -154,6 +155,22 @@ impl ChainReader {
                 immutables: Mutex::new(HashMap::new()),
             }),
         }
+    }
+
+    /// This reader, once the endpoint's `eth_chainId` is the chain it was
+    /// built for: `ChainReader::arbitrum(transport).checked().await?`.
+    /// Refuses another chain with [`ContractError::WrongChain`], since its
+    /// deployments' addresses would name another chain's contracts.
+    pub async fn checked(self) -> Result<Self> {
+        let served = self.inner.provider.get_chain_id().await?;
+        if served != self.inner.chain_id {
+            return Err(ContractError::WrongChain {
+                expected: self.inner.chain_id,
+                served,
+            }
+            .into());
+        }
+        Ok(self)
     }
 
     // ── Accessors ────────────────────────────────────────────────────
@@ -602,6 +619,31 @@ mod tests {
             ),
             "{answered}"
         );
+    }
+
+    /// The endpoint's chain is asked once; the chain the reader was built
+    /// for passes, and another is refused naming both.
+    #[tokio::test]
+    async fn checked_refuses_an_endpoint_on_another_chain() {
+        let (chain, rpc) = mock::chain();
+        rpc.quantity(mock::CHAIN_ID);
+        let chain = chain.checked().await.unwrap();
+        assert!(rpc.is_drained());
+
+        rpc.quantity(421_614);
+        let refused = chain.checked().await.unwrap_err();
+        assert!(
+            matches!(
+                refused,
+                PerpCityError::Contract(ContractError::WrongChain {
+                    expected: mock::CHAIN_ID,
+                    served: 421_614,
+                })
+            ),
+            "{refused}"
+        );
+        assert!(!refused.is_transient());
+        assert!(rpc.is_drained());
     }
 
     #[test]
