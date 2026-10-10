@@ -102,4 +102,15 @@ pub enum ContractError {
         #[source]
         source: Option<std::sync::Arc<alloy::transports::TransportError>>,
     },
+
+    /// The endpoint serves another chain than the reader was built for, so
+    /// every address the reader holds would name another chain's contract.
+    /// Not transient: the endpoint or the deployments are misconfigured.
+    #[error("endpoint serves chain {served}, the reader was built for chain {expected}")]
+    WrongChain {
+        /// The chain the reader's deployments describe.
+        expected: u64,
+        /// The chain the endpoint answered `eth_chainId` with.
+        served: u64,
+    },
 }

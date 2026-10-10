@@ -25,7 +25,8 @@
 //! )?;
 //!
 //! // One chain reader per process; every client and reader shares it.
-//! let chain = ChainReader::arbitrum(transport);
+//! // `checked` refuses an endpoint serving another chain.
+//! let chain = ChainReader::arbitrum(transport).checked().await?;
 //! let perp = address!("0000000000000000000000000000000000000001"); // the market's Perp contract
 //!
 //! let signer: PrivateKeySigner = "your_private_key_hex".parse().unwrap();

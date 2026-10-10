@@ -46,7 +46,8 @@ async fn main() -> Result<()> {
         .parse()
         .unwrap();
 
-    // One chain reader per process; the client is a signer on one market.
+    // One chain reader per process, refused if the endpoint serves another
+    // chain; the client is a signer on one market.
     let chain = ChainReader::new(
         transport,
         ChainDeployments {
@@ -54,7 +55,9 @@ async fn main() -> Result<()> {
             pool_manager: ARBITRUM_SEPOLIA_POOL_MANAGER,
         },
         ARBITRUM_SEPOLIA_CHAIN_ID,
-    );
+    )
+    .checked()
+    .await?;
     let client = PerpClient::new(chain.market(perp), signer);
     println!("connected to {rpc_url}");
 
