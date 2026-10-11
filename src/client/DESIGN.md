@@ -333,7 +333,7 @@ views it batches.
 | `StateAt::margin_ratios` | 3 | pinned | no |
 | `StateAt::mark` | 1 multicall + 1 pinned index | pinned | no |
 | `StateAt::pool` | 1 multicall + index + bounds + bitmap, + tick words when any tick is set: 4 or 5; plus 2 for the immutables once per market per process | pinned | immutables, forever |
-| `StateAt::positions` | 1 row multicall per chunk of at most 500 ids; 4 chunks in flight | pinned | no |
+| `StateAt::positions`, `owners`, `maker_bands` | 1 row multicall per chunk of at most 500 ids; 4 chunks in flight | pinned | no |
 | `StateAt::maker_equities` | 1 market-wide multicall + 1 pinned index; per chunk of at most 500 ids: 1 row multicall + 1 `extsload` + 1 `eth_getProof` (or, where proofs are not served, 2 `eth_getStorageAt` per distinct band tick, 16 ticks at a time, so 32 requests in flight per chunk); 4 chunks in flight, so up to 128 storage reads at once on the fallback; plus 2 for the immutables once per market per process | pinned | immutables, forever |
 | `StateAt::taker_healths` | 1 market-wide multicall + 1 pinned index; per chunk of at most 500 ids: 1 row multicall of 3 rows per id; 4 chunks in flight | pinned | no |
 | `get_positions_by_owner` | 1 + one `ownerOf` per id ever minted | head | no |
