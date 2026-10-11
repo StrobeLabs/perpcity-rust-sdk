@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`StateAt::owners`**, the holder of every position NFT in one row multicall per 500 ids at a pinned block, where `get_positions_by_owner` makes one `ownerOf` request per id at the head. An id never minted or burned is `None`, told apart by the token's own `TokenDoesNotExist` revert, so any other failed row is an error and never a burn.
+
 - **`ChainReader::checked`** asks the endpoint's `eth_chainId` and refuses a chain other than the one the reader was built for with `ContractError::WrongChain`. Every constructor takes the chain on trust, and a reader whose deployments name another chain's addresses reads them without error: a USDC address with no transfers on that chain answers every balance and scan with nothing.
 
 - **`MarketReader::liquidation_calldata`** is public: the era's call that liquidates a position whole, for a signer that liquidates across markets through its own pipeline. On `v0.2.2` it is the 3-arg call with the position's size, read at the head.

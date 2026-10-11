@@ -12,7 +12,7 @@ use std::sync::Arc;
 use alloy::eips::BlockId;
 use alloy::primitives::{Address, B256, U256};
 use alloy::providers::MulticallError;
-use alloy::sol_types::SolCall;
+use alloy::sol_types::{SolCall, SolError};
 use alloy::transports::{RpcError, TransportError};
 use futures_util::stream::{self, StreamExt};
 use serde::{Deserialize, Serialize};
@@ -367,6 +367,27 @@ impl StateAt {
             |pos_id, [row]| {
                 let position = decode_row::<Perp::positionsCall>(pos_id, row, "position")?;
                 Ok((position.margin != 0 || !position.delta.is_zero()).then_some(position))
+            },
+        )
+        .await
+    }
+
+    /// The holder of each position NFT, in one row multicall per
+    /// [`MAX_ROW_BATCH`] ids, all at this block: exactly one
+    /// [`RowOutcome`] per id, in input order.
+    ///
+    /// `Ok(None)` is an id never minted or burned (the token's own
+    /// `TokenDoesNotExist` revert); any other revert fails that id alone,
+    /// so a row that ran out of gas is never read as burned.
+    pub async fn owners(&self, pos_ids: &[U256]) -> Vec<RowOutcome<Address>> {
+        self.rows(
+            pos_ids,
+            |pos_id| [Perp::ownerOfCall { tokenId: pos_id }.abi_encode()],
+            |pos_id, [row]| {
+                if !row.success && row.returnData[..] == Perp::TokenDoesNotExist::SELECTOR {
+                    return Ok(None);
+                }
+                decode_row::<Perp::ownerOfCall>(pos_id, row, "owner").map(Some)
             },
         )
         .await
@@ -1318,6 +1339,31 @@ mod tests {
             "{err}"
         );
         assert!(!err.is_transient(), "a reverted row reverts again");
+        assert!(rpc.is_drained(), "one multicall");
+    }
+
+    /// Owners come back in input order from one multicall: a holder, a
+    /// burned id as `None`, and a revert that is not the token's own
+    /// failing alone rather than reading as burned.
+    #[tokio::test]
+    async fn owners_tell_a_burned_id_from_a_failed_read() {
+        let (state, rpc) = state().await;
+        let holder = Address::repeat_byte(0xaa);
+        rpc.aggregate3(vec![
+            mock::ok_row(returns::<Perp::ownerOfCall>(&holder)),
+            IMulticall3::Result {
+                success: false,
+                returnData: Perp::TokenDoesNotExist::SELECTOR.into(),
+            },
+            mock::failed_row(),
+        ]);
+
+        let rows = state
+            .owners(&[U256::ONE, U256::from(2u8), U256::from(3u8)])
+            .await;
+        assert_eq!(*rows[0].row.as_ref().unwrap(), Some(holder));
+        assert!(rows[1].row.as_ref().unwrap().is_none());
+        assert!(rows[2].row.is_err(), "an out-of-gas row is not a burn");
         assert!(rpc.is_drained(), "one multicall");
     }
 
