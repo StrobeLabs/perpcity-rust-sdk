@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`MarketReader::is_upgradeable`** says whether a market runs `v0.2.2-upgradeable`, the build the health and equity math ports, from its pool key's hook. It is read once per market and cached with the pool key, so a caller can skip a build `58b42b7` market before valuing anything on it.
+
 - **`StateAt::owners`**, the holder of every position NFT in one row multicall per 500 ids at a pinned block, where `get_positions_by_owner` makes one `ownerOf` request per id at the head. An id never minted or burned is `None`, told apart by the token's own `TokenDoesNotExist` revert, so any other failed row is an error and never a burn.
 
 - **`ChainReader::checked`** asks the endpoint's `eth_chainId` and refuses a chain other than the one the reader was built for with `ContractError::WrongChain`. Every constructor takes the chain on trust, and a reader whose deployments name another chain's addresses reads them without error: a USDC address with no transfers on that chain answers every balance and scan with nothing.
