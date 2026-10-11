@@ -139,6 +139,14 @@ impl MarketReader {
         Ok(())
     }
 
+    /// Whether this market runs `v0.2.2-upgradeable`, the build the SDK's
+    /// health and equity math ports: its pool carries the `PerpGuardHook`,
+    /// where a build `58b42b7` pool has no hook. Read once per market and
+    /// cached with the pool key.
+    pub async fn is_upgradeable(&self) -> Result<bool> {
+        Ok(self.immutables().await?.era == Era::Upgradeable)
+    }
+
     /// The calldata that liquidates `pos_id` whole on this market's era, for
     /// a sender not bound to this market (one signer liquidating across
     /// several); send it to this market's perp at [`GasLimits::LIQUIDATE`].
@@ -270,6 +278,21 @@ mod tests {
 
     const POOL_ID: B256 = B256::repeat_byte(0x99);
     const RECIPIENT: Address = Address::repeat_byte(0x44);
+
+    /// The build is the pool key's hook, read once per market.
+    #[tokio::test]
+    async fn the_build_is_read_from_the_pool_hook_once() {
+        let (chain, rpc) = mock::chain();
+        let (legacy, upgradeable) = (Address::repeat_byte(0x01), Address::repeat_byte(0x02));
+        rpc.call::<Perp::POOL_IDCall>(&POOL_ID);
+        rpc.call::<Perp::poolKeyCall>(&mock::pool_key(30));
+        assert!(!chain.market(legacy).is_upgradeable().await.unwrap());
+        rpc.call::<Perp::POOL_IDCall>(&POOL_ID);
+        rpc.call::<Perp::poolKeyCall>(&mock::pool_key_hooked(30));
+        assert!(chain.market(upgradeable).is_upgradeable().await.unwrap());
+        assert!(chain.market(upgradeable).is_upgradeable().await.unwrap());
+        assert!(rpc.is_drained(), "two reads per market, then the cache");
+    }
 
     /// A build `58b42b7` market: the whole-position call, and no read
     /// beyond the immutables.
