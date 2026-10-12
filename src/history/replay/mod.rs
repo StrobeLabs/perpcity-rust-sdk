@@ -248,6 +248,18 @@ impl Replay {
         }
     }
 
+    /// A fold over a segment that does not start at the market's genesis:
+    /// every total unknown until the segment states it, the tick map never
+    /// whole. What [`Fold::fold`] builds, named for its market, for a reader
+    /// that needs only what a segment carries (prints, liquidations, the
+    /// debt as stated) and reads the rest in with [`Self::read_books`].
+    pub fn segment(perp: Address) -> Self {
+        Self {
+            perp,
+            ..Self::default()
+        }
+    }
+
     /// The market as the reads return it at `state`'s block, so a live
     /// cache boots without a scan: every total stated, the tick map whole,
     /// every position's level and margin known. What only events carry — a
@@ -367,6 +379,42 @@ impl Replay {
             timestamp: block.timestamp,
             value: (),
         });
+    }
+
+    /// Stand at the end of `block` as [`Self::read_through`] does, with the
+    /// solvency books as a read returned them there, so a segment knows the
+    /// debt and the margin total from that point on whether or not an event
+    /// restates them.
+    ///
+    /// # Errors
+    ///
+    /// [`ValidationError::InvalidConfig`] when the fold already stands at or
+    /// past the end of `block`: a read behind the fold would restate the
+    /// books out of chain order.
+    pub fn read_books(&mut self, block: BlockContext, books: SolvencyState) -> Result<()> {
+        let end_of_block = ChainPoint {
+            block: block.number,
+            log_index: u64::MAX,
+        };
+        if self.point().is_some_and(|point| point >= end_of_block) {
+            return Err(ValidationError::InvalidConfig {
+                reason: format!(
+                    "books read at block {} arrive at or behind the fold",
+                    block.number
+                ),
+            }
+            .into());
+        }
+        self.market.inner_mut().solvency.read(
+            Sample {
+                point: end_of_block,
+                timestamp: block.timestamp,
+                value: (),
+            },
+            books,
+        );
+        self.read_through(block);
+        Ok(())
     }
 
     /// The market this is a replay of.
