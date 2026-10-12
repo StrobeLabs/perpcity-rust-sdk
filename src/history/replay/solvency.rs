@@ -118,6 +118,17 @@ impl Solvency {
         }
     }
 
+    /// A read of the books at `at`, stated over whatever the fold knew as the
+    /// contract's own statements are: both totals restated, the moves
+    /// counted since them reset, each stated series extended.
+    pub(super) fn read(&mut self, at: Sample<()>, read: SolvencyState) {
+        self.margin = Stated::with(read.total_margin);
+        self.debt = Stated::with(read.bad_debt);
+        self.opening = Opening::default();
+        self.margin_stated.push(at.with(read.total_margin));
+        self.debt_stated.push(at.with(read.bad_debt));
+    }
+
     pub(super) fn retain(&mut self, retention: Retention) {
         self.margin_stated.retain(retention);
         self.debt_stated.retain(retention);

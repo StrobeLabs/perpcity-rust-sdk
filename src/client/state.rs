@@ -120,6 +120,45 @@ pub struct SolvencyState {
     pub total_margin: UsdcAtoms,
 }
 
+/// The solvency books as one pinned read returned them, with the market and
+/// the block they were read at. Made by [`StateAt::books`], so the books,
+/// their market and their block cannot disagree; what [`Replay::read_books`](crate::history::Replay::read_books)
+/// stands a fold on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Books {
+    perp: Address,
+    block: BlockContext,
+    solvency: SolvencyState,
+}
+
+impl Books {
+    /// Books a caller asserts were read from `perp` at `block`, for tests
+    /// that have no node to read them from.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn stated(perp: Address, block: BlockContext, solvency: SolvencyState) -> Self {
+        Self {
+            perp,
+            block,
+            solvency,
+        }
+    }
+
+    /// The market the books were read from.
+    pub(crate) fn perp(&self) -> Address {
+        self.perp
+    }
+
+    /// The block the books were read at.
+    pub(crate) fn block(&self) -> BlockContext {
+        self.block
+    }
+
+    /// The books.
+    pub(crate) fn solvency(&self) -> SolvencyState {
+        self.solvency
+    }
+}
+
 /// The rates the last touch set, as the contract's `rates()` returns them
 /// and as `RatesAndEmasRefreshed` emits them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -305,6 +344,19 @@ impl StateAt {
         Ok(SolvencyState {
             bad_debt: UsdcAtoms::new(state.badDebt),
             total_margin: UsdcAtoms::new(state.totalMargin),
+        })
+    }
+
+    /// The solvency books at this handle's block, stamped with it.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::solvency`].
+    pub async fn books(&self) -> Result<Books> {
+        Ok(Books {
+            perp: self.market.perp,
+            block: self.block,
+            solvency: self.solvency().await?,
         })
     }
 

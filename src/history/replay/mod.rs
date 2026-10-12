@@ -31,7 +31,7 @@ use std::result::Result as StdResult;
 use alloy::primitives::{Address, U256};
 use alloy::providers::Provider;
 
-use crate::client::{OpenInterest, SolvencyState, StateAt};
+use crate::client::{Books, OpenInterest, SolvencyState, StateAt};
 use crate::errors::{Result, ValidationError};
 use crate::events::{CumulativesInfo, ModuleKind};
 use crate::math::BlockContext;
@@ -248,6 +248,18 @@ impl Replay {
         }
     }
 
+    /// A fold over a segment that does not start at the market's genesis:
+    /// every total unknown until the segment states it, the tick map never
+    /// whole. What [`Fold::fold`] builds, named for its market, for a reader
+    /// that needs only what a segment carries (prints, liquidations, the
+    /// debt as stated) and reads the rest in with [`Self::read_books`].
+    pub fn segment(perp: Address) -> Self {
+        Self {
+            perp,
+            ..Self::default()
+        }
+    }
+
     /// The market as the reads return it at `state`'s block, so a live
     /// cache boots without a scan: every total stated, the tick map whole,
     /// every position's level and margin known. What only events carry — a
@@ -369,6 +381,54 @@ impl Replay {
         });
     }
 
+    /// Stand at the end of the block `books` were read at, as
+    /// [`Self::read_through`] does, with those books stated there, so a
+    /// segment knows the debt and the margin total from that point on
+    /// whether or not an event restates them.
+    ///
+    /// # Errors
+    ///
+    /// [`ValidationError::InvalidConfig`] when the books were read from
+    /// another market, or when the fold already stands at or past the end of
+    /// their block: a read behind the fold would restate the books out of
+    /// chain order.
+    pub fn read_books(&mut self, books: Books) -> Result<()> {
+        if books.perp() != self.perp {
+            return Err(ValidationError::InvalidConfig {
+                reason: format!(
+                    "books read from {} cannot stand the fold of {}",
+                    books.perp(),
+                    self.perp
+                ),
+            }
+            .into());
+        }
+        let block = books.block();
+        let end_of_block = ChainPoint {
+            block: block.number,
+            log_index: u64::MAX,
+        };
+        if self.point().is_some_and(|point| point >= end_of_block) {
+            return Err(ValidationError::InvalidConfig {
+                reason: format!(
+                    "books read at block {} arrive at or behind the fold",
+                    block.number
+                ),
+            }
+            .into());
+        }
+        self.market.inner_mut().solvency.read(
+            Sample {
+                point: end_of_block,
+                timestamp: block.timestamp,
+                value: (),
+            },
+            books.solvency(),
+        );
+        self.read_through(block);
+        Ok(())
+    }
+
     /// The market this is a replay of.
     pub fn perp(&self) -> Address {
         self.perp
@@ -462,14 +522,16 @@ impl Replay {
         self.market().solvency.state()
     }
 
-    /// The margin total as each `MarginTransferred` stated it. The fees
+    /// The margin total as each `MarginTransferred` stated it, and as each
+    /// [`Self::read_books`] read it at the end of its block. The fees
     /// swaps removed since the last statement are not in it; the books
     /// ([`Self::solvency`]) carry those.
     pub fn margin_total(&self) -> &Series<UsdcAtoms> {
         &self.market().solvency.margin_stated
     }
 
-    /// The bad debt as each booking, socialization or donation stated it.
+    /// The bad debt as each booking, socialization or donation stated it,
+    /// and as each [`Self::read_books`] read it at the end of its block.
     pub fn bad_debt(&self) -> &Series<UsdcAtoms> {
         &self.market().solvency.debt_stated
     }

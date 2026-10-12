@@ -82,10 +82,12 @@ pub use replay::{
 };
 pub use scan::{ScanStats, get_logs_chunked};
 pub use tape::{
-    ChainPoint, OwnershipLog, Positioned, Swap, SwapAction, Tape, TapeAddresses, TapeEvent,
-    TapeSlice, Wallets, latest_market_events, market_events, market_tape,
+    ChainPoint, OwnershipLog, PoolLogs, Positioned, Swap, SwapAction, Tape, TapeAddresses,
+    TapeEvent, TapeSlice, Wallets, latest_market_events, market_events, market_tape,
 };
 pub use transfers::{TokenTransfer, token_transfers};
+
+use std::collections::BTreeMap;
 
 use alloy::primitives::Address;
 use alloy::providers::Provider;
@@ -318,6 +320,37 @@ impl<P: Provider> History<P> {
             addresses,
             from_block,
             to,
+            &self.widths,
+            self.in_flight,
+        )
+        .await
+    }
+
+    /// Every market's tape from one scan per filter, to `to_block` or the
+    /// lagged head, keyed by perp: the perps' and beacons' logs by address,
+    /// and with [`PoolLogs::Include`] the pools' by id. A beacon two markets
+    /// share prints into both. Every market named is in the map, with an
+    /// empty tape when it had no events.
+    ///
+    /// # Errors
+    ///
+    /// As [`market_tape`]; markets on two pool managers are
+    /// [`ValidationError::InvalidConfig`](crate::errors::ValidationError::InvalidConfig),
+    /// since one pool filter names one.
+    pub async fn markets_tape(
+        &self,
+        markets: &[TapeAddresses],
+        from_block: u64,
+        to_block: Option<u64>,
+        pool: PoolLogs,
+    ) -> Result<BTreeMap<Address, Tape>> {
+        let to = self.resolve(to_block).await?;
+        tape::markets_tape_with(
+            &self.provider,
+            markets,
+            from_block,
+            to,
+            pool,
             &self.widths,
             self.in_flight,
         )

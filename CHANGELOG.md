@@ -17,6 +17,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`History::markets_tape` reads every market's tape from one scan.** It takes a slice of `TapeAddresses` and returns a `BTreeMap` of tapes keyed by perp, splitting one scan's logs back by perp, beacon and pool id; a beacon two markets share prints into both. `PoolLogs::Skip` drops the PoolManager filter for a reader that folds no positions and no pool price, which skips a market's densest logs. A monitor following seven markets goes from fourteen `eth_getLogs` per poll to one whenever the poll's range fits one scan window; a wider range costs one request per window, as any scan does. A perp named twice is refused.
+
+- **`Replay::segment` and `Replay::read_books` fold a recent window.** `segment` is the trait's segment fold named for its market; `read_books` stands it at the end of a block with the solvency books a read returned there, taking a `Books` that only `StateAt::books` makes, so the books, their market and their block cannot disagree, and refusing another market's; the stated debt and margin series carry the read as a sample, so a window fold knows the bad-debt level from that point on instead of only after the window's first restatement. A read at or behind the fold is refused.
+
 - **`MarketReader::is_upgradeable`** says whether a market runs `v0.2.2-upgradeable`, the build the health and equity math ports, from its pool key's hook. It is read once per market and cached with the pool key, so a caller can skip a build `58b42b7` market before valuing anything on it.
 
 - **`StateAt::owners`**, the holder of every position NFT in one row multicall per 500 ids at a pinned block, where `get_positions_by_owner` makes one `ownerOf` request per id at the head. An id never minted or burned is `None`, told apart by the token's own `TokenDoesNotExist` revert, so any other failed row is an error and never a burn.

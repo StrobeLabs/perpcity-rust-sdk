@@ -2,6 +2,7 @@
 //! block, what moved in silence, and the combine law from genesis.
 
 use super::*;
+use crate::client::Books;
 
 #[test]
 fn the_totals_are_the_last_stated_and_the_snapshots_carry_the_callers_block() {
@@ -425,5 +426,137 @@ fn swap_fees_leave_the_margin_total_as_the_build_orders_them() {
         segment.solvency(),
         None,
         "a segment never told the debt does not invent it"
+    );
+}
+
+fn standing_block(number: u64) -> BlockContext {
+    BlockContext {
+        number,
+        hash: B256::with_last_byte(1),
+        timestamp: 1_700_000_000 + number * 10,
+    }
+}
+
+fn debt_booked(block: u64, after: u128) -> TapeEvent {
+    row(
+        block,
+        0,
+        MarketEvent::BadDebtAccounted {
+            bad_debt: UsdcAtoms::new(after),
+            insurance_after: UsdcAtoms::ZERO,
+            bad_debt_after: UsdcAtoms::new(after),
+        },
+    )
+}
+
+#[test]
+fn a_segment_knows_no_debt_until_the_books_are_read() {
+    let perp = Address::repeat_byte(0xF0);
+    let mut replay = Replay::segment(perp);
+    assert_eq!(replay.perp(), perp);
+    assert!(
+        replay.bad_debt().latest().is_none(),
+        "a segment states nothing it did not see"
+    );
+
+    let books = SolvencyState {
+        bad_debt: UsdcAtoms::new(157_820_000),
+        total_margin: UsdcAtoms::new(9_000_000_000),
+    };
+    replay
+        .read_books(Books::stated(
+            Address::repeat_byte(0xF0),
+            standing_block(500),
+            books,
+        ))
+        .unwrap();
+
+    assert_eq!(
+        replay.bad_debt().latest().map(|reading| reading.value),
+        Some(books.bad_debt)
+    );
+    assert_eq!(replay.solvency(), Some(books));
+    assert_eq!(
+        replay.block().map(|block| block.number),
+        Some(500),
+        "it stands at the end of the read's block"
+    );
+}
+
+#[test]
+fn debt_booked_after_the_read_is_growth_over_the_read() {
+    let mut replay = Replay::segment(Address::repeat_byte(0xF0));
+    let books = SolvencyState {
+        bad_debt: UsdcAtoms::new(100),
+        total_margin: UsdcAtoms::new(1_000),
+    };
+    replay
+        .read_books(Books::stated(
+            Address::repeat_byte(0xF0),
+            standing_block(500),
+            books,
+        ))
+        .unwrap();
+    replay.apply(&debt_booked(501, 160));
+
+    let series = replay.bad_debt();
+    let read = ChainPoint {
+        block: 500,
+        log_index: u64::MAX,
+    };
+    assert_eq!(
+        series.at(read).map(|reading| reading.value),
+        Some(UsdcAtoms::new(100))
+    );
+    assert_eq!(
+        series.latest().map(|reading| reading.value),
+        Some(UsdcAtoms::new(160))
+    );
+    assert_eq!(replay.gaps().faults.refused, 0);
+}
+
+#[test]
+fn books_read_at_or_behind_the_fold_are_refused() {
+    let mut replay = Replay::segment(Address::repeat_byte(0xF0));
+    replay.read_through(standing_block(500));
+    let books = SolvencyState::default();
+
+    assert!(
+        replay
+            .read_books(Books::stated(
+                Address::repeat_byte(0xF0),
+                standing_block(500),
+                books
+            ))
+            .is_err()
+    );
+    assert!(
+        replay
+            .read_books(Books::stated(
+                Address::repeat_byte(0xF0),
+                standing_block(499),
+                books
+            ))
+            .is_err()
+    );
+    assert!(
+        replay.bad_debt().latest().is_none(),
+        "a refused read changes nothing"
+    );
+}
+
+#[test]
+fn books_from_another_market_are_refused() {
+    let mut replay = Replay::segment(Address::repeat_byte(0xF0));
+    let books = Books::stated(
+        Address::repeat_byte(0xF1),
+        standing_block(500),
+        SolvencyState::default(),
+    );
+
+    assert!(replay.read_books(books).is_err());
+    assert!(
+        replay.block().is_none(),
+        "a refused read does not move the fold"
     );
 }

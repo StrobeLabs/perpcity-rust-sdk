@@ -54,6 +54,7 @@ pub(crate) mod storage;
 pub mod transport;
 pub mod units;
 
+pub use client::Books;
 #[doc(inline)]
 pub use client::{
     ARBITRUM_CHAIN_ID, ARBITRUM_POOL_MANAGER, ARBITRUM_SEPOLIA_CHAIN_ID,
