@@ -292,6 +292,17 @@ pub(in crate::history) async fn markets_tape_with<P: Provider>(
             }
             .into());
         }
+        if markets
+            .iter()
+            .filter(|other| other.perp == market.perp)
+            .count()
+            > 1
+        {
+            return Err(ValidationError::InvalidConfig {
+                reason: format!("market {} named twice: each perp is one tape", market.perp),
+            }
+            .into());
+        }
         addresses.extend([market.perp, market.beacon]);
     }
     addresses.sort_unstable();

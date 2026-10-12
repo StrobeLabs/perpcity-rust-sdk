@@ -2,6 +2,7 @@
 //! block, what moved in silence, and the combine law from genesis.
 
 use super::*;
+use crate::client::Books;
 
 #[test]
 fn the_totals_are_the_last_stated_and_the_snapshots_carry_the_callers_block() {
@@ -462,7 +463,9 @@ fn a_segment_knows_no_debt_until_the_books_are_read() {
         bad_debt: UsdcAtoms::new(157_820_000),
         total_margin: UsdcAtoms::new(9_000_000_000),
     };
-    replay.read_books(standing_block(500), books).unwrap();
+    replay
+        .read_books(Books::stated(standing_block(500), books))
+        .unwrap();
 
     assert_eq!(
         replay.bad_debt().latest().map(|reading| reading.value),
@@ -483,7 +486,9 @@ fn debt_booked_after_the_read_is_growth_over_the_read() {
         bad_debt: UsdcAtoms::new(100),
         total_margin: UsdcAtoms::new(1_000),
     };
-    replay.read_books(standing_block(500), books).unwrap();
+    replay
+        .read_books(Books::stated(standing_block(500), books))
+        .unwrap();
     replay.apply(&debt_booked(501, 160));
 
     let series = replay.bad_debt();
@@ -508,8 +513,16 @@ fn books_read_at_or_behind_the_fold_are_refused() {
     replay.read_through(standing_block(500));
     let books = SolvencyState::default();
 
-    assert!(replay.read_books(standing_block(500), books).is_err());
-    assert!(replay.read_books(standing_block(499), books).is_err());
+    assert!(
+        replay
+            .read_books(Books::stated(standing_block(500), books))
+            .is_err()
+    );
+    assert!(
+        replay
+            .read_books(Books::stated(standing_block(499), books))
+            .is_err()
+    );
     assert!(
         replay.bad_debt().latest().is_none(),
         "a refused read changes nothing"

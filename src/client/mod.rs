@@ -52,6 +52,7 @@ pub use chain::{ChainDeployments, ChainReader};
 pub use maker_equity::{MakerEquityKind, MakerEquityOutcome};
 pub use market::{MarketReader, PositionRole};
 pub use queries::{Bounds, Fees, MarketConfig, MarketSnapshot, OpenInterest};
+pub use state::Books;
 pub use state::{
     MAX_ROW_BATCH, MarginRatioTriple, MarginRatios, MarketRates, RowOutcome, SolvencyState, StateAt,
 };

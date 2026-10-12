@@ -31,7 +31,7 @@ use std::result::Result as StdResult;
 use alloy::primitives::{Address, U256};
 use alloy::providers::Provider;
 
-use crate::client::{OpenInterest, SolvencyState, StateAt};
+use crate::client::{Books, OpenInterest, SolvencyState, StateAt};
 use crate::errors::{Result, ValidationError};
 use crate::events::{CumulativesInfo, ModuleKind};
 use crate::math::BlockContext;
@@ -381,17 +381,18 @@ impl Replay {
         });
     }
 
-    /// Stand at the end of `block` as [`Self::read_through`] does, with the
-    /// solvency books as a read returned them there, so a segment knows the
-    /// debt and the margin total from that point on whether or not an event
-    /// restates them.
+    /// Stand at the end of the block `books` were read at, as
+    /// [`Self::read_through`] does, with those books stated there, so a
+    /// segment knows the debt and the margin total from that point on
+    /// whether or not an event restates them.
     ///
     /// # Errors
     ///
     /// [`ValidationError::InvalidConfig`] when the fold already stands at or
-    /// past the end of `block`: a read behind the fold would restate the
+    /// past the end of that block: a read behind the fold would restate the
     /// books out of chain order.
-    pub fn read_books(&mut self, block: BlockContext, books: SolvencyState) -> Result<()> {
+    pub fn read_books(&mut self, books: Books) -> Result<()> {
+        let block = books.block();
         let end_of_block = ChainPoint {
             block: block.number,
             log_index: u64::MAX,
@@ -411,7 +412,7 @@ impl Replay {
                 timestamp: block.timestamp,
                 value: (),
             },
-            books,
+            books.solvency(),
         );
         self.read_through(block);
         Ok(())
@@ -510,14 +511,16 @@ impl Replay {
         self.market().solvency.state()
     }
 
-    /// The margin total as each `MarginTransferred` stated it. The fees
+    /// The margin total as each `MarginTransferred` stated it, and as each
+    /// [`Self::read_books`] read it at the end of its block. The fees
     /// swaps removed since the last statement are not in it; the books
     /// ([`Self::solvency`]) carry those.
     pub fn margin_total(&self) -> &Series<UsdcAtoms> {
         &self.market().solvency.margin_stated
     }
 
-    /// The bad debt as each booking, socialization or donation stated it.
+    /// The bad debt as each booking, socialization or donation stated it,
+    /// and as each [`Self::read_books`] read it at the end of its block.
     pub fn bad_debt(&self) -> &Series<UsdcAtoms> {
         &self.market().solvency.debt_stated
     }

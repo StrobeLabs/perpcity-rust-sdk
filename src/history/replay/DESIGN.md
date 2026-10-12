@@ -196,20 +196,19 @@ matches is the other, and at these throughputs neither is measurable.
 
 | Type | Invariant | Produced by | Consumed by |
 |---|---|---|---|
+| [`Books`](../../client/state.rs#L128) | the solvency books and the block they were read at, from one pinned read, so they cannot disagree | [`StateAt::books`](../../client/DESIGN.md); `Books::stated` in tests | [`Replay::read_books`](mod.rs#L394), which stands a window fold on them. |
 | [`Replay`](mod.rs#L146) | the market as its events describe it, in the reads' types, with each figure's history kept as a series or arrivals, known through the last block read; every field combines across segments, the series by appending; an event at or before the fold's point is refused, never applied | [`Replay::from_genesis`](mod.rs#L236), [`Replay::seeded`](mod.rs#L278) from a [`StateAt`](../../client/DESIGN.md), [`Replay::segment`](mod.rs#L256), or the trait's `fold`; `Replay::retaining` sets the `Retention`; then `apply`, `Replay::catch_up`, or `Replay::read_through` (see accepted structure) | nothing in the crate; `Replay::deposited`, what bad debt is set against, is the one bare sum. The strategy layer's monitor, live cache and research folds, each driving it from a different source. |
-| [`Positions`](positions.rs#L530), [`PositionState`](positions.rs#L156), [`PositionKind`](positions.rs#L25) | every position on the tape: its two legs, the contract's delta, summed from its swaps and its priced liquidity changes; a maker's band; the margin a read supplied until an event touches it. Met mid-life or unpriced, a position is `Unknown` or unsized, never guessed, so segments merge | folded inside `Replay`; read through [`Replay::positions`](mod.rs#L568) and `Replay::position` | the strategy layer's live cache and economics, which price a taker's two legs at a mark; a `MakerBand` here and one read compare with `==`. |
+| [`Positions`](positions.rs#L530), [`PositionState`](positions.rs#L156), [`PositionKind`](positions.rs#L25) | every position on the tape: its two legs, the contract's delta, summed from its swaps and its priced liquidity changes; a maker's band; the margin a read supplied until an event touches it. Met mid-life or unpriced, a position is `Unknown` or unsized, never guessed, so segments merge | folded inside `Replay`; read through [`Replay::positions`](mod.rs#L571) and `Replay::position` | the strategy layer's live cache and economics, which price a taker's two legs at a mark; a `MakerBand` here and one read compare with `==`. |
 | [`Liquidation`](activity.rs#L21), [`Settlement`](activity.rs#L41) | the marks the replay alone can make. A liquidation is one record per position per liquidating transaction, whichever build's events carried it, with the pool price before and after and the index then; a cut inside the transaction or before the first price is repaired at `combine`. A settlement is what a position paid or earned when touched. Both are `Positioned`, so custody scopes them; the swap mark is the tape's | the activity fold inside `Replay`, read through `Replay::liquidations` and `Replay::settlements` | the readings over arrivals in the strategy layer: intensity, a cascade's run, a sweep. |
-| [`Gaps`](mod.rs#L64), [`Silences`](mod.rs#L78), [`Unknowns`](mod.rs#L94), [`Faults`](mod.rs#L111) | what the fold does not know, in three kinds with three cures: what the contract moved silently, cured by the cutover; what the fold's start did not supply, cured by a seed; what the driver did wrong, cured by `catch_up`. Decided at the read from the latest totals, so the counts combine like the rest | [`Replay::gaps`](mod.rs#L601) | nothing in the crate: the strategy layer's gate, one alarm per part. A reading with a nonzero gap is forensic, not a decision's input. |
+| [`Gaps`](mod.rs#L64), [`Silences`](mod.rs#L78), [`Unknowns`](mod.rs#L94), [`Faults`](mod.rs#L111) | what the fold does not know, in three kinds with three cures: what the contract moved silently, cured by the cutover; what the fold's start did not supply, cured by a seed; what the driver did wrong, cured by `catch_up`. Decided at the read from the latest totals, so the counts combine like the rest | [`Replay::gaps`](mod.rs#L604) | nothing in the crate: the strategy layer's gate, one alarm per part. A reading with a nonzero gap is forensic, not a decision's input. |
 
 ## Accepted structure
 
-- **The books flow both ways.** `Replay::solvency` hands a
-  [`SolvencyState`](../../client/DESIGN.md) out, and `Replay::read_books`
-  takes one in: a window fold has no statement of the debt before its
-  first event, so a reader states the books a read returned at the end of
-  a block, and the fold continues from there as from a seed. The pair is
-  one type in both directions on purpose: the read and the fold answer
-  the same question, so they share its shape.
+- **A read's books stand a window fold.** `Replay::read_books` takes the
+  [`Books`](../../client/DESIGN.md) a `StateAt` read, the books and their
+  block in one value: a window fold has no statement of the debt before
+  its first event, so a reader states the books a read returned at the end
+  of that block, and the fold continues from there as from a seed.
 
 - **The snapshots are the reads' types, with the caller's block.**
   `Replay::capacity_at`, `Replay::mark_at`, `Replay::solvency`,

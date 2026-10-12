@@ -416,3 +416,17 @@ async fn pool_logs_route_to_their_market_by_pool_id() {
     assert_eq!(tapes[&PERP][0].block_number, 20);
     assert_eq!(tapes[&PERP_B][0].block_number, 21);
 }
+
+#[tokio::test]
+async fn a_perp_named_twice_is_refused() {
+    let node = FakeNode::new(vec![], u64::MAX);
+    let history = History::new(node.provider()).with_lag(0);
+    let [first, _] = two_markets(BEACON);
+
+    let refused = history
+        .markets_tape(&[first, first], 0, Some(100), PoolLogs::Skip)
+        .await;
+
+    assert!(refused.is_err(), "its logs would land in its tape twice");
+    assert!(node.requests().is_empty(), "refused before any request");
+}
