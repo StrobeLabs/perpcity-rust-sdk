@@ -67,6 +67,13 @@ pub enum PerpCityError {
     #[error(transparent)]
     Serde(#[from] serde_json::Error),
 
+    /// Circle's attestation service failed; [`IrisError::is_transient`]
+    /// says whether a retry may succeed.
+    ///
+    /// [`IrisError::is_transient`]: crate::cctp::IrisError::is_transient
+    #[error(transparent)]
+    Iris(#[from] crate::cctp::IrisError),
+
     /// The filesystem's error, from writing or reading a recording. Not
     /// transient: a path that is missing or unwritable stays so, and
     /// [`is_transient`](Self::is_transient) says no.
@@ -110,6 +117,9 @@ impl PerpCityError {
     /// `LogsRejected` is a server's refusal of an `eth_getLogs` request at
     /// its narrowest, and `StateUnavailable` a full node's refusal of
     /// pruned state, so neither is transient.
+    ///
+    /// `Iris` is transient when Circle's service failed to answer, rate
+    /// limited, or erred on its side.
     pub fn is_transient(&self) -> bool {
         matches!(
             self,
@@ -125,7 +135,7 @@ impl PerpCityError {
                     source: Some(_),
                     ..
                 })
-        )
+        ) || matches!(self, Self::Iris(e) if e.is_transient())
     }
 
     /// Hash of the signed transaction when the failure came at or after

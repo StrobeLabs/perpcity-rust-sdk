@@ -7,6 +7,7 @@
 //!
 //! | Module | Purpose |
 //! |---|---|
+//! | [`cctp`] | Circle CCTP V2: native USDC burned on one chain and minted on another |
 //! | [`client`] | The reads and the trades, and the parameters, results, configuration and state they are spoken in |
 //! | [`constants`] | Protocol constants mirrored from on-chain `Constants.sol` |
 //! | [`contracts`] | ABI bindings via Alloy `sol!` — structs, events, errors, functions |
@@ -37,6 +38,7 @@
 #![warn(missing_debug_implementations, missing_docs, rust_2018_idioms)]
 #![doc = "\n\nThe crate's design lives beside its code as a graph of nodes, one per component, rooted at [`DESIGN.md`](https://github.com/StrobeLabs/perpcity-rust-sdk/blob/main/DESIGN.md); `cargo xtask design --open` draws its type graph."]
 
+pub mod cctp;
 pub mod client;
 pub mod constants;
 pub mod contracts;
