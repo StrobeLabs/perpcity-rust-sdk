@@ -22,7 +22,8 @@ use std::ops::Range;
 
 use alloy::primitives::{Address, B256, Bytes, U256, address};
 use alloy::providers::Provider;
-use alloy::sol_types::SolCall;
+use alloy::rpc::types::Filter;
+use alloy::sol_types::{SolCall, SolEvent};
 use serde::Deserialize;
 use thiserror::Error;
 
@@ -30,6 +31,7 @@ use crate::UsdcAtoms;
 use crate::client::{ARBITRUM_CHAIN_ID, ARBITRUM_SEPOLIA_CHAIN_ID, ARBITRUM_USDC};
 use crate::contracts::{IMessageTransmitterV2, ITokenMessengerV2};
 use crate::errors::Result;
+use crate::history::get_logs_chunked;
 
 /// `TokenMessengerV2` on every CCTP V2 mainnet chain (deployed with CREATE2).
 const TOKEN_MESSENGER_V2: Address = address!("28b5a0e9C621a5BadaA536219b3a228C8168cf5d");
@@ -113,6 +115,28 @@ impl CctpChain {
         ]
         .into_iter()
         .find(|chain| chain.chain_id == chain_id)
+    }
+
+    /// The transactions in blocks `from_block..=to_block` that burned USDC
+    /// from `depositor` through this chain's messenger, in chain order.
+    ///
+    /// `provider` must be connected to this chain. A caller that lost track
+    /// of its burns reads them back here, then asks Iris for each.
+    pub async fn burns_by<P: Provider>(
+        &self,
+        provider: &P,
+        depositor: Address,
+        from_block: u64,
+        to_block: u64,
+    ) -> Result<Vec<B256>> {
+        let filter = Filter::new()
+            .address(self.token_messenger)
+            .event_signature(ITokenMessengerV2::DepositForBurn::SIGNATURE_HASH)
+            .topic2(depositor.into_word());
+        let logs = get_logs_chunked(provider, &filter, from_block, to_block).await?;
+        let mut hashes: Vec<B256> = logs.iter().filter_map(|log| log.transaction_hash).collect();
+        hashes.dedup();
+        Ok(hashes)
     }
 
     /// Whether this chain has already minted the message with `nonce`.
@@ -551,6 +575,29 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(status, AttestationStatus::NotFound);
+    }
+
+    /// Live: a depositor's burns read back from Base. The busiest
+    /// depositor in a recent window must appear among `burns_by` for it.
+    #[tokio::test]
+    #[ignore = "network: reads Base mainnet logs"]
+    async fn burns_read_back_by_depositor() {
+        let provider = alloy::providers::ProviderBuilder::new()
+            .connect_http("https://base-rpc.publicnode.com".parse().unwrap());
+        let head = provider.get_block_number().await.unwrap();
+        let filter = Filter::new()
+            .address(CCTP_BASE.token_messenger)
+            .event_signature(ITokenMessengerV2::DepositForBurn::SIGNATURE_HASH);
+        let logs = get_logs_chunked(&provider, &filter, head - 300, head)
+            .await
+            .unwrap();
+        let log = logs.first().expect("Base burns USDC every few blocks");
+        let depositor = Address::from_word(log.topics()[2]);
+        let burns = CCTP_BASE
+            .burns_by(&provider, depositor, head - 300, head)
+            .await
+            .unwrap();
+        assert!(burns.contains(&log.transaction_hash.unwrap()));
     }
 
     #[test]
