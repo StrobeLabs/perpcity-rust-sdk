@@ -388,10 +388,21 @@ impl Replay {
     ///
     /// # Errors
     ///
-    /// [`ValidationError::InvalidConfig`] when the fold already stands at or
-    /// past the end of that block: a read behind the fold would restate the
-    /// books out of chain order.
+    /// [`ValidationError::InvalidConfig`] when the books were read from
+    /// another market, or when the fold already stands at or past the end of
+    /// their block: a read behind the fold would restate the books out of
+    /// chain order.
     pub fn read_books(&mut self, books: Books) -> Result<()> {
+        if books.perp() != self.perp {
+            return Err(ValidationError::InvalidConfig {
+                reason: format!(
+                    "books read from {} cannot stand the fold of {}",
+                    books.perp(),
+                    self.perp
+                ),
+            }
+            .into());
+        }
         let block = books.block();
         let end_of_block = ChainPoint {
             block: block.number,

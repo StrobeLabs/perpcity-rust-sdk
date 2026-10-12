@@ -120,22 +120,32 @@ pub struct SolvencyState {
     pub total_margin: UsdcAtoms,
 }
 
-/// The solvency books as one pinned read returned them, with the block they
-/// were read at. Made by [`StateAt::books`], so the books and their block
-/// cannot disagree; what [`Replay::read_books`](crate::history::Replay::read_books)
+/// The solvency books as one pinned read returned them, with the market and
+/// the block they were read at. Made by [`StateAt::books`], so the books,
+/// their market and their block cannot disagree; what [`Replay::read_books`](crate::history::Replay::read_books)
 /// stands a fold on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Books {
+    perp: Address,
     block: BlockContext,
     solvency: SolvencyState,
 }
 
 impl Books {
-    /// Books a caller asserts were read at `block`, for tests that have no
-    /// node to read them from.
+    /// Books a caller asserts were read from `perp` at `block`, for tests
+    /// that have no node to read them from.
     #[cfg(any(test, feature = "test-utils"))]
-    pub fn stated(block: BlockContext, solvency: SolvencyState) -> Self {
-        Self { block, solvency }
+    pub fn stated(perp: Address, block: BlockContext, solvency: SolvencyState) -> Self {
+        Self {
+            perp,
+            block,
+            solvency,
+        }
+    }
+
+    /// The market the books were read from.
+    pub(crate) fn perp(&self) -> Address {
+        self.perp
     }
 
     /// The block the books were read at.
@@ -344,6 +354,7 @@ impl StateAt {
     /// As [`Self::solvency`].
     pub async fn books(&self) -> Result<Books> {
         Ok(Books {
+            perp: self.market.perp,
             block: self.block,
             solvency: self.solvency().await?,
         })

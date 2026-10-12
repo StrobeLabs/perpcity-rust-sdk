@@ -464,7 +464,11 @@ fn a_segment_knows_no_debt_until_the_books_are_read() {
         total_margin: UsdcAtoms::new(9_000_000_000),
     };
     replay
-        .read_books(Books::stated(standing_block(500), books))
+        .read_books(Books::stated(
+            Address::repeat_byte(0xF0),
+            standing_block(500),
+            books,
+        ))
         .unwrap();
 
     assert_eq!(
@@ -487,7 +491,11 @@ fn debt_booked_after_the_read_is_growth_over_the_read() {
         total_margin: UsdcAtoms::new(1_000),
     };
     replay
-        .read_books(Books::stated(standing_block(500), books))
+        .read_books(Books::stated(
+            Address::repeat_byte(0xF0),
+            standing_block(500),
+            books,
+        ))
         .unwrap();
     replay.apply(&debt_booked(501, 160));
 
@@ -515,16 +523,40 @@ fn books_read_at_or_behind_the_fold_are_refused() {
 
     assert!(
         replay
-            .read_books(Books::stated(standing_block(500), books))
+            .read_books(Books::stated(
+                Address::repeat_byte(0xF0),
+                standing_block(500),
+                books
+            ))
             .is_err()
     );
     assert!(
         replay
-            .read_books(Books::stated(standing_block(499), books))
+            .read_books(Books::stated(
+                Address::repeat_byte(0xF0),
+                standing_block(499),
+                books
+            ))
             .is_err()
     );
     assert!(
         replay.bad_debt().latest().is_none(),
         "a refused read changes nothing"
+    );
+}
+
+#[test]
+fn books_from_another_market_are_refused() {
+    let mut replay = Replay::segment(Address::repeat_byte(0xF0));
+    let books = Books::stated(
+        Address::repeat_byte(0xF1),
+        standing_block(500),
+        SolvencyState::default(),
+    );
+
+    assert!(replay.read_books(books).is_err());
+    assert!(
+        replay.block().is_none(),
+        "a refused read does not move the fold"
     );
 }
