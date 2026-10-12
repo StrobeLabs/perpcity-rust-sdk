@@ -6,7 +6,7 @@
 //! 1. [`Burn`] — `depositForBurn` on the source chain's `TokenMessengerV2`
 //!    burns the USDC and emits a message naming the destination and the
 //!    recipient. The caller approves the messenger for the amount first.
-//! 2. [`IrisClient::attestation`] — Circle's attestation service signs the
+//! 2. [`IrisClient::attestations`] — Circle's attestation service signs the
 //!    message once the source chain reaches the burn's [`Finality`].
 //! 3. [`Attested::receive_calldata`] — `receiveMessage` on the destination
 //!    chain's `MessageTransmitterV2` checks the signature and mints the USDC
@@ -19,6 +19,7 @@
 #![doc = "\n\nThe design of this module: [`src/cctp/DESIGN.md`](https://github.com/StrobeLabs/perpcity-rust-sdk/blob/main/src/cctp/DESIGN.md)."]
 
 use std::ops::Range;
+use std::time::Duration;
 
 use alloy::primitives::{Address, B256, Bytes, U256, address};
 use alloy::providers::Provider;
@@ -54,18 +55,17 @@ pub const BASE_SEPOLIA_CHAIN_ID: u64 = 84532;
 /// The USDC is Circle's, which is the market's collateral on Arbitrum One
 /// but not on Arbitrum Sepolia, whose markets settle in a mock token
 /// ([`ARBITRUM_SEPOLIA_USDC`](crate::ARBITRUM_SEPOLIA_USDC)).
+///
+/// The fields are linked (a domain belongs to one chain, its contracts to
+/// one network), so the four constants are the only values: a chain is
+/// chosen, never assembled.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CctpChain {
-    /// The chain's EVM chain ID.
-    pub chain_id: u64,
-    /// The chain's CCTP domain, which messages address it by.
-    pub domain: u32,
-    /// Circle's native USDC on the chain.
-    pub usdc: Address,
-    /// The `TokenMessengerV2` a burn is sent to.
-    pub token_messenger: Address,
-    /// The `MessageTransmitterV2` a mint is sent to.
-    pub message_transmitter: Address,
+    chain_id: u64,
+    domain: u32,
+    usdc: Address,
+    token_messenger: Address,
+    message_transmitter: Address,
 }
 
 /// Arbitrum One, CCTP domain 3.
@@ -105,6 +105,31 @@ pub const CCTP_BASE_SEPOLIA: CctpChain = CctpChain {
 };
 
 impl CctpChain {
+    /// The chain's EVM chain ID.
+    pub const fn chain_id(&self) -> u64 {
+        self.chain_id
+    }
+
+    /// The chain's CCTP domain, which messages address it by.
+    pub const fn domain(&self) -> u32 {
+        self.domain
+    }
+
+    /// Circle's native USDC on the chain.
+    pub const fn usdc(&self) -> Address {
+        self.usdc
+    }
+
+    /// The `TokenMessengerV2` a burn is sent to.
+    pub const fn token_messenger(&self) -> Address {
+        self.token_messenger
+    }
+
+    /// The `MessageTransmitterV2` a mint is sent to.
+    pub const fn message_transmitter(&self) -> Address {
+        self.message_transmitter
+    }
+
     /// The chain with this chain ID, among the four this module knows.
     pub fn for_chain_id(chain_id: u64) -> Option<Self> {
         [
@@ -201,8 +226,8 @@ impl Burn {
         }
     }
 
-    /// The `depositForBurn` calldata, to send to `source.token_messenger`
-    /// after approving it for `amount` of `source.usdc`.
+    /// The `depositForBurn` calldata, to send to `source.token_messenger()`
+    /// after approving it for `amount` of `source.usdc()`.
     ///
     /// The destination caller is left empty, so anyone may submit the mint.
     pub fn calldata(&self, source: &CctpChain) -> Bytes {
@@ -289,7 +314,7 @@ impl Attested {
     }
 
     /// The `receiveMessage` calldata, to send to the destination's
-    /// `message_transmitter`.
+    /// `message_transmitter()`.
     pub fn receive_calldata(&self) -> Bytes {
         IMessageTransmitterV2::receiveMessageCall {
             message: self.message.clone(),
@@ -300,11 +325,9 @@ impl Attested {
     }
 }
 
-/// Where Circle's attestation of one burn stands.
+/// Where Circle's attestation of one burn message stands.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AttestationStatus {
-    /// Iris has not indexed the burn yet, or the hash holds no burn.
-    NotFound,
     /// Iris has the burn and waits for its finality.
     Pending,
     /// Signed and ready to mint.
@@ -343,6 +366,9 @@ impl IrisError {
     }
 }
 
+/// The longest one Iris request may take, connection to last byte.
+pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// Circle's attestation service (Iris), version 2.
 #[derive(Debug, Clone)]
 pub struct IrisClient {
@@ -362,23 +388,37 @@ impl IrisClient {
     }
 
     /// The service at `base_url`, without a trailing slash.
+    ///
+    /// # Panics
+    ///
+    /// When the TLS backend cannot be initialised, as `reqwest::Client::new`
+    /// does.
     pub fn new(base_url: impl Into<String>) -> Self {
+        let http = reqwest::Client::builder()
+            .timeout(REQUEST_TIMEOUT)
+            .build()
+            .expect("the TLS backend initialises");
         Self {
             base_url: base_url.into(),
-            http: reqwest::Client::new(),
+            http,
         }
     }
 
-    /// The attestation of the burn in transaction `tx_hash` on the chain
-    /// with CCTP domain `source_domain`.
+    /// The attestation of each burn message in transaction `tx_hash` on
+    /// the chain with CCTP domain `source_domain`, in the order Iris lists
+    /// them. One `depositForBurn` emits one message; a contract that burns
+    /// several times in one transaction emits several. Empty when Iris has
+    /// not indexed the transaction yet, or it holds no burn.
     ///
     /// Iris allows 35 requests a second and blocks a caller that exceeds
-    /// it for five minutes; poll at a human pace.
-    pub async fn attestation(
+    /// it for five minutes; poll at a human pace. Each request is bounded
+    /// by [`REQUEST_TIMEOUT`], and a request that runs over it is a
+    /// transient [`IrisError::Request`].
+    pub async fn attestations(
         &self,
         source_domain: u32,
         tx_hash: B256,
-    ) -> Result<AttestationStatus> {
+    ) -> Result<Vec<AttestationStatus>> {
         let url = format!(
             "{}/v2/messages/{source_domain}?transactionHash={tx_hash}",
             self.base_url
@@ -409,9 +449,9 @@ struct IrisMessage {
 
 const BODY_EXCERPT: usize = 200;
 
-fn parse_messages(status: u16, body: &str) -> Result<AttestationStatus> {
+fn parse_messages(status: u16, body: &str) -> Result<Vec<AttestationStatus>> {
     if status == 404 {
-        return Ok(AttestationStatus::NotFound);
+        return Ok(Vec::new());
     }
     if status != 200 {
         return Err(IrisError::Status {
@@ -422,10 +462,11 @@ fn parse_messages(status: u16, body: &str) -> Result<AttestationStatus> {
     }
     let response: MessagesResponse =
         serde_json::from_str(body).map_err(|e| IrisError::Malformed(e.to_string()))?;
-    let Some(first) = response.messages.into_iter().next() else {
-        return Ok(AttestationStatus::NotFound);
-    };
-    if first.status != "complete" {
+    response.messages.into_iter().map(parse_message).collect()
+}
+
+fn parse_message(message: IrisMessage) -> Result<AttestationStatus> {
+    if message.status != "complete" {
         return Ok(AttestationStatus::Pending);
     }
     let hex = |field: Option<String>, name: &str| {
@@ -435,14 +476,15 @@ fn parse_messages(status: u16, body: &str) -> Result<AttestationStatus> {
             .parse::<Bytes>()
             .map_err(|e| IrisError::Malformed(format!("{name}: {e}")))
     };
-    let message = hex(first.message, "message")?;
-    let attestation = hex(first.attestation, "attestation")?;
+    let attestation = hex(message.attestation, "attestation")?;
+    let message = hex(message.message, "message")?;
     Attested::new(message, attestation).map(AttestationStatus::Complete)
 }
 
 #[cfg(test)]
 mod tests {
     use alloy::hex;
+    use alloy::primitives::b256;
 
     use super::*;
     use crate::PerpCityError;
@@ -539,15 +581,12 @@ mod tests {
     fn iris_answers_parse_to_their_status() {
         // The body Iris returns for an unknown hash (read 2026-10-12).
         let missing = r#"{"error":"Message not found for provided parameters"}"#;
-        assert_eq!(
-            parse_messages(404, missing).unwrap(),
-            AttestationStatus::NotFound
-        );
+        assert_eq!(parse_messages(404, missing).unwrap(), []);
 
         let pending = r#"{"messages":[{"attestation":"PENDING","message":"0x","eventNonce":"0x00","cctpVersion":2,"status":"pending_confirmations"}]}"#;
         assert_eq!(
             parse_messages(200, pending).unwrap(),
-            AttestationStatus::Pending
+            [AttestationStatus::Pending]
         );
 
         let message = hex::encode_prefixed(burn_message(B256::repeat_byte(7), Address::ZERO, 1, 0));
@@ -555,7 +594,8 @@ mod tests {
             r#"{{"messages":[{{"attestation":"0x{}","message":"{message}","status":"complete"}}]}}"#,
             "11".repeat(65)
         );
-        let AttestationStatus::Complete(attested) = parse_messages(200, &complete).unwrap() else {
+        let [AttestationStatus::Complete(attested)] = &parse_messages(200, &complete).unwrap()[..]
+        else {
             panic!("a complete message is ready to mint");
         };
         assert_eq!(attested.nonce(), B256::repeat_byte(7));
@@ -566,15 +606,86 @@ mod tests {
         assert!(!malformed.is_transient());
     }
 
-    /// Live: the mainnet service answers an unknown hash with `NotFound`.
+    /// One transaction, two burns: each message keeps its own status, so
+    /// a pending first burn does not hide the second's attestation.
+    #[test]
+    fn each_message_in_a_transaction_has_its_own_status() {
+        let message = hex::encode_prefixed(burn_message(B256::repeat_byte(9), Address::ZERO, 1, 0));
+        let body = format!(
+            r#"{{"messages":[{{"attestation":"PENDING","message":"0x","status":"pending_confirmations"}},{{"attestation":"0x{}","message":"{message}","status":"complete"}}]}}"#,
+            "22".repeat(65)
+        );
+        let statuses = parse_messages(200, &body).unwrap();
+        assert_eq!(statuses.len(), 2);
+        assert_eq!(statuses[0], AttestationStatus::Pending);
+        let AttestationStatus::Complete(second) = &statuses[1] else {
+            panic!("the second burn is attested");
+        };
+        assert_eq!(second.nonce(), B256::repeat_byte(9));
+    }
+
+    /// Golden vector: Iris's answer for a Fast burn on Base, transaction
+    /// 0x40047386…c882 (block 52,512,660, read 2026-10-12), kept verbatim.
+    /// The expected fields are Iris's own `decodedMessage`, so the offsets
+    /// are checked against Circle's decoding, not against this module's.
+    #[test]
+    fn a_real_attested_message_reads_as_iris_decodes_it() {
+        let body = include_str!("cctp/iris_fast_burn.json");
+        let decoded: serde_json::Value = serde_json::from_str(body).unwrap();
+        let decoded = &decoded["messages"][0];
+        let [AttestationStatus::Complete(attested)] = &parse_messages(200, body).unwrap()[..]
+        else {
+            panic!("the burn is attested");
+        };
+        let field = |name: &str| decoded["decodedMessage"]["decodedMessageBody"][name].clone();
+        assert_eq!(
+            attested.nonce(),
+            decoded["eventNonce"]
+                .as_str()
+                .unwrap()
+                .parse::<B256>()
+                .unwrap()
+        );
+        assert_eq!(
+            attested.nonce(),
+            b256!("aeb3cef1d95de570b9fb4c3e2b95c55ec5c2abf2ef15009d53a37fd368c6514c")
+        );
+        assert_eq!(
+            attested.destination_domain().to_string(),
+            decoded["decodedMessage"]["destinationDomain"]
+                .as_str()
+                .unwrap()
+        );
+        assert_eq!(attested.destination_domain(), 10);
+        assert_eq!(
+            attested.recipient(),
+            field("mintRecipient")
+                .as_str()
+                .unwrap()
+                .parse::<Address>()
+                .unwrap()
+        );
+        assert_eq!(
+            attested.amount().to_string(),
+            field("amount").as_str().unwrap()
+        );
+        assert_eq!(attested.amount(), U256::from(100_569_942));
+        assert_eq!(
+            attested.fee_executed().to_string(),
+            field("feeExecuted").as_str().unwrap()
+        );
+        assert_eq!(attested.fee_executed(), U256::from(13_074));
+    }
+
+    /// Live: the mainnet service answers an unknown hash with no messages.
     #[tokio::test]
     #[ignore = "network: calls Circle's Iris API"]
     async fn iris_mainnet_answers_an_unknown_hash() {
-        let status = IrisClient::mainnet()
-            .attestation(CCTP_BASE.domain, B256::ZERO)
+        let statuses = IrisClient::mainnet()
+            .attestations(CCTP_BASE.domain(), B256::ZERO)
             .await
             .unwrap();
-        assert_eq!(status, AttestationStatus::NotFound);
+        assert_eq!(statuses, []);
     }
 
     /// Live: a depositor's burns read back from Base. The busiest

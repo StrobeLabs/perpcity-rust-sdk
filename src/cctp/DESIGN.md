@@ -33,13 +33,13 @@ recipient; nothing at the mint can redirect it.
 
 | Type | Invariant | Produced by | Consumed by |
 |---|---|---|---|
-| [`CctpChain`](../cctp.rs#L56) | one chain's domain, native USDC and the two CCTP V2 contracts, from Circle's address table | the four constants; [`CctpChain::for_chain_id`](../cctp.rs#L107) | [`Burn::calldata`](../cctp.rs#L184), as the source chain. The strategy layer's treasury, which checks the destination USDC is the market's collateral. |
-| [`Burn`](../cctp.rs#L154) | one `depositForBurn`: amount, destination, recipient, finality and the fee cap | [`Burn::standard`](../cctp.rs#L170), the free transfer | the strategy layer's treasury, which sends its calldata. |
-| [`Finality`](../cctp.rs#L132) | the two thresholds Circle attests at, Fast (1000) and Standard (2000) | the caller | [`Burn`](../cctp.rs#L154), which carries it. |
-| [`IrisClient`](../cctp.rs#L324) | one attestation service, mainnet or sandbox | [`IrisClient::mainnet`](../cctp.rs#L331), [`IrisClient::sandbox`](../cctp.rs#L336) | the strategy layer's treasury, which polls it for each burn. |
-| [`Attested`](../cctp.rs#L212) | a burn message at least a burn body long, with Circle's signature | [`Attested::new`](../cctp.rs#L224); inside a complete `AttestationStatus` | the strategy layer's treasury, which sends its `receive_calldata` after `nonce_used`. |
-| [`AttestationStatus`](../cctp.rs#L281) | not found, pending, or complete with the signed message | [`IrisClient::attestation`](../cctp.rs#L353) | the strategy layer's treasury. |
-| [`IrisError`](../cctp.rs#L293) | a failed request, an unexpected status, or a malformed answer, with a stated transience | the Iris calls, inside `PerpCityError::Iris` | `PerpCityError::is_transient`, and through it the strategy layer's retry loop. |
+| [`CctpChain`](../cctp.rs#L63) | one chain's domain, native USDC and the two CCTP V2 contracts, from Circle's address table; the fields are private, so the four constants are the only values | the four constants; [`CctpChain::for_chain_id`](../cctp.rs#L134) | [`Burn::calldata`](../cctp.rs#L233), as the source chain. The strategy layer's treasury, which checks the destination USDC is the market's collateral. |
+| [`Burn`](../cctp.rs#L203) | one `depositForBurn`: amount, destination, recipient, finality and the fee cap | [`Burn::standard`](../cctp.rs#L219), the free transfer | the strategy layer's treasury, which sends its calldata. |
+| [`Finality`](../cctp.rs#L181) | the two thresholds Circle attests at, Fast (1000) and Standard (2000) | the caller | [`Burn`](../cctp.rs#L203), which carries it. |
+| [`IrisClient`](../cctp.rs#L374) | one attestation service, mainnet or sandbox; every request bounded by `REQUEST_TIMEOUT` | [`IrisClient::mainnet`](../cctp.rs#L381), [`IrisClient::sandbox`](../cctp.rs#L386) | the strategy layer's treasury, which polls it for each burn. |
+| [`Attested`](../cctp.rs#L261) | a burn message at least a burn body long, with Circle's signature | [`Attested::new`](../cctp.rs#L273); inside a complete `AttestationStatus` | the strategy layer's treasury, which sends its `receive_calldata` after `nonce_used`. |
+| [`AttestationStatus`](../cctp.rs#L330) | one burn message's state: pending, or complete with the signed message; a transaction's list is empty until Iris indexes it | [`IrisClient::attestations`](../cctp.rs#L417) | the strategy layer's treasury. |
+| [`IrisError`](../cctp.rs#L340) | a failed request, an unexpected status, or a malformed answer, with a stated transience | the Iris calls, inside `PerpCityError::Iris` | `PerpCityError::is_transient`, and through it the strategy layer's retry loop. |
 
 ## Terminology
 
