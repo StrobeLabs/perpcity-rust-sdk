@@ -267,3 +267,152 @@ async fn catch_up_stands_at_the_end_of_the_range_it_read() {
         "the next poll starts after the quiet range"
     );
 }
+
+const PERP_B: Address = Address::repeat_byte(0xF2);
+const POOL_B: B256 = B256::repeat_byte(0x78);
+
+fn two_markets(beacon_b: Address) -> [TapeAddresses; 2] {
+    [
+        TapeAddresses {
+            perp: PERP,
+            beacon: BEACON,
+            pool_manager: POOL_MANAGER,
+            pool_id: POOL_ID,
+        },
+        TapeAddresses {
+            perp: PERP_B,
+            beacon: beacon_b,
+            pool_manager: POOL_MANAGER,
+            pool_id: POOL_B,
+        },
+    ]
+}
+
+fn print_at(beacon: Address, block: u64) -> Log {
+    mined_event_log(
+        &IBeacon::IndexUpdated { index: Q96 },
+        beacon,
+        block,
+        0,
+        Some(timestamp_of(block)),
+    )
+}
+
+#[tokio::test]
+async fn every_market_comes_back_from_one_scan_without_pool_logs() {
+    let logs = vec![
+        mined_event_log(&taker_opened(1), PERP, 10, 0, Some(timestamp_of(10))),
+        mined_event_log(&taker_opened(2), PERP_B, 11, 0, Some(timestamp_of(11))),
+        print_at(BEACON, 12),
+    ];
+    let node = FakeNode::new(logs, u64::MAX);
+    let history = History::new(node.provider()).with_lag(0);
+
+    let tapes = history
+        .markets_tape(
+            &two_markets(Address::repeat_byte(0xBF)),
+            0,
+            Some(100),
+            PoolLogs::Skip,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(tapes.len(), 2, "both markets, the quiet one included");
+    assert_eq!(
+        tapes[&PERP].len(),
+        2,
+        "its taker event and its beacon's print"
+    );
+    assert_eq!(tapes[&PERP_B].len(), 1);
+    assert_eq!(
+        node.requests().len(),
+        1,
+        "one getLogs for every market, no pool filter"
+    );
+}
+
+#[tokio::test]
+async fn a_shared_beacon_prints_into_every_market() {
+    let node = FakeNode::new(vec![print_at(BEACON, 12)], u64::MAX);
+    let history = History::new(node.provider()).with_lag(0);
+
+    let tapes = history
+        .markets_tape(&two_markets(BEACON), 0, Some(100), PoolLogs::Skip)
+        .await
+        .unwrap();
+
+    assert_eq!((tapes[&PERP].len(), tapes[&PERP_B].len()), (1, 1));
+}
+
+#[tokio::test]
+async fn markets_on_two_pool_managers_are_refused() {
+    let node = FakeNode::new(vec![], u64::MAX);
+    let history = History::new(node.provider()).with_lag(0);
+    let mut markets = two_markets(BEACON);
+    markets[1].pool_manager = Address::repeat_byte(0x9B);
+
+    let refused = history
+        .markets_tape(&markets, 0, Some(100), PoolLogs::Include)
+        .await;
+
+    assert!(refused.is_err(), "one pool filter cannot name two managers");
+    assert!(node.requests().is_empty(), "refused before any request");
+}
+
+#[tokio::test]
+async fn no_markets_is_no_request() {
+    let node = FakeNode::new(vec![], u64::MAX);
+    let history = History::new(node.provider()).with_lag(0);
+
+    let tapes = history
+        .markets_tape(&[], 0, Some(100), PoolLogs::Include)
+        .await
+        .unwrap();
+
+    assert!(tapes.is_empty());
+    assert!(node.requests().is_empty());
+}
+
+#[tokio::test]
+async fn pool_logs_route_to_their_market_by_pool_id() {
+    let logs = vec![
+        mined_event_log(
+            &liquidity_change(POOL_ID, 1, 1_000),
+            POOL_MANAGER,
+            20,
+            0,
+            Some(timestamp_of(20)),
+        ),
+        mined_event_log(
+            &liquidity_change(POOL_B, 2, 1_000),
+            POOL_MANAGER,
+            21,
+            0,
+            Some(timestamp_of(21)),
+        ),
+        // Another market's pool on the same manager: never ours.
+        mined_event_log(
+            &liquidity_change(B256::repeat_byte(0x99), 3, 1_000),
+            POOL_MANAGER,
+            22,
+            0,
+            Some(timestamp_of(22)),
+        ),
+    ];
+    let node = FakeNode::new(logs, u64::MAX);
+    let history = History::new(node.provider()).with_lag(0);
+
+    let tapes = history
+        .markets_tape(&two_markets(BEACON), 0, Some(100), PoolLogs::Include)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        (tapes[&PERP].len(), tapes[&PERP_B].len()),
+        (1, 1),
+        "each pool's log to its own market, the stranger's to neither"
+    );
+    assert_eq!(tapes[&PERP][0].block_number, 20);
+    assert_eq!(tapes[&PERP_B][0].block_number, 21);
+}

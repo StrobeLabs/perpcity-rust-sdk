@@ -48,9 +48,10 @@ use super::fold::{Arrival, Sample};
 pub use self::custody::{OwnershipLog, Positioned, Wallets};
 pub use self::lenses::{Swap, SwapAction};
 pub use self::read::{latest_market_events, market_events, market_tape};
+
 pub(in crate::history) use self::read::{
     latest_market_events_with, market_events_with, market_logs_with, market_tape_with,
-    stamp_timestamps,
+    markets_tape_with, stamp_timestamps,
 };
 
 /// A position in the chain's total order: a block, then a log's index
@@ -167,6 +168,17 @@ pub struct TapeAddresses {
     pub pool_manager: Address,
     /// The market's pool, as the PoolManager keys it.
     pub pool_id: B256,
+}
+
+/// Whether a tape read includes the PoolManager's logs for each market's
+/// pool. A reader that never folds the pool (no positions, no pool price)
+/// skips them; they are the densest logs a market has.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PoolLogs {
+    /// Read the pool's `Initialize`, `Swap` and `ModifyLiquidity` logs.
+    Include,
+    /// Read only the perp's and the beacon's logs.
+    Skip,
 }
 
 /// A market's record: every event in chain order, no two at one point,

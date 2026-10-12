@@ -1,9 +1,10 @@
 //! The readers: a market's tape from its three addresses, through the
 //! chunked scan and the live feed's decoder.
 
+use std::collections::BTreeMap;
 use std::result::Result as StdResult;
 
-use alloy::primitives::Address;
+use alloy::primitives::{Address, B256};
 use alloy::providers::Provider;
 use alloy::rpc::types::{Filter, Log};
 use alloy::sol_types::SolEvent;
@@ -16,7 +17,7 @@ use crate::history::scan::{
     SharedWidths, block_timestamps, check_block_range, scan_all, scan_newest,
 };
 
-use super::{Tape, TapeAddresses, TapeEvent};
+use super::{PoolLogs, Tape, TapeAddresses, TapeEvent};
 
 /// Every market event `perp` emitted in blocks `from_block..=to_block`,
 /// in chain order.
@@ -248,15 +249,89 @@ fn tape_filters(addresses: TapeAddresses) -> StdResult<(Filter, Filter), Validat
         }
     }
     let market = Filter::new().address(vec![perp, beacon]);
-    let pool = Filter::new()
+    Ok((market, pool_filter(pool_manager, vec![pool_id])))
+}
+
+/// The PoolManager's logs for the pools named, by event and pool id.
+fn pool_filter(pool_manager: Address, pool_ids: Vec<B256>) -> Filter {
+    Filter::new()
         .address(pool_manager)
         .event_signature(vec![
             IPoolManagerState::Initialize::SIGNATURE_HASH,
             IPoolManagerState::Swap::SIGNATURE_HASH,
             IPoolManagerState::ModifyLiquidity::SIGNATURE_HASH,
         ])
-        .topic1(pool_id);
-    Ok((market, pool))
+        .topic1(pool_ids)
+}
+
+/// [`History::markets_tape`](crate::history::History::markets_tape)'s read
+/// over a caller-held width search, with up to `in_flight` window requests
+/// outstanding per scan.
+pub(in crate::history) async fn markets_tape_with<P: Provider>(
+    provider: &P,
+    markets: &[TapeAddresses],
+    from_block: u64,
+    to_block: u64,
+    pool: PoolLogs,
+    widths: &SharedWidths,
+    in_flight: usize,
+) -> Result<BTreeMap<Address, Tape>> {
+    let Some(first) = markets.first() else {
+        return Ok(BTreeMap::new());
+    };
+    let mut addresses = Vec::with_capacity(markets.len() * 2);
+    for market in markets {
+        // The zero-address checks a single market's read makes.
+        tape_filters(*market)?;
+        if market.pool_manager != first.pool_manager {
+            return Err(ValidationError::InvalidConfig {
+                reason: format!(
+                    "markets on pool managers {} and {}: one scan reads one",
+                    first.pool_manager, market.pool_manager
+                ),
+            }
+            .into());
+        }
+        addresses.extend([market.perp, market.beacon]);
+    }
+    addresses.sort_unstable();
+    addresses.dedup();
+    let mut logs = scan_all(
+        provider,
+        &Filter::new().address(addresses),
+        from_block,
+        to_block,
+        widths,
+        in_flight,
+    )
+    .await?;
+    if pool == PoolLogs::Include {
+        let ids = markets.iter().map(|market| market.pool_id).collect();
+        let filter = pool_filter(first.pool_manager, ids);
+        logs.extend(scan_all(provider, &filter, from_block, to_block, widths, in_flight).await?);
+    }
+    logs.sort_by_key(|log| (log.block_number, log.log_index));
+    let mut decoded: BTreeMap<Address, Vec<(Log, MarketEvent)>> = markets
+        .iter()
+        .map(|market| (market.perp, Vec::new()))
+        .collect();
+    for (log, event) in decode_known(logs, widths) {
+        let from = log.address();
+        for market in markets {
+            let pool_log =
+                from == market.pool_manager && log.topics().get(1) == Some(&market.pool_id);
+            if (from == market.perp || from == market.beacon || pool_log)
+                && let Some(rows) = decoded.get_mut(&market.perp)
+            {
+                rows.push((log.clone(), event));
+            }
+        }
+    }
+    let mut tapes = BTreeMap::new();
+    for (perp, rows) in decoded {
+        tapes.insert(perp, tape_rows(provider, rows).await?);
+    }
+    Ok(tapes)
 }
 
 /// Decodes the logs this vocabulary recognizes, each kept with its log.
