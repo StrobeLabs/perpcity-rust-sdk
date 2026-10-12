@@ -660,6 +660,45 @@ sol! {
     }
 
     // ═══════════════════════════════════════════════════════════════════
+    //  Circle CCTP V2 — native USDC burned on one chain, minted on another
+    // ═══════════════════════════════════════════════════════════════════
+
+    /// CCTP V2 `TokenMessengerV2`: burns USDC on the source chain.
+    #[sol(rpc)]
+    interface ITokenMessengerV2 {
+        function depositForBurn(
+            uint256 amount,
+            uint32 destinationDomain,
+            bytes32 mintRecipient,
+            address burnToken,
+            bytes32 destinationCaller,
+            uint256 maxFee,
+            uint32 minFinalityThreshold
+        ) external;
+
+        event DepositForBurn(
+            address indexed burnToken,
+            uint256 amount,
+            address indexed depositor,
+            bytes32 mintRecipient,
+            uint32 destinationDomain,
+            bytes32 destinationTokenMessenger,
+            bytes32 destinationCaller,
+            uint256 maxFee,
+            uint32 indexed minFinalityThreshold,
+            bytes hookData
+        );
+    }
+
+    /// CCTP V2 `MessageTransmitterV2`: mints on the destination chain.
+    #[sol(rpc)]
+    interface IMessageTransmitterV2 {
+        function receiveMessage(bytes message, bytes attestation)
+            external returns (bool success);
+        function usedNonces(bytes32 nonce) external view returns (uint256);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
     //  Multicall3 — batch multiple contract reads into a single eth_call
     // ═══════════════════════════════════════════════════════════════════
 

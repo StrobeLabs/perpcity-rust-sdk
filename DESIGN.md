@@ -202,6 +202,7 @@ that carries it, the invariant it holds, and the node that owns it.
 | A value over time | [`Series`](src/history/fold/series.rs#L188), [`Arrivals`](src/history/fold/series.rs#L456) | chain order; appends across segments; trimmed to a retention | [history/fold](src/history/fold/DESIGN.md) |
 | A market rebuilt from its events | [`Replay`](src/history/replay/mod.rs#L146) | the reads' types, folded from the tape; equal to the reads at a block | [history/replay](src/history/replay/DESIGN.md) |
 | A print | [`IndexPrint`](src/history/beacon.rs#L20) | the index at a chain point and time | [`history`](src/history/DESIGN.md) |
+| A cross-chain transfer | [`Burn`](src/cctp.rs#L203), [`Attested`](src/cctp.rs#L261) | USDC burned on one chain, minted once on another | [`cctp`](src/cctp/DESIGN.md) |
 | A failure | [`PerpCityError`](src/errors/mod.rs#L45) | typed, with a stated transience | [`errors`](src/errors/DESIGN.md) |
 | A transport | [`HftTransport`](src/transport/provider.rs#L523) | many endpoints, one provider, reads and writes classified | [`transport`](src/transport/DESIGN.md) |
 | The send path | [`TxPipeline`](src/hft/pipeline.rs#L125), [`NonceManager`](src/hft/nonce.rs#L42) | zero RPC to prepare; the next nonce is owned | [`hft`](src/hft/DESIGN.md) |
