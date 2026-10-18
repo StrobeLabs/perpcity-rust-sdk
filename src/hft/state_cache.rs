@@ -32,7 +32,7 @@
 
 use std::collections::HashMap;
 
-use crate::units::Ratio;
+use crate::units::{Ratio, UsdcAtoms};
 
 /// A cached value with an expiration timestamp.
 #[derive(Debug, Clone, Copy)]
@@ -119,7 +119,7 @@ pub struct StateCache {
     // Fast layer (2s TTL): changes every block
     pool_prices: HashMap<[u8; 32], CachedValue<f64>>,
     funding_rates: HashMap<[u8; 32], CachedValue<f64>>,
-    balances: HashMap<BalanceKey, CachedValue<f64>>,
+    balances: HashMap<BalanceKey, CachedValue<UsdcAtoms>>,
 
     slow_ttl: u64,
     fast_ttl: u64,
@@ -231,7 +231,7 @@ impl StateCache {
 
     /// Get a cached token balance, or `None` if stale/absent.
     #[inline]
-    pub fn get_balance(&self, key: &BalanceKey, now_ts: u64) -> Option<f64> {
+    pub fn get_balance(&self, key: &BalanceKey, now_ts: u64) -> Option<UsdcAtoms> {
         self.balances
             .get(key)
             .filter(|cv| cv.is_valid(now_ts))
@@ -239,7 +239,7 @@ impl StateCache {
     }
 
     /// Cache a token balance.
-    pub fn put_balance(&mut self, key: BalanceKey, balance: f64, now_ts: u64) {
+    pub fn put_balance(&mut self, key: BalanceKey, balance: UsdcAtoms, now_ts: u64) {
         self.balances.insert(
             key,
             CachedValue {
@@ -349,8 +349,9 @@ mod tests {
         let mut c = StateCache::new(StateCacheConfig::default());
         let key = sample_balance_key();
 
-        c.put_balance(key, 10_000.0, 100);
-        assert_eq!(c.get_balance(&key, 101), Some(10_000.0));
+        let balance = UsdcAtoms::new(10_000_000_000);
+        c.put_balance(key, balance, 100);
+        assert_eq!(c.get_balance(&key, 101), Some(balance));
         assert!(c.get_balance(&key, 102).is_none());
     }
 
@@ -369,8 +370,8 @@ mod tests {
             ..key
         };
 
-        c.put_balance(key, 1.0, 0);
-        assert_eq!(c.get_balance(&key, 0), Some(1.0));
+        c.put_balance(key, UsdcAtoms::new(1), 0);
+        assert_eq!(c.get_balance(&key, 0), Some(UsdcAtoms::new(1)));
         assert!(c.get_balance(&other_holder, 0).is_none());
         assert!(c.get_balance(&other_token, 0).is_none());
     }
@@ -396,7 +397,7 @@ mod tests {
         c.put_bounds(addr, sample_bounds(), 0);
         c.put_pool_price(perp, 42000.0, 0);
         c.put_funding_rate(perp, 0.0001, 0);
-        c.put_balance(sample_balance_key(), 1000.0, 0);
+        c.put_balance(sample_balance_key(), UsdcAtoms::new(1_000_000_000), 0);
 
         c.invalidate_fast_layer();
 

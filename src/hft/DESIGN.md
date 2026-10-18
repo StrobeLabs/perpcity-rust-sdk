@@ -117,7 +117,7 @@ above can be measured rather than asserted.
 | [`Urgency`](gas.rs#L204) | the fee multiplier a caller chooses, background to liquidation defence | the caller, per action | [`FeeCache::fees_for`](gas.rs#L306); [`TxBuilder::with_urgency`](../client/DESIGN.md); every trade on the client takes one, [`PerpClient::open_taker`](../client/DESIGN.md) among them. The strategy layer picks it per action, which is the one knob on price it has. |
 | [`GasLimits`](gas.rs#L35) | fixed caps for calls whose cost is known, liquidation among them | constants | the liquidation probe on the market reader and the liquidation send on the client, by name, so the probe and the send use the same cap. Constants leave no signature, which is why this row draws no edge. |
 | [`GasLimitCache`](gas.rs#L119) | cached estimates per selector, evicted when disproved by an `OutOfGas` | [`GasLimitCache::new`](gas.rs#L140) | [`PerpClient`](../client/DESIGN.md), which holds one per signer and consults it in the simulation stage of a send before estimating. |
-| [`StateCache`](state_cache.rs#L114), [`CachedValue`](state_cache.rs#L39), [`CachedFees`](state_cache.rs#L56), [`CachedBounds`](state_cache.rs#L69), [`BalanceKey`](state_cache.rs#L102) | the now-reads' memory: two TTLs; every entry carries its expiry; a layer invalidates whole | [`StateCache::new`](state_cache.rs#L130) from a [`StateCacheConfig`](state_cache.rs#L82) | [`ChainReader`](../client/DESIGN.md), which holds one and invalidates it on a new block; the now-reads on the market reader reach it through the chain reader and serve fees, bounds, prices, funding and balances from it. The cached fees and bounds convert to and from the surface types in `client` at the read. |
+| [`StateCache`](state_cache.rs#L114), [`CachedValue`](state_cache.rs#L39), [`CachedFees`](state_cache.rs#L56), [`CachedBounds`](state_cache.rs#L69), [`BalanceKey`](state_cache.rs#L102) | the now-reads' memory: two TTLs; every entry carries its expiry; a layer invalidates whole; a balance is kept as the exact [`UsdcAtoms`](../units/DESIGN.md) it was read as, through `put_balance` and `get_balance` | [`StateCache::new`](state_cache.rs#L130) from a [`StateCacheConfig`](state_cache.rs#L82) | [`ChainReader`](../client/DESIGN.md), which holds one and invalidates it on a new block; the now-reads on the market reader reach it through the chain reader and serve fees, bounds, prices, funding and balances from it. The cached fees and bounds convert to and from the surface types in `client` at the read. |
 | [`StateCacheConfig`](state_cache.rs#L82) | the two TTLs | the caller; `Default` is 60 s and 2 s | [`StateCache::new`](state_cache.rs#L130). |
 | [`LatencyTracker`](latency.rs#L62), [`LatencyStats`](latency.rs#L38) | the measurement: fixed ring; percentiles over the window | [`LatencyTracker::new`](latency.rs#L77) | nothing in the crate. The strategy layer's runners record around their sends, which is how the zero-RPC claim is checked. |
 | [`PositionManager`](position_manager.rs#L201), [`ManagedPosition`](position_manager.rs#L69), [`TriggerType`](position_manager.rs#L45), [`TriggerAction`](position_manager.rs#L56) | trigger evaluation: one trigger per position per check, in a fixed precedence; the price is the caller's | [`PositionManager::new`](position_manager.rs#L207) | nothing in the crate, and the strategy layer has its own. See the debts. |
@@ -182,9 +182,13 @@ This module's specification is a number: zero requests on the hot path.
 ## Accepted structure
 
 - **A cache and its entry convert both ways, which is what a cache is.**
-  `StateCache` takes a `CachedFees` or a `CachedBounds` in and hands the
-  same type back, so the graph shows two cycles. The conversion is not
-  mis-homed; there is no conversion, only storage with an expiry.
+  `StateCache` takes a `CachedFees`, a `CachedBounds` or a balance's
+  `UsdcAtoms` (`put_balance`, `get_balance`) in and hands the same type
+  back, so the graph shows three cycles. The conversion is not mis-homed;
+  there is no conversion, only storage with an expiry. The reads in front
+  of the balance entry, `balance_of` and `get_usdc_balance`, hand on the
+  same count, so a balance is never a float between the chain and its
+  caller.
 - **A registry and its element do the same.** `PositionManager` takes a
   `ManagedPosition` in and lends one out, by reference, because the
   manager advances each position's trailing anchor in place.

@@ -27,7 +27,7 @@ use crate::hft::state_cache::{CachedBounds, CachedFees};
 use crate::history::TapeAddresses;
 use crate::math::BlockContext;
 use crate::math::pricing::{Emas, Mark};
-use crate::units::{PerSide, PerpAtoms, Price, Ratio};
+use crate::units::{PerSide, PerpAtoms, Price, Ratio, UsdcAtoms};
 
 use super::market::MarketReader;
 use super::state::{ema_window_secs, pinned_read_error};
@@ -670,7 +670,7 @@ impl PerpClient {
     /// client's address. Every other read is on [`Self::market`] or
     /// [`Self::chain`]; this one stays here because only the client knows
     /// whose balance "mine" is.
-    pub async fn get_usdc_balance(&self) -> Result<f64> {
+    pub async fn get_usdc_balance(&self) -> Result<UsdcAtoms> {
         self.chain().balance_of(self.address).await
     }
 }
@@ -682,6 +682,7 @@ mod tests {
     use alloy::primitives::Uint;
 
     use super::*;
+    use crate::client::Balances;
     use crate::client::mock::{self, BEACON, Rpc, e6, failed_row, ok_row, returns, x96};
     use crate::constants::SNAPSHOT_BLOCK_LAG;
     use crate::contracts::{IBeacon, IERC20, IMulticall3, Modules, Rates};
@@ -820,31 +821,32 @@ mod tests {
         assert!(rpc.is_drained());
     }
 
-    /// The signer's USDC balance, scaled from six decimals, and cached in
-    /// the fast layer alongside the prices.
+    /// The signer's USDC balance, exact to the atom, and cached in the fast
+    /// layer alongside the prices.
     #[tokio::test]
-    async fn usdc_balance_is_scaled_from_6dec_and_cached() {
+    async fn usdc_balance_is_exact_and_cached() {
         let (client, rpc) = mock::client();
         rpc.call::<IERC20::balanceOfCall>(&U256::from(1_234_567u32));
 
-        assert_eq!(client.get_usdc_balance().await.unwrap(), 1.234_567);
+        let balance = UsdcAtoms::new(1_234_567);
+        assert_eq!(client.get_usdc_balance().await.unwrap(), balance);
         assert_eq!(
             client.get_usdc_balance().await.unwrap(),
-            1.234_567,
+            balance,
             "cache hit"
         );
 
         client.chain().invalidate_fast_cache();
         rpc.call::<IERC20::balanceOfCall>(&U256::ZERO);
-        assert_eq!(client.get_usdc_balance().await.unwrap(), 0.0);
+        assert_eq!(client.get_usdc_balance().await.unwrap(), UsdcAtoms::ZERO);
         assert!(rpc.is_drained());
     }
 
-    /// A balance beyond `i128` is an overflow, not a saturated number.
+    /// A balance beyond `u128` is an overflow, not a saturated number.
     #[tokio::test]
-    async fn usdc_balance_beyond_i128_is_an_overflow() {
+    async fn usdc_balance_beyond_u128_is_an_overflow() {
         let (client, rpc) = mock::client();
-        rpc.call::<IERC20::balanceOfCall>(&(U256::from(i128::MAX) + U256::from(1u8)));
+        rpc.call::<IERC20::balanceOfCall>(&(U256::from(u128::MAX) + U256::from(1u8)));
 
         let err = client.get_usdc_balance().await.unwrap_err();
         assert!(
@@ -1168,7 +1170,17 @@ mod tests {
         ]);
 
         let balances = client.chain().get_balances_batch(&holders).await.unwrap();
-        assert_eq!(balances, vec![(1.0, U256::from(5u8)), (2.5, U256::ZERO)]);
+        let expected = [
+            Balances {
+                usdc: UsdcAtoms::new(1_000_000),
+                eth_wei: U256::from(5u8),
+            },
+            Balances {
+                usdc: UsdcAtoms::new(2_500_000),
+                eth_wei: U256::ZERO,
+            },
+        ];
+        assert_eq!(balances, expected);
         assert!(rpc.is_drained(), "one eth_call for four sub-calls");
     }
 

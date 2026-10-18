@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::constants::{MULTICALL3, SNAPSHOT_BLOCK_LAG};
 use crate::contracts::{IBeacon, IERC20, IMulticall3};
-use crate::convert::{price_x96_to_f64, usdc_from_atoms};
+use crate::convert::price_x96_to_f64;
 use crate::errors::{ContractError, PerpCityError, Result, TransactionError, ValidationError};
 use crate::hft::gas::FeeCache;
 use crate::hft::state_cache::{BalanceKey, StateCache, StateCacheConfig};
@@ -24,6 +24,7 @@ use crate::math::BlockContext;
 use crate::math::pricing::PricePair;
 use crate::storage::{perp_emas_slot, stored_emas};
 use crate::transport::provider::HftTransport;
+use crate::units::UsdcAtoms;
 
 use super::queries::MarketImmutables;
 use super::transactions::{classify_simulation_failure, preflight_request};
@@ -41,6 +42,15 @@ pub struct ChainDeployments {
     /// The Uniswap V4 `PoolManager` every market's pool lives in (see
     /// `ARBITRUM_POOL_MANAGER` / `ARBITRUM_SEPOLIA_POOL_MANAGER`).
     pub pool_manager: Address,
+}
+
+/// One address's collateral and gas money, read in one call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Balances {
+    /// The chain's USDC.
+    pub usdc: UsdcAtoms,
+    /// Native ETH, in wei.
+    pub eth_wei: U256,
 }
 
 /// What every market on a chain shares, and the reads addressed by
@@ -293,10 +303,10 @@ impl ChainReader {
 
     // ── Reads ────────────────────────────────────────────────────────
 
-    /// The USDC balance of `holder`, in human units, from the fast cache
-    /// layer or one `balanceOf` call. Cached per token and holder, so a
-    /// reader shared across signers keeps each balance apart.
-    pub async fn balance_of(&self, holder: Address) -> Result<f64> {
+    /// The USDC balance of `holder`, from the fast cache layer or one
+    /// `balanceOf` call. Cached per token and holder, so a reader shared
+    /// across signers keeps each balance apart.
+    pub async fn balance_of(&self, holder: Address) -> Result<UsdcAtoms> {
         let now_ts = now_secs();
         let usdc = self.inner.deployments.usdc;
         let key = BalanceKey {
@@ -307,7 +317,7 @@ impl ChainReader {
         {
             let cache = self.inner.state.lock().unwrap();
             if let Some(balance) = cache.get_balance(&key, now_ts) {
-                tracing::trace!(%holder, balance, "USDC balance cache hit");
+                tracing::trace!(%holder, %balance, "USDC balance cache hit");
                 return Ok(balance);
             }
         }
@@ -316,8 +326,8 @@ impl ChainReader {
             .balanceOf(holder)
             .call()
             .await?;
-        let balance = usdc_from_atoms(raw, "USDC balance")?;
-        tracing::debug!(%holder, balance, "USDC balance fetched");
+        let balance = UsdcAtoms::try_from(raw)?;
+        tracing::debug!(%holder, %balance, "USDC balance fetched");
 
         self.inner
             .state
@@ -327,27 +337,21 @@ impl ChainReader {
         Ok(balance)
     }
 
-    /// Get the USDC and ETH balances of an address in a single RPC call.
-    ///
-    /// Uses Multicall3 to bundle a `balanceOf` (USDC) and `getEthBalance`
-    /// (native ETH) into one `eth_call`. The RPC provider charges 1 CU
-    /// regardless of how many sub-calls the multicall executes.
-    ///
-    /// Returns `(usdc_balance, eth_balance)` where USDC is in human units
-    /// (e.g. `100.0` = 100 USDC) and ETH is in wei.
-    pub async fn get_balances(&self, address: Address) -> Result<(f64, U256)> {
-        let results = self.get_balances_batch(&[address]).await?;
-        Ok(results.into_iter().next().unwrap())
+    /// An address's USDC and ETH in one `eth_call`: a Multicall3 bundle of
+    /// `balanceOf` and `getEthBalance`.
+    pub async fn get_balances(&self, address: Address) -> Result<Balances> {
+        let [balances] = self.get_balances_batch(&[address]).await?[..] else {
+            return Err(ContractError::MulticallFailed {
+                reason: format!("no balances returned for {address}"),
+            }
+            .into());
+        };
+        Ok(balances)
     }
 
-    /// Get the USDC and ETH balances for multiple addresses in a single RPC call.
-    ///
-    /// Uses Multicall3 to bundle N × `balanceOf` + N × `getEthBalance` into
-    /// one `eth_call`. For 10 addresses, this is 1 CU instead of 20.
-    ///
-    /// Returns a `Vec<(usdc_balance, eth_balance)>` in the same order as
-    /// the input addresses.
-    pub async fn get_balances_batch(&self, addresses: &[Address]) -> Result<Vec<(f64, U256)>> {
+    /// The balances of many addresses in one `eth_call`, in their order:
+    /// N `balanceOf` and N `getEthBalance` in one Multicall3 bundle.
+    pub async fn get_balances_batch(&self, addresses: &[Address]) -> Result<Vec<Balances>> {
         if addresses.is_empty() {
             return Ok(Vec::new());
         }
@@ -407,7 +411,7 @@ impl ChainReader {
                     context: format!("failed to decode USDC balance: {e}"),
                 }
             })?;
-            let usdc = usdc_from_atoms(usdc_raw, "USDC balance")?;
+            let usdc = UsdcAtoms::try_from(usdc_raw)?;
 
             // Decode ETH balance (last N results)
             let eth_result = &results[n + i];
@@ -417,13 +421,13 @@ impl ChainReader {
                 }
                 .into());
             }
-            let eth = U256::abi_decode(&eth_result.returnData).map_err(|e| {
+            let eth_wei = U256::abi_decode(&eth_result.returnData).map_err(|e| {
                 ValidationError::DecodeFailed {
                     context: format!("failed to decode ETH balance: {e}"),
                 }
             })?;
 
-            out.push((usdc, eth));
+            out.push(Balances { usdc, eth_wei });
         }
 
         tracing::debug!(count = n, "batch balances fetched via multicall");
@@ -666,14 +670,19 @@ mod tests {
         rpc.call::<IERC20::balanceOfCall>(&U256::from(1_000_000u32));
         rpc.call::<IERC20::balanceOfCall>(&U256::from(2_500_000u32));
 
-        assert_eq!(chain.balance_of(a).await.unwrap(), 1.0);
+        let (one, two_and_a_half) = (UsdcAtoms::new(1_000_000), UsdcAtoms::new(2_500_000));
+        assert_eq!(chain.balance_of(a).await.unwrap(), one);
         assert_eq!(
             chain.balance_of(b).await.unwrap(),
-            2.5,
+            two_and_a_half,
             "another holder is another entry, not a hit"
         );
-        assert_eq!(chain.balance_of(a).await.unwrap(), 1.0, "cache hit");
-        assert_eq!(chain.balance_of(b).await.unwrap(), 2.5, "cache hit");
+        assert_eq!(chain.balance_of(a).await.unwrap(), one, "cache hit");
+        assert_eq!(
+            chain.balance_of(b).await.unwrap(),
+            two_and_a_half,
+            "cache hit"
+        );
         assert!(rpc.is_drained());
     }
 }

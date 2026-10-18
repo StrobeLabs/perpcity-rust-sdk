@@ -8,13 +8,13 @@
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use std::collections::HashMap;
 
-use perpcity_sdk::Ratio;
 use perpcity_sdk::hft::gas::{FeeCache, GasLimits, Urgency};
 use perpcity_sdk::hft::latency::LatencyTracker;
 use perpcity_sdk::hft::nonce::NonceManager;
 use perpcity_sdk::hft::pipeline::{PipelineConfig, TxPipeline, TxRequest};
 use perpcity_sdk::hft::position_manager::{ManagedPosition, PositionManager};
 use perpcity_sdk::hft::state_cache::{BalanceKey, CachedFees, StateCache, StateCacheConfig};
+use perpcity_sdk::{Ratio, UsdcAtoms};
 
 // ---------------------------------------------------------------------------
 // Nonce benchmarks
@@ -177,7 +177,7 @@ fn bench_state_cache(c: &mut Criterion) {
             token: [0xEE; 20],
             holder: [0x01; 20],
         };
-        cache.put_balance(key, 10_000.0, 1000);
+        cache.put_balance(key, UsdcAtoms::new(10_000_000_000), 1000);
         b.iter(|| cache.get_balance(black_box(&key), black_box(1001)))
     });
 
