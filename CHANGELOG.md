@@ -17,6 +17,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`MarketReader::state_at_head`** pins reads to the head block the endpoint serves now, which a transaction just confirmed is in; the lagged `state()` does not promise that. Not reorg-safe.
+
+- **`PoolSnapshot::ends_on_tick`** names the initialized tick a swap of a given size would end on, if it ends on one, within 2^-16 of the tick's square-root price (the margin V4's word-boundary rounding can move the chain's end). On the deployed contracts a swap that stops exactly on an initialized tick inverts that tick's funding parity, so a closer shrinks such a clip. It checks only the quote's end tick and the one above it, which the tolerance guarantees are the only candidates.
+
 - **`History::markets_tape` reads every market's tape from one scan.** It takes a slice of `TapeAddresses` and returns a `BTreeMap` of tapes keyed by perp, splitting one scan's logs back by perp, beacon and pool id; a beacon two markets share prints into both. `PoolLogs::Skip` drops the PoolManager filter for a reader that folds no positions and no pool price, which skips a market's densest logs. A monitor following seven markets goes from fourteen `eth_getLogs` per poll to one whenever the poll's range fits one scan window; a wider range costs one request per window, as any scan does. A perp named twice is refused.
 
 - **`Replay::segment` and `Replay::read_books` fold a recent window.** `segment` is the trait's segment fold named for its market; `read_books` stands it at the end of a block with the solvency books a read returned there, taking a `Books` that only `StateAt::books` makes, so the books, their market and their block cannot disagree, and refusing another market's; the stated debt and margin series carry the read as a sample, so a window fold knows the bad-debt level from that point on instead of only after the window's first restatement. A read at or behind the fold is refused.

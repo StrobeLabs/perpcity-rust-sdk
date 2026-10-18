@@ -187,6 +187,10 @@ struct Simulation {
     hit_limit: bool,
 }
 
+/// [`PoolSnapshot::ends_on_tick`]'s tolerance, as a right shift of the
+/// tick's square-root price: 2^-16.
+const ON_TICK_SHIFT: usize = 16;
+
 impl PoolSnapshot {
     /// Quote an exact signed perp delta using the snapshot's protocol price
     /// limits, then evaluate the resulting price against the module bounds.
@@ -213,6 +217,35 @@ impl PoolSnapshot {
             QuoteLimit::InsufficientLiquidity
         };
         Ok(self.finish_quote(perp_delta.atoms(), sim, reason))
+    }
+
+    /// The initialized tick a swap of `perp_delta` would end on, if it ends
+    /// on one; `None` for a swap that does not fill, which the contract
+    /// reverts. On the deployed contracts a swap that stops exactly on an
+    /// initialized tick inverts that tick's funding parity.
+    ///
+    /// "On" is within 2^-16 of the tick's square-root price, the margin
+    /// the word-boundary rounding [`Self::quote_perp`] documents can move
+    /// the chain's end. That is under one tick's spacing, so the tick can
+    /// only be the quote's end tick or the one above it: an end just below
+    /// a tick, or on it with the price falling, reports the tick below.
+    pub fn ends_on_tick(&self, perp_delta: PerpDelta) -> Result<Option<i32>, ValidationError> {
+        if perp_delta.atoms() == 0 {
+            return Ok(None);
+        }
+        let quote = self.quote_perp(perp_delta)?;
+        if !quote.fully_filled {
+            return Ok(None);
+        }
+        let end = quote.sqrt_price_after.x96();
+        let near = quote.tick_after..=quote.tick_after.saturating_add(1);
+        for &tick in self.ticks.range(near).map(|(tick, _)| tick) {
+            let at = get_sqrt_ratio_at_tick(tick)?.x96();
+            if end.abs_diff(at) <= at >> ON_TICK_SHIFT {
+                return Ok(Some(tick));
+            }
+        }
+        Ok(None)
     }
 
     /// Size and quote the largest trade toward `target_sqrt_price` without
@@ -580,6 +613,70 @@ mod tests {
     /// A depth in the pool's units.
     fn l(units: u128) -> LUnits {
         LUnits::new(units)
+    }
+
+    /// Liquidity L over [-300, 300] plus a band of G over [100, 300]: the
+    /// tick at 100 is initialized inside the range, as a band's bound is.
+    fn pool_with_band() -> PoolSnapshot {
+        let (outer, band): (u128, u128) = (1_000_000_000_000, 400_000_000_000);
+        PoolSnapshot {
+            sqrt_price: get_sqrt_ratio_at_tick(0).unwrap(),
+            liquidity: l(outer),
+            ticks: BTreeMap::from([
+                (-300, tick_liquidity(outer, outer as i128)),
+                (100, tick_liquidity(band, band as i128)),
+                (300, tick_liquidity(outer + band, -((outer + band) as i128))),
+            ]),
+            ..PoolSnapshot::default()
+        }
+    }
+
+    fn to_tick(pool: &PoolSnapshot, tick: i32) -> PerpDelta {
+        pool.quote_to_price(
+            get_sqrt_ratio_at_tick(tick).unwrap(),
+            QuoteConstraints {
+                enforce_price_impact: false,
+                max_perp: None,
+            },
+        )
+        .unwrap()
+        .perp_delta
+    }
+
+    /// The exact swap to a band's bound ends on it; half of it, a 0.5%
+    /// smaller clip, and no swap at all do not.
+    #[test]
+    fn a_swap_that_stops_on_an_initialized_tick_is_caught() {
+        let pool = pool_with_band();
+        let to_bound = to_tick(&pool, 100);
+        assert_eq!(pool.ends_on_tick(to_bound).unwrap(), Some(100));
+        let atoms = to_bound.atoms();
+        assert_eq!(
+            pool.ends_on_tick(PerpDelta::new(atoms - 1)).unwrap(),
+            Some(100),
+            "an end one atom short of the bound is within the tolerance"
+        );
+        assert_eq!(pool.ends_on_tick(PerpDelta::new(atoms / 2)).unwrap(), None);
+        assert_eq!(
+            pool.ends_on_tick(PerpDelta::new(atoms * 995 / 1000))
+                .unwrap(),
+            None
+        );
+        assert_eq!(pool.ends_on_tick(PerpDelta::ZERO).unwrap(), None);
+    }
+
+    /// A swap to the outer bound ends on it; one larger than the pool can
+    /// fill ends nowhere, since the contract reverts it.
+    #[test]
+    fn the_outer_bound_counts_and_an_unfilled_swap_does_not() {
+        let pool = pool_with_band();
+        let to_edge = to_tick(&pool, 300);
+        assert_eq!(pool.ends_on_tick(to_edge).unwrap(), Some(300));
+        let down = to_tick(&pool, -300);
+        assert_eq!(pool.ends_on_tick(down).unwrap(), Some(-300));
+        let beyond = PerpDelta::new(to_edge.atoms() * 2);
+        assert!(!pool.quote_perp(beyond).unwrap().fully_filled);
+        assert_eq!(pool.ends_on_tick(beyond).unwrap(), None);
     }
 
     /// Only ticks at or below the current one count, each by its net.
