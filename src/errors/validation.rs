@@ -106,6 +106,16 @@ pub enum ValidationError {
         reason: &'static str,
     },
 
+    /// Text that is not an exact amount: the parse refuses rather than
+    /// rounds.
+    #[error("invalid amount {text:?}: {reason}")]
+    InvalidAmount {
+        /// The text refused.
+        text: String,
+        /// What was wrong with it.
+        reason: &'static str,
+    },
+
     /// A configuration value is invalid or missing.
     #[error("invalid config: {reason}")]
     InvalidConfig {

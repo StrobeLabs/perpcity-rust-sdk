@@ -2,8 +2,8 @@
 //! their domains rather than at hand-picked points: a split returns every
 //! atom it was given, the two asset crossings invert each other to within
 //! the truncation they document, a price and its root round-trip to within
-//! the floor the root documents, and a human amount survives the trip
-//! through `f64` to the atom.
+//! the floor the root documents, a human amount survives the trip through
+//! `f64` to the atom, and every amount survives the trip through its text.
 
 use std::num::NonZeroUsize;
 
@@ -135,4 +135,36 @@ proptest! {
         // Two truncations can lose at most one atom between them.
         prop_assert!(x - (taken.atoms() + left.atoms()) <= 1);
     }
+
+    /// Every count prints as a decimal that parses back to it, across the
+    /// whole width: the text door is exact everywhere, not only where an
+    /// `f64` is.
+    #[test]
+    fn a_count_parses_back_from_what_it_prints(x: u128) {
+        prop_assert_eq!(UsdcAtoms::new(x).to_string().parse::<UsdcAtoms>().unwrap(), UsdcAtoms::new(x));
+        prop_assert_eq!(PerpAtoms::new(x).to_string().parse::<PerpAtoms>().unwrap(), PerpAtoms::new(x));
+    }
+
+    /// The same for a signed count, `i128::MIN` and all.
+    #[test]
+    fn a_signed_count_parses_back_from_what_it_prints(x: i128) {
+        prop_assert_eq!(UsdcDelta::new(x).to_string().parse::<UsdcDelta>().unwrap(), UsdcDelta::new(x));
+        prop_assert_eq!(PerpDelta::new(x).to_string().parse::<PerpDelta>().unwrap(), PerpDelta::new(x));
+    }
+}
+
+/// The extremes a property may not draw: the parse reaches both ends of
+/// each width and refuses one past them.
+#[test]
+fn the_parse_reaches_both_ends_of_each_width() {
+    for x in [i128::MIN, i128::MAX] {
+        assert_eq!(
+            UsdcDelta::new(x).to_string().parse::<UsdcDelta>().unwrap(),
+            UsdcDelta::new(x)
+        );
+    }
+    let max = UsdcAtoms::new(u128::MAX);
+    assert_eq!(max.to_string().parse::<UsdcAtoms>().unwrap(), max);
+    let past = format!("{}0", max);
+    assert!(past.parse::<UsdcAtoms>().is_err(), "{past}");
 }
