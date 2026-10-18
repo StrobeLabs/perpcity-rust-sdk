@@ -7,6 +7,7 @@
 //! crosses between them is a valuation at a [`Price`].
 
 use std::fmt;
+use std::str::FromStr;
 
 use alloy::primitives::{I256, U256};
 
@@ -291,6 +292,115 @@ impl fmt::Display for PerpAtoms {
 impl fmt::Display for PerpDelta {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         fmt_atoms(f, self.is_negative(), self.atoms().unsigned_abs())
+    }
+}
+
+// What a person writes in a flag or a config file: the same exact decimal
+// `Display` prints, read back to the atom. A seventh decimal place is
+// refused, never rounded, since no atom holds it.
+
+/// The decimal `fmt_atoms` prints, as its sign and magnitude in atoms:
+/// digits, then optionally `.` and one to six more, after an optional `-`.
+fn parse_atoms(text: &str) -> Result<(bool, u128), ValidationError> {
+    let refuse = |reason| ValidationError::InvalidAmount {
+        text: text.to_owned(),
+        reason,
+    };
+    let (negative, unsigned) = match text.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, text),
+    };
+    let (whole, fraction) = match unsigned.split_once('.') {
+        Some((whole, fraction)) => (whole, Some(fraction)),
+        None => (unsigned, None),
+    };
+    let digits = |part: &str| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit());
+    if !digits(whole) {
+        return Err(refuse("expected digits before any decimal point"));
+    }
+    let fraction = match fraction {
+        None => 0,
+        Some(fraction) if !digits(fraction) => {
+            return Err(refuse("expected digits after the decimal point"));
+        }
+        Some(fraction) if fraction.len() > PLACES => {
+            return Err(refuse("more than six decimal places; an atom is the sixth"));
+        }
+        Some(fraction) => {
+            let padded = format!("{fraction:0<PLACES$}");
+            padded
+                .parse::<u128>()
+                .map_err(|_| refuse("unreadable fraction"))?
+        }
+    };
+    let magnitude = whole
+        .parse::<u128>()
+        .ok()
+        .and_then(|whole| whole.checked_mul(ATOMS_PER_UNIT))
+        .and_then(|atoms| atoms.checked_add(fraction))
+        .ok_or_else(|| refuse("past the range of 128 bits"))?;
+    Ok((negative, magnitude))
+}
+
+/// A count: no sign, since a count cannot be below zero.
+fn parse_count(text: &str) -> Result<u128, ValidationError> {
+    match parse_atoms(text)? {
+        (false, atoms) => Ok(atoms),
+        (true, _) => Err(ValidationError::InvalidAmount {
+            text: text.to_owned(),
+            reason: "a count cannot be negative",
+        }),
+    }
+}
+
+/// A signed count, `i128::MIN` included.
+fn parse_delta(text: &str) -> Result<i128, ValidationError> {
+    let (negative, magnitude) = parse_atoms(text)?;
+    let atoms = if negative {
+        0i128.checked_sub_unsigned(magnitude)
+    } else {
+        i128::try_from(magnitude).ok()
+    };
+    atoms.ok_or_else(|| ValidationError::InvalidAmount {
+        text: text.to_owned(),
+        reason: "past the range of a signed 128-bit count",
+    })
+}
+
+impl FromStr for UsdcAtoms {
+    type Err = ValidationError;
+
+    /// Dollars written as `Display` prints them, exact: `12.5` is
+    /// 12 500 000 atoms.
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        parse_count(text).map(Self::new)
+    }
+}
+
+impl FromStr for UsdcDelta {
+    type Err = ValidationError;
+
+    /// Signed dollars written as `Display` prints them, exact.
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        parse_delta(text).map(Self::new)
+    }
+}
+
+impl FromStr for PerpAtoms {
+    type Err = ValidationError;
+
+    /// Tokens written as `Display` prints them, exact.
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        parse_count(text).map(Self::new)
+    }
+}
+
+impl FromStr for PerpDelta {
+    type Err = ValidationError;
+
+    /// A signed exposure written as `Display` prints it, exact.
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        parse_delta(text).map(Self::new)
     }
 }
 
@@ -652,5 +762,54 @@ mod tests {
             serde_json::from_str::<PerpDelta>("-42").unwrap(),
             PerpDelta::new(-42)
         );
+    }
+
+    /// Text reads to the atom it names, with no float on the way: what an
+    /// operator types into a guard is the guard.
+    #[test]
+    fn text_reads_to_the_atom_it_names() {
+        let usdc = |text: &str| text.parse::<UsdcAtoms>().unwrap().atoms();
+        assert_eq!(usdc("12.5"), 12_500_000);
+        assert_eq!(usdc("0.000001"), 1);
+        assert_eq!(usdc("007"), 7_000_000);
+        assert_eq!(usdc("0"), 0);
+        assert_eq!(
+            "-0.29".parse::<PerpDelta>().unwrap(),
+            PerpDelta::new(-290_000)
+        );
+        assert_eq!("-0".parse::<UsdcDelta>().unwrap(), UsdcDelta::ZERO);
+    }
+
+    /// Anything that is not an exact amount is refused, never rounded or
+    /// trimmed into one.
+    #[test]
+    fn text_that_is_not_an_exact_amount_is_refused() {
+        for text in [
+            "",
+            "-",
+            ".5",
+            "5.",
+            "1.0000001",
+            "1e6",
+            " 1",
+            "1 ",
+            "+1",
+            "1_000",
+            "0x10",
+            "1.2.3",
+            "--1",
+            "NaN",
+        ] {
+            let refused = text.parse::<UsdcDelta>().unwrap_err();
+            assert!(
+                matches!(refused, ValidationError::InvalidAmount { .. }),
+                "{text:?}: {refused}"
+            );
+        }
+        assert!(
+            "-1".parse::<UsdcAtoms>().is_err(),
+            "a count cannot be negative"
+        );
+        assert!("-0".parse::<PerpAtoms>().is_err(), "nor written as one");
     }
 }

@@ -19,6 +19,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Amounts parse from text, exactly.** `UsdcAtoms`, `UsdcDelta`, `PerpAtoms` and `PerpDelta` implement `FromStr`, the inverse of their `Display`: `"12.5"` is 12 500 000 atoms, with no float on the way. Anything that is not an exact amount is refused with `ValidationError::InvalidAmount` rather than rounded: a seventh decimal place, a sign on a count, `+`, exponents, separators, surrounding whitespace, or a value past the type's width. A command-line flag or config value can then be a unit type directly, and every value round-trips through its text, `u128::MAX` and `i128::MIN` included.
+
 - **`PerpCityError::is_unconfirmed`** (and `TransactionError::is_unconfirmed`) names a send that was broadcast and not confirmed either way, `BroadcastFailed` or `ReceiptTimeout`, which may still land. Both are transient, so a loop that retries transients must exclude these before resending a change that is not idempotent: a resent partial close could trade twice.
 
 - **`MarketReader::state_at_head`** pins reads to the head block the endpoint serves now, which a transaction just confirmed is in; the lagged `state()` does not promise that. Not reorg-safe.
