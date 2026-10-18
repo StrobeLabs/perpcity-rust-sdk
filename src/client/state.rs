@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use alloy::eips::BlockId;
 use alloy::primitives::{Address, B256, U256};
-use alloy::providers::MulticallError;
+use alloy::providers::{MulticallError, Provider};
 use alloy::sol_types::{SolCall, SolError};
 use alloy::transports::{RpcError, TransportError};
 use futures_util::stream::{self, StreamExt};
@@ -257,6 +257,20 @@ impl MarketReader {
             market: self.clone(),
             block,
         })
+    }
+
+    /// State reads pinned to the head block the endpoint serves now: one a
+    /// transaction this process saw confirmed is in, which the lagged
+    /// snapshot block does not promise. Not reorg-safe; a read that must
+    /// survive a reorg takes [`Self::state`].
+    ///
+    /// # Errors
+    ///
+    /// [`ContractError::BlockUnavailable`] when the serving replica is
+    /// missing the header it just named.
+    pub async fn state_at_head(&self) -> Result<StateAt> {
+        let head = self.chain.provider().get_block_number().await?;
+        self.state_at(head).await
     }
 
     /// State reads pinned to block `number`.
@@ -1075,6 +1089,17 @@ mod tests {
         rpc.block(92, TIMESTAMP);
         let state = client.market().state_at(92).await.unwrap();
         (state, rpc)
+    }
+
+    #[tokio::test]
+    async fn state_at_head_pins_the_block_the_endpoint_names() {
+        let (client, rpc) = mock::client();
+        rpc.quantity(100);
+        let hash = rpc.block(100, TIMESTAMP);
+
+        let state = client.market().state_at_head().await.unwrap();
+        assert_eq!((state.block().number, state.block().hash), (100, hash));
+        assert!(rpc.is_drained(), "blockNumber and the header, nothing else");
     }
 
     #[tokio::test]
