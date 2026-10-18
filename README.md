@@ -130,7 +130,7 @@ let band     = state.maker_band(open.pos_id).await?;           // Some(MakerBand
 let at_block = state.block();                                  // number, hash, timestamp
 
 // Batch balances — N addresses in 1 multicall (1 CU instead of 2N)
-let (usdc, eth) = client.chain().get_balances(address).await?;
+let Balances { usdc, eth_wei } = client.chain().get_balances(address).await?; // usdc: UsdcAtoms
 let all = client.chain().get_balances_batch(&addresses).await?;
 ```
 

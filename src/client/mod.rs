@@ -48,7 +48,7 @@ mod taker_health;
 mod trades;
 mod transactions;
 
-pub use chain::{ChainDeployments, ChainReader};
+pub use chain::{Balances, ChainDeployments, ChainReader};
 pub use maker_equity::{MakerEquityKind, MakerEquityOutcome};
 pub use market::{MarketReader, PositionRole};
 pub use queries::{Bounds, Fees, MarketConfig, MarketSnapshot, OpenInterest};

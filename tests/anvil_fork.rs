@@ -19,8 +19,9 @@ use alloy::sol_types::SolCall;
 
 use perpcity_sdk::constants::SNAPSHOT_BLOCK_LAG;
 use perpcity_sdk::{
-    AdjustTakerParams, ChainDeployments, ChainReader, HftTransport, MakerEquityKind,
+    AdjustTakerParams, Balances, ChainDeployments, ChainReader, HftTransport, MakerEquityKind,
     OpenTakerParams, PerpCityError, PerpClient, TransactionError, TransportConfig, Urgency,
+    UsdcAtoms,
 };
 
 sol! {
@@ -266,7 +267,7 @@ async fn open_and_close_taker_on_fork() {
     let balance = client.get_usdc_balance().await.unwrap();
     println!("USDC balance: {balance}");
     assert!(
-        balance >= 100.0,
+        balance >= UsdcAtoms::new(100_000_000),
         "expected at least 100 USDC, got {balance}"
     );
 
@@ -419,7 +420,10 @@ async fn open_and_close_taker_on_fork() {
     client.chain().invalidate_fast_cache();
     let final_balance = client.get_usdc_balance().await.unwrap();
     println!("\nFinal USDC balance: {final_balance}");
-    assert!(final_balance > 900.0, "lost too much USDC: {final_balance}");
+    assert!(
+        final_balance > UsdcAtoms::new(900_000_000),
+        "lost too much USDC: {final_balance}"
+    );
 
     println!("\n=== Test passed! ===");
 }
@@ -449,16 +453,19 @@ async fn batch_balances_via_multicall() {
     deal_usdc(&anvil.url, address, U256::from(500_000_000u64)).await; // 500 USDC
 
     // 4. Test get_balances (single address)
-    let (usdc, eth) = client.chain().get_balances(address).await.unwrap();
-    println!("get_balances: USDC={usdc}, ETH={eth}");
-    assert!(usdc >= 500.0, "expected at least 500 USDC, got {usdc}");
-    assert!(eth > U256::ZERO, "expected non-zero ETH balance");
+    let Balances { usdc, eth_wei } = client.chain().get_balances(address).await.unwrap();
+    println!("get_balances: USDC={usdc}, ETH={eth_wei}");
+    assert!(
+        usdc >= UsdcAtoms::new(500_000_000),
+        "expected at least 500 USDC, got {usdc}"
+    );
+    assert!(eth_wei > U256::ZERO, "expected non-zero ETH balance");
 
     // Cross-check with individual methods
     let usdc_individual = client.get_usdc_balance().await.unwrap();
-    assert!(
-        (usdc - usdc_individual).abs() < 0.01,
-        "multicall USDC ({usdc}) should match individual ({usdc_individual})"
+    assert_eq!(
+        usdc, usdc_individual,
+        "the multicall and the single read agree to the atom"
     );
 
     // 5. Test get_balances_batch (multiple addresses)
@@ -474,15 +481,20 @@ async fn batch_balances_via_multicall() {
         .unwrap();
     assert_eq!(results.len(), 2);
 
-    let (usdc1, eth1) = results[0];
-    let (usdc2, eth2) = results[1];
-    println!("batch[0]: USDC={usdc1}, ETH={eth1}");
-    println!("batch[1]: USDC={usdc2}, ETH={eth2}");
+    let (first, second) = (results[0], results[1]);
+    println!("batch[0]: {first:?}");
+    println!("batch[1]: {second:?}");
 
-    assert!(usdc1 >= 500.0, "addr1 should have >= 500 USDC");
-    assert!(usdc2 >= 200.0, "addr2 should have >= 200 USDC");
-    assert!(eth1 > U256::ZERO, "addr1 should have ETH");
-    assert!(eth2 > U256::ZERO, "addr2 should have ETH");
+    assert!(
+        first.usdc >= UsdcAtoms::new(500_000_000),
+        "addr1 should have >= 500 USDC"
+    );
+    assert!(
+        second.usdc >= UsdcAtoms::new(200_000_000),
+        "addr2 should have >= 200 USDC"
+    );
+    assert!(first.eth_wei > U256::ZERO, "addr1 should have ETH");
+    assert!(second.eth_wei > U256::ZERO, "addr2 should have ETH");
 
     // 6. Test empty batch
     let empty = client.chain().get_balances_batch(&[]).await.unwrap();

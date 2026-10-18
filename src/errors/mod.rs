@@ -138,6 +138,14 @@ impl PerpCityError {
         ) || matches!(self, Self::Iris(e) if e.is_transient())
     }
 
+    /// A transaction broadcast and not confirmed either way; see
+    /// [`TransactionError::is_unconfirmed`]. Such an error is also
+    /// [transient](Self::is_transient), so a loop that retries transients
+    /// must exclude it before resending a change that is not idempotent.
+    pub fn is_unconfirmed(&self) -> bool {
+        matches!(self, Self::Transaction(e) if e.is_unconfirmed())
+    }
+
     /// Hash of the signed transaction when the failure came at or after
     /// the broadcast; see [`TransactionError::tx_hash`].
     ///
@@ -229,6 +237,21 @@ mod tests {
         }
         .into();
         assert!(!range.is_transient(), "a reversed range stays reversed");
+
+        let timed_out: PerpCityError = TransactionError::ReceiptTimeout {
+            tx_hash: [0x33; 32].into(),
+            reason: "no receipt by the deadline".into(),
+        }
+        .into();
+        assert!(
+            timed_out.is_transient() && timed_out.is_unconfirmed(),
+            "it may still land, so a blind resend could make the change twice"
+        );
+        assert!(
+            !not_closed.is_unconfirmed(),
+            "mined: its effect is on chain to read"
+        );
+        assert!(!desynced.is_unconfirmed(), "nothing was sent");
 
         let refused: PerpCityError = ContractError::LogsRejected {
             from_block: 7,

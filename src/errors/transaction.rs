@@ -172,6 +172,18 @@ pub enum TransactionError {
 }
 
 impl TransactionError {
+    /// Whether the transaction was broadcast and not confirmed either way
+    /// (`BroadcastFailed`, `ReceiptTimeout`), so it may still land.
+    ///
+    /// Its effect is unknown: sending the same change again could make it
+    /// twice. Read the state the send would have changed before acting.
+    pub fn is_unconfirmed(&self) -> bool {
+        matches!(
+            self,
+            Self::BroadcastFailed { .. } | Self::ReceiptTimeout { .. }
+        )
+    }
+
     /// Hash of the signed transaction, for every failure from the broadcast
     /// onward: `BroadcastFailed`, `ReceiptTimeout`, `Reverted` and
     /// `OutOfGas`. `None` means nothing was sent.

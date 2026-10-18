@@ -100,11 +100,11 @@ type, `RowOutcome`, and one driver that chunks, fans out and classifies;
 
 Think of the module as three handles and one path.
 
-`ChainReader` is the chain. It owns the transport and the provider, the
-chain id and the deployment addresses, the history handle, the base-fee
-cache and the state cache. It answers questions addressed to something
-other than a market: a wallet's balances, a beacon's index, the lagged
-block. Build one per process; everything else shares it.
+`ChainReader` is the chain: the transport and provider, the chain id and
+deployment addresses, the history handle, and the base-fee and state
+caches. It answers what is addressed to something other than a market —
+a wallet's balances, a beacon's index, the lagged block — and is built
+once per process and shared.
 
 `MarketReader` is a market on that chain: the `Perp` address and the
 chain reader, nothing more. Its reads are the *now* tense, from the head
@@ -228,7 +228,7 @@ send would ask.
 
 | Type | Invariant | Produced by | Consumed by |
 |---|---|---|---|
-| [`ChainReader`](chain.rs#L56) | one chain: one transport, one deployment set, one set of caches shared by everything built over it | [`ChainReader::new`](chain.rs#L104) over an [`HftTransport`](../transport/DESIGN.md) and a [`ChainDeployments`](chain.rs#L38); [`ChainReader::arbitrum`](chain.rs#L112) and [`ChainReader::arbitrum_sepolia`](chain.rs#L125) for the known chains, each taking the chain on trust until [`ChainReader::checked`](chain.rs#L164) asks the endpoint | [`ChainReader::market`](market.rs#L33), which is how every market reader is made; [`ChainReader::history`](chain.rs#L203), which hands out the scanning handle; the wallet and index reads; any helper bounded on `AsRef<ChainReader>`. The strategy layer builds one per process, and that sharing is why the caches live here and not on a market. |
+| [`ChainReader`](chain.rs#L66) | one chain: one transport, one deployment set, one set of caches shared by everything built over it | [`ChainReader::new`](chain.rs#L114) over an [`HftTransport`](../transport/DESIGN.md) and a [`ChainDeployments`](chain.rs#L39); [`ChainReader::arbitrum`](chain.rs#L122) and [`ChainReader::arbitrum_sepolia`](chain.rs#L135) for the known chains, each taking the chain on trust until [`ChainReader::checked`](chain.rs#L174) asks the endpoint | [`ChainReader::market`](market.rs#L33), which is how every market reader is made; [`ChainReader::history`](chain.rs#L213), which hands out the scanning handle; the wallet reads, [`ChainReader::balance_of`](chain.rs#L309) among them, and the index read; any helper bounded on `AsRef<ChainReader>`. The strategy layer builds one per process, and that sharing is why the caches live here and not on a market. |
 | [`MarketReader`](market.rs#L26) | one market, read now: a `Perp` over a `ChainReader`; every read is current, takes no block and is named for what it returns. `tape_addresses` answers for the past tense; an earlier beacon is the `history` node's debt. `is_upgradeable` names the build, cached with the pool key | [`ChainReader::market`](market.rs#L33) | [`MarketReader::state`](state.rs#L254), [`MarketReader::state_at`](state.rs#L288) and `state_at_head`, the door to the other tense, and the `get_*` conveniences; [`PerpClient::new`](mod.rs#L238); [`LiveTakerMarket::subscribe`](../feeds/DESIGN.md); [`TapeAddresses`](../history/tape/DESIGN.md); [`MarketReader::liquidation_calldata`](market.rs#L160), for a signer bound elsewhere. The strategy layer, which reads only `v0.2.2` markets. |
 | [`StateAt`](state.rs#L70) | one market at one block: the handle resolved one header; every read is pinned to its hash; results carry the block | [`MarketReader::state`](state.rs#L254), at the lagged snapshot block; [`MarketReader::state_at`](state.rs#L288), at a block the caller names | its own reads, which fill the snapshots in `math` and the state types below and enforce the tense rule; its batches, [`StateAt::positions`](state.rs#L429), [`StateAt::owners`](state.rs#L448), [`StateAt::maker_equities`](maker_equity.rs#L324) and [`StateAt::taker_healths`](taker_health.rs#L58), one block over many ids; the replay's seed, every figure the fold holds at one block, and [`StateAt::books`](state.rs#L369), the books a window fold stands on; the strategy layer's block-pinned sources, behind a trait so a read can be stubbed. |
 | [`RowOutcome`](state.rs#L177) | one id's row in a batch: exactly one per input id, in input order; `Ok(None)` is an id with no row; `Err` is that id's failure and says whether to retry | [`StateAt::positions`](state.rs#L429), [`StateAt::owners`](state.rs#L448) and [`StateAt::taker_healths`](taker_health.rs#L58), one row multicall per chunk, the second's `None` a burned id and the third's row a taker's health at the handle's mark; [`MarketReader::get_taker_healths`](taker_health.rs#L27) as the convenience | the maker-equity batch, on the same driver. The strategy layer's solvency folds, which sweep every id a market ever minted, and its liquidation sweep, which retries the transient failures and probes the rest. |
@@ -253,7 +253,8 @@ send would ask.
 | [`OpenInterest`](queries.rs#L100) | the two sides' draw as the contract accumulates it: a [`PerSide`](../units/DESIGN.md) of [`PerpAtoms`](../units/DESIGN.md), the same shape and unit as the capacity it draws on, so the two compare without a conversion; `on` reads a side and `total` the market | [`MarketReader::get_open_interest`](queries.rs#L454), from the contract's own pair | [`MarketSnapshot`](queries.rs#L117), as a field; the strategy layer's capacity gauges, which price it at a mark through `PerpAtoms::value_at`. |
 | [`SolvencyState`](state.rs#L116) | the market's solvency books at a block, as [`UsdcAtoms`](../units/DESIGN.md): the figures they are set against — every position's margin summed, the USDC the contract holds, the same books folded from the tape — are exact, and a comparison to the cent needs both sides exact | [`StateAt::solvency`](state.rs#L350); [`Replay::solvency`](../history/replay/DESIGN.md), the same books from the tape, which the read checks | nothing in the crate. The strategy layer's solvency audits and its monitor's solvency reading, which gate on the replay's gaps before trusting the fold. |
 | [`MarketRates`](state.rs#L165) | the rates the last touch set, as `rates()` returns them and `RatesAndEmasRefreshed` emits them: funding per day as a [`FundingRate`](../units/DESIGN.md), the utilization fees as a [`PerSide`](../units/DESIGN.md) of [`UtilizationRate`](../units/DESIGN.md), and the touch's timestamp. The read side of a fold accessor, so the rates keep two producers | [`StateAt::rates`](state.rs#L601); the `RatesAndEmasRefreshed` event carries the same three | the replay's seed in the history module, which reads it beside the stored EMAs, the cumulatives, the modules and the maker bands: every figure the fold holds, read at one block, so a fold starts from the reads and the tape continues it. |
-| [`ChainDeployments`](chain.rs#L38) | the addresses a chain shares: collateral and pool manager | the known chains' constants, or the caller for another | [`ChainReader::new`](chain.rs#L104). |
+| [`ChainDeployments`](chain.rs#L39) | the addresses a chain shares: collateral and pool manager | the known chains' constants, or the caller for another | [`ChainReader::new`](chain.rs#L114). |
+| [`Balances`](chain.rs#L49) | one address's USDC as [`UsdcAtoms`](../units/DESIGN.md) and its ETH in wei, from one multicall; exact, so balances before and after a run subtract to the atom | [`ChainReader::get_balances`](chain.rs#L342) and `get_balances_batch`, one per address in input order; `ChainReader::balance_of` and `PerpClient::get_usdc_balance` give the USDC alone, as `UsdcAtoms` | nothing in the crate. The strategy layer's treasury, which funds and drains wallets by these figures, and its operators' receipts. |
 | `MarketImmutables` (crate-private) | a market's deployment-fixed values: pool id, tick spacing and its `Era`; read once per market, never pinned | the first pinned pool read or liquidation call on a market, then the chain reader's cache | the pool reads and the liquidation calldata, and no caller |
 | `Era` (crate-private) | which contract build a market runs, `Legacy` (`58b42b7`) or `Upgradeable` (`v0.2.2`), from whether its pool key names a hook; fixed for the market's life. The client's own choice, not a caller's: the one thing it decides is the shape of the liquidation call, and nothing above the client chooses by era, so the type stays private and goes with the cutover | `MarketImmutables`, from `poolKey` | the liquidation calldata on `MarketReader`, which picks the 2-arg whole-position call or the 3-arg call by amount |
 
@@ -293,13 +294,12 @@ importer was already this module, and `Fees` holding a validated
 it was still written down. A type's home is its producer, and a type
 with nothing but fields is not thereby a different kind of thing.
 
-`convert` has no rows at all, because it declares no types: its functions
-are edges. Every read that returns a price calls
-[`price_x96_to_f64`](../convert.rs#L178) once; the trades call
-[`scale_to_6dec`](../convert.rs#L48) once; the balance and solvency reads
-call [`usdc_from_atoms`](../convert.rs#L88); the decoder and the
-maker-equity batch call [`unpack_balance_delta`](../convert.rs#L286). The
-types on either side of that door do have rows: the wire side's in
+`convert` has no rows, because it declares no types: its functions are
+edges. Every price read calls [`price_x96_to_f64`](../convert.rs#L178)
+once; the trades call [`scale_to_6dec`](../convert.rs#L48) once; the
+collateral read calls [`usdc_from_atoms`](../convert.rs#L88); the decoder
+and the maker-equity batch call [`unpack_balance_delta`](../convert.rs#L286).
+The types on either side of that door do have rows: the wire side's in
 [`units`](../units/DESIGN.md), the human side's here, the exact twins in
 [`math`](../math/DESIGN.md).
 
