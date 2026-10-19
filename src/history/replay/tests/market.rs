@@ -274,13 +274,14 @@ fn genesis_states_the_zeros_and_leaves_the_creation_log_unknown() {
     assert_combine_law(Replay::from_genesis(perp), &tape);
 }
 
-/// What was ever deposited is a sum only a fold from genesis has whole,
-/// and where a fold began is the earlier fold's through `combine`.
+/// What was ever deposited is a sum only a fold from the market's creation
+/// has whole, and where a fold began is the earlier fold's through
+/// `combine`.
 #[test]
-fn only_a_fold_from_genesis_knows_what_was_ever_deposited() {
+fn only_a_fold_from_creation_knows_what_was_ever_deposited() {
     let tape = tape();
     let whole = genesis(&tape);
-    assert_eq!(whole.start(), Start::Genesis);
+    assert_eq!(whole.start(), Start::Creation);
     assert_eq!(whole.deposited(), Some(UsdcAtoms::new(100_000_000)));
 
     let segment = Replay::fold(&tape);
@@ -294,7 +295,7 @@ fn only_a_fold_from_genesis_knows_what_was_ever_deposited() {
     empty.combine(whole.clone());
     assert_eq!(
         empty.start(),
-        Start::Genesis,
+        Start::Creation,
         "an empty fold is the identity"
     );
 }

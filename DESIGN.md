@@ -200,7 +200,7 @@ that carries it, the invariant it holds, and the node that owns it.
 | Custody over time | [`OwnershipLog`](src/history/tape/custody.rs#L102) | a fold of transfers; owner at a chain point | [history/tape](src/history/tape/DESIGN.md) |
 | A computation over the tape | [`Fold`](src/history/fold/mod.rs#L34) | the fold of a concatenation is the combination of the folds | [history/fold](src/history/fold/DESIGN.md) |
 | A value over time | [`Series`](src/history/fold/series.rs#L188), [`Arrivals`](src/history/fold/series.rs#L456) | chain order; appends across segments; trimmed to a retention | [history/fold](src/history/fold/DESIGN.md) |
-| A market rebuilt from its events | [`Replay`](src/history/replay/mod.rs#L161) | the reads' types, folded from the tape; equal to the reads at a block | [history/replay](src/history/replay/DESIGN.md) |
+| A market rebuilt from its events | [`Replay`](src/history/replay/mod.rs#L162) | the reads' types, folded from the tape; equal to the reads at a block | [history/replay](src/history/replay/DESIGN.md) |
 | A print | [`IndexPrint`](src/history/beacon.rs#L20) | the index at a chain point and time | [`history`](src/history/DESIGN.md) |
 | A cross-chain transfer | [`Burn`](src/cctp.rs#L203), [`Attested`](src/cctp.rs#L261) | USDC burned on one chain, minted once on another | [`cctp`](src/cctp/DESIGN.md) |
 | A failure | [`PerpCityError`](src/errors/mod.rs#L45) | typed, with a stated transience | [`errors`](src/errors/DESIGN.md) |
