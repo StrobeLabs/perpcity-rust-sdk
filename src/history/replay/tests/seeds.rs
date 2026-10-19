@@ -19,6 +19,12 @@ fn a_seed_is_a_checkpoint() {
 
     let mut seeded = Replay::from_seed(seed).unwrap();
     assert_eq!(seeded.block(), Some(at));
+    assert_eq!(seeded.start(), Start::Seed);
+    assert_eq!(
+        seeded.deposited(),
+        None,
+        "no read says what was ever deposited"
+    );
     assert_eq!(
         seeded.gaps().unknowns.margin_unknown,
         0,

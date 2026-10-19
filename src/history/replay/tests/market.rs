@@ -274,6 +274,31 @@ fn genesis_states_the_zeros_and_leaves_the_creation_log_unknown() {
     assert_combine_law(Replay::from_genesis(perp), &tape);
 }
 
+/// What was ever deposited is a sum only a fold from genesis has whole,
+/// and where a fold began is the earlier fold's through `combine`.
+#[test]
+fn only_a_fold_from_genesis_knows_what_was_ever_deposited() {
+    let tape = tape();
+    let whole = genesis(&tape);
+    assert_eq!(whole.start(), Start::Genesis);
+    assert_eq!(whole.deposited(), Some(UsdcAtoms::new(100_000_000)));
+
+    let segment = Replay::fold(&tape);
+    assert_eq!(segment.start(), Start::Segment);
+    assert_eq!(segment.deposited(), None, "short by what came before it");
+
+    let mut continued = genesis(&tape[..2]);
+    continued.combine(Replay::fold(&tape[2..]));
+    assert_eq!(continued.deposited(), whole.deposited());
+    let mut empty = Replay::default();
+    empty.combine(whole.clone());
+    assert_eq!(
+        empty.start(),
+        Start::Genesis,
+        "an empty fold is the identity"
+    );
+}
+
 fn with_tx(mut row: TapeEvent, tx: u8) -> TapeEvent {
     row.tx_hash = B256::with_last_byte(tx);
     row

@@ -164,7 +164,7 @@ fn the_replay_keeps_series_and_trims_them_to_a_retention() {
         1,
         "genesis's zero is the one sample before the window"
     );
-    assert_eq!(short.deposited(), UsdcAtoms::ZERO);
+    assert_eq!(short.deposited(), Some(UsdcAtoms::ZERO));
 }
 
 /// Two wallets, two positions; position 1 changes hands mid-life. A
