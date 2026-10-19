@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking
 
+- **`Replay::deposited` is `Option<UsdcAtoms>`, `None` unless the fold began at genesis.** It is set against bad debt as what was ever deposited, and a sum from a segment or a seed is short by everything before it, so a check of debt against it would fire on a healthy market. `Replay::start` returns the new `Start` (`Genesis`, `Seed` or `Segment`), which a consumer reads to know whether the fold knows every position: a segment knows only the ones it saw move. A fold keeps its start through `combine`.
+
 - **`PerpClient::transfer_usdc` takes `UsdcAtoms`**, in place of an `f64` of dollars, so a transfer moves exactly the atoms named. Before, the float was rounded to the nearest atom, and a negative amount wrapped into an enormous transfer instead of being refused. `UsdcAtoms::try_from(dollars)` gives the same atoms the old call sent for any non-negative amount.
 
 - **Balances are exact.** `ChainReader::get_balances` returns a `Balances { usdc, eth_wei }` and `get_balances_batch` a `Vec<Balances>`, in place of `(f64, U256)` tuples; `usdc` is `UsdcAtoms`. `ChainReader::balance_of` and `PerpClient::get_usdc_balance` return `UsdcAtoms`, and the state cache keeps balances as `UsdcAtoms`. Call `.usdc()` where a float is wanted: it is the same value the reads returned before. A balance past `u128` is an overflow, where `i128` was the bound.

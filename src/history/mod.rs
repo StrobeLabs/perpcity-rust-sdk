@@ -78,7 +78,7 @@ pub use fold::{
 pub use recording::{FORMAT, Manifest, Recording, TailCheck};
 pub use replay::{
     Faults, Gaps, Liquidation, PositionKind, PositionState, Positions, Replay, Settlement,
-    Silences, Unknowns,
+    Silences, Start, Unknowns,
 };
 pub use scan::{ScanStats, get_logs_chunked};
 pub use tape::{
