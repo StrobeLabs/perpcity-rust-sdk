@@ -338,10 +338,12 @@ path the chain checks.
 - **Each crossing has its inverse, so the two dangerous pairs flow both
   ways.** `PerpAtoms` and `UsdcAtoms`: `value_at` prices tokens and
   `perp_at` sizes them. `SqrtPrice` and `Price`: `squared` and `try_from`
-  take a root to its price and back. An inverse is not a
-  second home for a conversion: the two directions are two questions a
-  strategy asks — what is this worth, and how much does this buy — and
-  a pair with only one of them answered sends the other through `f64`.
+  take a root to its price and back. An inverse is not a second home for a
+  conversion: the two directions are two questions a strategy asks — what
+  is this worth, and how much does this buy — and a pair with only one of
+  them answered sends the other through `f64`. A `PerpClient` and its
+  `UsdcAtoms` do the same: `get_usdc_balance` reads the count and
+  `transfer_usdc` sends one.
 - **`Price` divides into an `f64` and `f64` multiplies a `Price`**, which
   the graph reads as a cycle through a primitive. A ratio of prices is a
   number the strategy reasons over and a factor is a number it chose;
@@ -385,11 +387,9 @@ path the chain checks.
   and neither direction is a conversion with two homes.
 - **A [`Side`](side.rs#L20) flows both ways with the two things it keys.**
   `Side::exposure` signs a count into a [`PerpDelta`](amount.rs#L59) and
-  `PerpDelta::side` reads the sign back; `PerSide::on` takes a side to
-  pick a value and `PerSide::iter` hands each value back with its side. A
-  key and the thing it indexes necessarily point at each other, and
-  neither direction is a conversion with two homes: one is the sign of a
-  number and the other is a lookup.
+  `PerpDelta::side` reads the sign back; `PerSide::on` picks a value by
+  side and `PerSide::iter` returns each with its side: a key and what it
+  indexes point at each other, a sign and a lookup, not a conversion.
 - **`PricePair` holds two `u128` prices rather than two [`Price`](price.rs#L26).**
   It mirrors the contract's struct, whose cast to `uint128` is the check
   its constructor performs, and a `Price` does not remember that width.
