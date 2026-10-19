@@ -117,12 +117,13 @@ pub struct Faults {
 }
 
 /// Where a fold began, which decides what its totals can say: a sum over
-/// the tape is the market's lifetime sum only from genesis, and only a
-/// fold that began at genesis or on a read knows every position.
+/// the tape is the market's lifetime sum only from its creation, and only a
+/// fold that began at creation or on a read knows every position.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum Start {
-    /// Before the market's first event: [`Replay::from_genesis`].
-    Genesis,
+    /// At the market's creation, before its first event:
+    /// [`Replay::from_genesis`].
+    Creation,
     /// On the reads at a block: [`Replay::seeded`].
     Seed,
     /// Anywhere else: [`Replay::segment`] or [`Fold::fold`]. What it saw
@@ -252,7 +253,7 @@ impl Replay {
     pub fn from_genesis(perp: Address) -> Self {
         Self {
             perp,
-            start: Start::Genesis,
+            start: Start::Creation,
             events: 0,
             block: Latest::default(),
             market: Sequenced::new(Market {
@@ -557,10 +558,10 @@ impl Replay {
     /// USDC that ever entered the market as margin: every positive
     /// `MarginTransferred` delta, summed. What bad debt is set against,
     /// since no trading loss can exceed what was ever deposited. `None`
-    /// unless the fold began at genesis, since a sum from anywhere later
-    /// is short by what came before.
+    /// unless the fold began at the market's creation, since a sum from
+    /// anywhere later is short by what came before.
     pub fn deposited(&self) -> Option<UsdcAtoms> {
-        (self.start == Start::Genesis).then_some(self.market().solvency.deposited)
+        (self.start == Start::Creation).then_some(self.market().solvency.deposited)
     }
 
     /// Where the fold began: kept through `combine`, as the earlier
