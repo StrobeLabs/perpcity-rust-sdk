@@ -849,12 +849,19 @@ impl PerpClient {
         Ok(receipt.transaction_hash)
     }
 
-    /// Transfer USDC to an address. `amount` is in human units (e.g. 100.0 = 100 USDC).
-    pub async fn transfer_usdc(&self, to: Address, amount: f64, urgency: Urgency) -> Result<B256> {
-        tracing::debug!(%to, amount, ?urgency, "transferring USDC");
+    /// Transfer `amount` of USDC to an address, exact to the atom.
+    pub async fn transfer_usdc(
+        &self,
+        to: Address,
+        amount: UsdcAtoms,
+        urgency: Urgency,
+    ) -> Result<B256> {
+        tracing::debug!(%to, %amount, ?urgency, "transferring USDC");
         let usdc = IERC20::new(self.chain().deployments().usdc, self.chain().provider());
-        let scaled = U256::from(scale_to_6dec(amount)? as u128);
-        let calldata = usdc.transfer(to, scaled).calldata().clone();
+        let calldata = usdc
+            .transfer(to, U256::from(amount.atoms()))
+            .calldata()
+            .clone();
         let receipt = self
             .tx(self.chain().deployments().usdc, calldata)
             .with_urgency(urgency)
