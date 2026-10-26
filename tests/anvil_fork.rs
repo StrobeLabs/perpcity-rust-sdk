@@ -749,14 +749,13 @@ async fn state_reads_pin_the_block_they_were_asked_for() {
     let collateral = lagged.collateral().await.unwrap();
     let tick = lagged.pool_tick().await.unwrap();
     println!(
-        "block {}: {minted} minted, totalMargin {}, badDebt {}, collateral {:.2}, tick {tick}",
+        "block {}: {minted} minted, totalMargin {}, badDebt {}, collateral {}, tick {tick}",
         lagged.block().number,
         solvency.total_margin,
         solvency.bad_debt,
         collateral
     );
     assert!(minted >= 1, "nextPosId starts at 1");
-    assert!(collateral >= 0.0);
 
     // Every minted id is either a position or an empty struct, and only a
     // maker with liquidity has a range; the tick math accepts every range.

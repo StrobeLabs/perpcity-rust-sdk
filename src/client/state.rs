@@ -23,7 +23,6 @@ use crate::constants::{
 use crate::contracts::{
     IERC20, IMarginRatios, IMulticall3, IPoolManagerState, IPriceImpact, Modules, Perp, Position,
 };
-use crate::convert::usdc_from_atoms;
 use crate::errors::{ContractError, PerpCityError, Result, ValidationError};
 use crate::events::CumulativesInfo;
 use crate::math::BlockContext;
@@ -667,8 +666,8 @@ impl StateAt {
     ///
     /// # Errors
     ///
-    /// [`ValidationError::Overflow`] if the balance does not fit `i128`.
-    pub async fn collateral(&self) -> Result<f64> {
+    /// [`ValidationError::Overflow`] if the balance does not fit `u128`.
+    pub async fn collateral(&self) -> Result<UsdcAtoms> {
         let chain = &self.market.chain;
         let raw: U256 = IERC20::new(chain.deployments().usdc, chain.provider())
             .balanceOf(self.market.perp)
@@ -676,7 +675,7 @@ impl StateAt {
             .call()
             .await
             .map_err(|e| self.read_error(e))?;
-        Ok(usdc_from_atoms(raw, "collateral")?)
+        Ok(UsdcAtoms::try_from(raw)?)
     }
 
     /// The market's taker capacity and the open interest drawing on it, in
@@ -1274,7 +1273,10 @@ mod tests {
     async fn collateral_is_the_perps_usdc_balance() {
         let (state, rpc) = state().await;
         rpc.call::<IERC20::balanceOfCall>(&U256::from(3_265_080_000u64));
-        assert_eq!(state.collateral().await.unwrap(), 3_265.08);
+        assert_eq!(
+            state.collateral().await.unwrap(),
+            UsdcAtoms::new(3_265_080_000)
+        );
         assert!(rpc.is_drained());
     }
 
