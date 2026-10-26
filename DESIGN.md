@@ -182,7 +182,7 @@ that carries it, the invariant it holds, and the node that owns it.
 |---|---|---|---|
 | A chain | [`ChainReader`](src/client/chain.rs#L66) | one transport, one deployment set, shared caches | [`client`](src/client/DESIGN.md) |
 | A market, now | [`MarketReader`](src/client/market.rs#L26) | one `Perp` over a `ChainReader`; every read is current | [`client`](src/client/DESIGN.md) |
-| A market, at a block | [`StateAt`](src/client/state.rs#L70) | the handle is the block; every read pinned to its hash | [`client`](src/client/DESIGN.md) |
+| A market, at a block | [`StateAt`](src/client/state.rs#L69) | the handle is the block; every read pinned to its hash | [`client`](src/client/DESIGN.md) |
 | A market with a signer | [`PerpClient`](src/client/mod.rs#L185) | a `MarketReader` plus the send pipeline | [`client`](src/client/DESIGN.md) |
 | A send | [`TxBuilder`](src/client/transactions.rs#L40) | one transaction, one nonce, one outcome | [`client`](src/client/DESIGN.md) |
 | A tick interval | [`TickRange`](src/math/range.rs#L25) | `lower < upper`, both in the V4 domain, checked at construction | [`math::range`](src/math/range.rs#L1) |
