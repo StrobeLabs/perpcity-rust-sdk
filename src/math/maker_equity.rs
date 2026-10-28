@@ -47,6 +47,10 @@ use crate::units::{
     PerpDelta, Price, Ratio, Side, SqrtPrice, UsdcAtoms, UsdcDelta, UtilizationRate,
 };
 
+mod close;
+
+pub use close::{CloseRefusal, FullClose, Remainder};
+
 /// One `TickInfo` from the Perp's tick funding mapping (`s.ticks[tick]`),
 /// fields named after the contract's.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -249,7 +253,8 @@ impl Exposure {
 /// shock with nothing else in hand: [`Self::equity_at`],
 /// [`Self::is_liquidatable_at`] and [`Self::liquidation_prices`]. Its value
 /// and PnL are that revaluation at its own prices, which deserialization
-/// recomputes and requires.
+/// recomputes and requires. It carries the band's capacity too, which a
+/// full close takes out of the market's: [`Self::full_close`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "RawMakerEquityBreakdown")]
 pub struct MakerEquityBreakdown {
@@ -263,6 +268,7 @@ pub struct MakerEquityBreakdown {
     mark: Price,
     sqrt_price: SqrtPrice,
     exposure: Exposure,
+    capacity: PerSide<PerpAtoms>,
 }
 
 /// Deserialization shadow of [`MakerEquityBreakdown`]: identical fields,
@@ -280,6 +286,7 @@ struct RawMakerEquityBreakdown {
     mark: Price,
     sqrt_price: SqrtPrice,
     exposure: Exposure,
+    capacity: PerSide<PerpAtoms>,
 }
 
 impl TryFrom<RawMakerEquityBreakdown> for MakerEquityBreakdown {
@@ -330,6 +337,7 @@ impl TryFrom<RawMakerEquityBreakdown> for MakerEquityBreakdown {
             mark: raw.mark,
             sqrt_price: raw.sqrt_price,
             exposure: raw.exposure,
+            capacity: raw.capacity,
         })
     }
 }
@@ -356,6 +364,7 @@ impl MakerEquityBreakdown {
                 delta_perp: PerpDelta::ZERO,
                 delta_usd: UsdcDelta::ZERO,
             },
+            capacity: PerSide::default(),
         }
     }
 }
@@ -873,6 +882,7 @@ impl AccruedMakerSnapshot {
             mark: self.0.mark,
             sqrt_price: self.0.sqrt_price,
             exposure,
+            capacity: maker.capacity,
         })
     }
 }
@@ -988,7 +998,7 @@ mod tests {
     /// loads the fair price; this fixture predates that), which costs a
     /// few micro-dollars on the utilization legs over the 5775s replay
     /// window.
-    fn golden_market_and_maker() -> (MakerMarketSnapshot, AccrualInputs, MakerState) {
+    pub(super) fn golden_market_and_maker() -> (MakerMarketSnapshot, AccrualInputs, MakerState) {
         let i = |s: &str| I256::from_dec_str(s).unwrap();
         let u = |s: &str| U256::from_str_radix(s, 10).unwrap();
         let market = MakerMarketSnapshot {
@@ -1178,14 +1188,17 @@ mod tests {
 
     /// The golden maker with the pool standing at the mark and a margin
     /// that leaves it at one and a half times its band's value.
-    fn healthy_maker_at_the_mark() -> MakerEquityBreakdown {
+    pub(super) fn healthy_maker_at_the_mark() -> MakerEquityBreakdown {
         healthy_maker(1000, GOLDEN_BAND)
     }
 
     /// The golden maker in `band`, with the pool's root at `pool_root_e3`
     /// thousandths of the mark's, and a margin that leaves it at one and a
     /// half times its band's value.
-    fn healthy_maker(pool_root_e3: u16, (lower, upper): (i32, i32)) -> MakerEquityBreakdown {
+    pub(super) fn healthy_maker(
+        pool_root_e3: u16,
+        (lower, upper): (i32, i32),
+    ) -> MakerEquityBreakdown {
         let (market, accrual, mut maker) = golden_market_and_maker();
         (maker.tick_lower, maker.tick_upper) = (lower, upper);
         let mark_root = SqrtPrice::try_from(market.mark).unwrap().x96();
