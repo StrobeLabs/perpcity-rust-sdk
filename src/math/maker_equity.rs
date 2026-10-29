@@ -1199,17 +1199,14 @@ mod tests {
 
     /// The golden maker with the pool standing at the mark and a margin
     /// that leaves it at one and a half times its band's value.
-    pub(super) fn healthy_maker_at_the_mark() -> MakerEquityBreakdown {
+    fn healthy_maker_at_the_mark() -> MakerEquityBreakdown {
         healthy_maker(1000, GOLDEN_BAND)
     }
 
     /// The golden maker in `band`, with the pool's root at `pool_root_e3`
     /// thousandths of the mark's, and a margin that leaves it at one and a
     /// half times its band's value.
-    pub(super) fn healthy_maker(
-        pool_root_e3: u16,
-        (lower, upper): (i32, i32),
-    ) -> MakerEquityBreakdown {
+    fn healthy_maker(pool_root_e3: u16, (lower, upper): (i32, i32)) -> MakerEquityBreakdown {
         let (market, accrual, mut maker) = golden_market_and_maker();
         (maker.tick_lower, maker.tick_upper) = (lower, upper);
         let mark_root = SqrtPrice::try_from(market.mark).unwrap().x96();

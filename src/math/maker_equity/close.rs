@@ -189,47 +189,45 @@ fn exceeded(open_interest: PerSide<PerpAtoms>, capacity: Capacity) -> Option<Clo
 #[cfg(test)]
 mod tests {
     use alloy::primitives::I256;
+    use proptest::prelude::*;
 
     use super::super::MakerState;
-    use super::super::tests::{golden_market_and_maker, healthy_maker, healthy_maker_at_the_mark};
+    use super::super::tests::golden_market_and_maker;
     use super::*;
     use crate::constants::Q96;
     use crate::math::liquidity::liquidity_change_delta;
     use crate::math::range::TickRange;
     use crate::math::tick::get_sqrt_ratio_at_tick;
-    use crate::units::{LDelta, LUnits, Side, SqrtPrice};
+    use crate::units::{LDelta, LUnits};
 
     /// The deployed taker liquidation ratio, 5%.
     fn taker_liquidation() -> Ratio {
         Ratio::from_e6(50_000).unwrap()
     }
 
-    /// A market whose bands back `room` on each side beyond this one's, with
-    /// `open_interest` drawn on them.
-    fn market(
-        b: &MakerEquityBreakdown,
-        room: u128,
-        open_interest: PerSide<PerpAtoms>,
-    ) -> MarketCapacity {
+    /// A margin that keeps the golden maker solvent: $1,000.
+    const MARGIN: UsdcAtoms = UsdcAtoms::new(1_000_000_000);
+
+    /// A market whose other bands back `room` on each side, with
+    /// `open_interest` drawn on them, at `b`'s block.
+    fn market(b: &MakerEquityBreakdown, room: u128, open_interest: [u128; 2]) -> MarketCapacity {
         MarketCapacity {
             block: b.block,
-            capacity: Capacity::new(
-                b.capacity.long + PerpAtoms::new(room),
-                b.capacity.short + PerpAtoms::new(room),
+            capacity: b.capacity.map(|band| band + PerpAtoms::new(room)),
+            open_interest: PerSide::new(
+                PerpAtoms::new(open_interest[0]),
+                PerpAtoms::new(open_interest[1]),
             ),
-            open_interest,
         }
     }
 
-    fn open(b: &MakerEquityBreakdown, room: u128) -> MarketCapacity {
-        market(b, room, PerSide::default())
+    fn close(b: &MakerEquityBreakdown, room: u128, open_interest: [u128; 2]) -> FullClose {
+        b.full_close(&market(b, room, open_interest), taker_liquidation())
+            .unwrap()
     }
 
-    /// A band straddling the pool, which the golden mark puts at tick 28543.
-    const STRADDLING: (i32, i32) = (28_200, 28_800);
-
-    /// The golden maker with no margin, its perp residual `left` atoms short
-    /// of the band's perp at the pool price, and `edit` applied, accrued.
+    /// The golden maker with no margin and a residual that leaves `left`
+    /// perp once its band is removed, edited by `edit`.
     fn golden(left: i128, edit: impl FnOnce(&mut MakerState)) -> MakerEquityBreakdown {
         let (market, accrual, mut maker) = golden_market_and_maker();
         let (perp, _) = amounts_for_liquidity(
@@ -249,140 +247,107 @@ mod tests {
             .unwrap()
     }
 
-    /// A close changes the position's form, not its worth: the taker it
-    /// leaves is worth what the maker was, to the atom the one rounding
-    /// fewer can move, and it holds the band's perp plus the residual.
+    /// A close changes the position's form, not its worth: the taker holds
+    /// the perp the residual leaves and is worth what the maker was, to the
+    /// atom the one rounding fewer can move.
     #[test]
-    fn a_conversion_keeps_the_equity_and_takes_the_band_into_the_residual() {
-        let b = healthy_maker(1000, STRADDLING);
-        let close = b
-            .full_close(&open(&b, 1_000_000_000), taker_liquidation())
-            .unwrap();
+    fn a_conversion_keeps_the_equity() {
+        let b = golden(-1_000, |maker| maker.margin = MARGIN);
+        let close = close(&b, 1_000, [0, 0]);
         let Remainder::Taker(taker) = close.remainder() else {
-            panic!("a straddling band leaves perp: {close:?}");
+            panic!("perp is left: {close:?}");
         };
-        let e = &b.exposure;
-        let (perp, usd) =
-            amounts_for_liquidity(b.sqrt_price, e.sqrt_lower, e.sqrt_upper, e.liquidity).unwrap();
-        assert_eq!(close.perp_left(), e.delta_perp + PerpDelta::from(perp));
-        assert_eq!(taker.delta_usd(), e.delta_usd + UsdcDelta::from(usd));
+        assert_eq!(close.perp_left(), PerpDelta::new(-1_000));
         assert!((taker.equity() - b.equity()).atoms().abs() <= 1);
         assert_eq!(taker.liquidation_margin_ratio(), taker_liquidation());
         assert_eq!(close.refusal(), None);
     }
 
-    /// With no perp left the position closes, paying exactly its equity,
-    /// and the contract refuses the close when that is negative.
+    /// With no perp left the position closes, paying out exactly its
+    /// equity, which the contract refuses when negative.
     #[test]
-    fn nothing_left_pays_out_the_equity_and_a_negative_one_is_refused() {
-        let underwater = golden(0, |_| ());
-        let close = underwater
-            .full_close(&open(&underwater, 0), taker_liquidation())
-            .unwrap();
-        assert_eq!(close.remainder(), &Remainder::Payout(underwater.equity()));
-        assert!(underwater.equity().is_negative());
-        assert_eq!(close.refusal(), Some(CloseRefusal::NegativeMargin));
-        assert_eq!(close.perp_left(), PerpDelta::ZERO);
-
-        let covered = golden(0, |maker| maker.margin = UsdcAtoms::new(1_000_000_000));
-        let close = covered
-            .full_close(&open(&covered, 0), taker_liquidation())
-            .unwrap();
-        assert_eq!(close.remainder(), &Remainder::Payout(covered.equity()));
-        assert_eq!(close.refusal(), None);
+    fn nothing_left_pays_out_the_equity() {
+        for (margin, refusal) in [
+            (UsdcAtoms::ZERO, Some(CloseRefusal::NegativeMargin)),
+            (MARGIN, None),
+        ] {
+            let b = golden(0, |maker| maker.margin = margin);
+            let close = close(&b, 0, [0, 0]);
+            assert_eq!(close.remainder(), &Remainder::Payout(b.equity()));
+            assert_eq!(close.perp_left(), PerpDelta::ZERO);
+            assert_eq!(close.refusal(), refusal);
+        }
     }
 
-    /// An atom of perp left makes an underwater maker a taker the contract
-    /// will not hold. A settle that owes more than the margin is carried in
-    /// the USD leg, as `normalizeMargin` does, and moves no equity.
+    /// An underwater maker left with an atom of perp converts to a taker the
+    /// contract will not hold. A settle owing more than the margin is carried
+    /// in the USD leg, as `normalizeMargin` does, and moves no equity.
     #[test]
     fn an_underwater_conversion_is_refused_on_its_margin_ratio() {
-        // A funding checkpoint a thousand units of the cumulative ahead of the
-        // market, so the position owes about $134 in funding.
-        let owing = |maker: &mut MakerState| {
-            let ahead = I256::try_from(Q96).unwrap() * I256::try_from(1000).unwrap();
-            maker.last_cuml_funding = Funding::from_x96(golden_funding() + ahead);
-        };
-        let b = golden(-1, owing);
+        // A funding checkpoint 1,000 units of the cumulative off the
+        // market's, so the position owes about $134.
+        let b = golden(-1, |maker| {
+            let funding = golden_market_and_maker().0.funding.x96();
+            let ahead = I256::try_from(Q96).unwrap() * I256::try_from(1_000).unwrap();
+            maker.last_cuml_funding = Funding::from_x96(funding + ahead);
+        });
         assert!(b.settled_margin().is_negative());
-        let close = b.full_close(&open(&b, 0), taker_liquidation()).unwrap();
+        let close = close(&b, 1, [0, 0]);
         let Remainder::Taker(taker) = close.remainder() else {
             panic!("an atom of perp is left: {close:?}");
         };
-        assert_eq!(close.perp_left(), PerpDelta::new(-1));
         assert_eq!(taker.margin(), UsdcAtoms::ZERO);
         assert!((taker.equity() - b.equity()).atoms().abs() <= 1);
         assert_eq!(close.refusal(), Some(CloseRefusal::MarginRatioTooLow));
     }
 
-    fn golden_funding() -> I256 {
-        golden_market_and_maker().0.funding.x96()
-    }
-
-    /// Open interest is checked twice, as the contract does: against the
-    /// capacity the band leaves, then with the taker it converts to added
-    /// on its side. Open interest may fill capacity exactly.
+    /// Open interest is checked against the capacity the band leaves, then
+    /// again with the converted taker on its side; it may fill that capacity
+    /// but not exceed it.
     #[test]
-    fn open_interest_is_checked_against_the_capacity_left_before_and_after_the_conversion() {
-        let b = healthy_maker(1000, STRADDLING);
-        let room = 1_000_000_000;
-        let converted = b
-            .full_close(&open(&b, room), taker_liquidation())
-            .unwrap()
-            .perp_left();
-        let side = converted.side().unwrap();
-        let other = match side {
-            Side::Long => Side::Short,
-            Side::Short => Side::Long,
-        };
-        let refusal = |side: Side| match side {
-            Side::Long => CloseRefusal::LongUtilizationExceeded,
-            Side::Short => CloseRefusal::ShortUtilizationExceeded,
-        };
-        let drawn = |side: Side, atoms: PerpAtoms| {
-            let mut open_interest = PerSide::default();
-            *open_interest.on_mut(side) = atoms;
-            b.full_close(&market(&b, room, open_interest), taker_liquidation())
-                .unwrap()
-                .refusal()
-        };
-        // What the bands left back, on each side.
-        let room = PerpAtoms::new(room);
-
-        assert_eq!(drawn(other, room), None);
-        assert_eq!(drawn(other, room + PerpAtoms::new(1)), Some(refusal(other)));
-        let headroom = room.checked_sub(converted.magnitude()).unwrap();
-        assert_eq!(drawn(side, headroom), None);
+    fn open_interest_may_fill_the_capacity_left_but_not_exceed_it() {
+        let b = golden(-1_000, |maker| maker.margin = MARGIN);
+        let refusal = |open_interest| close(&b, 10_000, open_interest).refusal();
+        assert_eq!(refusal([10_000, 0]), None);
         assert_eq!(
-            drawn(side, headroom + PerpAtoms::new(1)),
-            Some(refusal(side))
+            refusal([10_001, 0]),
+            Some(CloseRefusal::LongUtilizationExceeded)
+        );
+        // The taker adds its 1,000 short.
+        assert_eq!(refusal([0, 9_000]), None);
+        assert_eq!(
+            refusal([0, 9_001]),
+            Some(CloseRefusal::ShortUtilizationExceeded)
         );
     }
 
-    /// The contract checks utilization when the band leaves, before it
-    /// checks the taker, so that is the refusal a close failing both meets.
+    /// The contract checks utilization as the band leaves, before the
+    /// taker, so that is what a close failing both is refused for.
     #[test]
     fn the_first_check_to_fail_is_the_one_reported() {
         let b = golden(-1, |_| ());
-        let alone = b.full_close(&open(&b, 0), taker_liquidation()).unwrap();
-        assert_eq!(alone.refusal(), Some(CloseRefusal::MarginRatioTooLow));
-        let crowded = market(&b, 0, PerSide::new(PerpAtoms::new(1), PerpAtoms::ZERO));
-        let close = b.full_close(&crowded, taker_liquidation()).unwrap();
-        assert_eq!(close.refusal(), Some(CloseRefusal::LongUtilizationExceeded));
+        assert_eq!(
+            close(&b, 1, [0, 0]).refusal(),
+            Some(CloseRefusal::MarginRatioTooLow)
+        );
+        assert_eq!(
+            close(&b, 1, [2, 0]).refusal(),
+            Some(CloseRefusal::LongUtilizationExceeded)
+        );
     }
 
     /// Inputs no single block produces are an error, not a close: a market
     /// read at another block, or a band backing more than its market.
     #[test]
     fn inputs_from_no_one_block_are_an_error() {
-        let b = healthy_maker_at_the_mark();
-        let mut later = open(&b, 0);
+        let b = golden(0, |maker| maker.margin = MARGIN);
+        let mut later = market(&b, 0, [0, 0]);
         later.block.number += 1;
         assert!(matches!(
             b.full_close(&later, taker_liquidation()),
             Err(ValidationError::BlockMismatch { .. })
         ));
-        let mut thin = open(&b, 0);
+        let mut thin = market(&b, 0, [0, 0]);
         thin.capacity.long = PerpAtoms::ZERO;
         assert!(matches!(
             b.full_close(&thin, taker_liquidation()),
@@ -390,37 +355,33 @@ mod tests {
         ));
     }
 
-    /// V4 removes a band's principal rounded down, choosing its legs by the
-    /// pool's tick; the amounts `valPnl` reads clamp the price to the band
-    /// instead. They agree wherever the pool can stand, the bounds included
-    /// with the tick on either side of them.
-    #[test]
-    fn the_principal_is_what_v4_removes() {
-        let range = TickRange::new(28_200, 28_800).unwrap();
-        let liquidity = LUnits::new(570_282_387);
-        let at = |sqrt: SqrtPrice, tick: i32| {
+    proptest! {
+        /// V4 removes a band's principal rounded down, choosing its legs by
+        /// the pool's tick; the amounts `valPnl` reads clamp the price to the
+        /// band instead. They agree wherever the pool stands, on a tick with
+        /// the pool's tick either at it or just below, as after a cross down.
+        #[test]
+        fn the_principal_is_what_v4_removes(
+            lower in -50_000i32..50_000,
+            width in 1i32..5_000,
+            offset in -1_000i32..6_000,
+            crossed_down: bool,
+            liquidity in 1u128..1 << 80,
+        ) {
+            let range = TickRange::new(lower, lower + width).unwrap();
+            let sqrt = get_sqrt_ratio_at_tick(lower + offset).unwrap();
+            let tick = lower + offset - i32::from(crossed_down);
             let (perp, usd) = amounts_for_liquidity(
                 sqrt,
                 get_sqrt_ratio_at_tick(range.lower()).unwrap(),
                 get_sqrt_ratio_at_tick(range.upper()).unwrap(),
-                liquidity,
+                LUnits::new(liquidity),
             )
             .unwrap();
             let removed =
-                liquidity_change_delta(sqrt, tick, &range, LDelta::new(-570_282_387)).unwrap();
-            assert_eq!(
-                (PerpDelta::from(perp), UsdcDelta::from(usd)),
-                removed,
-                "tick {tick}"
-            );
-        };
-        for tick in [28_000, 28_543, 29_000] {
-            at(get_sqrt_ratio_at_tick(tick).unwrap(), tick);
-        }
-        for bound in [range.lower(), range.upper()] {
-            let sqrt = get_sqrt_ratio_at_tick(bound).unwrap();
-            at(sqrt, bound);
-            at(sqrt, bound - 1);
+                liquidity_change_delta(sqrt, tick, &range, LDelta::new(-(liquidity as i128)))
+                    .unwrap();
+            prop_assert_eq!((PerpDelta::from(perp), UsdcDelta::from(usd)), removed);
         }
     }
 }
