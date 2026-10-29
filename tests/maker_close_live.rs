@@ -15,6 +15,7 @@
 //! cargo test --test maker_close_live -- --ignored --nocapture
 //! ```
 
+use std::collections::HashMap;
 use std::env;
 
 use alloy::eips::BlockId;
@@ -77,7 +78,12 @@ async fn the_close_refuses_as_the_contract_does() {
         .collect();
     let market = state.capacity().await.unwrap();
     let taker_liquidation = state.margin_ratios().await.unwrap().taker.liquidation;
-    let owners = state.owners(&ids).await;
+    let owners: HashMap<U256, Address> = state
+        .owners(&ids)
+        .await
+        .into_iter()
+        .filter_map(|o| o.row.ok().flatten().map(|owner| (o.pos_id, owner)))
+        .collect();
     let contract = Perp::new(perp, chain.provider());
     println!("{} ids at block {}", ids.len(), state.block().number);
 
@@ -91,11 +97,7 @@ async fn the_close_refuses_as_the_contract_does() {
         };
         makers += 1;
         let close = breakdown.full_close(&market, taker_liquidation).unwrap();
-        let owner = owners
-            .iter()
-            .find(|o| o.pos_id == outcome.pos_id)
-            .and_then(|o| o.row.as_ref().ok().copied().flatten())
-            .expect("an open maker has an owner");
+        let owner = owners[&outcome.pos_id];
         let band = state
             .maker_band(outcome.pos_id)
             .await
