@@ -19,7 +19,7 @@ use crate::errors::ValidationError;
 use crate::math::capacity::{Capacity, MarketCapacity};
 use crate::math::liquidity::amounts_for_liquidity;
 use crate::math::taker::{TakerHealth, TakerMarketSnapshot, TakerState};
-use crate::units::{Funding, PerSide, PerpAtoms, PerpDelta, Ratio, UsdcAtoms, UsdcDelta};
+use crate::units::{Funding, PerSide, PerpAtoms, PerpDelta, Ratio, Side, UsdcAtoms, UsdcDelta};
 
 /// What removing all of a maker's liquidity leaves.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -49,6 +49,16 @@ pub enum CloseRefusal {
     NegativeMargin,
 }
 
+impl CloseRefusal {
+    /// The utilization refusal on `side`.
+    const fn utilization(side: Side) -> Self {
+        match side {
+            Side::Long => Self::LongUtilizationExceeded,
+            Side::Short => Self::ShortUtilizationExceeded,
+        }
+    }
+}
+
 /// A maker's full close: what it leaves, and whether the contract would
 /// take it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -72,7 +82,7 @@ impl FullClose {
     /// The perp the close leaves the position holding, long positive: zero
     /// when it closes.
     pub fn perp_left(&self) -> PerpDelta {
-        match &self.remainder {
+        match self.remainder {
             Remainder::Payout(_) => PerpDelta::ZERO,
             Remainder::Taker(taker) => taker.delta_perp(),
         }
@@ -101,34 +111,35 @@ impl MakerEquityBreakdown {
                 found: market.block.number,
             });
         }
-        let capacity_left = |side: &str, market: PerpAtoms, band: PerpAtoms| {
-            market
-                .checked_sub(band)
+        let mut capacity = Capacity::default();
+        for side in Side::BOTH {
+            *capacity.on_mut(side) = market
+                .capacity
+                .on(side)
+                .checked_sub(*self.capacity.on(side))
                 .ok_or_else(|| ValidationError::Overflow {
                     context: format!("the band's {side} capacity exceeds the market's"),
-                })
-        };
-        let capacity = Capacity::new(
-            capacity_left("long", market.capacity.long, self.capacity.long)?,
-            capacity_left("short", market.capacity.short, self.capacity.short)?,
-        );
+                })?;
+        }
         let mut refusal = exceeded(market.open_interest, capacity);
 
         // V4 rounds a removal's principal down, as `valPnl`'s amounts do,
         // and at a bound the pool's tick picks the same legs the clamp does.
-        let e = &self.exposure;
-        let (perp, usd) =
-            amounts_for_liquidity(self.sqrt_price, e.sqrt_lower, e.sqrt_upper, e.liquidity)?;
-        let delta_perp = e.delta_perp + PerpDelta::from(perp);
-        let delta_usd = e.delta_usd + UsdcDelta::from(usd);
+        let exposure = &self.exposure;
+        let (perp, usd) = amounts_for_liquidity(
+            self.sqrt_price,
+            exposure.sqrt_lower,
+            exposure.sqrt_upper,
+            exposure.liquidity,
+        )?;
+        let delta_perp = exposure.delta_perp + PerpDelta::from(perp);
+        let delta_usd = exposure.delta_usd + UsdcDelta::from(usd);
         let settled = self.settled_margin();
 
         let remainder = match delta_perp.side() {
             None => {
                 let payout = settled + delta_usd;
-                if payout.is_negative() {
-                    refusal = refusal.or(Some(CloseRefusal::NegativeMargin));
-                }
+                refusal = refusal.or(payout.is_negative().then_some(CloseRefusal::NegativeMargin));
                 Remainder::Payout(payout)
             }
             Some(side) => {
@@ -153,11 +164,11 @@ impl MakerEquityBreakdown {
                     last_cuml_funding: Funding::ZERO,
                     last_util_payments: PerSide::default(),
                 })?;
-                if taker.is_liquidatable() {
-                    refusal = refusal.or(Some(CloseRefusal::MarginRatioTooLow));
-                }
+                refusal = refusal.or(taker
+                    .is_liquidatable()
+                    .then_some(CloseRefusal::MarginRatioTooLow));
                 let mut open_interest = market.open_interest;
-                *open_interest.on_mut(side) = *open_interest.on(side) + delta_perp.magnitude();
+                *open_interest.on_mut(side) += delta_perp.magnitude();
                 refusal = refusal.or(exceeded(open_interest, capacity));
                 Remainder::Taker(taker)
             }
@@ -169,13 +180,10 @@ impl MakerEquityBreakdown {
 /// `checkUtilization`: the side whose open interest exceeds its capacity,
 /// long first.
 fn exceeded(open_interest: PerSide<PerpAtoms>, capacity: Capacity) -> Option<CloseRefusal> {
-    if open_interest.long > capacity.long {
-        Some(CloseRefusal::LongUtilizationExceeded)
-    } else if open_interest.short > capacity.short {
-        Some(CloseRefusal::ShortUtilizationExceeded)
-    } else {
-        None
-    }
+    Side::BOTH
+        .into_iter()
+        .find(|&side| open_interest.on(side) > capacity.on(side))
+        .map(CloseRefusal::utilization)
 }
 
 #[cfg(test)]
