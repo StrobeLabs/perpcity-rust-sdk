@@ -82,18 +82,25 @@ impl FullClose {
 impl MakerEquityBreakdown {
     /// Removing all of this maker's liquidity, at the preview's pool price
     /// and mark, against the market's capacity and the taker liquidation
-    /// ratio (`takerMarginRatios().liq`) read at the same block.
+    /// ratio (`takerMarginRatios().liq`) read at the preview's block.
     ///
     /// # Errors
     ///
-    /// [`ValidationError::Overflow`] when the band's capacity exceeds the
-    /// market's, which no block produces, or a leg leaves the range its
-    /// type can hold.
+    /// [`ValidationError::BlockMismatch`] when `market` was read at another
+    /// block; [`ValidationError::Overflow`] when the band's capacity exceeds
+    /// the market's, which no block produces, or the principal or the
+    /// taker's value leaves the range its type can hold.
     pub fn full_close(
         &self,
         market: &MarketCapacity,
         taker_liquidation: Ratio,
     ) -> Result<FullClose, ValidationError> {
+        if market.block != self.block {
+            return Err(ValidationError::BlockMismatch {
+                expected: self.block.number,
+                found: market.block.number,
+            });
+        }
         let capacity_left = |side: &str, market: PerpAtoms, band: PerpAtoms| {
             market
                 .checked_sub(band)
@@ -133,7 +140,7 @@ impl MakerEquityBreakdown {
                 // Checkpointed at the market's cumulatives, so both are zero
                 // here and nothing accrues against the margin.
                 let checkpointed = TakerMarketSnapshot {
-                    block: market.block,
+                    block: self.block,
                     funding: Funding::ZERO,
                     util_payments: PerSide::default(),
                     mark: self.mark,
@@ -179,7 +186,6 @@ mod tests {
     use super::super::tests::{golden_market_and_maker, healthy_maker, healthy_maker_at_the_mark};
     use super::*;
     use crate::constants::Q96;
-    use crate::math::BlockContext;
     use crate::math::liquidity::liquidity_change_delta;
     use crate::math::range::TickRange;
     use crate::math::tick::get_sqrt_ratio_at_tick;
@@ -198,7 +204,7 @@ mod tests {
         open_interest: PerSide<PerpAtoms>,
     ) -> MarketCapacity {
         MarketCapacity {
-            block: BlockContext::default(),
+            block: b.block,
             capacity: Capacity::new(
                 b.capacity.long + PerpAtoms::new(room),
                 b.capacity.short + PerpAtoms::new(room),
@@ -357,11 +363,17 @@ mod tests {
         assert_eq!(close.refusal(), Some(CloseRefusal::LongUtilizationExceeded));
     }
 
-    /// No block holds a band backing more than its market, so inputs that
-    /// say so are an error, not a wrapped capacity.
+    /// Inputs no single block produces are an error, not a close: a market
+    /// read at another block, or a band backing more than its market.
     #[test]
-    fn a_band_backing_more_than_its_market_is_an_error() {
+    fn inputs_from_no_one_block_are_an_error() {
         let b = healthy_maker_at_the_mark();
+        let mut later = open(&b, 0);
+        later.block.number += 1;
+        assert!(matches!(
+            b.full_close(&later, taker_liquidation()),
+            Err(ValidationError::BlockMismatch { .. })
+        ));
         let mut thin = open(&b, 0);
         thin.capacity.long = PerpAtoms::ZERO;
         assert!(matches!(

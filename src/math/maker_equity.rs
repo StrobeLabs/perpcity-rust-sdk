@@ -253,8 +253,9 @@ impl Exposure {
 /// shock with nothing else in hand: [`Self::equity_at`],
 /// [`Self::is_liquidatable_at`] and [`Self::liquidation_prices`]. Its value
 /// and PnL are that revaluation at its own prices, which deserialization
-/// recomputes and requires. It carries the band's capacity too, which a
-/// full close takes out of the market's: [`Self::full_close`].
+/// recomputes and requires. It carries its block and the band's capacity
+/// too, which a full close takes out of that block's market:
+/// [`Self::full_close`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "RawMakerEquityBreakdown")]
 pub struct MakerEquityBreakdown {
@@ -269,6 +270,7 @@ pub struct MakerEquityBreakdown {
     sqrt_price: SqrtPrice,
     exposure: Exposure,
     capacity: PerSide<PerpAtoms>,
+    block: BlockContext,
 }
 
 /// Deserialization shadow of [`MakerEquityBreakdown`]: identical fields,
@@ -287,6 +289,7 @@ struct RawMakerEquityBreakdown {
     sqrt_price: SqrtPrice,
     exposure: Exposure,
     capacity: PerSide<PerpAtoms>,
+    block: BlockContext,
 }
 
 impl TryFrom<RawMakerEquityBreakdown> for MakerEquityBreakdown {
@@ -338,6 +341,7 @@ impl TryFrom<RawMakerEquityBreakdown> for MakerEquityBreakdown {
             sqrt_price: raw.sqrt_price,
             exposure: raw.exposure,
             capacity: raw.capacity,
+            block: raw.block,
         })
     }
 }
@@ -365,6 +369,7 @@ impl MakerEquityBreakdown {
                 delta_usd: UsdcDelta::ZERO,
             },
             capacity: PerSide::default(),
+            block: BlockContext::default(),
         }
     }
 }
@@ -456,6 +461,11 @@ impl MakerEquityBreakdown {
     /// The mark the preview was priced at: where a price shock starts.
     pub fn mark(&self) -> Price {
         self.mark
+    }
+
+    /// The block the preview was computed at.
+    pub fn block(&self) -> BlockContext {
+        self.block
     }
 
     /// The band's value and the unrealized PnL along a price shock that
@@ -883,6 +893,7 @@ impl AccruedMakerSnapshot {
             sqrt_price: self.0.sqrt_price,
             exposure,
             capacity: maker.capacity,
+            block: self.0.block,
         })
     }
 }
