@@ -94,6 +94,15 @@ pub enum ValidationError {
         to_block: u64,
     },
 
+    /// Inputs read at two blocks where a computation needs one.
+    #[error("inputs from two blocks: {expected} and {found}")]
+    BlockMismatch {
+        /// The block the first input was read at.
+        expected: u64,
+        /// The block the other was read at.
+        found: u64,
+    },
+
     /// Rows that are not a tape: one out of chain order, at a point already
     /// taken, or disagreeing with its block's hash or timestamp.
     #[error("invalid tape at block {block} log {log_index}: {reason}")]

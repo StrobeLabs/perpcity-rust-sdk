@@ -47,6 +47,10 @@ use crate::units::{
     PerpDelta, Price, Ratio, Side, SqrtPrice, UsdcAtoms, UsdcDelta, UtilizationRate,
 };
 
+mod close;
+
+pub use close::{CloseRefusal, FullClose, Remainder};
+
 /// One `TickInfo` from the Perp's tick funding mapping (`s.ticks[tick]`),
 /// fields named after the contract's.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -249,7 +253,9 @@ impl Exposure {
 /// shock with nothing else in hand: [`Self::equity_at`],
 /// [`Self::is_liquidatable_at`] and [`Self::liquidation_prices`]. Its value
 /// and PnL are that revaluation at its own prices, which deserialization
-/// recomputes and requires.
+/// recomputes and requires. It carries its block and the band's capacity
+/// too, which a full close takes out of that block's market:
+/// [`Self::full_close`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "RawMakerEquityBreakdown")]
 pub struct MakerEquityBreakdown {
@@ -263,6 +269,8 @@ pub struct MakerEquityBreakdown {
     mark: Price,
     sqrt_price: SqrtPrice,
     exposure: Exposure,
+    capacity: PerSide<PerpAtoms>,
+    block: BlockContext,
 }
 
 /// Deserialization shadow of [`MakerEquityBreakdown`]: identical fields,
@@ -280,6 +288,8 @@ struct RawMakerEquityBreakdown {
     mark: Price,
     sqrt_price: SqrtPrice,
     exposure: Exposure,
+    capacity: PerSide<PerpAtoms>,
+    block: BlockContext,
 }
 
 impl TryFrom<RawMakerEquityBreakdown> for MakerEquityBreakdown {
@@ -330,6 +340,8 @@ impl TryFrom<RawMakerEquityBreakdown> for MakerEquityBreakdown {
             mark: raw.mark,
             sqrt_price: raw.sqrt_price,
             exposure: raw.exposure,
+            capacity: raw.capacity,
+            block: raw.block,
         })
     }
 }
@@ -356,6 +368,8 @@ impl MakerEquityBreakdown {
                 delta_perp: PerpDelta::ZERO,
                 delta_usd: UsdcDelta::ZERO,
             },
+            capacity: PerSide::default(),
+            block: BlockContext::default(),
         }
     }
 }
@@ -447,6 +461,11 @@ impl MakerEquityBreakdown {
     /// The mark the preview was priced at: where a price shock starts.
     pub fn mark(&self) -> Price {
         self.mark
+    }
+
+    /// The block the preview was computed at.
+    pub fn block(&self) -> BlockContext {
+        self.block
     }
 
     /// The band's value and the unrealized PnL along a price shock that
@@ -873,6 +892,8 @@ impl AccruedMakerSnapshot {
             mark: self.0.mark,
             sqrt_price: self.0.sqrt_price,
             exposure,
+            capacity: maker.capacity,
+            block: self.0.block,
         })
     }
 }
@@ -988,7 +1009,7 @@ mod tests {
     /// loads the fair price; this fixture predates that), which costs a
     /// few micro-dollars on the utilization legs over the 5775s replay
     /// window.
-    fn golden_market_and_maker() -> (MakerMarketSnapshot, AccrualInputs, MakerState) {
+    pub(super) fn golden_market_and_maker() -> (MakerMarketSnapshot, AccrualInputs, MakerState) {
         let i = |s: &str| I256::from_dec_str(s).unwrap();
         let u = |s: &str| U256::from_str_radix(s, 10).unwrap();
         let market = MakerMarketSnapshot {
