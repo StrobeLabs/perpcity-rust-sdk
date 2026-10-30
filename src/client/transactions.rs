@@ -44,9 +44,17 @@ pub struct TxBuilder<'a> {
     value: u128,
     gas_limit: Option<u64>,
     urgency: Urgency,
+    max_fee_per_gas: Option<u64>,
 }
 
 impl<'a> TxBuilder<'a> {
+    /// Refuse before signing when the prepared EIP-1559 fee exceeds this cap.
+    /// Use with an explicit gas limit to bound the transaction's maximum gas cost.
+    pub fn with_max_fee_per_gas(mut self, cap: u64) -> Self {
+        self.max_fee_per_gas = Some(cap);
+        self
+    }
+
     /// Attach ETH value to the transaction.
     pub fn with_value(mut self, value: u128) -> Self {
         self.value = value;
@@ -173,6 +181,23 @@ impl<'a> TxBuilder<'a> {
                 now,
             )?
         };
+
+        if let Some(cap) = self.max_fee_per_gas
+            && prepared.gas_fees.max_fee_per_gas > cap
+        {
+            self.client
+                .pipeline
+                .lock()
+                .unwrap()
+                .abandon_prepared(prepared.nonce);
+            return Err(ValidationError::InvalidConfig {
+                reason: format!(
+                    "prepared max fee {} exceeds configured cap {cap}",
+                    prepared.gas_fees.max_fee_per_gas
+                ),
+            }
+            .into());
+        }
 
         tracing::debug!(
             nonce = prepared.nonce,
@@ -384,6 +409,7 @@ impl PerpClient {
             value: 0,
             gas_limit: None,
             urgency: Urgency::Normal,
+            max_fee_per_gas: None,
         }
     }
 
@@ -556,7 +582,39 @@ mod tests {
     use alloy::transports::mock::Asserter;
 
     use super::*;
+    use crate::client::{mock, now_ms};
     use crate::errors::PerpCityError;
+
+    #[tokio::test]
+    async fn fee_cap_refuses_before_broadcast_and_releases_reserved_nonce() {
+        let (client, rpc) = mock::client();
+        client.pipeline.lock().unwrap().resync_nonce(19);
+        client
+            .chain()
+            .fee_cache()
+            .lock()
+            .unwrap()
+            .update(1_000_000, now_ms());
+        rpc.bytes(&[]); // explicit gas preflight succeeds
+        let error = client
+            .tx(Address::repeat_byte(2), Bytes::new())
+            .with_gas_limit(21_000)
+            .with_max_fee_per_gas(1)
+            .send()
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            PerpCityError::Validation(ValidationError::InvalidConfig { .. })
+        ));
+        assert!(rpc.is_drained(), "no submission RPC after budget refusal");
+        let pipeline = client.pipeline.lock().unwrap();
+        assert!(
+            pipeline.can_resync(),
+            "refused preparation must not strand its nonce"
+        );
+        assert_eq!(pipeline.nonce_manager().acquire(), 19);
+    }
 
     /// The explicit-limit path exists for operations (liquidations) where
     /// `eth_estimateGas` has passed while the real execution ran out of gas.

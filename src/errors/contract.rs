@@ -113,4 +113,13 @@ pub enum ContractError {
         /// The chain the endpoint answered `eth_chainId` with.
         served: u64,
     },
+    /// A staged operation does not match the reviewed deployment identity.
+    /// This error is nontransient. Review and configure the deployed build before retrying.
+    #[error("unsupported operations at {address}: {reason}")]
+    UnsupportedOperations {
+        /// Contract whose code or binding differed.
+        address: Address,
+        /// The failed compatibility check.
+        reason: String,
+    },
 }

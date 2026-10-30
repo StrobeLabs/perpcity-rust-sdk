@@ -150,6 +150,11 @@ impl Rpc {
         self.0.push_success(&Option::<Block>::None);
     }
 
+    /// The next code read or raw call returns bytes.
+    pub(super) fn bytes(&self, bytes: &[u8]) {
+        self.0.push_success(&Bytes::copy_from_slice(bytes));
+    }
+
     /// The next `eth_getStorageAt` returns `word`.
     pub(super) fn storage(&self, word: U256) {
         self.0.push_success(&word);

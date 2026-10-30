@@ -6,7 +6,7 @@
 //! wins), a sum of its deltas, or a first occurrence, so the fold
 //! [`combine`](Fold::combine)s across segments of the tape and a fold of
 //! any prefix is a checkpoint. The accessors return the same types the
-//! reads on [`StateAt`](crate::StateAt) return, so a value rebuilt here is
+//! reads on [`StateAt`] return, so a value rebuilt here is
 //! compared to a value read there with `==`, not approximately; that
 //! comparison is the test this type exists to pass.
 //!

@@ -42,6 +42,7 @@ mod maker_equity;
 mod market;
 #[cfg(test)]
 mod mock;
+pub mod operations;
 mod queries;
 mod state;
 mod taker_health;

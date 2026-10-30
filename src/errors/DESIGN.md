@@ -128,3 +128,8 @@ would branch on it, and existing callers with a wildcard keep compiling.
 - **`Rpc` and `Abi` are the raw layers showing through.** Every failure
   that reaches a caller should be one of the three families; the raw
   variants exist because some paths do not yet classify.
+
+Client operations return `ContractError::UnsupportedOperations` when code,
+controller binding, or the expected contract schema does not match. This error
+is nontransient. RPC failures retain their read-error classification. Failed
+legacy getters never become empty operational state.
