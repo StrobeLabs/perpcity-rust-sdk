@@ -87,7 +87,7 @@ pub use tape::{
     TapeEvent, TapeSlice, Wallets, latest_market_events, market_events, market_tape,
 };
 pub use transfers::{TokenTransfer, token_transfers};
-pub use withdrawals::{ReductionEvidence, WithdrawalEvent, WithdrawalEventKind};
+pub use withdrawals::{ReductionEvidence, RepaymentEvidence, WithdrawalEvent, WithdrawalEventKind};
 
 use std::collections::BTreeMap;
 

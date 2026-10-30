@@ -1,11 +1,12 @@
 //! Write operations: open, close, adjust positions, transfers, approvals.
 
-use alloy::primitives::{Address, B256, Bytes, I256, U256};
+use alloy::primitives::{Address, B256, Bytes, I256, U256, Uint};
 use alloy::rpc::types::{Log as RpcLog, TransactionReceipt};
-use alloy::sol_types::SolEvent;
+use alloy::sol_types::{SolCall, SolEvent};
 use serde::{Deserialize, Serialize};
 
 use crate::constants::{MIN_OPENING_MARGIN, TICK_SPACING};
+use crate::contracts::operations::{OperationsController, OperationsFees, OperationsPerp};
 use crate::contracts::{IERC20, Perp, Position};
 use crate::convert::{scale_from_6dec, scale_to_6dec, unpack_balance_delta};
 use crate::errors::{ContractError, Result, TransactionError, ValidationError};
@@ -16,6 +17,11 @@ use crate::math::tick::{align_tick_down, align_tick_up, price_to_tick};
 use crate::units::{LDelta, LUnits, PerpAtoms, PerpDelta, UsdcAtoms, UsdcDelta};
 
 use super::market::{PositionRole, validate_fee_recipient};
+use super::state::invalid;
+use super::{
+    BackstopKind, BackstopOrder, ContractCall, ControllerAction, CurrentDeployment, StateAt,
+    UtilizationCurve,
+};
 use super::{MAX_APPROVAL, PerpClient, i32_to_i24};
 
 // ── Parameters ──────────────────────────────────────────────────────
@@ -937,6 +943,159 @@ impl PerpClient {
     }
 }
 
+fn call(to: Address, data: Vec<u8>) -> ContractCall {
+    ContractCall {
+        to,
+        data: data.into(),
+        value: 0,
+    }
+}
+
+/// Permissionless touch calldata, shared by legacy and staged current builds.
+pub fn touch_call(market: Address) -> ContractCall {
+    call(market, OperationsPerp::touchCall {}.abi_encode())
+}
+/// Encode a cap change after the caller verifies the live governor and contract build.
+pub fn set_tvl_cap_call(market: Address, cap: U256) -> ContractCall {
+    call(market, OperationsPerp::setTvlCapCall { cap }.abi_encode())
+}
+/// Encode the fee-module setter with a validated curve.
+pub fn set_utilization_curve_call(
+    module: Address,
+    curve: UtilizationCurve,
+) -> Result<ContractCall> {
+    Ok(call(
+        module,
+        OperationsFees::setUtilFeeCurveCall {
+            target: curve.target(),
+            before: curve.before(),
+            after: curve.after(),
+        }
+        .abi_encode(),
+    ))
+}
+/// Encode a controller call. The caller checks its authority and permitted changes.
+pub fn controller_call(controller: Address, action: ControllerAction) -> Result<ContractCall> {
+    let data = match action {
+        ControllerAction::PauseReleases => OperationsController::pauseReleasesCall {}.abi_encode(),
+        ControllerAction::PauseClaim { claim } => {
+            OperationsController::pauseClaimCall { claim }.abi_encode()
+        }
+        ControllerAction::LowerRateLimit {
+            capacity,
+            refill_per_second,
+        } => OperationsController::lowerRateLimitCall {
+            capacity: capacity.atoms(),
+            refill: refill_per_second.atoms(),
+        }
+        .abi_encode(),
+        ControllerAction::IncreaseChallengeWindow { seconds } => {
+            if seconds == 0 || seconds >= (1u64 << 48) {
+                return Err(invalid("challenge window must fit positive uint48"));
+            }
+            OperationsController::increaseChallengeWindowCall {
+                seconds_: Uint::<48, 1>::from(seconds),
+            }
+            .abi_encode()
+        }
+        ControllerAction::ReduceClaim {
+            claim,
+            new_amount,
+            evidence,
+        } => {
+            if evidence == B256::ZERO {
+                return Err(invalid("claim reduction requires evidence hash"));
+            }
+            OperationsController::reduceClaimCall {
+                claim,
+                newAmount: new_amount.atoms(),
+                evidence,
+            }
+            .abi_encode()
+        }
+        ControllerAction::UnpauseReleases => {
+            OperationsController::unpauseReleasesCall {}.abi_encode()
+        }
+        ControllerAction::UnpauseClaim { claim } => {
+            OperationsController::unpauseClaimCall { claim }.abi_encode()
+        }
+    };
+    Ok(call(controller, data))
+}
+/// Encode an explicit USDC allowance for an action plan, including zero to revoke.
+pub fn usdc_approve_call(
+    token: Address,
+    spender: Address,
+    amount: UsdcAtoms,
+) -> Result<ContractCall> {
+    if token == Address::ZERO || spender == Address::ZERO {
+        return Err(invalid("approval needs nonzero token and spender"));
+    }
+    Ok(call(
+        token,
+        IERC20::approveCall {
+            spender,
+            amount: U256::from(amount.atoms()),
+        }
+        .abi_encode(),
+    ))
+}
+
+/// Encode an exact USDC return transfer. It restores cash but does not repair accounting.
+pub fn usdc_transfer_call(
+    token: Address,
+    recipient: Address,
+    amount: UsdcAtoms,
+) -> Result<ContractCall> {
+    if recipient == Address::ZERO || amount.atoms() == 0 {
+        return Err(invalid("transfer needs nonzero recipient and amount"));
+    }
+    Ok(call(
+        token,
+        IERC20::transferCall {
+            to: recipient,
+            amount: U256::from(amount.atoms()),
+        }
+        .abi_encode(),
+    ))
+}
+
+impl StateAt {
+    /// Encode a current-build backstop with fresh deployment and deadline checks.
+    pub async fn backstop_call(
+        &self,
+        expected: &CurrentDeployment,
+        order: &BackstopOrder,
+    ) -> Result<ContractCall> {
+        self.verify_current(expected).await?;
+        if order.margin.atoms() == 0
+            || order.recipient == Address::ZERO
+            || order.deadline < self.block().timestamp
+        {
+            return Err(invalid(
+                "backstop needs positive margin, nonzero recipient and an unexpired deadline",
+            ));
+        }
+        let data = match order.kind {
+            BackstopKind::Maker => OperationsPerp::backstopMakerCall {
+                id: order.position,
+                margin: order.margin.atoms(),
+                recipient: order.recipient,
+                deadline: order.deadline,
+            }
+            .abi_encode(),
+            BackstopKind::Taker => OperationsPerp::backstopTakerCall {
+                id: order.position,
+                margin: order.margin.atoms(),
+                recipient: order.recipient,
+                deadline: order.deadline,
+            }
+            .abi_encode(),
+        };
+        Ok(call(self.market().perp(), data))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use alloy::primitives::{Address, B256, I256, U256, Uint};
@@ -1062,5 +1221,26 @@ mod tests {
             scale_opening_margin(5.000_001).unwrap(),
             UsdcAtoms::new(5_000_001)
         );
+    }
+}
+
+#[cfg(test)]
+mod action_tests {
+    use super::*;
+
+    #[test]
+    fn approval_plan_encodes_exact_allowance_and_can_revoke() {
+        let token = Address::repeat_byte(1);
+        let spender = Address::repeat_byte(2);
+        for amount in [0, 5_000_000] {
+            let call = usdc_approve_call(token, spender, UsdcAtoms::new(amount)).unwrap();
+            assert_eq!(call.to, token);
+            assert_eq!(call.value, 0);
+            assert_eq!(&call.data[..4], &[0x09, 0x5e, 0xa7, 0xb3]);
+            let decoded = IERC20::approveCall::abi_decode(&call.data).unwrap();
+            assert_eq!(decoded.spender, spender);
+            assert_eq!(decoded.amount, U256::from(amount));
+        }
+        assert!(usdc_approve_call(token, Address::ZERO, UsdcAtoms::new(1)).is_err());
     }
 }

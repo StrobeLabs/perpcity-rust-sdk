@@ -88,13 +88,4 @@ sol! {
         function unpauseReleases() external;
         function unpauseClaim(uint256 claim) external;
     }
-    #[sol(rpc)]
-    interface OperationsSafe {
-        function nonce() external view returns (uint256);
-        function masterCopy() external view returns (address);
-        function VERSION() external view returns (string);
-    }
-    interface OperationsMultiSend {
-        function multiSend(bytes transactions) external payable;
-    }
 }

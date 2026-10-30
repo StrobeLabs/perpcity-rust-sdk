@@ -8,14 +8,16 @@ use alloy::rpc::types::{Filter, Log};
 use alloy::sol_types::SolEvent;
 use serde::{Deserialize, Serialize};
 
+use crate::contracts::IERC20;
 use crate::contracts::withdrawal_events::WithdrawalEvents as Events;
 use crate::errors::{ContractError, PerpCityError, Result, ValidationError};
 use crate::events::decode_raw;
 use crate::math::BlockContext;
 use crate::units::UsdcAtoms;
 
-use super::History;
 use super::scan::check_block_range;
+use super::transfers::decode_transfer;
+use super::{History, TokenTransfer};
 
 /// One current-build controller event, with canonical chain identity at read time.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -145,6 +147,30 @@ impl ReductionEvidence {
     }
 }
 
+/// One exact repayment transfer in a successful canonical receipt.
+/// It proves this payment's contents, not that another payment never occurred.
+#[derive(Debug, Clone, Serialize)]
+pub struct RepaymentEvidence {
+    transfer: TokenTransfer,
+    block: BlockContext,
+    token: Address,
+}
+
+impl RepaymentEvidence {
+    /// Exact transfer identity, sender, recipient and amount.
+    pub fn transfer(&self) -> &TokenTransfer {
+        &self.transfer
+    }
+    /// The canonical block containing the repayment.
+    pub fn block(&self) -> BlockContext {
+        self.block
+    }
+    /// The USDC contract that emitted the transfer.
+    pub fn token(&self) -> Address {
+        self.token
+    }
+}
+
 impl<P: Provider> History<P> {
     /// Read controller events for the new version in chain order.
     ///
@@ -203,6 +229,99 @@ impl<P: Provider> History<P> {
             return Err(malformed("controller history changed while scanning"));
         }
         Ok(rows)
+    }
+
+    /// Verify a supplied USDC repayment through a pinned lagged block.
+    /// The caller verifies the reduction controller's permanent market binding.
+    /// `None` means the receipt is absent or newer than `at`, never proof of nonpayment.
+    ///
+    /// # Errors
+    /// Reject an unconfirmed or changed endpoint, stale reduction evidence, failed or
+    /// foreign receipt, malformed transfer, wrong amount or ambiguous matching logs.
+    pub async fn confirmed_repayment(
+        &self,
+        tx_hash: B256,
+        token: Address,
+        market: Address,
+        reduction: &ReductionEvidence,
+        at: BlockContext,
+    ) -> Result<Option<RepaymentEvidence>> {
+        nonzero(token)?;
+        nonzero(market)?;
+        if at.number > self.tip().await? || self.block(at.number).await? != at {
+            return Err(malformed(
+                "repayment endpoint is unconfirmed or not canonical",
+            ));
+        }
+        let source = reduction.event().block;
+        if source.number > at.number || self.block(source.number).await? != source {
+            return Err(malformed(
+                "reduction evidence is outside the canonical endpoint",
+            ));
+        }
+        let Some(receipt) = self.provider.get_transaction_receipt(tx_hash).await? else {
+            return Ok(None);
+        };
+        if receipt.transaction_hash != tx_hash || !receipt.status() {
+            return Err(malformed(
+                "repayment receipt failed or names another transaction",
+            ));
+        }
+        let number = receipt
+            .block_number
+            .ok_or_else(|| malformed("repayment receipt has no block"))?;
+        if number > at.number {
+            return Ok(None);
+        }
+        if number < source.number {
+            return Err(malformed("repayment precedes the reduction"));
+        }
+        let block = self.block(number).await?;
+        if block.number != number || receipt.block_hash != Some(block.hash) {
+            return Err(malformed("repayment receipt is not canonical"));
+        }
+        let mut matching = Vec::new();
+        for log in receipt.inner.logs() {
+            if log.address() != token || log.topic0() != Some(&IERC20::Transfer::SIGNATURE_HASH) {
+                continue;
+            }
+            if log.removed
+                || log.block_number != Some(number)
+                || log.block_hash != Some(block.hash)
+                || log.transaction_hash != Some(tx_hash)
+                || log
+                    .block_timestamp
+                    .is_some_and(|timestamp| timestamp != block.timestamp)
+            {
+                return Err(malformed("repayment log is not canonical"));
+            }
+            let transfer = decode_transfer(log)?;
+            if transfer.from == reduction.guardian()
+                && transfer.to == market
+                && transfer.value == U256::from(reduction.recovered().atoms())
+            {
+                if (number, transfer.log_index) <= (source.number, reduction.event().log_index) {
+                    return Err(malformed("repayment transfer precedes the reduction"));
+                }
+                matching.push(transfer);
+            }
+        }
+        let [transfer] = matching.as_slice() else {
+            return Err(malformed(
+                "repayment receipt needs exactly one matching transfer",
+            ));
+        };
+        if self.block(number).await? != block
+            || self.block(source.number).await? != source
+            || self.block(at.number).await? != at
+        {
+            return Err(malformed("repayment chain changed while reading receipt"));
+        }
+        Ok(Some(RepaymentEvidence {
+            transfer: *transfer,
+            block,
+            token,
+        }))
     }
 
     /// Identify one reduction in a successful transaction on the canonical chain.
@@ -605,6 +724,201 @@ mod tests {
             .await
             .unwrap_err();
         assert!(error.to_string().contains("changed while scanning"));
+    }
+
+    const TOKEN: Address = Address::repeat_byte(0x55);
+    const MARKET: Address = Address::repeat_byte(0x66);
+    const REPAY_TX: B256 = B256::repeat_byte(0x44);
+
+    fn context(number: u64) -> BlockContext {
+        BlockContext {
+            number,
+            hash: hash_of(number),
+            timestamp: timestamp_of(number),
+        }
+    }
+
+    fn reduction_evidence() -> ReductionEvidence {
+        ReductionEvidence {
+            event: decode(&reduction(), CONTROLLER, context(10)).unwrap(),
+            claim_id: U256::from(7),
+            guardian: GUARDIAN,
+            recovered: UsdcAtoms::new(60_000_001),
+        }
+    }
+
+    fn repayment() -> TransactionReceipt {
+        let mut transfer = log(
+            vec![
+                IERC20::Transfer::SIGNATURE_HASH,
+                GUARDIAN.into_word(),
+                MARKET.into_word(),
+            ],
+            U256::from(60_000_001).abi_encode(),
+            11,
+            4,
+        );
+        transfer.inner.address = TOKEN;
+        transfer.transaction_hash = Some(REPAY_TX);
+        let mut receipt = receipt(transfer, true);
+        receipt.transaction_hash = REPAY_TX;
+        receipt.block_number = Some(11);
+        receipt.block_hash = Some(hash_of(11));
+        receipt.to = Some(TOKEN);
+        receipt
+    }
+
+    fn repayment_answers(rpc: &Asserter, receipt: Option<TransactionReceipt>) {
+        rpc.push_success(&"0x14");
+        rpc.push_success(&header(20));
+        rpc.push_success(&header(10));
+        rpc.push_success(&receipt);
+        if receipt.as_ref().is_some_and(|r| r.block_number <= Some(20)) {
+            rpc.push_success(&header(11));
+            rpc.push_success(&header(11));
+            rpc.push_success(&header(10));
+            rpc.push_success(&header(20));
+        }
+    }
+
+    #[tokio::test]
+    async fn repayment_proves_one_exact_transfer_through_the_pinned_endpoint() {
+        for safe_executor in [false, true] {
+            let mut receipt = repayment();
+            if safe_executor {
+                receipt.from = Address::repeat_byte(0xaa);
+                receipt.to = Some(GUARDIAN);
+            }
+            let rpc = Asserter::new();
+            repayment_answers(&rpc, Some(receipt));
+            let history =
+                History::new(ProviderBuilder::new().connect_mocked_client(rpc.clone())).with_lag(0);
+            let result = history
+                .confirmed_repayment(REPAY_TX, TOKEN, MARKET, &reduction_evidence(), context(20))
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(result.transfer().tx_hash, REPAY_TX);
+            assert_eq!(result.transfer().log_index, 4);
+            assert_eq!(result.transfer().from, GUARDIAN);
+            assert_eq!(result.transfer().to, MARKET);
+            assert_eq!(result.transfer().value, U256::from(60_000_001));
+            assert_eq!(result.block(), context(11));
+            assert_eq!(result.token(), TOKEN);
+            assert!(rpc.read_q().is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn repayment_refuses_foreign_failed_ambiguous_and_reorged_evidence() {
+        let mut cases = Vec::new();
+        let mut bad = repayment();
+        bad.transaction_hash = TX;
+        cases.push((bad, "another transaction"));
+        let mut bad = repayment();
+        bad.block_hash = Some(B256::ZERO);
+        cases.push((bad, "not canonical"));
+        for mutation in 0..7 {
+            let mut bad = repayment();
+            let mut logs = bad.inner.logs().to_vec();
+            match mutation {
+                0 => {
+                    logs[0].inner.address = CONTROLLER;
+                }
+                1 => {
+                    logs[0].inner.data = LogData::new_unchecked(
+                        logs[0].topics().to_vec(),
+                        U256::from(60_000_000).abi_encode().into(),
+                    );
+                }
+                2 => {
+                    logs.push(logs[0].clone());
+                }
+                3 => {
+                    logs[0].block_hash = Some(B256::ZERO);
+                }
+                5 | 6 => {
+                    let mut topics = logs[0].topics().to_vec();
+                    topics[if mutation == 5 { 1 } else { 2 }] =
+                        Address::repeat_byte(0x99).into_word();
+                    logs[0].inner.data =
+                        LogData::new_unchecked(topics, logs[0].data().data.clone());
+                }
+                _ => {}
+            }
+            bad.inner = ReceiptEnvelope::Legacy(
+                Receipt {
+                    status: (mutation != 4).into(),
+                    cumulative_gas_used: 30_000,
+                    logs,
+                }
+                .with_bloom(),
+            );
+            cases.push((
+                bad,
+                match mutation {
+                    3 => "log is not canonical",
+                    4 => "receipt failed",
+                    _ => "exactly one matching transfer",
+                },
+            ));
+        }
+        for (receipt, expected) in cases {
+            let rpc = Asserter::new();
+            repayment_answers(&rpc, Some(receipt));
+            let history =
+                History::new(ProviderBuilder::new().connect_mocked_client(rpc)).with_lag(0);
+            let error = history
+                .confirmed_repayment(REPAY_TX, TOKEN, MARKET, &reduction_evidence(), context(20))
+                .await
+                .unwrap_err();
+            assert!(error.to_string().contains(expected), "{error}");
+        }
+        for changed_block in [10, 11, 20] {
+            let rpc = Asserter::new();
+            rpc.push_success(&"0x14");
+            rpc.push_success(&header(20));
+            rpc.push_success(&header(10));
+            rpc.push_success(&Some(repayment()));
+            rpc.push_success(&header(11));
+            for number in [11, 10, 20] {
+                let mut block = header(number);
+                if number == changed_block {
+                    block.header.hash = B256::ZERO;
+                }
+                rpc.push_success(&block);
+            }
+            let error = History::new(ProviderBuilder::new().connect_mocked_client(rpc))
+                .with_lag(0)
+                .confirmed_repayment(REPAY_TX, TOKEN, MARKET, &reduction_evidence(), context(20))
+                .await
+                .unwrap_err();
+            assert!(error.to_string().contains("chain changed"), "{error}");
+        }
+    }
+
+    #[tokio::test]
+    async fn repayment_absence_and_receipts_after_the_endpoint_remain_pending() {
+        let mut future = repayment();
+        future.block_number = Some(21);
+        for receipt in [None, Some(future)] {
+            let rpc = Asserter::new();
+            repayment_answers(&rpc, receipt);
+            assert!(
+                History::new(ProviderBuilder::new().connect_mocked_client(rpc))
+                    .with_lag(0)
+                    .confirmed_repayment(
+                        REPAY_TX,
+                        TOKEN,
+                        MARKET,
+                        &reduction_evidence(),
+                        context(20)
+                    )
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+        }
     }
 
     #[tokio::test]
