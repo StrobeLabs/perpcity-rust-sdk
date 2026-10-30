@@ -62,6 +62,24 @@ pub enum ContractError {
         number: u64,
     },
 
+    /// A block no longer matches the canonical chain during a read.
+    /// Transient: retry against the current canonical chain.
+    #[error("chain reorganized while reading block {number}")]
+    ChainReorganized {
+        /// The block whose canonical identity changed.
+        number: u64,
+    },
+
+    /// A requested endpoint is newer than the history handle's confirmed tip.
+    /// Transient: wait for the configured confirmation lag.
+    #[error("block {number} is unconfirmed; confirmed through {confirmed_through}")]
+    BlockUnconfirmed {
+        /// The requested endpoint.
+        number: u64,
+        /// The latest block that satisfies the handle's confirmation lag.
+        confirmed_through: u64,
+    },
+
     /// The endpoint serves block `number`'s header but has pruned the
     /// state behind it: a full node asked for a block outside its window.
     /// Retrying gets the same answer; an archive endpoint is the fix. Not

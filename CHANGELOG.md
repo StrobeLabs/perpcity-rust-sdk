@@ -59,6 +59,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`Series::advance`, `Arrivals::advance`, `Series::through`, `Arrivals::through`**, for a fold or driver of its own; `Arrivals::from_genesis` and `Arrivals::after` for a process complete from the start or from the end of a seed's block.
 - **`Replay::read_through`**, what `catch_up` does after its scan, for a driver that read a range itself; **`Sequenced::stand_at`**, the guard's half of it; and **`History::block`**, a block's context by number.
 
+### Fixed
+
+- Pinned deployment code and storage reads classify pruned state as nontransient `StateUnavailable` and missing blocks as transient `BlockUnavailable`. Other RPC errors retain their variants.
+- Withdrawal history distinguishes transient `ChainReorganized` and `BlockUnconfirmed` from malformed evidence. Mined reverted reduction and repayment receipts return `TransactionError::Reverted` with the transaction hash.
+
 ## [0.12.0] - 2026-10-06
 
 The scope and health release. The tape is a type: every reader returned a

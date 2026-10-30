@@ -108,6 +108,8 @@ impl PerpCityError {
     /// particular is a caller sending faster than the chain confirms, which
     /// the next receipt fixes.
     ///
+    /// `ChainReorganized` and `BlockUnconfirmed` are transient reads: retry
+    /// against the canonical chain or wait for the confirmation lag.
     /// `BlockUnavailable` (a lagging replica briefly missing the pinned
     /// header) and `StorageReadFailed` with a transport `source` are
     /// stale-replica / network conditions — retryable. A
@@ -131,6 +133,8 @@ impl PerpCityError {
                 | Self::Transaction(TransactionError::TooManyInFlight { .. })
                 | Self::Transaction(TransactionError::TakerNotClosed { .. })
                 | Self::Contract(ContractError::BlockUnavailable { .. })
+                | Self::Contract(ContractError::ChainReorganized { .. })
+                | Self::Contract(ContractError::BlockUnconfirmed { .. })
                 | Self::Contract(ContractError::StorageReadFailed {
                     source: Some(_),
                     ..

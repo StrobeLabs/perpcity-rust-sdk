@@ -984,10 +984,12 @@ pub(super) fn decode_row<C: SolCall>(
 /// one that named the block will catch up. Every other failure passes
 /// through.
 pub(super) fn pinned_read_error(error: PerpCityError, number: u64) -> PerpCityError {
-    let PerpCityError::Abi(alloy::contract::Error::TransportError(RpcError::ErrorResp(payload))) =
-        &error
-    else {
-        return error;
+    let payload = match &error {
+        PerpCityError::Abi(alloy::contract::Error::TransportError(RpcError::ErrorResp(
+            payload,
+        )))
+        | PerpCityError::Rpc(RpcError::ErrorResp(payload)) => payload,
+        _ => return error,
     };
     let message = payload.message.to_ascii_lowercase();
     if state_pruned(&message) {
@@ -2658,6 +2660,61 @@ mod staged_tests {
             state.verify_current(&deployment()).await.unwrap_err(),
             PerpCityError::Rpc(_)
         ));
+    }
+
+    #[tokio::test]
+    async fn deployment_reads_classify_raw_rpc_failures_at_code_and_storage() {
+        for fail_storage in [false, true] {
+            for message in [
+                "missing trie node",
+                "historical state is not available",
+                "header not found",
+                "endpoint unavailable",
+            ] {
+                let (chain, rpc) = mock::chain();
+                rpc.block(5, 100);
+                let state = chain.market(PERP).state_at(5).await.unwrap();
+                if fail_storage {
+                    rpc.bytes(&[0x11]);
+                }
+                rpc.fails(message);
+                let error = state.verify_current(&deployment()).await.unwrap_err();
+                match message {
+                    "missing trie node" | "historical state is not available" => {
+                        assert!(
+                            matches!(
+                                error,
+                                PerpCityError::Contract(ContractError::StateUnavailable {
+                                    number: 5
+                                })
+                            ),
+                            "{error}"
+                        );
+                        assert!(!error.is_transient());
+                    }
+                    "header not found" => {
+                        assert!(
+                            matches!(
+                                error,
+                                PerpCityError::Contract(ContractError::BlockUnavailable {
+                                    number: 5
+                                })
+                            ),
+                            "{error}"
+                        );
+                        assert!(error.is_transient());
+                    }
+                    _ => {
+                        assert!(
+                            matches!(error, PerpCityError::Rpc(RpcError::ErrorResp(_))),
+                            "{error}"
+                        );
+                        assert!(error.is_transient());
+                    }
+                }
+                assert!(rpc.is_drained());
+            }
+        }
     }
 
     #[tokio::test]

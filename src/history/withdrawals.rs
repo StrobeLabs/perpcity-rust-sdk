@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::contracts::IERC20;
 use crate::contracts::withdrawal_events::WithdrawalEvents as Events;
-use crate::errors::{ContractError, PerpCityError, Result, ValidationError};
+use crate::errors::{ContractError, PerpCityError, Result, TransactionError, ValidationError};
 use crate::events::decode_raw;
 use crate::math::BlockContext;
 use crate::units::UsdcAtoms;
@@ -226,7 +226,7 @@ impl<P: Provider> History<P> {
             rows.push(event);
         }
         if self.block(to).await? != anchor {
-            return Err(malformed("controller history changed while scanning"));
+            return Err(ContractError::ChainReorganized { number: to }.into());
         }
         Ok(rows)
     }
@@ -248,24 +248,41 @@ impl<P: Provider> History<P> {
     ) -> Result<Option<RepaymentEvidence>> {
         nonzero(token)?;
         nonzero(market)?;
-        if at.number > self.tip().await? || self.block(at.number).await? != at {
-            return Err(malformed(
-                "repayment endpoint is unconfirmed or not canonical",
-            ));
+        let confirmed_through = self.tip().await?;
+        if at.number > confirmed_through {
+            return Err(ContractError::BlockUnconfirmed {
+                number: at.number,
+                confirmed_through,
+            }
+            .into());
+        }
+        if self.block(at.number).await? != at {
+            return Err(ContractError::ChainReorganized { number: at.number }.into());
         }
         let source = reduction.event().block;
-        if source.number > at.number || self.block(source.number).await? != source {
+        if source.number > at.number {
             return Err(malformed(
                 "reduction evidence is outside the canonical endpoint",
             ));
         }
+        if self.block(source.number).await? != source {
+            return Err(ContractError::ChainReorganized {
+                number: source.number,
+            }
+            .into());
+        }
         let Some(receipt) = self.provider.get_transaction_receipt(tx_hash).await? else {
             return Ok(None);
         };
-        if receipt.transaction_hash != tx_hash || !receipt.status() {
-            return Err(malformed(
-                "repayment receipt failed or names another transaction",
-            ));
+        if receipt.transaction_hash != tx_hash {
+            return Err(malformed("repayment receipt names another transaction"));
+        }
+        if !receipt.status() {
+            return Err(TransactionError::Reverted {
+                tx_hash,
+                reason: "repayment receipt reverted".into(),
+            }
+            .into());
         }
         let number = receipt
             .block_number
@@ -277,8 +294,11 @@ impl<P: Provider> History<P> {
             return Err(malformed("repayment precedes the reduction"));
         }
         let block = self.block(number).await?;
-        if block.number != number || receipt.block_hash != Some(block.hash) {
-            return Err(malformed("repayment receipt is not canonical"));
+        if block.number != number || receipt.block_hash.is_none() {
+            return Err(malformed("repayment receipt has invalid block identity"));
+        }
+        if receipt.block_hash != Some(block.hash) {
+            return Err(ContractError::ChainReorganized { number }.into());
         }
         let mut matching = Vec::new();
         for log in receipt.inner.logs() {
@@ -311,11 +331,13 @@ impl<P: Provider> History<P> {
                 "repayment receipt needs exactly one matching transfer",
             ));
         };
-        if self.block(number).await? != block
-            || self.block(source.number).await? != source
-            || self.block(at.number).await? != at
-        {
-            return Err(malformed("repayment chain changed while reading receipt"));
+        for expected in [block, source, at] {
+            if self.block(expected.number).await? != expected {
+                return Err(ContractError::ChainReorganized {
+                    number: expected.number,
+                }
+                .into());
+            }
         }
         Ok(Some(RepaymentEvidence {
             transfer: *transfer,
@@ -347,10 +369,15 @@ impl<P: Provider> History<P> {
         let Some(receipt) = self.provider.get_transaction_receipt(tx_hash).await? else {
             return Ok(None);
         };
-        if receipt.transaction_hash != tx_hash || !receipt.status() {
-            return Err(malformed(
-                "reduction receipt failed or names another transaction",
-            ));
+        if receipt.transaction_hash != tx_hash {
+            return Err(malformed("reduction receipt names another transaction"));
+        }
+        if !receipt.status() {
+            return Err(TransactionError::Reverted {
+                tx_hash,
+                reason: "reduction receipt reverted".into(),
+            }
+            .into());
         }
         let number = receipt
             .block_number
@@ -359,8 +386,11 @@ impl<P: Provider> History<P> {
             return Ok(None);
         }
         let block = self.block(number).await?;
+        if block.number != number || receipt.block_hash.is_none() {
+            return Err(malformed("reduction receipt has invalid block identity"));
+        }
         if receipt.block_hash != Some(block.hash) {
-            return Err(malformed("reduction receipt is not canonical"));
+            return Err(ContractError::ChainReorganized { number }.into());
         }
         let mut matching = receipt
             .inner
@@ -402,7 +432,7 @@ impl<P: Provider> History<P> {
             return Err(malformed("claim reduction has zero guardian"));
         }
         if self.block(number).await? != block {
-            return Err(malformed("reduction block changed while reading receipt"));
+            return Err(ContractError::ChainReorganized { number }.into());
         }
         Ok(Some(ReductionEvidence {
             event,
@@ -723,7 +753,80 @@ mod tests {
             .withdrawal_events(CONTROLLER, 1, Some(10))
             .await
             .unwrap_err();
-        assert!(error.to_string().contains("changed while scanning"));
+        assert_reorganized(&error, 10);
+    }
+
+    fn assert_reorganized(error: &PerpCityError, expected: u64) {
+        assert!(
+            matches!(error, PerpCityError::Contract(ContractError::ChainReorganized { number }) if *number == expected),
+            "{error}"
+        );
+        assert!(error.is_transient());
+        assert!(!error.is_unconfirmed());
+        assert_eq!(error.tx_hash(), None);
+    }
+
+    #[tokio::test]
+    async fn repayment_endpoint_distinguishes_confirmation_lag_and_canonicality() {
+        for changed_block in [None, Some(20), Some(10)] {
+            let rpc = Asserter::new();
+            rpc.push_success(&"0x14");
+            let mut endpoint = header(20);
+            let mut source = header(10);
+            if changed_block == Some(20) {
+                endpoint.header.hash = B256::ZERO;
+            }
+            if changed_block == Some(10) {
+                source.header.hash = B256::ZERO;
+            }
+            if changed_block.is_some() {
+                rpc.push_success(&endpoint);
+                if changed_block == Some(10) {
+                    rpc.push_success(&source);
+                }
+            }
+            let history = History::new(ProviderBuilder::new().connect_mocked_client(rpc.clone()))
+                .with_lag(if changed_block.is_some() { 0 } else { 8 });
+            let error = history
+                .confirmed_repayment(REPAY_TX, TOKEN, MARKET, &reduction_evidence(), context(20))
+                .await
+                .unwrap_err();
+            if let Some(number) = changed_block {
+                assert_reorganized(&error, number);
+            } else {
+                assert!(
+                    matches!(
+                        error,
+                        PerpCityError::Contract(ContractError::BlockUnconfirmed {
+                            number: 20,
+                            confirmed_through: 12
+                        })
+                    ),
+                    "{error}"
+                );
+                assert!(error.is_transient());
+                assert!(!error.is_unconfirmed());
+                assert_eq!(error.tx_hash(), None);
+            }
+            assert!(rpc.read_q().is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn reduction_rechecks_the_receipt_block_after_decoding() {
+        let rpc = Asserter::new();
+        rpc.push_success(&Some(receipt(reduction(), true)));
+        rpc.push_success(&"0x14");
+        rpc.push_success(&header(10));
+        let mut changed = header(10);
+        changed.header.hash = B256::ZERO;
+        rpc.push_success(&changed);
+        let error = History::new(ProviderBuilder::new().connect_mocked_client(rpc.clone()))
+            .confirmed_reduction(TX, CONTROLLER, U256::from(7), 3)
+            .await
+            .unwrap_err();
+        assert_reorganized(&error, 10);
+        assert!(rpc.read_q().is_empty());
     }
 
     const TOKEN: Address = Address::repeat_byte(0x55);
@@ -817,7 +920,7 @@ mod tests {
         cases.push((bad, "another transaction"));
         let mut bad = repayment();
         bad.block_hash = Some(B256::ZERO);
-        cases.push((bad, "not canonical"));
+        cases.push((bad, "reorganized"));
         for mutation in 0..7 {
             let mut bad = repayment();
             let mut logs = bad.inner.logs().to_vec();
@@ -858,12 +961,14 @@ mod tests {
                 bad,
                 match mutation {
                     3 => "log is not canonical",
-                    4 => "receipt failed",
+                    4 => "receipt reverted",
                     _ => "exactly one matching transfer",
                 },
             ));
         }
         for (receipt, expected) in cases {
+            let receipt_block = 11;
+            let expected_tx = REPAY_TX;
             let rpc = Asserter::new();
             repayment_answers(&rpc, Some(receipt));
             let history =
@@ -873,6 +978,28 @@ mod tests {
                 .await
                 .unwrap_err();
             assert!(error.to_string().contains(expected), "{error}");
+            match expected {
+                "reorganized" => assert_reorganized(&error, receipt_block),
+                "receipt reverted" => {
+                    assert!(matches!(
+                        error,
+                        PerpCityError::Transaction(TransactionError::Reverted { .. })
+                    ));
+                    assert_eq!(error.tx_hash(), Some(expected_tx));
+                    assert!(!error.is_transient());
+                    assert!(!error.is_unconfirmed());
+                }
+                _ => {
+                    assert!(
+                        matches!(
+                            error,
+                            PerpCityError::Validation(ValidationError::DecodeFailed { .. })
+                        ),
+                        "{error}"
+                    );
+                    assert!(!error.is_transient());
+                }
+            }
         }
         for changed_block in [10, 11, 20] {
             let rpc = Asserter::new();
@@ -893,7 +1020,7 @@ mod tests {
                 .confirmed_repayment(REPAY_TX, TOKEN, MARKET, &reduction_evidence(), context(20))
                 .await
                 .unwrap_err();
-            assert!(error.to_string().contains("chain changed"), "{error}");
+            assert_reorganized(&error, changed_block);
         }
     }
 
@@ -970,7 +1097,7 @@ mod tests {
                 receipt(reduction(), false),
                 CONTROLLER,
                 U256::from(7),
-                "receipt failed",
+                "receipt reverted",
             ),
             (
                 receipt(reduction(), true),
@@ -992,9 +1119,11 @@ mod tests {
                 },
                 CONTROLLER,
                 U256::from(7),
-                "not canonical",
+                "reorganized",
             ),
         ] {
+            let receipt_block = 10;
+            let expected_tx = TX;
             let rpc = Asserter::new();
             rpc.push_success(&Some(receipt));
             rpc.push_success(&"0x14");
@@ -1004,6 +1133,28 @@ mod tests {
                 .await
                 .unwrap_err();
             assert!(error.to_string().contains(expected), "{error}");
+            match expected {
+                "reorganized" => assert_reorganized(&error, receipt_block),
+                "receipt reverted" => {
+                    assert!(matches!(
+                        error,
+                        PerpCityError::Transaction(TransactionError::Reverted { .. })
+                    ));
+                    assert_eq!(error.tx_hash(), Some(expected_tx));
+                    assert!(!error.is_transient());
+                    assert!(!error.is_unconfirmed());
+                }
+                _ => {
+                    assert!(
+                        matches!(
+                            error,
+                            PerpCityError::Validation(ValidationError::DecodeFailed { .. })
+                        ),
+                        "{error}"
+                    );
+                    assert!(!error.is_transient());
+                }
+            }
         }
     }
 }
