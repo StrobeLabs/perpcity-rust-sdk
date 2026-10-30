@@ -154,7 +154,7 @@ fn topic_values(
     ))
 }
 
-fn decode_transfer(log: &Log) -> Result<TokenTransfer> {
+pub(super) fn decode_transfer(log: &Log) -> Result<TokenTransfer> {
     let decoded = log
         .block_number
         .zip(log.log_index)

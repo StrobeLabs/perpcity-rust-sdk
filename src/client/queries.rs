@@ -166,7 +166,7 @@ pub(super) fn registered_module(addr: Address, module: &str) -> Result<Address> 
     Ok(addr)
 }
 
-/// Map a failed [`PerpClient::multicall_at`] batch onto the SDK's errors.
+/// Map a failed pinned multicall batch onto the SDK's errors.
 ///
 /// A transport failure keeps the classification a contract call gets
 /// ([`PerpCityError::Abi`]): a view that reverts reaches the client as a

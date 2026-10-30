@@ -63,6 +63,7 @@ mod replay;
 pub(crate) mod scan;
 mod tape;
 mod transfers;
+mod withdrawals;
 
 #[cfg(any(test, feature = "test-utils"))]
 pub mod test_support;
@@ -86,6 +87,7 @@ pub use tape::{
     TapeEvent, TapeSlice, Wallets, latest_market_events, market_events, market_tape,
 };
 pub use transfers::{TokenTransfer, token_transfers};
+pub use withdrawals::{ReductionEvidence, RepaymentEvidence, WithdrawalEvent, WithdrawalEventKind};
 
 use std::collections::BTreeMap;
 

@@ -182,9 +182,9 @@ that carries it, the invariant it holds, and the node that owns it.
 |---|---|---|---|
 | A chain | [`ChainReader`](src/client/chain.rs#L66) | one transport, one deployment set, shared caches | [`client`](src/client/DESIGN.md) |
 | A market, now | [`MarketReader`](src/client/market.rs#L26) | one `Perp` over a `ChainReader`; every read is current | [`client`](src/client/DESIGN.md) |
-| A market, at a block | [`StateAt`](src/client/state.rs#L69) | the handle is the block; every read pinned to its hash | [`client`](src/client/DESIGN.md) |
-| A market with a signer | [`PerpClient`](src/client/mod.rs#L185) | a `MarketReader` plus the send pipeline | [`client`](src/client/DESIGN.md) |
-| A send | [`TxBuilder`](src/client/transactions.rs#L40) | one transaction, one nonce, one outcome | [`client`](src/client/DESIGN.md) |
+| A market, at a block | [`StateAt`](src/client/state.rs#L72) | the handle is the block; every read pinned to its hash | [`client`](src/client/DESIGN.md) |
+| A market with a signer | [`PerpClient`](src/client/mod.rs#L194) | a `MarketReader` plus the send pipeline | [`client`](src/client/DESIGN.md) |
+| A send | [`TxBuilder`](src/client/transactions.rs#L41) | one transaction, one nonce, one outcome | [`client`](src/client/DESIGN.md) |
 | A tick interval | [`TickRange`](src/math/range.rs#L25) | `lower < upper`, both in the V4 domain, checked at construction | [`math::range`](src/math/range.rs#L1) |
 | A maker's geometry | [`MakerBand`](src/math/range.rs#L140) | a `TickRange` with liquidity | [`math::range`](src/math/range.rs#L1) |
 | The mark's inputs | [`Mark`](src/math/pricing.rs#L114) | pool price, index and EMAs from one block, advanced to it | [`math::pricing`](src/math/pricing.rs#L1) |
@@ -204,7 +204,7 @@ that carries it, the invariant it holds, and the node that owns it.
 | A print | [`IndexPrint`](src/history/beacon.rs#L20) | the index at a chain point and time | [`history`](src/history/DESIGN.md) |
 | A cross-chain transfer | [`Burn`](src/cctp.rs#L203), [`Attested`](src/cctp.rs#L261) | USDC burned on one chain, minted once on another | [`cctp`](src/cctp/DESIGN.md) |
 | A failure | [`PerpCityError`](src/errors/mod.rs#L45) | typed, with a stated transience | [`errors`](src/errors/DESIGN.md) |
-| A transport | [`HftTransport`](src/transport/provider.rs#L523) | many endpoints, one provider, reads and writes classified | [`transport`](src/transport/DESIGN.md) |
+| A transport | [`HftTransport`](src/transport/provider.rs#L522) | many endpoints, one provider, reads and writes classified | [`transport`](src/transport/DESIGN.md) |
 | The send path | [`TxPipeline`](src/hft/pipeline.rs#L125), [`NonceManager`](src/hft/nonce.rs#L42) | zero RPC to prepare; the next nonce is owned | [`hft`](src/hft/DESIGN.md) |
 | The chain's shapes | [`contracts`](src/contracts/DESIGN.md), `storage` | bindings match deployed bytecode; slots match the deployed layout | [`contracts`](src/contracts/DESIGN.md) |
 | The unit boundary | `convert` | a human unit becomes a wire unit once, at the edge | [`client`](src/client/DESIGN.md) |
@@ -512,3 +512,16 @@ Two of these are about the graph rather than any component.
   re-examined against it.
 - A consumer named in a type table must exist, since the doc gate
   resolves the link, but nothing yet checks that it takes the type.
+
+## Operations for the next contract version
+
+The [client](src/client/DESIGN.md) provides operations for contracts revision
+`5141c2f`. Operators must review and configure each deployment before using them.
+Each market read verifies the proxy and implementation against that configuration.
+The APIs include no production defaults and do not use the cached legacy-era
+classifier. Their private bindings remain separate from deployed beta bindings.
+
+The client documentation describes the inputs and returned state. The
+[history](src/history/DESIGN.md) component reads controller events and verifies
+claim-reduction receipts against the canonical chain. Neither the source revision
+nor a successful selector call proves that a deployment supports these APIs.

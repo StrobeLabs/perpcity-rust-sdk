@@ -54,6 +54,11 @@ pub use market::{MarketReader, PositionRole};
 pub use queries::{Bounds, Fees, MarketConfig, MarketSnapshot, OpenInterest};
 pub use state::Books;
 pub use state::{
+    BackstopKind, BackstopOrder, BackstopPosition, ClaimStatus, ContractCode, ControllerAction,
+    ControllerState, CurrentDeployment, FeeState, FundingState, OperationalState, UtilizationCurve,
+    WithdrawalClaim,
+};
+pub use state::{
     MAX_ROW_BATCH, MarginRatioTriple, MarginRatios, MarketRates, RowOutcome, SolvencyState, StateAt,
 };
 pub use trades::{
@@ -61,7 +66,11 @@ pub use trades::{
     ExactAdjustMakerParams, ExactAdjustTakerParams, ExactOpenMakerParams, ExactOpenTakerParams,
     OpenMakerParams, OpenResult, OpenTakerParams,
 };
-pub use transactions::TxBuilder;
+pub use trades::{
+    controller_call, set_tvl_cap_call, set_utilization_curve_call, touch_call, usdc_approve_call,
+    usdc_transfer_call,
+};
+pub use transactions::{ContractCall, TxBuilder};
 
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};

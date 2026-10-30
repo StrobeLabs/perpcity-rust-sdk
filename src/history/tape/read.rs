@@ -349,7 +349,7 @@ pub(in crate::history) async fn markets_tape_with<P: Provider>(
 ///
 /// A log of another vocabulary is skipped, which is what a filter on one
 /// address returns plenty of. A log of *this* vocabulary that will not
-/// decode is counted on the scan's [`ScanStats::undecodable`] and skipped
+/// decode is counted on the scan's [`ScanStats::undecodable`](crate::history::ScanStats::undecodable) and skipped
 /// too: the scan is not failed over it, because one such log should not cost
 /// a scan of millions of blocks, but the count is how a caller learns the
 /// tape has a gap rather than being told nothing at all.

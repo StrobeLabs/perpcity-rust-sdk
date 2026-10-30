@@ -59,7 +59,11 @@ that does not exist or is not the caller's, a module not registered, an
 event not in the receipt, a batch that failed, a block the replica lacks
 (transient), state the node pruned (not), a log range refused (not), a
 storage read that failed (transient when a transport error is the
-cause), an endpoint serving another chain (not).
+cause), an endpoint serving another chain (not). `ChainReorganized` names
+a block that no longer matches the canonical chain. `BlockUnconfirmed` names
+an endpoint newer than the history handle's confirmed tip. Both are transient.
+Malformed withdrawal evidence remains `DecodeFailed`; a mined reverted receipt
+is `TransactionError::Reverted` and retains the transaction hash.
 
 `TransactionError` is the send's stages: simulation reverted or failed,
 signing failed, gas unavailable, too many in flight, broadcast failed,
@@ -77,10 +81,10 @@ answers for all of them.
 | Type | Invariant | Produced by | Consumed by |
 |---|---|---|---|
 | [`ValidationError`](validation.rs#L11) | the caller's input refused, typed per input kind; never transient, no request was sent. A variant names only what the caller could not have known: `NoBandCapacity` carries the band's ticks; `InvalidAmount`, the text an amount's parse refused; `BlockMismatch`, the two blocks inputs meant for one came from | every constructor, conversion and parse that checks its input, [`TickRange::new`](../math/DESIGN.md) and [`TransportConfigBuilder::build`](../transport/DESIGN.md) among them; every port in `math` and function in `convert`, since pure code fails only on its inputs | [`PerpCityError`](mod.rs#L45), by conversion. The strategy layer refuses a config before any request is made. |
-| [`ContractError`](contract.rs#L9) | the chain's state refusing: each variant states its transience in its doc; [`BlockUnavailable`](contract.rs#L60) and [`StateUnavailable`](contract.rs#L70) are the pair every pinned read distinguishes | no signature names it; the variant is chosen inside the pinned reads on `StateAt` (pruned state, missing block), the batches on `MarketReader` and `ChainReader` (a failed multicall or storage read), `ChainReader::checked` (another chain), the scans in `history` (a range no narrowing serves) and the trades' receipt parsers (an event not emitted) | [`PerpCityError`](mod.rs#L45), by conversion. A retry loop keys on the transience the variant states; a forensic read keys on which of the pair it was. |
+| [`ContractError`](contract.rs#L9) | the chain's state refusing: each variant states its transience in its doc; [`BlockUnavailable`](contract.rs#L60) and [`StateUnavailable`](contract.rs#L88) are the pair every pinned read distinguishes; `ChainReorganized` and `BlockUnconfirmed` are transient history read failures | no signature names it; the variant is chosen inside the pinned reads on `StateAt` (pruned state, missing block), the batches on `MarketReader` and `ChainReader` (a failed multicall or storage read), `ChainReader::checked` (another chain), the scans in `history` (a range no narrowing serves), `History::withdrawal_events`, `History::confirmed_reduction` and `History::confirmed_repayment` (canonicality and confirmations), and the trades' receipt parsers (an event not emitted) | [`PerpCityError`](mod.rs#L45), by conversion. A retry loop keys on the transience the variant states; a forensic read keys on which of the pair it was. |
 | [`TransactionError`](transaction.rs#L11) | the send's stages: the variant is the stage; every variant after broadcast carries `tx_hash`; [`is_revert`](transaction.rs#L218) reads a typed revert; `is_unconfirmed` names the two stages whose send may still land | [`TxPipeline::prepare`](../hft/DESIGN.md), the one signature that names it; the stages of `TxBuilder::send` choose the rest inside the crate's `Result`, and the simulation stage names a revert through `try_extract_revert`, the bridge from the node's hex to a selector | [`PerpCityError`](mod.rs#L45), by conversion. The strategy layer reads the stage to know whether money may have moved, and the hash to find out. |
-| [`PerpCityError`](mod.rs#L45) | the umbrella: one enum for every failure; [`is_transient`](mod.rs#L123) answers for all; [`PerpCityError::tx_hash`](mod.rs#L156) for any post-broadcast send; `is_unconfirmed` for one that may still land, which a retry of transients must not resend | conversion from [`ValidationError`](validation.rs#L11), [`ContractError`](contract.rs#L9), [`TransactionError`](transaction.rs#L11), the transport's and the ABI's errors, the JSON parser's, Circle's attestation service's ([`IrisError`](../cctp/DESIGN.md)), and the filesystem's for a recording read or written; nothing constructs it directly | [`Result`](mod.rs#L165); [`MakerEquityKind`](../client/DESIGN.md), as the `Failed` payload of an outcome. The strategy layer's retry loops and per-position decisions key on `is_transient` and never re-classify. |
-| [`Result`](mod.rs#L165) | the crate's result: `PerpCityError` throughout; `Result<T, ValidationError>` only inside `math` and `convert`, where nothing else can fail | every read, scan and send | the strategy layer, which adds context at its binaries and nowhere else. |
+| [`PerpCityError`](mod.rs#L45) | the umbrella: one enum for every failure; [`is_transient`](mod.rs#L125) answers for all; [`PerpCityError::tx_hash`](mod.rs#L160) for any post-broadcast send; `is_unconfirmed` for one that may still land, which a retry of transients must not resend | conversion from [`ValidationError`](validation.rs#L11), [`ContractError`](contract.rs#L9), [`TransactionError`](transaction.rs#L11), the transport's and the ABI's errors, the JSON parser's, Circle's attestation service's ([`IrisError`](../cctp/DESIGN.md)), and the filesystem's for a recording read or written; nothing constructs it directly | [`Result`](mod.rs#L169); [`MakerEquityKind`](../client/DESIGN.md), as the `Failed` payload of an outcome. The strategy layer's retry loops and per-position decisions key on `is_transient` and never re-classify. |
+| [`Result`](mod.rs#L169) | the crate's result: `PerpCityError` throughout; `Result<T, ValidationError>` only inside `math` and `convert`, where nothing else can fail | every read, scan and send | the strategy layer, which adds context at its binaries and nowhere else. |
 
 The enums are `#[non_exhaustive]`. A new variant is added when a caller
 would branch on it, and existing callers with a wildcard keep compiling.
@@ -93,8 +97,9 @@ would branch on it, and existing callers with a wildcard keep compiling.
   state and missing blocks; the send path produces every transaction
   variant; the probes read typed reverts.
 - From [`history`](../history/DESIGN.md): a refusal a narrower range
-  cannot fix is `LogsRejected`; everything else is left transient for the
-  caller's policy.
+  cannot fix is `LogsRejected`. Withdrawal readers return transient
+  `ChainReorganized` or `BlockUnconfirmed`, nontransient `DecodeFailed` for
+  malformed evidence, and `TransactionError::Reverted` for mined failures.
 - From [`transport`](../transport/DESIGN.md): a transport error that
   reaches the caller has already exhausted the transport's retries and is
   transient at this level.
@@ -128,3 +133,8 @@ would branch on it, and existing callers with a wildcard keep compiling.
 - **`Rpc` and `Abi` are the raw layers showing through.** Every failure
   that reaches a caller should be one of the three families; the raw
   variants exist because some paths do not yet classify.
+
+Client operations return `ContractError::UnsupportedOperations` when code,
+controller binding, or the expected contract schema does not match. This error
+is nontransient. RPC failures retain their read-error classification. Failed
+legacy getters never become empty operational state.

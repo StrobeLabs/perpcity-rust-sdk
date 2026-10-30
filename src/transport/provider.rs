@@ -451,8 +451,7 @@ impl EndpointPool {
     /// A request the endpoint declined is not held against it — it
     /// answered, and every endpoint would decline the same request — but
     /// the answer is still evidence it is alive, which ends its failure
-    /// streak and releases the probe slot a half-open request took. See
-    /// [`Fault`](super::fault::Fault).
+    /// streak and releases the probe slot a half-open request took.
     pub fn record_error(&self, idx: usize, now_ms: u64, error: &TransportError) {
         match fault(error) {
             Fault::Endpoint => self.record_failure(idx, now_ms),
@@ -788,7 +787,7 @@ impl Router {
     /// Fan out a read request to multiple endpoints in a pool, return the
     /// fastest success.
     ///
-    /// Uses [`JoinSet`] to properly cancel losing requests via `abort_all()`,
+    /// Uses [`tokio::task::JoinSet`] to properly cancel losing requests via `abort_all()`,
     /// saving RPC rate limits and network bandwidth. Health is recorded for all
     /// endpoints that complete before cancellation.
     async fn hedged_request(

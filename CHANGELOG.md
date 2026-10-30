@@ -28,6 +28,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - **`MakerEquityBreakdown::full_close` says what removing a whole band would do**, as the deployed `adjustMaker` takes it, against the market's `MarketCapacity` and the taker liquidation ratio from the same block; a capacity read at another block is refused with the new `ValidationError::BlockMismatch`. The `FullClose` holds the `Remainder`: a payout when no perp is left, or else the `TakerHealth` of the taker the maker converts to. It also holds the first `CloseRefusal` the contract would revert with, checked in the contract's order: utilization once the band's capacity leaves, then `MarginRatioTooLow` or `NegativeMargin`, then utilization with the taker's open interest added. `perp_left` is the size of that taker. Every one of 43 conversions on Arbitrum One was reproduced from the block before it: the perp and USD legs to the atom, and the margin to the atom wherever the two blocks share a timestamp. Every one of 147 open makers on seven markets agreed with an `eth_call` of its own close, 11 of them refusals. `tests/maker_close_live.rs` repeats that check for any market.
+- Added canonical repayment receipt evidence matched to a confirmed reduction and pinned block.
+- Added bounded pinned controller claim reads with one controller verification per batch.
+- Added operations for contracts `5141c2f` to read market and controller state at a fixed block and encode backstops, ordered action calls, and recovery transfers. Reads check deployment code against operator-supplied addresses and hashes. Operators must review deployments before configuring them. Legacy bindings remain unchanged.
+- Added withdrawal event histories and claim-reduction evidence for monitoring and recovery. The readers check events and receipts against the canonical chain.
 
 - **Amounts parse from text, exactly.** `UsdcAtoms`, `UsdcDelta`, `PerpAtoms` and `PerpDelta` implement `FromStr`, the inverse of their `Display`: `"12.5"` is 12 500 000 atoms, with no float on the way. Anything that is not an exact amount is refused with `ValidationError::InvalidAmount` rather than rounded: a seventh decimal place, a sign on a count, `+`, exponents, separators, surrounding whitespace, or a value past the type's width. A command-line flag or config value can then be a unit type directly, and every value round-trips through its text, `u128::MAX` and `i128::MIN` included.
 
@@ -54,6 +58,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`Series::until` and `Arrivals::until`**, the same questions asked as of a point taken from the tape, for the past: `market.liquidations().until(close.sample(())).count_in(window)`. `Until` is the view they return.
 - **`Series::advance`, `Arrivals::advance`, `Series::through`, `Arrivals::through`**, for a fold or driver of its own; `Arrivals::from_genesis` and `Arrivals::after` for a process complete from the start or from the end of a seed's block.
 - **`Replay::read_through`**, what `catch_up` does after its scan, for a driver that read a range itself; **`Sequenced::stand_at`**, the guard's half of it; and **`History::block`**, a block's context by number.
+
+### Fixed
+
+- Pinned deployment code and storage reads classify pruned state as nontransient `StateUnavailable` and missing blocks as transient `BlockUnavailable`. Other RPC errors retain their variants.
+- Withdrawal history distinguishes transient `ChainReorganized` and `BlockUnconfirmed` from malformed evidence. Mined reverted reduction and repayment receipts return `TransactionError::Reverted` with the transaction hash.
 
 ## [0.12.0] - 2026-10-06
 

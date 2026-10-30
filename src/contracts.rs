@@ -36,6 +36,9 @@
 #![allow(clippy::too_many_arguments)]
 #![doc = "\n\nThe design of this module: [`src/contracts/DESIGN.md`](https://github.com/StrobeLabs/perpcity-rust-sdk/blob/main/src/contracts/DESIGN.md)."]
 
+pub(crate) mod operations;
+pub(crate) mod withdrawal_events;
+
 use alloy::sol;
 
 sol! {

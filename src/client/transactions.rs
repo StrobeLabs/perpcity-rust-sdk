@@ -18,13 +18,14 @@ use alloy::network::TransactionBuilder;
 use alloy::primitives::{Address, B256, Bytes, U256};
 use alloy::providers::Provider;
 use alloy::rpc::types::{TransactionReceipt, TransactionRequest};
+use serde::{Deserialize, Serialize};
 
 use crate::constants::{RECEIPT_POLL_INTERVAL, RECEIPT_TIMEOUT};
 use crate::errors::{Result, TransactionError, ValidationError, decode};
 use crate::hft::gas::{Urgency, is_out_of_gas};
 use crate::hft::pipeline::TxRequest;
 
-use super::PerpClient;
+use super::{ChainReader, PerpClient};
 
 /// Delay before the first receipt poll — a just-broadcast transaction
 /// rarely has a receipt sooner, so an earlier poll is a wasted call.
@@ -547,6 +548,36 @@ pub(super) fn classify_simulation_failure(
         TransactionError::GasUnavailable {
             reason: format!("{what} failed: {e}"),
         }
+    }
+}
+
+/// Encoded call. The caller must verify that the target deployment supports it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContractCall {
+    /// Called contract.
+    pub to: Address,
+    /// ABI calldata.
+    pub data: Bytes,
+    /// Native currency, in wei.
+    pub value: u128,
+}
+
+impl ContractCall {
+    /// Simulate as the executor without signing.
+    pub async fn simulate(&self, chain: &ChainReader, from: Address) -> Result<()> {
+        Ok(chain
+            .preflight_call(from, self.to, &self.data, self.value, None)
+            .await?)
+    }
+
+    /// Submit once through the existing transaction pipeline.
+    /// The caller must recheck any conditions that can change before sending.
+    pub async fn send(&self, client: &PerpClient) -> Result<TransactionReceipt> {
+        client
+            .tx(self.to, self.data.clone())
+            .with_value(self.value)
+            .send()
+            .await
     }
 }
 
