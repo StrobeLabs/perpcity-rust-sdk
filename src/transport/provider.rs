@@ -470,6 +470,12 @@ impl EndpointPool {
         &self.endpoints[idx].label
     }
 
+    /// `err`'s text with every trace of endpoint `idx`'s URL cut, safe for
+    /// tracing.
+    fn redacted(&self, idx: usize, err: &TransportError) -> String {
+        super::redact::redact_in(&err.to_string(), &self.endpoints[idx].url)
+    }
+
     /// Number of endpoints currently in Closed (healthy) state.
     ///
     /// Lock-free: reads atomic state mirrors without taking any mutexes.
@@ -746,7 +752,7 @@ impl Router {
                         attempt = attempt + 1,
                         max_attempts,
                         endpoint = %pool.label(idx),
-                        error = %e,
+                        error = %pool.redacted(idx, &e),
                         is_write,
                         "transport error"
                     );

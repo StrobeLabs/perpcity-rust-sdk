@@ -204,7 +204,7 @@ that carries it, the invariant it holds, and the node that owns it.
 | A print | [`IndexPrint`](src/history/beacon.rs#L20) | the index at a chain point and time | [`history`](src/history/DESIGN.md) |
 | A cross-chain transfer | [`Burn`](src/cctp.rs#L203), [`Attested`](src/cctp.rs#L261) | USDC burned on one chain, minted once on another | [`cctp`](src/cctp/DESIGN.md) |
 | A failure | [`PerpCityError`](src/errors/mod.rs#L45) | typed, with a stated transience | [`errors`](src/errors/DESIGN.md) |
-| A transport | [`HftTransport`](src/transport/provider.rs#L523) | many endpoints, one provider, reads and writes classified | [`transport`](src/transport/DESIGN.md) |
+| A transport | [`HftTransport`](src/transport/provider.rs#L529) | many endpoints, one provider, reads and writes classified | [`transport`](src/transport/DESIGN.md) |
 | The send path | [`TxPipeline`](src/hft/pipeline.rs#L125), [`NonceManager`](src/hft/nonce.rs#L42) | zero RPC to prepare; the next nonce is owned | [`hft`](src/hft/DESIGN.md) |
 | The chain's shapes | [`contracts`](src/contracts/DESIGN.md), `storage` | bindings match deployed bytecode; slots match the deployed layout | [`contracts`](src/contracts/DESIGN.md) |
 | The unit boundary | `convert` | a human unit becomes a wire unit once, at the edge | [`client`](src/client/DESIGN.md) |
