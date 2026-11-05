@@ -74,11 +74,7 @@ pub fn redact_text(text: &str) -> String {
     while let Some(sep) = rest.find("://") {
         let before = rest[..sep].to_ascii_lowercase();
         let after = &rest[sep + 3..];
-        let end = sep
-            + 3
-            + after
-                .find(|c: char| c.is_whitespace() || URL_END.contains(c))
-                .unwrap_or(after.len());
+        let end = sep + 3 + url_len(after);
         match SCHEMES.iter().find(|scheme| before.ends_with(**scheme)) {
             Some(scheme) => {
                 let start = sep - scheme.len();
@@ -91,6 +87,25 @@ pub fn redact_text(text: &str) -> String {
     }
     out.push_str(rest);
     out
+}
+
+/// The length of the URL that `after` (the text after `://`) starts with: up
+/// to whitespace or a [`URL_END`] character, except inside the brackets of an
+/// IPv6 host.
+fn url_len(after: &str) -> usize {
+    let mut in_host = true;
+    let mut in_brackets = false;
+    for (i, c) in after.char_indices() {
+        match c {
+            '[' if in_host => in_brackets = true,
+            ']' if in_brackets => in_brackets = false,
+            '/' | '\\' | '?' | '#' if !in_brackets => in_host = false,
+            _ if in_brackets => {}
+            _ if c.is_whitespace() || URL_END.contains(c) => return i,
+            _ => {}
+        }
+    }
+    after.len()
 }
 
 /// `url` with its userinfo, path, query and fragment replaced by
@@ -299,6 +314,14 @@ mod tests {
             (
                 format!("HTTPS://HOST.example/v2/{KEY}"),
                 "https://host.example/<redacted>",
+            ),
+            (
+                format!("dial http://[::1]:8545/v2/{KEY} failed"),
+                "dial http://[::1]:8545/<redacted> failed",
+            ),
+            (
+                format!("dial ws://u:{KEY}@[2001:db8::1]/ws] failed"),
+                "dial ws://[2001:db8::1]/<redacted>] failed",
             ),
             (
                 format!("url=xhttps://host.example/v2/{KEY}"),
