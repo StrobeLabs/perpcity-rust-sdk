@@ -44,4 +44,4 @@ pub mod provider;
 mod redact;
 pub mod ws;
 
-pub use redact::redact_url;
+pub use redact::{redact_text, redact_url};

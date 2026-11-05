@@ -97,7 +97,8 @@ impl WsManager {
         // Build RPC client directly (no fillers — we manage nonce/gas ourselves)
         let rpc_client = alloy::rpc::client::ClientBuilder::default()
             .ws(ws_connect)
-            .await?;
+            .await
+            .map_err(|e| super::redact::redact_error(e, &url))?;
         let provider = RootProvider::new(rpc_client);
 
         let label = super::redact_url(&url);

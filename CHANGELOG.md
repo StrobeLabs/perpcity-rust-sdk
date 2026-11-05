@@ -27,6 +27,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`transport::redact_text` cuts every `http`, `https`, `ws` or `wss` URL in a text to its scheme and host**, as in `https://arb-mainnet.g.alchemy.com/<redacted>`, for a caller logging an error chain that may quote an endpoint.
+
 - **`MakerEquityBreakdown::full_close` says what removing a whole band would do**, as the deployed `adjustMaker` takes it, against the market's `MarketCapacity` and the taker liquidation ratio from the same block; a capacity read at another block is refused with the new `ValidationError::BlockMismatch`. The `FullClose` holds the `Remainder`: a payout when no perp is left, or else the `TakerHealth` of the taker the maker converts to. It also holds the first `CloseRefusal` the contract would revert with, checked in the contract's order: utilization once the band's capacity leaves, then `MarginRatioTooLow` or `NegativeMargin`, then utilization with the taker's open interest added. `perp_left` is the size of that taker. Every one of 43 conversions on Arbitrum One was reproduced from the block before it: the perp and USD legs to the atom, and the margin to the atom wherever the two blocks share a timestamp. Every one of 147 open makers on seven markets agreed with an `eth_call` of its own close, 11 of them refusals. `tests/maker_close_live.rs` repeats that check for any market.
 
 - **Amounts parse from text, exactly.** `UsdcAtoms`, `UsdcDelta`, `PerpAtoms` and `PerpDelta` implement `FromStr`, the inverse of their `Display`: `"12.5"` is 12 500 000 atoms, with no float on the way. Anything that is not an exact amount is refused with `ValidationError::InvalidAmount` rather than rounded: a seventh decimal place, a sign on a count, `+`, exponents, separators, surrounding whitespace, or a value past the type's width. A command-line flag or config value can then be a unit type directly, and every value round-trips through its text, `u128::MAX` and `i128::MIN` included.
@@ -54,6 +56,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`Series::until` and `Arrivals::until`**, the same questions asked as of a point taken from the tape, for the past: `market.liquidations().until(close.sample(())).count_in(window)`. `Until` is the view they return.
 - **`Series::advance`, `Arrivals::advance`, `Series::through`, `Arrivals::through`**, for a fold or driver of its own; `Arrivals::from_genesis` and `Arrivals::after` for a process complete from the start or from the end of a seed's block.
 - **`Replay::read_through`**, what `catch_up` does after its scan, for a driver that read a range itself; **`Sequenced::stand_at`**, the guard's half of it; and **`History::block`**, a block's context by number.
+
+
+### Fixed
+
+- **Endpoint keys stay out of the transport's logs and traces.** An HTTP endpoint no longer runs under alloy's request span, which recorded the full URL, key included, on every DEBUG event it covered. The `transport error` warning, error bodies and undecodable responses cut the endpoint's URL wherever they quote it, and its path, query and userinfo where an error page quotes them without the host; `WsManager::connect` does the same to its error. An error with nothing to cut keeps its type.
 
 ## [0.12.0] - 2026-10-06
 
