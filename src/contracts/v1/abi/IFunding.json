@@ -1,0 +1,55 @@
+[
+  {
+    "type": "function",
+    "name": "funding",
+    "inputs": [
+      {
+        "name": "spots",
+        "type": "tuple",
+        "internalType": "struct PricePair",
+        "components": [
+          {
+            "name": "ammPrice",
+            "type": "uint128",
+            "internalType": "uint128"
+          },
+          {
+            "name": "index",
+            "type": "uint128",
+            "internalType": "uint128"
+          }
+        ]
+      },
+      {
+        "name": "emas",
+        "type": "tuple",
+        "internalType": "struct PricePair",
+        "components": [
+          {
+            "name": "ammPrice",
+            "type": "uint128",
+            "internalType": "uint128"
+          },
+          {
+            "name": "index",
+            "type": "uint128",
+            "internalType": "uint128"
+          }
+        ]
+      },
+      {
+        "name": "markPrice",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "int88",
+        "internalType": "int88"
+      }
+    ],
+    "stateMutability": "view"
+  }
+]

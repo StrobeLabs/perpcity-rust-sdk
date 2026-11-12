@@ -1,0 +1,3276 @@
+[
+  {
+    "type": "function",
+    "name": "abdicate",
+    "inputs": [
+      {
+        "name": "selector",
+        "type": "bytes4",
+        "internalType": "bytes4"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "abdicated",
+    "inputs": [
+      {
+        "name": "selector",
+        "type": "bytes4",
+        "internalType": "bytes4"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "bool",
+        "internalType": "bool"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "accountedTvl",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "tvl",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "adjustMaker",
+    "inputs": [
+      {
+        "name": "params",
+        "type": "tuple",
+        "internalType": "struct AdjustMakerParams",
+        "components": [
+          {
+            "name": "posId",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "marginDelta",
+            "type": "int128",
+            "internalType": "int128"
+          },
+          {
+            "name": "liquidityDelta",
+            "type": "int128",
+            "internalType": "int128"
+          },
+          {
+            "name": "amt0Limit",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "amt1Limit",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "deadline",
+            "type": "uint64",
+            "internalType": "uint64"
+          }
+        ]
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "adjustTaker",
+    "inputs": [
+      {
+        "name": "params",
+        "type": "tuple",
+        "internalType": "struct AdjustTakerParams",
+        "components": [
+          {
+            "name": "posId",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "marginDelta",
+            "type": "int128",
+            "internalType": "int128"
+          },
+          {
+            "name": "perpDelta",
+            "type": "int256",
+            "internalType": "int256"
+          },
+          {
+            "name": "amt1Limit",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "maxTotalFee",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "reduceOnly",
+            "type": "bool",
+            "internalType": "bool"
+          },
+          {
+            "name": "deadline",
+            "type": "uint64",
+            "internalType": "uint64"
+          }
+        ]
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "backstopMaker",
+    "inputs": [
+      {
+        "name": "posId",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "marginIn",
+        "type": "uint128",
+        "internalType": "uint128"
+      },
+      {
+        "name": "positionRecipient",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "deadline",
+        "type": "uint64",
+        "internalType": "uint64"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "backstopTaker",
+    "inputs": [
+      {
+        "name": "posId",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "marginIn",
+        "type": "uint128",
+        "internalType": "uint128"
+      },
+      {
+        "name": "positionRecipient",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "deadline",
+        "type": "uint64",
+        "internalType": "uint64"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "capacity",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "tuple",
+        "internalType": "struct Capacity",
+        "components": [
+          {
+            "name": "long",
+            "type": "uint128",
+            "internalType": "uint128"
+          },
+          {
+            "name": "short",
+            "type": "uint128",
+            "internalType": "uint128"
+          }
+        ]
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "claimSurplus",
+    "inputs": [
+      {
+        "name": "recipient",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "amount",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "collectCreatorFees",
+    "inputs": [
+      {
+        "name": "recipient",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "collectProtocolFees",
+    "inputs": [
+      {
+        "name": "recipient",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "cumulatives",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "tuple",
+        "internalType": "struct Cumulatives",
+        "components": [
+          {
+            "name": "fundingX96",
+            "type": "int256",
+            "internalType": "int256"
+          },
+          {
+            "name": "fundingDivSqrtPX192",
+            "type": "int256",
+            "internalType": "int256"
+          },
+          {
+            "name": "lpFeeGrowthGlobalX128",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "longUtilPaymentsX96",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "shortUtilPaymentsX96",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "longReserveUtilPaymentsX96",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "shortReserveUtilPaymentsX96",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "fundingCorrectionX128",
+            "type": "int256",
+            "internalType": "int256"
+          }
+        ]
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "currency0",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "address",
+        "internalType": "Currency"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "currency1",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "address",
+        "internalType": "Currency"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "donate",
+    "inputs": [
+      {
+        "name": "amount",
+        "type": "uint128",
+        "internalType": "uint128"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "emaWindow",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint24",
+        "internalType": "uint24"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "feeFund",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "tuple",
+        "internalType": "struct FeeFund",
+        "components": [
+          {
+            "name": "insurance",
+            "type": "uint80",
+            "internalType": "uint80"
+          },
+          {
+            "name": "creatorFees",
+            "type": "uint80",
+            "internalType": "uint80"
+          },
+          {
+            "name": "protocolFees",
+            "type": "uint80",
+            "internalType": "uint80"
+          }
+        ]
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "fundingState",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "tuple",
+        "internalType": "struct FundingState",
+        "components": [
+          {
+            "name": "baseX96",
+            "type": "int256",
+            "internalType": "int256"
+          },
+          {
+            "name": "inventoryX96",
+            "type": "int256",
+            "internalType": "int256"
+          },
+          {
+            "name": "makerLiquidity",
+            "type": "uint256",
+            "internalType": "uint256"
+          }
+        ]
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "governor",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "hooks",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "address",
+        "internalType": "contract IHooks"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "initialize",
+    "inputs": [
+      {
+        "name": "_protocolFeeManager",
+        "type": "address",
+        "internalType": "contract IProtocolFeeManager"
+      },
+      {
+        "name": "_protocolFee",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "_owner",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "_governor",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "_withdrawalController",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "_modules",
+        "type": "tuple",
+        "internalType": "struct Modules",
+        "components": [
+          {
+            "name": "beacon",
+            "type": "address",
+            "internalType": "contract IBeacon"
+          },
+          {
+            "name": "fees",
+            "type": "address",
+            "internalType": "contract IFees"
+          },
+          {
+            "name": "funding",
+            "type": "address",
+            "internalType": "contract IFunding"
+          },
+          {
+            "name": "marginRatios",
+            "type": "address",
+            "internalType": "contract IMarginRatios"
+          },
+          {
+            "name": "priceImpact",
+            "type": "address",
+            "internalType": "contract IPriceImpact"
+          },
+          {
+            "name": "pricing",
+            "type": "address",
+            "internalType": "contract IPricing"
+          }
+        ]
+      },
+      {
+        "name": "_poolKey",
+        "type": "tuple",
+        "internalType": "struct PoolKey",
+        "components": [
+          {
+            "name": "currency0",
+            "type": "address",
+            "internalType": "Currency"
+          },
+          {
+            "name": "currency1",
+            "type": "address",
+            "internalType": "Currency"
+          },
+          {
+            "name": "fee",
+            "type": "uint24",
+            "internalType": "uint24"
+          },
+          {
+            "name": "tickSpacing",
+            "type": "int24",
+            "internalType": "int24"
+          },
+          {
+            "name": "hooks",
+            "type": "address",
+            "internalType": "contract IHooks"
+          }
+        ]
+      },
+      {
+        "name": "_emaWindow",
+        "type": "uint24",
+        "internalType": "uint24"
+      },
+      {
+        "name": "_latency",
+        "type": "uint32",
+        "internalType": "uint32"
+      },
+      {
+        "name": "index",
+        "type": "uint128",
+        "internalType": "uint128"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "latency",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint32",
+        "internalType": "uint32"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "liquidateMaker",
+    "inputs": [
+      {
+        "name": "posId",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "liquidationFeeRecipient",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "liquidityAmount",
+        "type": "uint128",
+        "internalType": "uint128"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "liquidateTaker",
+    "inputs": [
+      {
+        "name": "posId",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "liquidationFeeRecipient",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "perpAmount",
+        "type": "uint128",
+        "internalType": "uint128"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "lowerTvlCap",
+    "inputs": [
+      {
+        "name": "newTvlCap",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "makerDetails",
+    "inputs": [
+      {
+        "name": "posId",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "tuple",
+        "internalType": "struct Maker",
+        "components": [
+          {
+            "name": "tickLower",
+            "type": "int24",
+            "internalType": "int24"
+          },
+          {
+            "name": "tickUpper",
+            "type": "int24",
+            "internalType": "int24"
+          },
+          {
+            "name": "liquidity",
+            "type": "uint128",
+            "internalType": "uint128"
+          },
+          {
+            "name": "lastLpFeeGrowthInsideX128",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "lastCumlFunding",
+            "type": "tuple",
+            "internalType": "struct MakerFunding",
+            "components": [
+              {
+                "name": "belowX96",
+                "type": "int256",
+                "internalType": "int256"
+              },
+              {
+                "name": "withinInventoryX192",
+                "type": "int256",
+                "internalType": "int256"
+              }
+            ]
+          },
+          {
+            "name": "lastFundingCorrectionX128",
+            "type": "int256",
+            "internalType": "int256"
+          }
+        ]
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "modules",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "tuple",
+        "internalType": "struct Modules",
+        "components": [
+          {
+            "name": "beacon",
+            "type": "address",
+            "internalType": "contract IBeacon"
+          },
+          {
+            "name": "fees",
+            "type": "address",
+            "internalType": "contract IFees"
+          },
+          {
+            "name": "funding",
+            "type": "address",
+            "internalType": "contract IFunding"
+          },
+          {
+            "name": "marginRatios",
+            "type": "address",
+            "internalType": "contract IMarginRatios"
+          },
+          {
+            "name": "priceImpact",
+            "type": "address",
+            "internalType": "contract IPriceImpact"
+          },
+          {
+            "name": "pricing",
+            "type": "address",
+            "internalType": "contract IPricing"
+          }
+        ]
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "moveMaker",
+    "inputs": [
+      {
+        "name": "params",
+        "type": "tuple",
+        "internalType": "struct MoveMakerParams",
+        "components": [
+          {
+            "name": "posId",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "tickLower",
+            "type": "int24",
+            "internalType": "int24"
+          },
+          {
+            "name": "tickUpper",
+            "type": "int24",
+            "internalType": "int24"
+          },
+          {
+            "name": "liquidity",
+            "type": "uint128",
+            "internalType": "uint128"
+          },
+          {
+            "name": "removeAmt0Min",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "removeAmt1Min",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "addAmt0Max",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "addAmt1Max",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "marginDelta",
+            "type": "int128",
+            "internalType": "int128"
+          },
+          {
+            "name": "deadline",
+            "type": "uint64",
+            "internalType": "uint64"
+          }
+        ]
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "nextPosId",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "openInterest",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "tuple",
+        "internalType": "struct OpenInterest",
+        "components": [
+          {
+            "name": "long",
+            "type": "uint128",
+            "internalType": "uint128"
+          },
+          {
+            "name": "short",
+            "type": "uint128",
+            "internalType": "uint128"
+          }
+        ]
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "openMaker",
+    "inputs": [
+      {
+        "name": "params",
+        "type": "tuple",
+        "internalType": "struct OpenMakerParams",
+        "components": [
+          {
+            "name": "holder",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "margin",
+            "type": "uint128",
+            "internalType": "uint128"
+          },
+          {
+            "name": "tickLower",
+            "type": "int24",
+            "internalType": "int24"
+          },
+          {
+            "name": "tickUpper",
+            "type": "int24",
+            "internalType": "int24"
+          },
+          {
+            "name": "liquidity",
+            "type": "uint128",
+            "internalType": "uint128"
+          },
+          {
+            "name": "maxAmt0In",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "maxAmt1In",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "deadline",
+            "type": "uint64",
+            "internalType": "uint64"
+          }
+        ]
+      }
+    ],
+    "outputs": [
+      {
+        "name": "posId",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "openTaker",
+    "inputs": [
+      {
+        "name": "params",
+        "type": "tuple",
+        "internalType": "struct OpenTakerParams",
+        "components": [
+          {
+            "name": "holder",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "margin",
+            "type": "uint128",
+            "internalType": "uint128"
+          },
+          {
+            "name": "perpDelta",
+            "type": "int256",
+            "internalType": "int256"
+          },
+          {
+            "name": "amt1Limit",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "maxTotalFee",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "deadline",
+            "type": "uint64",
+            "internalType": "uint64"
+          }
+        ]
+      }
+    ],
+    "outputs": [
+      {
+        "name": "posId",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "owner",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "permissionlessDonationsEnabled",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "bool",
+        "internalType": "bool"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "physicalCloseCapacity",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "longClose",
+        "type": "uint128",
+        "internalType": "uint128"
+      },
+      {
+        "name": "shortClose",
+        "type": "uint128",
+        "internalType": "uint128"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "poolId",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "bytes32",
+        "internalType": "PoolId"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "poolKey",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "tuple",
+        "internalType": "struct PoolKey",
+        "components": [
+          {
+            "name": "currency0",
+            "type": "address",
+            "internalType": "Currency"
+          },
+          {
+            "name": "currency1",
+            "type": "address",
+            "internalType": "Currency"
+          },
+          {
+            "name": "fee",
+            "type": "uint24",
+            "internalType": "uint24"
+          },
+          {
+            "name": "tickSpacing",
+            "type": "int24",
+            "internalType": "int24"
+          },
+          {
+            "name": "hooks",
+            "type": "address",
+            "internalType": "contract IHooks"
+          }
+        ]
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "poolState",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "tick",
+        "type": "int24",
+        "internalType": "int24"
+      },
+      {
+        "name": "sqrtPrice",
+        "type": "uint160",
+        "internalType": "uint160"
+      },
+      {
+        "name": "ammPrice",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "liquidity",
+        "type": "uint128",
+        "internalType": "uint128"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "positionOwner",
+    "inputs": [
+      {
+        "name": "posId",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "positions",
+    "inputs": [
+      {
+        "name": "posId",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "tuple",
+        "internalType": "struct Position",
+        "components": [
+          {
+            "name": "delta",
+            "type": "int256",
+            "internalType": "BalanceDelta"
+          },
+          {
+            "name": "margin",
+            "type": "uint128",
+            "internalType": "uint128"
+          },
+          {
+            "name": "lastCumlFundingX96",
+            "type": "int256",
+            "internalType": "int256"
+          }
+        ]
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "previewPosition",
+    "inputs": [
+      {
+        "name": "posId",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "tuple",
+        "internalType": "struct PositionPreview",
+        "components": [
+          {
+            "name": "isMaker",
+            "type": "bool",
+            "internalType": "bool"
+          },
+          {
+            "name": "markPrice",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "settledMargin",
+            "type": "int256",
+            "internalType": "int256"
+          },
+          {
+            "name": "pendingLpFees",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "pendingFunding",
+            "type": "int256",
+            "internalType": "int256"
+          },
+          {
+            "name": "pendingUtil",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "pendingReserveUtil",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "value",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "unrealizedPnl",
+            "type": "int256",
+            "internalType": "int256"
+          },
+          {
+            "name": "equity",
+            "type": "int256",
+            "internalType": "int256"
+          },
+          {
+            "name": "meetsInitialMargin",
+            "type": "bool",
+            "internalType": "bool"
+          },
+          {
+            "name": "liquidatable",
+            "type": "bool",
+            "internalType": "bool"
+          },
+          {
+            "name": "backstoppable",
+            "type": "bool",
+            "internalType": "bool"
+          },
+          {
+            "name": "nominalLiqFee",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "payableLiqFee",
+            "type": "uint256",
+            "internalType": "uint256"
+          }
+        ]
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "protocolFee",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "protocolFeeManager",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "address",
+        "internalType": "contract IProtocolFeeManager"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "rates",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "tuple",
+        "internalType": "struct Rates",
+        "components": [
+          {
+            "name": "fundingPerDay",
+            "type": "int88",
+            "internalType": "int88"
+          },
+          {
+            "name": "longUtilFeePerDay",
+            "type": "uint64",
+            "internalType": "uint64"
+          },
+          {
+            "name": "shortUtilFeePerDay",
+            "type": "uint64",
+            "internalType": "uint64"
+          },
+          {
+            "name": "lastTouch",
+            "type": "uint40",
+            "internalType": "uint40"
+          },
+          {
+            "name": "lastMark",
+            "type": "uint256",
+            "internalType": "uint256"
+          }
+        ]
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "readBeaconIndex",
+    "inputs": [
+      {
+        "name": "beacon",
+        "type": "address",
+        "internalType": "contract IBeacon"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint128",
+        "internalType": "uint128"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "setBeacon",
+    "inputs": [
+      {
+        "name": "newBeacon",
+        "type": "address",
+        "internalType": "contract IBeacon"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "setEmaWindow",
+    "inputs": [
+      {
+        "name": "newEmaWindow",
+        "type": "uint24",
+        "internalType": "uint24"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "setFeesModule",
+    "inputs": [
+      {
+        "name": "newFees",
+        "type": "address",
+        "internalType": "contract IFees"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "setFundingModule",
+    "inputs": [
+      {
+        "name": "newFunding",
+        "type": "address",
+        "internalType": "contract IFunding"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "setGovernor",
+    "inputs": [
+      {
+        "name": "newGovernor",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "setLatency",
+    "inputs": [
+      {
+        "name": "newLatency",
+        "type": "uint32",
+        "internalType": "uint32"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "setMarginRatiosModule",
+    "inputs": [
+      {
+        "name": "newMarginRatios",
+        "type": "address",
+        "internalType": "contract IMarginRatios"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "setPermissionlessDonationsEnabled",
+    "inputs": [
+      {
+        "name": "enabled",
+        "type": "bool",
+        "internalType": "bool"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "setPriceImpactModule",
+    "inputs": [
+      {
+        "name": "newPriceImpact",
+        "type": "address",
+        "internalType": "contract IPriceImpact"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "setPricingModule",
+    "inputs": [
+      {
+        "name": "newPricing",
+        "type": "address",
+        "internalType": "contract IPricing"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "setTvlCap",
+    "inputs": [
+      {
+        "name": "newTvlCap",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "setWithdrawalController",
+    "inputs": [
+      {
+        "name": "newController",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "solvencyState",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "tuple",
+        "internalType": "struct SolvencyState",
+        "components": [
+          {
+            "name": "badDebt",
+            "type": "uint128",
+            "internalType": "uint128"
+          },
+          {
+            "name": "totalMargin",
+            "type": "uint128",
+            "internalType": "uint128"
+          }
+        ]
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "syncProtocolFee",
+    "inputs": [],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "takerDetails",
+    "inputs": [
+      {
+        "name": "posId",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "tuple",
+        "internalType": "struct Taker",
+        "components": [
+          {
+            "name": "lastUtilPaymentsX96",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "lastReserveUtilPaymentsX96",
+            "type": "uint256",
+            "internalType": "uint256"
+          }
+        ]
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "touch",
+    "inputs": [],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "tvlCap",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "utilizationBand",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "tuple",
+        "internalType": "struct UtilizationBand",
+        "components": [
+          {
+            "name": "lower",
+            "type": "uint128",
+            "internalType": "uint128"
+          },
+          {
+            "name": "upper",
+            "type": "uint128",
+            "internalType": "uint128"
+          }
+        ]
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "withdrawalController",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "event",
+    "name": "Abdicate",
+    "inputs": [
+      {
+        "name": "selector",
+        "type": "bytes4",
+        "indexed": true,
+        "internalType": "bytes4"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "BadDebtAccounted",
+    "inputs": [
+      {
+        "name": "badDebt",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      },
+      {
+        "name": "insuranceConsumed",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      },
+      {
+        "name": "insuranceAfter",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      },
+      {
+        "name": "badDebtAfter",
+        "type": "uint128",
+        "indexed": false,
+        "internalType": "uint128"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "BeaconRecoveryUsed",
+    "inputs": [
+      {
+        "name": "oldBeacon",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      },
+      {
+        "name": "newBeacon",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "CapacityUpdated",
+    "inputs": [
+      {
+        "name": "cap",
+        "type": "tuple",
+        "indexed": false,
+        "internalType": "struct Capacity",
+        "components": [
+          {
+            "name": "long",
+            "type": "uint128",
+            "internalType": "uint128"
+          },
+          {
+            "name": "short",
+            "type": "uint128",
+            "internalType": "uint128"
+          }
+        ]
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "CreatorFeesCollected",
+    "inputs": [
+      {
+        "name": "amount",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      },
+      {
+        "name": "recipient",
+        "type": "address",
+        "indexed": false,
+        "internalType": "address"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "CumulativesAccrued",
+    "inputs": [
+      {
+        "name": "cumls",
+        "type": "tuple",
+        "indexed": false,
+        "internalType": "struct Cumulatives",
+        "components": [
+          {
+            "name": "fundingX96",
+            "type": "int256",
+            "internalType": "int256"
+          },
+          {
+            "name": "fundingDivSqrtPX192",
+            "type": "int256",
+            "internalType": "int256"
+          },
+          {
+            "name": "lpFeeGrowthGlobalX128",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "longUtilPaymentsX96",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "shortUtilPaymentsX96",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "longReserveUtilPaymentsX96",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "shortReserveUtilPaymentsX96",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "fundingCorrectionX128",
+            "type": "int256",
+            "internalType": "int256"
+          }
+        ]
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "Donated",
+    "inputs": [
+      {
+        "name": "donor",
+        "type": "address",
+        "indexed": false,
+        "internalType": "address"
+      },
+      {
+        "name": "amount",
+        "type": "uint128",
+        "indexed": false,
+        "internalType": "uint128"
+      },
+      {
+        "name": "badDebt",
+        "type": "uint128",
+        "indexed": false,
+        "internalType": "uint128"
+      },
+      {
+        "name": "insurance",
+        "type": "uint80",
+        "indexed": false,
+        "internalType": "uint80"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "LossSocialized",
+    "inputs": [
+      {
+        "name": "originalAmount",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      },
+      {
+        "name": "feeCharged",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      },
+      {
+        "name": "badDebtAfter",
+        "type": "uint128",
+        "indexed": false,
+        "internalType": "uint128"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "MakerAdjusted",
+    "inputs": [
+      {
+        "name": "posId",
+        "type": "uint256",
+        "indexed": true,
+        "internalType": "uint256"
+      },
+      {
+        "name": "owner",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      },
+      {
+        "name": "marginDelta",
+        "type": "int128",
+        "indexed": false,
+        "internalType": "int128"
+      },
+      {
+        "name": "liquidityDelta",
+        "type": "int128",
+        "indexed": false,
+        "internalType": "int128"
+      },
+      {
+        "name": "funding",
+        "type": "int256",
+        "indexed": false,
+        "internalType": "int256"
+      },
+      {
+        "name": "lpFees",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      },
+      {
+        "name": "delta",
+        "type": "int256",
+        "indexed": false,
+        "internalType": "BalanceDelta"
+      },
+      {
+        "name": "margin",
+        "type": "uint128",
+        "indexed": false,
+        "internalType": "uint128"
+      },
+      {
+        "name": "liquidity",
+        "type": "uint128",
+        "indexed": false,
+        "internalType": "uint128"
+      },
+      {
+        "name": "lastCumlFundingX96",
+        "type": "int256",
+        "indexed": false,
+        "internalType": "int256"
+      },
+      {
+        "name": "lastCumlFunding",
+        "type": "tuple",
+        "indexed": false,
+        "internalType": "struct MakerFunding",
+        "components": [
+          {
+            "name": "belowX96",
+            "type": "int256",
+            "internalType": "int256"
+          },
+          {
+            "name": "withinInventoryX192",
+            "type": "int256",
+            "internalType": "int256"
+          }
+        ]
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "MakerBackstopped",
+    "inputs": [
+      {
+        "name": "posId",
+        "type": "uint256",
+        "indexed": true,
+        "internalType": "uint256"
+      },
+      {
+        "name": "marginIn",
+        "type": "uint128",
+        "indexed": false,
+        "internalType": "uint128"
+      },
+      {
+        "name": "posRecipient",
+        "type": "address",
+        "indexed": false,
+        "internalType": "address"
+      },
+      {
+        "name": "funding",
+        "type": "int256",
+        "indexed": false,
+        "internalType": "int256"
+      },
+      {
+        "name": "lpFees",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      },
+      {
+        "name": "margin",
+        "type": "uint128",
+        "indexed": false,
+        "internalType": "uint128"
+      },
+      {
+        "name": "delta",
+        "type": "int256",
+        "indexed": false,
+        "internalType": "BalanceDelta"
+      },
+      {
+        "name": "liquidity",
+        "type": "uint128",
+        "indexed": false,
+        "internalType": "uint128"
+      },
+      {
+        "name": "lastCumlFundingX96",
+        "type": "int256",
+        "indexed": false,
+        "internalType": "int256"
+      },
+      {
+        "name": "lastCumlFunding",
+        "type": "tuple",
+        "indexed": false,
+        "internalType": "struct MakerFunding",
+        "components": [
+          {
+            "name": "belowX96",
+            "type": "int256",
+            "internalType": "int256"
+          },
+          {
+            "name": "withinInventoryX192",
+            "type": "int256",
+            "internalType": "int256"
+          }
+        ]
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "MakerClosed",
+    "inputs": [
+      {
+        "name": "posId",
+        "type": "uint256",
+        "indexed": true,
+        "internalType": "uint256"
+      },
+      {
+        "name": "owner",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      },
+      {
+        "name": "marginDelta",
+        "type": "int128",
+        "indexed": false,
+        "internalType": "int128"
+      },
+      {
+        "name": "liquidityDelta",
+        "type": "int128",
+        "indexed": false,
+        "internalType": "int128"
+      },
+      {
+        "name": "funding",
+        "type": "int256",
+        "indexed": false,
+        "internalType": "int256"
+      },
+      {
+        "name": "lpFees",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      },
+      {
+        "name": "delta",
+        "type": "int256",
+        "indexed": false,
+        "internalType": "BalanceDelta"
+      },
+      {
+        "name": "margin",
+        "type": "uint128",
+        "indexed": false,
+        "internalType": "uint128"
+      },
+      {
+        "name": "liquidity",
+        "type": "uint128",
+        "indexed": false,
+        "internalType": "uint128"
+      },
+      {
+        "name": "lastCumlFundingX96",
+        "type": "int256",
+        "indexed": false,
+        "internalType": "int256"
+      },
+      {
+        "name": "lastCumlFunding",
+        "type": "tuple",
+        "indexed": false,
+        "internalType": "struct MakerFunding",
+        "components": [
+          {
+            "name": "belowX96",
+            "type": "int256",
+            "internalType": "int256"
+          },
+          {
+            "name": "withinInventoryX192",
+            "type": "int256",
+            "internalType": "int256"
+          }
+        ]
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "MakerConverted",
+    "inputs": [
+      {
+        "name": "posId",
+        "type": "uint256",
+        "indexed": true,
+        "internalType": "uint256"
+      },
+      {
+        "name": "owner",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      },
+      {
+        "name": "marginDelta",
+        "type": "int128",
+        "indexed": false,
+        "internalType": "int128"
+      },
+      {
+        "name": "liquidityDelta",
+        "type": "int128",
+        "indexed": false,
+        "internalType": "int128"
+      },
+      {
+        "name": "funding",
+        "type": "int256",
+        "indexed": false,
+        "internalType": "int256"
+      },
+      {
+        "name": "lpFees",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      },
+      {
+        "name": "delta",
+        "type": "int256",
+        "indexed": false,
+        "internalType": "BalanceDelta"
+      },
+      {
+        "name": "margin",
+        "type": "uint128",
+        "indexed": false,
+        "internalType": "uint128"
+      },
+      {
+        "name": "liquidity",
+        "type": "uint128",
+        "indexed": false,
+        "internalType": "uint128"
+      },
+      {
+        "name": "lastCumlFundingX96",
+        "type": "int256",
+        "indexed": false,
+        "internalType": "int256"
+      },
+      {
+        "name": "lastCumlFunding",
+        "type": "tuple",
+        "indexed": false,
+        "internalType": "struct MakerFunding",
+        "components": [
+          {
+            "name": "belowX96",
+            "type": "int256",
+            "internalType": "int256"
+          },
+          {
+            "name": "withinInventoryX192",
+            "type": "int256",
+            "internalType": "int256"
+          }
+        ]
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "MakerLiquidated",
+    "inputs": [
+      {
+        "name": "posId",
+        "type": "uint256",
+        "indexed": true,
+        "internalType": "uint256"
+      },
+      {
+        "name": "feeRecipient",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      },
+      {
+        "name": "liquidityAmount",
+        "type": "uint128",
+        "indexed": false,
+        "internalType": "uint128"
+      },
+      {
+        "name": "liqFee",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "MakerMoved",
+    "inputs": [
+      {
+        "name": "posId",
+        "type": "uint256",
+        "indexed": true,
+        "internalType": "uint256"
+      },
+      {
+        "name": "owner",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      },
+      {
+        "name": "oldTickLower",
+        "type": "int24",
+        "indexed": false,
+        "internalType": "int24"
+      },
+      {
+        "name": "oldTickUpper",
+        "type": "int24",
+        "indexed": false,
+        "internalType": "int24"
+      },
+      {
+        "name": "newTickLower",
+        "type": "int24",
+        "indexed": false,
+        "internalType": "int24"
+      },
+      {
+        "name": "newTickUpper",
+        "type": "int24",
+        "indexed": false,
+        "internalType": "int24"
+      },
+      {
+        "name": "oldLiquidity",
+        "type": "uint128",
+        "indexed": false,
+        "internalType": "uint128"
+      },
+      {
+        "name": "newLiquidity",
+        "type": "uint128",
+        "indexed": false,
+        "internalType": "uint128"
+      },
+      {
+        "name": "marginDelta",
+        "type": "int128",
+        "indexed": false,
+        "internalType": "int128"
+      },
+      {
+        "name": "funding",
+        "type": "int256",
+        "indexed": false,
+        "internalType": "int256"
+      },
+      {
+        "name": "lpFees",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "MakerOpened",
+    "inputs": [
+      {
+        "name": "posId",
+        "type": "uint256",
+        "indexed": true,
+        "internalType": "uint256"
+      },
+      {
+        "name": "owner",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      },
+      {
+        "name": "tickLower",
+        "type": "int24",
+        "indexed": false,
+        "internalType": "int24"
+      },
+      {
+        "name": "tickUpper",
+        "type": "int24",
+        "indexed": false,
+        "internalType": "int24"
+      },
+      {
+        "name": "liquidity",
+        "type": "uint128",
+        "indexed": false,
+        "internalType": "uint128"
+      },
+      {
+        "name": "delta",
+        "type": "int256",
+        "indexed": false,
+        "internalType": "BalanceDelta"
+      },
+      {
+        "name": "lastCumlFundingX96",
+        "type": "int256",
+        "indexed": false,
+        "internalType": "int256"
+      },
+      {
+        "name": "lastCumlFunding",
+        "type": "tuple",
+        "indexed": false,
+        "internalType": "struct MakerFunding",
+        "components": [
+          {
+            "name": "belowX96",
+            "type": "int256",
+            "internalType": "int256"
+          },
+          {
+            "name": "withinInventoryX192",
+            "type": "int256",
+            "internalType": "int256"
+          }
+        ]
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "MarginTransferred",
+    "inputs": [
+      {
+        "name": "marginDelta",
+        "type": "int128",
+        "indexed": false,
+        "internalType": "int128"
+      },
+      {
+        "name": "totalMargin",
+        "type": "uint128",
+        "indexed": false,
+        "internalType": "uint128"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "OpenInterestUpdated",
+    "inputs": [
+      {
+        "name": "oi",
+        "type": "tuple",
+        "indexed": false,
+        "internalType": "struct OpenInterest",
+        "components": [
+          {
+            "name": "long",
+            "type": "uint128",
+            "internalType": "uint128"
+          },
+          {
+            "name": "short",
+            "type": "uint128",
+            "internalType": "uint128"
+          }
+        ]
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "PermissionlessDonationsEnabledSet",
+    "inputs": [
+      {
+        "name": "enabled",
+        "type": "bool",
+        "indexed": false,
+        "internalType": "bool"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "PhysicalCapacityUpdated",
+    "inputs": [
+      {
+        "name": "physicalCap",
+        "type": "tuple",
+        "indexed": false,
+        "internalType": "struct PhysicalCapacity",
+        "components": [
+          {
+            "name": "longCloseX64",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "shortCloseX64",
+            "type": "uint256",
+            "internalType": "uint256"
+          }
+        ]
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "PositionOwnerUpdated",
+    "inputs": [
+      {
+        "name": "posId",
+        "type": "uint256",
+        "indexed": true,
+        "internalType": "uint256"
+      },
+      {
+        "name": "oldOwner",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      },
+      {
+        "name": "newOwner",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "ProtocolFeeSynced",
+    "inputs": [
+      {
+        "name": "protocolFee",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "ProtocolFeesCollected",
+    "inputs": [
+      {
+        "name": "amount",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      },
+      {
+        "name": "recipient",
+        "type": "address",
+        "indexed": false,
+        "internalType": "address"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "QuoteFolded",
+    "inputs": [
+      {
+        "name": "posId",
+        "type": "uint256",
+        "indexed": true,
+        "internalType": "uint256"
+      },
+      {
+        "name": "amount",
+        "type": "int256",
+        "indexed": false,
+        "internalType": "int256"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "RatesAndEmasRefreshed",
+    "inputs": [
+      {
+        "name": "rates",
+        "type": "tuple",
+        "indexed": false,
+        "internalType": "struct Rates",
+        "components": [
+          {
+            "name": "fundingPerDay",
+            "type": "int88",
+            "internalType": "int88"
+          },
+          {
+            "name": "longUtilFeePerDay",
+            "type": "uint64",
+            "internalType": "uint64"
+          },
+          {
+            "name": "shortUtilFeePerDay",
+            "type": "uint64",
+            "internalType": "uint64"
+          },
+          {
+            "name": "lastTouch",
+            "type": "uint40",
+            "internalType": "uint40"
+          },
+          {
+            "name": "lastMark",
+            "type": "uint256",
+            "internalType": "uint256"
+          }
+        ]
+      },
+      {
+        "name": "index",
+        "type": "uint128",
+        "indexed": false,
+        "internalType": "uint128"
+      },
+      {
+        "name": "emas",
+        "type": "tuple",
+        "indexed": false,
+        "internalType": "struct PricePair",
+        "components": [
+          {
+            "name": "ammPrice",
+            "type": "uint128",
+            "internalType": "uint128"
+          },
+          {
+            "name": "index",
+            "type": "uint128",
+            "internalType": "uint128"
+          }
+        ]
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "SetBeacon",
+    "inputs": [
+      {
+        "name": "beacon",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "SetEmaWindow",
+    "inputs": [
+      {
+        "name": "emaWindow",
+        "type": "uint24",
+        "indexed": false,
+        "internalType": "uint24"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "SetFeesModule",
+    "inputs": [
+      {
+        "name": "fees",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "SetFundingModule",
+    "inputs": [
+      {
+        "name": "funding",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "SetGovernor",
+    "inputs": [
+      {
+        "name": "governor",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "SetLatency",
+    "inputs": [
+      {
+        "name": "latency",
+        "type": "uint32",
+        "indexed": false,
+        "internalType": "uint32"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "SetMarginRatiosModule",
+    "inputs": [
+      {
+        "name": "marginRatios",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "SetPriceImpactModule",
+    "inputs": [
+      {
+        "name": "priceImpact",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "SetPricingModule",
+    "inputs": [
+      {
+        "name": "pricing",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "SetTvlCap",
+    "inputs": [
+      {
+        "name": "tvlCap",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "SetWithdrawalController",
+    "inputs": [
+      {
+        "name": "controller",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "SurplusRecovered",
+    "inputs": [
+      {
+        "name": "recipient",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      },
+      {
+        "name": "amount",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "SwapFeesRemovedFromMargin",
+    "inputs": [
+      {
+        "name": "feeAmount",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      },
+      {
+        "name": "totalMargin",
+        "type": "uint128",
+        "indexed": false,
+        "internalType": "uint128"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "TakerAdjusted",
+    "inputs": [
+      {
+        "name": "posId",
+        "type": "uint256",
+        "indexed": true,
+        "internalType": "uint256"
+      },
+      {
+        "name": "owner",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      },
+      {
+        "name": "marginDelta",
+        "type": "int128",
+        "indexed": false,
+        "internalType": "int128"
+      },
+      {
+        "name": "sr",
+        "type": "tuple",
+        "indexed": false,
+        "internalType": "struct SwapResult",
+        "components": [
+          {
+            "name": "delta",
+            "type": "int256",
+            "internalType": "BalanceDelta"
+          },
+          {
+            "name": "ammPrice",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "totalFeeAmt",
+            "type": "int256",
+            "internalType": "int256"
+          },
+          {
+            "name": "lpFeeAmt",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "protocolFeeAmt",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "creatorFeeAmt",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "insuranceFeeAmt",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "feeFundFeeAmt",
+            "type": "uint256",
+            "internalType": "uint256"
+          }
+        ]
+      },
+      {
+        "name": "funding",
+        "type": "int256",
+        "indexed": false,
+        "internalType": "int256"
+      },
+      {
+        "name": "utilFees",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      },
+      {
+        "name": "delta",
+        "type": "int256",
+        "indexed": false,
+        "internalType": "BalanceDelta"
+      },
+      {
+        "name": "margin",
+        "type": "uint128",
+        "indexed": false,
+        "internalType": "uint128"
+      },
+      {
+        "name": "lastCumlFundingX96",
+        "type": "int256",
+        "indexed": false,
+        "internalType": "int256"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "TakerBackstopped",
+    "inputs": [
+      {
+        "name": "posId",
+        "type": "uint256",
+        "indexed": true,
+        "internalType": "uint256"
+      },
+      {
+        "name": "marginIn",
+        "type": "uint128",
+        "indexed": false,
+        "internalType": "uint128"
+      },
+      {
+        "name": "posRecipient",
+        "type": "address",
+        "indexed": false,
+        "internalType": "address"
+      },
+      {
+        "name": "funding",
+        "type": "int256",
+        "indexed": false,
+        "internalType": "int256"
+      },
+      {
+        "name": "utilFees",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      },
+      {
+        "name": "delta",
+        "type": "int256",
+        "indexed": false,
+        "internalType": "BalanceDelta"
+      },
+      {
+        "name": "margin",
+        "type": "uint128",
+        "indexed": false,
+        "internalType": "uint128"
+      },
+      {
+        "name": "lastCumlFundingX96",
+        "type": "int256",
+        "indexed": false,
+        "internalType": "int256"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "TakerClosed",
+    "inputs": [
+      {
+        "name": "posId",
+        "type": "uint256",
+        "indexed": true,
+        "internalType": "uint256"
+      },
+      {
+        "name": "owner",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      },
+      {
+        "name": "marginDelta",
+        "type": "int128",
+        "indexed": false,
+        "internalType": "int128"
+      },
+      {
+        "name": "sr",
+        "type": "tuple",
+        "indexed": false,
+        "internalType": "struct SwapResult",
+        "components": [
+          {
+            "name": "delta",
+            "type": "int256",
+            "internalType": "BalanceDelta"
+          },
+          {
+            "name": "ammPrice",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "totalFeeAmt",
+            "type": "int256",
+            "internalType": "int256"
+          },
+          {
+            "name": "lpFeeAmt",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "protocolFeeAmt",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "creatorFeeAmt",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "insuranceFeeAmt",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "feeFundFeeAmt",
+            "type": "uint256",
+            "internalType": "uint256"
+          }
+        ]
+      },
+      {
+        "name": "funding",
+        "type": "int256",
+        "indexed": false,
+        "internalType": "int256"
+      },
+      {
+        "name": "utilFees",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      },
+      {
+        "name": "delta",
+        "type": "int256",
+        "indexed": false,
+        "internalType": "BalanceDelta"
+      },
+      {
+        "name": "margin",
+        "type": "uint128",
+        "indexed": false,
+        "internalType": "uint128"
+      },
+      {
+        "name": "lastCumlFundingX96",
+        "type": "int256",
+        "indexed": false,
+        "internalType": "int256"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "TakerLiquidated",
+    "inputs": [
+      {
+        "name": "posId",
+        "type": "uint256",
+        "indexed": true,
+        "internalType": "uint256"
+      },
+      {
+        "name": "feeRecipient",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      },
+      {
+        "name": "perpAmount",
+        "type": "uint128",
+        "indexed": false,
+        "internalType": "uint128"
+      },
+      {
+        "name": "liqFee",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "TakerOpened",
+    "inputs": [
+      {
+        "name": "posId",
+        "type": "uint256",
+        "indexed": true,
+        "internalType": "uint256"
+      },
+      {
+        "name": "owner",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      },
+      {
+        "name": "margin",
+        "type": "uint128",
+        "indexed": false,
+        "internalType": "uint128"
+      },
+      {
+        "name": "sr",
+        "type": "tuple",
+        "indexed": false,
+        "internalType": "struct SwapResult",
+        "components": [
+          {
+            "name": "delta",
+            "type": "int256",
+            "internalType": "BalanceDelta"
+          },
+          {
+            "name": "ammPrice",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "totalFeeAmt",
+            "type": "int256",
+            "internalType": "int256"
+          },
+          {
+            "name": "lpFeeAmt",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "protocolFeeAmt",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "creatorFeeAmt",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "insuranceFeeAmt",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "feeFundFeeAmt",
+            "type": "uint256",
+            "internalType": "uint256"
+          }
+        ]
+      },
+      {
+        "name": "lastCumlFundingX96",
+        "type": "int256",
+        "indexed": false,
+        "internalType": "int256"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "TickDeleted",
+    "inputs": [
+      {
+        "name": "tick",
+        "type": "int24",
+        "indexed": false,
+        "internalType": "int24"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "TickInitialized",
+    "inputs": [
+      {
+        "name": "tick",
+        "type": "int24",
+        "indexed": false,
+        "internalType": "int24"
+      },
+      {
+        "name": "cumlFundingOppX96",
+        "type": "int256",
+        "indexed": false,
+        "internalType": "int256"
+      },
+      {
+        "name": "cumlFundingDivSqrtPOppX192",
+        "type": "int256",
+        "indexed": false,
+        "internalType": "int256"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "TicksCrossed",
+    "inputs": [
+      {
+        "name": "startingTick",
+        "type": "int24",
+        "indexed": false,
+        "internalType": "int24"
+      },
+      {
+        "name": "endingTick",
+        "type": "int24",
+        "indexed": false,
+        "internalType": "int24"
+      },
+      {
+        "name": "zeroForOne",
+        "type": "bool",
+        "indexed": false,
+        "internalType": "bool"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "UtilizationAccrued",
+    "inputs": [
+      {
+        "name": "longOi",
+        "type": "uint128",
+        "indexed": false,
+        "internalType": "uint128"
+      },
+      {
+        "name": "shortOi",
+        "type": "uint128",
+        "indexed": false,
+        "internalType": "uint128"
+      },
+      {
+        "name": "longCapacity",
+        "type": "uint128",
+        "indexed": false,
+        "internalType": "uint128"
+      },
+      {
+        "name": "shortCapacity",
+        "type": "uint128",
+        "indexed": false,
+        "internalType": "uint128"
+      },
+      {
+        "name": "longMakerReward",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      },
+      {
+        "name": "shortMakerReward",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      },
+      {
+        "name": "longReserveFee",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      },
+      {
+        "name": "shortReserveFee",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "UtilizationReserveRealized",
+    "inputs": [
+      {
+        "name": "posId",
+        "type": "uint256",
+        "indexed": true,
+        "internalType": "uint256"
+      },
+      {
+        "name": "amount",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      },
+      {
+        "name": "badDebtRepaid",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      },
+      {
+        "name": "insuranceCredited",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "UtilizationReserveRemovedFromMargin",
+    "inputs": [
+      {
+        "name": "amount",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      },
+      {
+        "name": "totalMargin",
+        "type": "uint128",
+        "indexed": false,
+        "internalType": "uint128"
+      }
+    ],
+    "anonymous": false
+  }
+]

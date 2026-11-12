@@ -1,0 +1,48 @@
+[
+  {
+    "type": "function",
+    "name": "makerMarginRatios",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "init",
+        "type": "uint24",
+        "internalType": "uint24"
+      },
+      {
+        "name": "liq",
+        "type": "uint24",
+        "internalType": "uint24"
+      },
+      {
+        "name": "backstop",
+        "type": "uint24",
+        "internalType": "uint24"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "takerMarginRatios",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "init",
+        "type": "uint24",
+        "internalType": "uint24"
+      },
+      {
+        "name": "liq",
+        "type": "uint24",
+        "internalType": "uint24"
+      },
+      {
+        "name": "backstop",
+        "type": "uint24",
+        "internalType": "uint24"
+      }
+    ],
+    "stateMutability": "view"
+  }
+]

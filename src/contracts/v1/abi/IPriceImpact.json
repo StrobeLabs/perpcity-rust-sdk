@@ -1,0 +1,46 @@
+[
+  {
+    "type": "function",
+    "name": "sqrtPriceBounds",
+    "inputs": [
+      {
+        "name": "ammPrice",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "index",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "emaAmmPrice",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "emaIndex",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "markPrice",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "sqrtMin",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "sqrtMax",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  }
+]

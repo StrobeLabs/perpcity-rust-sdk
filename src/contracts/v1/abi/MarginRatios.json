@@ -1,0 +1,770 @@
+[
+  {
+    "type": "constructor",
+    "inputs": [
+      {
+        "name": "owner",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "updateDelay",
+        "type": "uint48",
+        "internalType": "uint48"
+      },
+      {
+        "name": "_makerRatios",
+        "type": "tuple",
+        "internalType": "struct MarginRatios.Ratios",
+        "components": [
+          {
+            "name": "init",
+            "type": "uint24",
+            "internalType": "uint24"
+          },
+          {
+            "name": "liq",
+            "type": "uint24",
+            "internalType": "uint24"
+          },
+          {
+            "name": "backstop",
+            "type": "uint24",
+            "internalType": "uint24"
+          }
+        ]
+      },
+      {
+        "name": "_takerRatios",
+        "type": "tuple",
+        "internalType": "struct MarginRatios.Ratios",
+        "components": [
+          {
+            "name": "init",
+            "type": "uint24",
+            "internalType": "uint24"
+          },
+          {
+            "name": "liq",
+            "type": "uint24",
+            "internalType": "uint24"
+          },
+          {
+            "name": "backstop",
+            "type": "uint24",
+            "internalType": "uint24"
+          }
+        ]
+      }
+    ],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "UPDATE_DELAY",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint48",
+        "internalType": "uint48"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "cancelMakerMarginRatios",
+    "inputs": [],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "cancelOwnershipHandover",
+    "inputs": [],
+    "outputs": [],
+    "stateMutability": "payable"
+  },
+  {
+    "type": "function",
+    "name": "cancelTakerMarginRatios",
+    "inputs": [],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "completeOwnershipHandover",
+    "inputs": [
+      {
+        "name": "pendingOwner",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "payable"
+  },
+  {
+    "type": "function",
+    "name": "executeMakerMarginRatios",
+    "inputs": [],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "executeTakerMarginRatios",
+    "inputs": [],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "makerMarginRatios",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "init",
+        "type": "uint24",
+        "internalType": "uint24"
+      },
+      {
+        "name": "liq",
+        "type": "uint24",
+        "internalType": "uint24"
+      },
+      {
+        "name": "backstop",
+        "type": "uint24",
+        "internalType": "uint24"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "makerRatios",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "init",
+        "type": "uint24",
+        "internalType": "uint24"
+      },
+      {
+        "name": "liq",
+        "type": "uint24",
+        "internalType": "uint24"
+      },
+      {
+        "name": "backstop",
+        "type": "uint24",
+        "internalType": "uint24"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "owner",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "result",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "ownershipHandoverExpiresAt",
+    "inputs": [
+      {
+        "name": "pendingOwner",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "result",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "pendingMakerRatios",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "ratios",
+        "type": "tuple",
+        "internalType": "struct MarginRatios.Ratios",
+        "components": [
+          {
+            "name": "init",
+            "type": "uint24",
+            "internalType": "uint24"
+          },
+          {
+            "name": "liq",
+            "type": "uint24",
+            "internalType": "uint24"
+          },
+          {
+            "name": "backstop",
+            "type": "uint24",
+            "internalType": "uint24"
+          }
+        ]
+      },
+      {
+        "name": "executableAt",
+        "type": "uint48",
+        "internalType": "uint48"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "pendingTakerRatios",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "ratios",
+        "type": "tuple",
+        "internalType": "struct MarginRatios.Ratios",
+        "components": [
+          {
+            "name": "init",
+            "type": "uint24",
+            "internalType": "uint24"
+          },
+          {
+            "name": "liq",
+            "type": "uint24",
+            "internalType": "uint24"
+          },
+          {
+            "name": "backstop",
+            "type": "uint24",
+            "internalType": "uint24"
+          }
+        ]
+      },
+      {
+        "name": "executableAt",
+        "type": "uint48",
+        "internalType": "uint48"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "renounceOwnership",
+    "inputs": [],
+    "outputs": [],
+    "stateMutability": "payable"
+  },
+  {
+    "type": "function",
+    "name": "requestOwnershipHandover",
+    "inputs": [],
+    "outputs": [],
+    "stateMutability": "payable"
+  },
+  {
+    "type": "function",
+    "name": "scheduleMakerMarginRatios",
+    "inputs": [
+      {
+        "name": "newRatios",
+        "type": "tuple",
+        "internalType": "struct MarginRatios.Ratios",
+        "components": [
+          {
+            "name": "init",
+            "type": "uint24",
+            "internalType": "uint24"
+          },
+          {
+            "name": "liq",
+            "type": "uint24",
+            "internalType": "uint24"
+          },
+          {
+            "name": "backstop",
+            "type": "uint24",
+            "internalType": "uint24"
+          }
+        ]
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "scheduleTakerMarginRatios",
+    "inputs": [
+      {
+        "name": "newRatios",
+        "type": "tuple",
+        "internalType": "struct MarginRatios.Ratios",
+        "components": [
+          {
+            "name": "init",
+            "type": "uint24",
+            "internalType": "uint24"
+          },
+          {
+            "name": "liq",
+            "type": "uint24",
+            "internalType": "uint24"
+          },
+          {
+            "name": "backstop",
+            "type": "uint24",
+            "internalType": "uint24"
+          }
+        ]
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "takerMarginRatios",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "init",
+        "type": "uint24",
+        "internalType": "uint24"
+      },
+      {
+        "name": "liq",
+        "type": "uint24",
+        "internalType": "uint24"
+      },
+      {
+        "name": "backstop",
+        "type": "uint24",
+        "internalType": "uint24"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "takerRatios",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "init",
+        "type": "uint24",
+        "internalType": "uint24"
+      },
+      {
+        "name": "liq",
+        "type": "uint24",
+        "internalType": "uint24"
+      },
+      {
+        "name": "backstop",
+        "type": "uint24",
+        "internalType": "uint24"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "transferOwnership",
+    "inputs": [
+      {
+        "name": "newOwner",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "payable"
+  },
+  {
+    "type": "event",
+    "name": "MakerMarginRatiosCancelled",
+    "inputs": [
+      {
+        "name": "ratios",
+        "type": "tuple",
+        "indexed": false,
+        "internalType": "struct MarginRatios.Ratios",
+        "components": [
+          {
+            "name": "init",
+            "type": "uint24",
+            "internalType": "uint24"
+          },
+          {
+            "name": "liq",
+            "type": "uint24",
+            "internalType": "uint24"
+          },
+          {
+            "name": "backstop",
+            "type": "uint24",
+            "internalType": "uint24"
+          }
+        ]
+      },
+      {
+        "name": "executableAt",
+        "type": "uint48",
+        "indexed": false,
+        "internalType": "uint48"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "MakerMarginRatiosExecuted",
+    "inputs": [
+      {
+        "name": "ratios",
+        "type": "tuple",
+        "indexed": false,
+        "internalType": "struct MarginRatios.Ratios",
+        "components": [
+          {
+            "name": "init",
+            "type": "uint24",
+            "internalType": "uint24"
+          },
+          {
+            "name": "liq",
+            "type": "uint24",
+            "internalType": "uint24"
+          },
+          {
+            "name": "backstop",
+            "type": "uint24",
+            "internalType": "uint24"
+          }
+        ]
+      },
+      {
+        "name": "executableAt",
+        "type": "uint48",
+        "indexed": false,
+        "internalType": "uint48"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "MakerMarginRatiosScheduled",
+    "inputs": [
+      {
+        "name": "ratios",
+        "type": "tuple",
+        "indexed": false,
+        "internalType": "struct MarginRatios.Ratios",
+        "components": [
+          {
+            "name": "init",
+            "type": "uint24",
+            "internalType": "uint24"
+          },
+          {
+            "name": "liq",
+            "type": "uint24",
+            "internalType": "uint24"
+          },
+          {
+            "name": "backstop",
+            "type": "uint24",
+            "internalType": "uint24"
+          }
+        ]
+      },
+      {
+        "name": "executableAt",
+        "type": "uint48",
+        "indexed": false,
+        "internalType": "uint48"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "MakerMarginRatiosSet",
+    "inputs": [
+      {
+        "name": "ratios",
+        "type": "tuple",
+        "indexed": false,
+        "internalType": "struct MarginRatios.Ratios",
+        "components": [
+          {
+            "name": "init",
+            "type": "uint24",
+            "internalType": "uint24"
+          },
+          {
+            "name": "liq",
+            "type": "uint24",
+            "internalType": "uint24"
+          },
+          {
+            "name": "backstop",
+            "type": "uint24",
+            "internalType": "uint24"
+          }
+        ]
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "OwnershipHandoverCanceled",
+    "inputs": [
+      {
+        "name": "pendingOwner",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "OwnershipHandoverRequested",
+    "inputs": [
+      {
+        "name": "pendingOwner",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "OwnershipTransferred",
+    "inputs": [
+      {
+        "name": "oldOwner",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      },
+      {
+        "name": "newOwner",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "TakerMarginRatiosCancelled",
+    "inputs": [
+      {
+        "name": "ratios",
+        "type": "tuple",
+        "indexed": false,
+        "internalType": "struct MarginRatios.Ratios",
+        "components": [
+          {
+            "name": "init",
+            "type": "uint24",
+            "internalType": "uint24"
+          },
+          {
+            "name": "liq",
+            "type": "uint24",
+            "internalType": "uint24"
+          },
+          {
+            "name": "backstop",
+            "type": "uint24",
+            "internalType": "uint24"
+          }
+        ]
+      },
+      {
+        "name": "executableAt",
+        "type": "uint48",
+        "indexed": false,
+        "internalType": "uint48"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "TakerMarginRatiosExecuted",
+    "inputs": [
+      {
+        "name": "ratios",
+        "type": "tuple",
+        "indexed": false,
+        "internalType": "struct MarginRatios.Ratios",
+        "components": [
+          {
+            "name": "init",
+            "type": "uint24",
+            "internalType": "uint24"
+          },
+          {
+            "name": "liq",
+            "type": "uint24",
+            "internalType": "uint24"
+          },
+          {
+            "name": "backstop",
+            "type": "uint24",
+            "internalType": "uint24"
+          }
+        ]
+      },
+      {
+        "name": "executableAt",
+        "type": "uint48",
+        "indexed": false,
+        "internalType": "uint48"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "TakerMarginRatiosScheduled",
+    "inputs": [
+      {
+        "name": "ratios",
+        "type": "tuple",
+        "indexed": false,
+        "internalType": "struct MarginRatios.Ratios",
+        "components": [
+          {
+            "name": "init",
+            "type": "uint24",
+            "internalType": "uint24"
+          },
+          {
+            "name": "liq",
+            "type": "uint24",
+            "internalType": "uint24"
+          },
+          {
+            "name": "backstop",
+            "type": "uint24",
+            "internalType": "uint24"
+          }
+        ]
+      },
+      {
+        "name": "executableAt",
+        "type": "uint48",
+        "indexed": false,
+        "internalType": "uint48"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "TakerMarginRatiosSet",
+    "inputs": [
+      {
+        "name": "ratios",
+        "type": "tuple",
+        "indexed": false,
+        "internalType": "struct MarginRatios.Ratios",
+        "components": [
+          {
+            "name": "init",
+            "type": "uint24",
+            "internalType": "uint24"
+          },
+          {
+            "name": "liq",
+            "type": "uint24",
+            "internalType": "uint24"
+          },
+          {
+            "name": "backstop",
+            "type": "uint24",
+            "internalType": "uint24"
+          }
+        ]
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "error",
+    "name": "AlreadyInitialized",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "InvalidMarginRatios",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "NewOwnerIsZeroAddress",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "NoHandoverRequest",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "NoPendingUpdate",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "Unauthorized",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "UpdateAlreadyPending",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "UpdateNotReady",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "ZeroDelay",
+    "inputs": []
+  }
+]
