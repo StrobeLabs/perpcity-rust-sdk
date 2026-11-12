@@ -48,7 +48,11 @@ the `v1.0.0` source names them, beside the beta bindings rather than
 merged into them. Its lock compares each interface with `forge inspect`
 output at the tag, both ways: the selectors, topics and struct strings,
 and the JSON ABI, which carries the names, the return types, the
-`indexed` flags and the mutability. A fork test builds a market on the
+`indexed` flags and the mutability. The JSON ABI alloy builds has no
+struct names, so a struct swapped for another of the same layout is
+caught by the names the binding's types carry, set against the
+`internalType` of each item with a tuple, and the `ClaimStatus` order,
+which no selector carries, by its values. A fork test builds a market on the
 deployed Sepolia factory, decodes every log of the market, its factory,
 its withdrawal controller and its beacon, and calls every view of every
 `v1` interface; a view it did not call fails it.

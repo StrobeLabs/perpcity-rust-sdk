@@ -4,18 +4,18 @@
 //! The tables are the `methodIdentifiers`, `events` and `errors` output,
 //! copied by a script, not by hand: every selector, topic and struct
 //! string. The files in `abi/` are the `abi --json` output, unchanged:
-//! every item's parameter and return types in order, with their names and
-//! tuple components, each event's `indexed` flags and each function's
-//! mutability. Each binding is compared with its source both ways, so a
+//! every item's parameter and return types in order, with their names,
+//! tuple components and first-level field names, each event's `indexed`
+//! flags and each function's mutability. Each binding is compared with its source both ways, so a
 //! binding the source lacks and a source item the binding lacks both fail.
 //! A module binding is the `I*` interface whole plus the views and setter
 //! events named in its table.
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use alloy::json_abi::{JsonAbi, Param};
+use alloy::json_abi::{InternalType, JsonAbi, Param};
 use alloy::primitives::hex;
-use alloy::sol_types::{SolCall, SolStruct};
+use alloy::sol_types::{SolCall, SolEvent, SolStruct, SolType};
 
 use super::*;
 
@@ -960,6 +960,16 @@ fn structs_match_forge_inspect() {
     assert_eq!(bound, table(STRUCTS));
 }
 
+/// `ClaimStatus` in the order of `src/libraries/Structs.sol:38` at the
+/// tag, which no selector or topic carries.
+#[test]
+fn claim_status_order() {
+    assert_eq!(ClaimStatus::None as u8, 0);
+    assert_eq!(ClaimStatus::Pending as u8, 1);
+    assert_eq!(ClaimStatus::Completed as u8, 2);
+    assert_eq!(ClaimStatus::Cancelled as u8, 3);
+}
+
 /// The three selectors the build plan names, by `cast sig` as well.
 #[test]
 fn named_selectors() {
@@ -979,19 +989,28 @@ macro_rules! forge_abi {
 }
 
 /// A parameter list: each type in order and, when `names` is set, each
-/// name. A tuple is its component types; the field names of a struct are
-/// [`structs_match_forge_inspect`]'s.
+/// name and the field names of each tuple, so a struct swapped for
+/// another of the same layout fails. alloy keeps no field names below the
+/// first tuple, so a nested tuple is its component types; its field names
+/// are [`structs_match_forge_inspect`]'s.
 fn params(params: &[Param], names: bool) -> String {
     params
         .iter()
-        .map(|p| named(ty(&p.ty, &p.components), &p.name, names))
+        .map(|p| named(ty(&p.ty, &p.components, names), &p.name, names))
         .collect::<Vec<_>>()
         .join(",")
 }
 
-fn ty(ty: &str, components: &[Param]) -> String {
+fn ty(ty: &str, components: &[Param], names: bool) -> String {
     match ty.strip_prefix("tuple") {
-        Some(array) => format!("({}){array}", params(components, false)),
+        Some(array) => {
+            let fields = components
+                .iter()
+                .map(|c| named(self::ty(&c.ty, &c.components, false), &c.name, names))
+                .collect::<Vec<_>>()
+                .join(",");
+            format!("({fields}){array}")
+        }
         None => ty.to_string(),
     }
 }
@@ -1024,7 +1043,7 @@ fn items(abis: &[&JsonAbi], names: bool) -> BTreeSet<String> {
                 .inputs
                 .iter()
                 .map(|p| {
-                    let t = ty(&p.ty, &p.components);
+                    let t = ty(&p.ty, &p.components, names);
                     let t = if p.indexed { t + " indexed" } else { t };
                     named(t, &p.name, names)
                 })
@@ -1149,4 +1168,212 @@ fn beacon_abi_matches_forge_inspect() {
         &[&ibeacon],
         &ibeacon,
     );
+}
+
+/// A function's Solidity type names, inputs then returns: the struct names
+/// that alloy's `abi::contract()` drops.
+fn call<C: SolCall>() -> String {
+    format!(
+        "function {} {} returns {}",
+        item_name(C::SIGNATURE),
+        <C::Parameters<'static> as SolType>::SOL_NAME,
+        <C::ReturnTuple<'static> as SolType>::SOL_NAME
+    )
+}
+
+/// An event's Solidity type names, of its data (the non-indexed inputs).
+fn event<E: SolEvent>() -> String {
+    format!(
+        "event {} {}",
+        item_name(E::SIGNATURE),
+        <E::DataTuple<'static> as SolType>::SOL_NAME
+    )
+}
+
+fn item_name(signature: &str) -> &str {
+    signature.split('(').next().unwrap_or(signature)
+}
+
+/// A parameter's Solidity type name, as [`call`] and [`event`] write it:
+/// the struct's name for a struct, its ABI type for any other.
+fn sol_name<'a>(ty: &'a str, internal_type: &'a Option<InternalType>) -> &'a str {
+    match internal_type {
+        Some(InternalType::Struct { ty, .. }) => ty,
+        _ => ty,
+    }
+}
+
+fn param_sol_name(p: &Param) -> &str {
+    sol_name(&p.ty, &p.internal_type)
+}
+
+fn sol_names<'a>(names: impl IntoIterator<Item = &'a str>) -> String {
+    format!("({})", names.into_iter().collect::<Vec<_>>().join(","))
+}
+
+/// Every function and event of `abis` with its Solidity type names.
+fn forge_sol_names(abis: &[&JsonAbi]) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    for abi in abis {
+        out.extend(abi.functions().map(|f| {
+            format!(
+                "function {} {} returns {}",
+                f.name,
+                sol_names(f.inputs.iter().map(param_sol_name)),
+                sol_names(f.outputs.iter().map(param_sol_name))
+            )
+        }));
+        out.extend(abi.events().map(|e| {
+            let data = e.inputs.iter().filter(|p| !p.indexed);
+            let data = sol_names(data.map(|p| sol_name(&p.ty, &p.internal_type)));
+            format!("event {} {data}", e.name)
+        }));
+    }
+    out
+}
+
+/// Every function, event and error of `bound` with a tuple parameter or
+/// return.
+fn with_tuples(bound: &JsonAbi) -> BTreeSet<String> {
+    let tuple = |ty: &str| ty.starts_with("tuple");
+    let mut out = BTreeSet::new();
+    out.extend(
+        bound
+            .functions()
+            .filter(|f| f.inputs.iter().chain(&f.outputs).any(|p| tuple(&p.ty)))
+            .map(|f| format!("function {}", f.name)),
+    );
+    out.extend(
+        bound
+            .events()
+            .filter(|e| e.inputs.iter().any(|p| tuple(&p.ty)))
+            .map(|e| format!("event {}", e.name)),
+    );
+    out.extend(
+        bound
+            .errors()
+            .filter(|e| e.inputs.iter().any(|p| tuple(&p.ty)))
+            .map(|e| format!("error {}", e.name)),
+    );
+    out
+}
+
+/// `named` (by [`call`] and [`event`]) names every struct the `deployed`
+/// contract names, for every item of `bound` with a tuple.
+#[track_caller]
+fn struct_names(bound: &JsonAbi, deployed: &[&JsonAbi], named: &[String]) {
+    let items: BTreeSet<String> = named
+        .iter()
+        .map(|n| n.splitn(3, ' ').take(2).collect::<Vec<_>>().join(" "))
+        .collect();
+    assert_eq!(items, with_tuples(bound), "the items with a tuple");
+    let named: BTreeSet<String> = named.iter().cloned().collect();
+    within(
+        "struct names, not as deployed",
+        &named,
+        &forge_sol_names(deployed),
+    );
+}
+
+/// Each struct of a binding by its name, which the JSON ABI lock cannot
+/// see: a struct swapped for another of the same layout fails here.
+#[test]
+fn struct_names_match_forge_inspect() {
+    let [perp, factory, controller] = forge_abi!("Perp", "PerpFactory", "WithdrawalController");
+    struct_names(
+        &Perp::abi::contract(),
+        &[&perp],
+        &[
+            call::<Perp::adjustMakerCall>(),
+            call::<Perp::adjustTakerCall>(),
+            call::<Perp::capacityCall>(),
+            call::<Perp::cumulativesCall>(),
+            call::<Perp::feeFundCall>(),
+            call::<Perp::fundingStateCall>(),
+            call::<Perp::initializeCall>(),
+            call::<Perp::makerDetailsCall>(),
+            call::<Perp::modulesCall>(),
+            call::<Perp::moveMakerCall>(),
+            call::<Perp::openInterestCall>(),
+            call::<Perp::openMakerCall>(),
+            call::<Perp::openTakerCall>(),
+            call::<Perp::poolKeyCall>(),
+            call::<Perp::positionsCall>(),
+            call::<Perp::previewPositionCall>(),
+            call::<Perp::ratesCall>(),
+            call::<Perp::solvencyStateCall>(),
+            call::<Perp::takerDetailsCall>(),
+            call::<Perp::utilizationBandCall>(),
+            event::<Perp::CapacityUpdated>(),
+            event::<Perp::CumulativesAccrued>(),
+            event::<Perp::MakerAdjusted>(),
+            event::<Perp::MakerBackstopped>(),
+            event::<Perp::MakerClosed>(),
+            event::<Perp::MakerConverted>(),
+            event::<Perp::MakerOpened>(),
+            event::<Perp::OpenInterestUpdated>(),
+            event::<Perp::PhysicalCapacityUpdated>(),
+            event::<Perp::RatesAndEmasRefreshed>(),
+            event::<Perp::TakerAdjusted>(),
+            event::<Perp::TakerClosed>(),
+            event::<Perp::TakerOpened>(),
+        ],
+    );
+    struct_names(
+        &PerpFactory::abi::contract(),
+        &[&factory],
+        &[
+            call::<PerpFactory::createPerpCall>(),
+            event::<PerpFactory::PerpCreated>(),
+        ],
+    );
+    struct_names(
+        &WithdrawalController::abi::contract(),
+        &[&controller],
+        &[call::<WithdrawalController::initializeCall>()],
+    );
+    let [
+        fees,
+        funding,
+        margin_ratios,
+        price_impact,
+        pricing,
+        identity,
+    ] = forge_abi!(
+        "Fees",
+        "Funding",
+        "MarginRatios",
+        "PriceImpact",
+        "Pricing",
+        "IdentityBeacon"
+    );
+    struct_names(
+        &IFees::abi::contract(),
+        &[&fees],
+        &[call::<IFees::feesCall>(), event::<IFees::LpFeeConfigSet>()],
+    );
+    struct_names(
+        &IFunding::abi::contract(),
+        &[&funding],
+        &[call::<IFunding::fundingCall>()],
+    );
+    struct_names(
+        &IMarginRatios::abi::contract(),
+        &[&margin_ratios],
+        &[
+            call::<IMarginRatios::pendingMakerRatiosCall>(),
+            call::<IMarginRatios::pendingTakerRatiosCall>(),
+            event::<IMarginRatios::MakerMarginRatiosScheduled>(),
+            event::<IMarginRatios::MakerMarginRatiosExecuted>(),
+            event::<IMarginRatios::MakerMarginRatiosCancelled>(),
+            event::<IMarginRatios::MakerMarginRatiosSet>(),
+            event::<IMarginRatios::TakerMarginRatiosScheduled>(),
+            event::<IMarginRatios::TakerMarginRatiosExecuted>(),
+            event::<IMarginRatios::TakerMarginRatiosCancelled>(),
+            event::<IMarginRatios::TakerMarginRatiosSet>(),
+        ],
+    );
+    struct_names(&IPriceImpact::abi::contract(), &[&price_impact], &[]);
+    struct_names(&IPricing::abi::contract(), &[&pricing], &[]);
+    struct_names(&IBeacon::abi::contract(), &[&identity], &[]);
 }
