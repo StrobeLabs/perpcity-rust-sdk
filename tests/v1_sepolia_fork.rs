@@ -1,9 +1,11 @@
 //! Integration test: the `v1.0.0` bindings against deployed bytecode. A
 //! market is built on an Anvil fork of Arbitrum Sepolia by the W11 smoke
-//! steps (`v1_fork`), and every log its steps emit, every view it answers
-//! and three of its reverts are decoded with `contracts::v1`. Each decode
-//! is also re-encoded and compared with the bytes on the wire, so a field
-//! the binding lacks or adds fails here and not as a silent prefix decode.
+//! steps (`v1_fork`), and every log its steps emit from the market, its
+//! factory, its withdrawal controller and its beacon, every view of every
+//! binding, and three of its reverts are decoded with `contracts::v1`.
+//! Each decode is also re-encoded and compared with the bytes on the
+//! wire, so a field the binding lacks or adds fails here and not as a
+//! silent prefix decode.
 //!
 //! Requires `anvil` (from Foundry) and an Arbitrum Sepolia endpoint in
 //! `SEPOLIA_FORK_URL` (default: the public RPC).
@@ -14,26 +16,43 @@
 
 mod v1_fork;
 
-use std::collections::BTreeMap;
+use std::cell::RefCell;
+use std::collections::{BTreeMap, BTreeSet};
 
-use alloy::primitives::{Address, Bytes, I256, IntoLogData, U256, keccak256};
+use alloy::json_abi::{JsonAbi, StateMutability};
+use alloy::primitives::{Address, B256, Bytes, I256, IntoLogData, U256, b256, keccak256};
 use alloy::providers::Provider;
 use alloy::rpc::types::TransactionRequest;
 use alloy::sol_types::{SolCall, SolEventInterface, SolInterface, SolValue};
 
 use perpcity_sdk::contracts::v1::{
-    AdjustMakerParams, IBeacon, IFees, IFunding, IMarginRatios, IPriceImpact, IPricing,
-    OpenTakerParams, Perp, PerpFactory,
+    AdjustMakerParams, ClaimStatus, IBeacon, IFees, IFunding, IMarginRatios, IPriceImpact,
+    IPricing, OpenTakerParams, Perp, PerpFactory, PricePair, WithdrawalController,
 };
 
 use v1_fork::{
-    FEES, FUNDING, HOOK, MARGIN_RATIOS, PRICE_IMPACT, PRICING, SepoliaFork, V1Fork, V1Market,
+    BLOCK_INTERVAL, FACTORY, FEES, FUNDING, HOOK, MARGIN_RATIOS, PERP_IMPLEMENTATION, PRICE_IMPACT,
+    PRICING, SepoliaFork, V1Fork, V1Market,
 };
 
-/// The `v1.0.0` events each W11 step must emit from the market (W11
-/// table; Uniswap, ERC-20, proxy and controller logs are not listed).
+/// The ERC-1967 implementation slot, `proxiableUUID()` of a UUPS
+/// implementation.
+const ERC1967_IMPLEMENTATION_SLOT: B256 =
+    b256!("360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc");
+
+/// The `v1.0.0` events each W11 step must emit from the market and its
+/// controller (W11 table; Uniswap and ERC-20 logs are not listed).
 const STEP_EVENTS: &[(&str, &[&str])] = &[
-    ("create-perp", &["Upgraded", "Initialized", "SetGovernor"]),
+    (
+        "create-perp",
+        &[
+            "Upgraded",
+            "Initialized",
+            "SetGovernor",
+            "PerpCreated",
+            "ControllerInitialized",
+        ],
+    ),
     (
         "open-maker",
         &[
@@ -69,7 +88,12 @@ const STEP_EVENTS: &[(&str, &[&str])] = &[
     ),
     (
         "close-taker",
-        &["TakerClosed", "PositionOwnerUpdated", "MarginTransferred"],
+        &[
+            "TakerClosed",
+            "PositionOwnerUpdated",
+            "MarginTransferred",
+            "InstantPayout",
+        ],
     ),
     (
         "move-maker",
@@ -81,13 +105,14 @@ const STEP_EVENTS: &[(&str, &[&str])] = &[
 #[tokio::test]
 #[ignore] // Requires `anvil` and an Arbitrum Sepolia endpoint.
 async fn v1_bindings_decode_a_w11_market() {
-    let fork = SepoliaFork::start(48_700).await;
+    let fork = SepoliaFork::start().await;
     let mut w = V1Fork::new(&fork);
     let market = w.build_w11_market().await;
     println!(
-        "v1 market {} (beacon {}, maker {}, taker {})",
-        market.perp, market.beacon, market.maker_id, market.taker_id
+        "v1 market {} (controller {}, beacon {}, maker {}, taker {})",
+        market.perp, market.controller, market.beacon, market.maker_id, market.taker_id
     );
+    check_clock(&w);
 
     let per_step = decode_logs(&w, &market);
     for (step, expected) in STEP_EVENTS {
@@ -97,13 +122,39 @@ async fn v1_bindings_decode_a_w11_market() {
         }
     }
     for step in &w.steps {
-        println!("{}: {:?}", step.label, per_step[step.label]);
+        println!(
+            "{}: t={} gas used {} estimate {:?}: {:?}",
+            step.label, step.timestamp, step.receipt.gas_used, step.estimate, per_step[step.label]
+        );
     }
     let total: usize = per_step.values().map(Vec::len).sum();
     println!("{total} logs decoded across {} steps", w.steps.len());
 
-    check_views(&w, &market).await;
-    check_reverts(&w, &market).await;
+    let views = Views::new(&w, &market);
+    check_views(&views).await;
+    check_reverts(&views).await;
+    views.check_all_called();
+}
+
+/// Each step mines later than the one before it, and the touch a minute
+/// after the second index: the market accrues on every step.
+fn check_clock(w: &V1Fork) {
+    for pair in w.steps.windows(2) {
+        assert!(
+            pair[1].timestamp >= pair[0].timestamp + BLOCK_INTERVAL,
+            "{} mined at {}, {} at {}",
+            pair[0].label,
+            pair[0].timestamp,
+            pair[1].label,
+            pair[1].timestamp
+        );
+    }
+    let at = |label: &str| w.steps.iter().find(|s| s.label == label).unwrap().timestamp;
+    assert_eq!(
+        at("touch") - at("update-2"),
+        60,
+        "the warp did not move the clock"
+    );
 }
 
 /// Decode every log of every step with the `v1` binding of its emitter,
@@ -130,7 +181,23 @@ fn decode_logs(w: &V1Fork, market: &V1Market) -> BTreeMap<&'static str, Vec<&'st
                     .unwrap_or_else(|e| panic!("{}: beacon log: {e}", step.label));
                 assert_eq!(&event.to_log_data(), data);
                 "IndexUpdated"
-            } else if log.address() == v1_fork::FACTORY {
+            } else if log.address() == market.controller {
+                let event = WithdrawalController::WithdrawalControllerEvents::decode_raw_log(
+                    data.topics(),
+                    &data.data,
+                )
+                .unwrap_or_else(|e| panic!("{}: controller log: {e}", step.label));
+                assert_eq!(&event.to_log_data(), data);
+                if let WithdrawalController::WithdrawalControllerEvents::ControllerInitialized(
+                    init,
+                ) = &event
+                {
+                    assert_eq!(init.perp, market.perp);
+                    assert_eq!(init.capacity, u128::MAX);
+                }
+                WithdrawalController::WithdrawalControllerEvents::name_by_selector(topic0.0)
+                    .unwrap()
+            } else if log.address() == FACTORY {
                 let event =
                     PerpFactory::PerpFactoryEvents::decode_raw_log(data.topics(), &data.data)
                         .unwrap_or_else(|e| panic!("{}: factory log: {e}", step.label));
@@ -149,113 +216,208 @@ fn decode_logs(w: &V1Fork, market: &V1Market) -> BTreeMap<&'static str, Vec<&'st
             names.push(name);
         }
     }
-    for name in ["Upgraded", "Initialized", "PerpCreated"] {
-        assert!(out["create-perp"].contains(&name), "create-perp: no {name}");
-    }
     assert_eq!(out["update-1"], ["IndexUpdated"]);
     assert_eq!(out["update-2"], ["IndexUpdated"]);
     out
 }
 
-/// `eth_call` `call` on `to`, decode the answer strictly, and check it
-/// re-encodes to the same bytes (the binding has exactly the deployed
-/// return shape).
-async fn view<C: SolCall>(w: &V1Fork, to: Address, call: C) -> C::Return {
-    let tx = TransactionRequest::default()
-        .to(to)
-        .input(Bytes::from(call.abi_encode()).into());
-    let ret = w
-        .provider
-        .call(tx)
-        .await
-        .unwrap_or_else(|e| panic!("{}: {e}", C::SIGNATURE));
-    let decoded =
-        C::abi_decode_returns_validate(&ret).unwrap_or_else(|e| panic!("{}: {e}", C::SIGNATURE));
-    assert_eq!(
-        C::abi_encode_returns(&decoded),
-        ret.to_vec(),
-        "{}: the deployed return has another shape",
-        C::SIGNATURE
-    );
-    decoded
+/// The bindings with views, by the name the call log keys them by.
+fn view_bindings() -> [(&'static str, JsonAbi); 9] {
+    [
+        ("Perp", Perp::abi::contract()),
+        ("PerpFactory", PerpFactory::abi::contract()),
+        (
+            "WithdrawalController",
+            WithdrawalController::abi::contract(),
+        ),
+        ("IFees", IFees::abi::contract()),
+        ("IFunding", IFunding::abi::contract()),
+        ("IMarginRatios", IMarginRatios::abi::contract()),
+        ("IPriceImpact", IPriceImpact::abi::contract()),
+        ("IPricing", IPricing::abi::contract()),
+        ("IBeacon", IBeacon::abi::contract()),
+    ]
 }
 
-async fn check_views(w: &V1Fork, m: &V1Market) {
-    let p = m.perp;
+/// Strict `eth_call`s of views, with a log of each binding and signature
+/// called, so the test shows that it called every view of every binding.
+struct Views<'a> {
+    w: &'a V1Fork,
+    m: &'a V1Market,
+    called: RefCell<BTreeSet<String>>,
+}
+
+impl<'a> Views<'a> {
+    fn new(w: &'a V1Fork, m: &'a V1Market) -> Self {
+        Self {
+            w,
+            m,
+            called: RefCell::new(BTreeSet::new()),
+        }
+    }
+
+    /// The binding whose ABI `to` answers.
+    fn binding(&self, to: Address) -> &'static str {
+        match to {
+            a if a == self.m.perp || a == PERP_IMPLEMENTATION => "Perp",
+            a if a == FACTORY => "PerpFactory",
+            a if a == self.m.controller => "WithdrawalController",
+            a if a == FEES => "IFees",
+            a if a == FUNDING => "IFunding",
+            a if a == MARGIN_RATIOS => "IMarginRatios",
+            a if a == PRICE_IMPACT => "IPriceImpact",
+            a if a == PRICING => "IPricing",
+            a if a == self.m.beacon => "IBeacon",
+            _ => panic!("no binding for {to}"),
+        }
+    }
+
+    /// `eth_call` `call` on `to`, decode the answer strictly, and check it
+    /// re-encodes to the same bytes (the binding has exactly the deployed
+    /// return shape).
+    async fn view<C: SolCall>(&self, to: Address, call: C) -> C::Return {
+        self.called
+            .borrow_mut()
+            .insert(format!("{}.{}", self.binding(to), C::SIGNATURE));
+        let tx = TransactionRequest::default()
+            .to(to)
+            .input(Bytes::from(call.abi_encode()).into());
+        let ret = self
+            .w
+            .provider
+            .call(tx)
+            .await
+            .unwrap_or_else(|e| panic!("{}: {e}", C::SIGNATURE));
+        let decoded = C::abi_decode_returns_validate(&ret)
+            .unwrap_or_else(|e| panic!("{}: {e}", C::SIGNATURE));
+        assert_eq!(
+            C::abi_encode_returns(&decoded),
+            ret.to_vec(),
+            "{}: the deployed return has another shape",
+            C::SIGNATURE
+        );
+        decoded
+    }
+
+    fn check_all_called(&self) {
+        let every: BTreeSet<String> = view_bindings()
+            .iter()
+            .flat_map(|(name, abi)| {
+                abi.functions()
+                    .filter(|f| {
+                        matches!(
+                            f.state_mutability,
+                            StateMutability::View | StateMutability::Pure
+                        )
+                    })
+                    .map(move |f| format!("{name}.{}", f.signature()))
+            })
+            .collect();
+        let called = self.called.borrow();
+        let missed: Vec<_> = every.difference(&called).collect();
+        assert!(missed.is_empty(), "views never called: {missed:#?}");
+        println!("{} views called, every view of every binding", called.len());
+    }
+}
+
+async fn check_views(v: &Views<'_>) {
+    let (w, m, p) = (v.w, v.m, v.m.perp);
 
     // The pool key, its id and the guard hook.
-    let key = view(w, p, Perp::poolKeyCall {}).await;
+    let key = v.view(p, Perp::poolKeyCall {}).await;
     assert_eq!(key.hooks, HOOK);
-    assert_eq!(view(w, p, Perp::hooksCall {}).await, HOOK);
-    assert_eq!(view(w, p, Perp::currency0Call {}).await, key.currency0);
-    assert_eq!(view(w, p, Perp::currency1Call {}).await, key.currency1);
+    assert_eq!(v.view(p, Perp::hooksCall {}).await, HOOK);
+    assert_eq!(v.view(p, Perp::currency0Call {}).await, key.currency0);
+    assert_eq!(v.view(p, Perp::currency1Call {}).await, key.currency1);
     assert_eq!(
-        view(w, p, Perp::poolIdCall {}).await,
+        v.view(p, Perp::poolIdCall {}).await,
         keccak256(key.abi_encode()),
         "poolId() is keccak256(abi.encode(poolKey()))"
     );
 
-    // Configuration.
+    // Configuration, ownership and the proxy.
     assert_eq!(
-        view(w, p, Perp::emaWindowCall {}).await.to::<u32>(),
+        v.view(p, Perp::emaWindowCall {}).await.to::<u32>(),
         v1_fork::EMA_WINDOW
     );
-    assert_eq!(view(w, p, Perp::latencyCall {}).await, v1_fork::LATENCY);
-    assert_eq!(view(w, p, Perp::ownerCall {}).await, w.me);
-    assert_eq!(view(w, p, Perp::governorCall {}).await, w.me);
-    let modules = view(w, p, Perp::modulesCall {}).await;
+    assert_eq!(v.view(p, Perp::latencyCall {}).await, v1_fork::LATENCY);
+    assert_eq!(v.view(p, Perp::ownerCall {}).await, w.me);
+    assert_eq!(v.view(p, Perp::governorCall {}).await, w.me);
+    let modules = v.view(p, Perp::modulesCall {}).await;
     assert_eq!(modules.beacon, m.beacon);
-    assert_eq!(modules.fees, FEES);
-    assert_ne!(
-        view(w, p, Perp::withdrawalControllerCall {}).await,
-        Address::ZERO
+    assert_eq!(
+        [
+            modules.fees,
+            modules.funding,
+            modules.marginRatios,
+            modules.priceImpact,
+            modules.pricing
+        ],
+        [FEES, FUNDING, MARGIN_RATIOS, PRICE_IMPACT, PRICING]
     );
-    assert_ne!(
-        view(w, p, Perp::protocolFeeManagerCall {}).await,
-        Address::ZERO
+    assert_eq!(
+        v.view(p, Perp::withdrawalControllerCall {}).await,
+        m.controller
     );
-    assert_eq!(view(w, p, Perp::tvlCapCall {}).await, U256::MAX);
-    view(w, p, Perp::protocolFeeCall {}).await;
-    view(w, p, Perp::permissionlessDonationsEnabledCall {}).await;
-    view(
-        w,
-        p,
-        Perp::abdicatedCall {
-            selector: Perp::openTakerCall::SELECTOR.into(),
-        },
-    )
-    .await;
+    let fee_manager = v.view(p, Perp::protocolFeeManagerCall {}).await;
+    assert_ne!(fee_manager, Address::ZERO);
+    assert_eq!(v.view(p, Perp::tvlCapCall {}).await, U256::MAX);
+    v.view(p, Perp::protocolFeeCall {}).await;
+    v.view(p, Perp::permissionlessDonationsEnabledCall {}).await;
+    let abdicated = Perp::abdicatedCall {
+        selector: Perp::openTakerCall::SELECTOR.into(),
+    };
+    assert!(!v.view(p, abdicated).await);
+    let handover = Perp::ownershipHandoverExpiresAtCall { pendingOwner: w.me };
+    assert_eq!(v.view(p, handover).await, U256::ZERO);
+    assert_eq!(
+        v.view(p, Perp::UPGRADE_INTERFACE_VERSIONCall {}).await,
+        "5.0.0"
+    );
+    // UUPS answers `proxiableUUID` on the implementation only.
+    assert_eq!(
+        v.view(PERP_IMPLEMENTATION, Perp::proxiableUUIDCall {})
+            .await,
+        ERC1967_IMPLEMENTATION_SLOT
+    );
 
     // Market state.
-    let rates = view(w, p, Perp::ratesCall {}).await;
+    let rates = v.view(p, Perp::ratesCall {}).await;
     assert!(rates.lastMark > U256::ZERO);
-    view(w, p, Perp::cumulativesCall {}).await;
-    view(w, p, Perp::capacityCall {}).await;
-    view(w, p, Perp::openInterestCall {}).await;
-    view(w, p, Perp::feeFundCall {}).await;
-    view(w, p, Perp::solvencyStateCall {}).await;
-    view(w, p, Perp::fundingStateCall {}).await;
-    view(w, p, Perp::utilizationBandCall {}).await;
-    view(w, p, Perp::accountedTvlCall {}).await;
-    view(w, p, Perp::physicalCloseCapacityCall {}).await;
-    view(w, p, Perp::poolStateCall {}).await;
+    v.view(p, Perp::cumulativesCall {}).await;
+    v.view(p, Perp::capacityCall {}).await;
+    v.view(p, Perp::openInterestCall {}).await;
+    v.view(p, Perp::feeFundCall {}).await;
+    v.view(p, Perp::solvencyStateCall {}).await;
+    v.view(p, Perp::fundingStateCall {}).await;
+    v.view(p, Perp::utilizationBandCall {}).await;
+    v.view(p, Perp::accountedTvlCall {}).await;
+    v.view(p, Perp::physicalCloseCapacityCall {}).await;
+    let pool = v.view(p, Perp::poolStateCall {}).await;
+    assert!(pool.liquidity > 0);
     assert_eq!(
-        view(w, p, Perp::nextPosIdCall {}).await,
+        v.view(p, Perp::nextPosIdCall {}).await,
         m.taker_id + U256::from(1)
     );
-    let index = view(w, p, Perp::readBeaconIndexCall { beacon: m.beacon }).await;
+    let index = v
+        .view(p, Perp::readBeaconIndexCall { beacon: m.beacon })
+        .await;
     assert_eq!(U256::from(index), v1_fork::index_2());
 
     // Positions: the open maker, and the closed taker's cleared row.
     assert_eq!(
-        view(w, p, Perp::positionOwnerCall { posId: m.maker_id }).await,
+        v.view(p, Perp::positionOwnerCall { posId: m.maker_id })
+            .await,
         w.me
     );
     assert_eq!(
-        view(w, p, Perp::positionOwnerCall { posId: m.taker_id }).await,
+        v.view(p, Perp::positionOwnerCall { posId: m.taker_id })
+            .await,
         Address::ZERO
     );
-    let maker = view(w, p, Perp::makerDetailsCall { posId: m.maker_id }).await;
+    let maker = v
+        .view(p, Perp::makerDetailsCall { posId: m.maker_id })
+        .await;
     assert_eq!(
         (maker.tickLower.as_i32(), maker.tickUpper.as_i32()),
         v1_fork::MOVE_TICKS
@@ -264,51 +426,177 @@ async fn check_views(w: &V1Fork, m: &V1Market) {
         maker.liquidity,
         v1_fork::MOVE_LIQUIDITY - v1_fork::REDUCE_LIQUIDITY
     );
-    let position = view(w, p, Perp::positionsCall { posId: m.maker_id }).await;
+    let position = v.view(p, Perp::positionsCall { posId: m.maker_id }).await;
     assert!(position.margin > 0);
-    view(w, p, Perp::takerDetailsCall { posId: m.taker_id }).await;
-    let preview = view(w, p, Perp::previewPositionCall { posId: m.maker_id }).await;
+    v.view(p, Perp::takerDetailsCall { posId: m.taker_id })
+        .await;
+    let preview = v
+        .view(p, Perp::previewPositionCall { posId: m.maker_id })
+        .await;
     assert!(preview.isMaker);
     assert!(preview.markPrice > U256::ZERO);
 
-    // The modules and the beacon.
-    view(w, FEES, IFees::maxSwapFeeCall {}).await;
-    view(w, FEES, IFees::liqFeeCall {}).await;
-    view(w, FEES, IFees::cFeeCall {}).await;
-    view(w, FEES, IFees::insFeeCall {}).await;
-    view(w, FEES, IFees::lpFeeConfigCall {}).await;
-    view(w, FEES, IFees::targetUtilizationCall {}).await;
-    view(w, FEES, IFees::slopeBeforeTargetCall {}).await;
-    view(w, FEES, IFees::slopeAfterTargetCall {}).await;
-    view(
-        w,
-        FEES,
-        IFees::utilFeesCall {
-            longUtilization: U256::ZERO,
-            shortUtilization: U256::ZERO,
-        },
-    )
-    .await;
-    view(w, FUNDING, IFunding::fundingRateMultiplierCall {}).await;
-    view(w, FUNDING, IFunding::maxFundingPerDayPercentCall {}).await;
-    let ratios = view(w, MARGIN_RATIOS, IMarginRatios::makerMarginRatiosCall {}).await;
+    // The factory.
+    let f = FACTORY;
+    assert_eq!(
+        v.view(f, PerpFactory::perpImplementationCall {}).await,
+        PERP_IMPLEMENTATION
+    );
+    assert_eq!(v.view(f, PerpFactory::PERP_GUARD_HOOKCall {}).await, HOOK);
+    assert_eq!(
+        v.view(f, PerpFactory::PROTOCOL_FEE_MANAGERCall {}).await,
+        fee_manager
+    );
+    assert_ne!(
+        v.view(f, PerpFactory::ACCOUNTING_TOKEN_IMPLCall {}).await,
+        Address::ZERO
+    );
+    let controller_impl = v
+        .view(f, PerpFactory::WITHDRAWAL_CONTROLLER_IMPLCall {})
+        .await;
+    assert_ne!(controller_impl, Address::ZERO);
+    assert_ne!(
+        controller_impl, m.controller,
+        "the market's controller is a clone"
+    );
+
+    // The withdrawal controller: an unlimited bucket, so the taker's
+    // payout was instant and no claim exists.
+    let c = m.controller;
+    assert_eq!(v.view(c, WithdrawalController::perpCall {}).await, p);
+    assert_eq!(
+        v.view(c, WithdrawalController::challengeWindowCall {})
+            .await
+            .to::<u64>(),
+        86_400
+    );
+    let bucket = v.view(c, WithdrawalController::rateLimitCall {}).await;
+    assert_eq!(
+        (bucket.capacity, bucket.refillPerSecond),
+        (u128::MAX, u128::MAX)
+    );
+    assert!(!v.view(c, WithdrawalController::releasesPausedCall {}).await);
+    // Claim ids start at one; the first is still unused.
+    assert_eq!(
+        v.view(c, WithdrawalController::nextClaimIdCall {}).await,
+        U256::from(1)
+    );
+    assert_eq!(
+        v.view(c, WithdrawalController::totalReservedCall {}).await,
+        U256::ZERO
+    );
+    let claim = v
+        .view(
+            c,
+            WithdrawalController::claimsCall {
+                claimId: U256::from(1),
+            },
+        )
+        .await;
+    assert!(matches!(claim.status, ClaimStatus::None));
+
+    // The modules, with the market's own prices as the inputs.
+    let spots = PricePair {
+        ammPrice: pool.ammPrice.to::<u128>(),
+        index,
+    };
+    let emas = spots.clone();
+    let c_fee = v.view(FEES, IFees::cFeeCall {}).await;
+    let ins_fee = v.view(FEES, IFees::insFeeCall {}).await;
+    let fees = v
+        .view(
+            FEES,
+            IFees::feesCall {
+                liquidity: pool.liquidity,
+                spots: spots.clone(),
+                emas: emas.clone(),
+            },
+        )
+        .await;
+    assert_eq!((fees.cFee, fees.insFee), (c_fee, ins_fee));
+    v.view(FEES, IFees::maxSwapFeeCall {}).await;
+    v.view(FEES, IFees::liqFeeCall {}).await;
+    v.view(FEES, IFees::lpFeeConfigCall {}).await;
+    v.view(FEES, IFees::targetUtilizationCall {}).await;
+    v.view(FEES, IFees::slopeBeforeTargetCall {}).await;
+    v.view(FEES, IFees::slopeAfterTargetCall {}).await;
+    let util = IFees::utilFeesCall {
+        longUtilization: U256::ZERO,
+        shortUtilization: U256::ZERO,
+    };
+    v.view(FEES, util).await;
+    let funding = IFunding::fundingCall {
+        spots: spots.clone(),
+        emas: emas.clone(),
+        markPrice: rates.lastMark,
+    };
+    v.view(FUNDING, funding).await;
+    v.view(FUNDING, IFunding::fundingRateMultiplierCall {})
+        .await;
+    v.view(FUNDING, IFunding::maxFundingPerDayPercentCall {})
+        .await;
+    let ratios = v
+        .view(MARGIN_RATIOS, IMarginRatios::makerMarginRatiosCall {})
+        .await;
     assert_eq!(
         ratios.init.to::<u32>(),
         1_000_000,
         "the Sepolia maker initial ratio (W11 fact 2)"
     );
-    view(w, MARGIN_RATIOS, IMarginRatios::takerMarginRatiosCall {}).await;
-    view(w, MARGIN_RATIOS, IMarginRatios::pendingMakerRatiosCall {}).await;
-    view(w, MARGIN_RATIOS, IMarginRatios::UPDATE_DELAYCall {}).await;
-    view(w, PRICE_IMPACT, IPriceImpact::priceImpactBoundCall {}).await;
-    view(w, PRICING, IPricing::maxPremiumRatioCall {}).await;
-    let beacon = view(w, m.beacon, IBeacon::indexCall {}).await;
+    let stored = v
+        .view(MARGIN_RATIOS, IMarginRatios::makerRatiosCall {})
+        .await;
+    assert_eq!(
+        (stored.init, stored.liq, stored.backstop),
+        (ratios.init, ratios.liq, ratios.backstop)
+    );
+    let ratios = v
+        .view(MARGIN_RATIOS, IMarginRatios::takerMarginRatiosCall {})
+        .await;
+    let stored = v
+        .view(MARGIN_RATIOS, IMarginRatios::takerRatiosCall {})
+        .await;
+    assert_eq!(
+        (stored.init, stored.liq, stored.backstop),
+        (ratios.init, ratios.liq, ratios.backstop)
+    );
+    v.view(MARGIN_RATIOS, IMarginRatios::pendingMakerRatiosCall {})
+        .await;
+    v.view(MARGIN_RATIOS, IMarginRatios::pendingTakerRatiosCall {})
+        .await;
+    v.view(MARGIN_RATIOS, IMarginRatios::UPDATE_DELAYCall {})
+        .await;
+    let amm = U256::from(spots.ammPrice);
+    let bounds = IPriceImpact::sqrtPriceBoundsCall {
+        ammPrice: amm,
+        index: U256::from(index),
+        emaAmmPrice: amm,
+        emaIndex: U256::from(index),
+        markPrice: rates.lastMark,
+    };
+    let bounds = v.view(PRICE_IMPACT, bounds).await;
+    assert!(bounds.sqrtMin < bounds.sqrtMax);
+    v.view(PRICE_IMPACT, IPriceImpact::priceImpactBoundCall {})
+        .await;
+    let fair = IPricing::fairPriceCall {
+        ammPrice: amm,
+        index: U256::from(index),
+        emaAmmPrice: amm,
+        emaIndex: U256::from(index),
+    };
+    assert!(v.view(PRICING, fair).await > U256::ZERO);
+    v.view(PRICING, IPricing::maxPremiumRatioCall {}).await;
+
+    // The beacon.
+    let beacon = v.view(m.beacon, IBeacon::indexCall {}).await;
     assert_eq!(beacon.index, v1_fork::index_2());
     assert!(beacon.updatedAt > U256::ZERO);
+    v.view(m.beacon, IBeacon::twAvgCall { secondsAgo: 0 }).await;
 }
 
 /// The typed reverts of three refusals decode by the `v1` error binding.
-async fn check_reverts(w: &V1Fork, m: &V1Market) {
+async fn check_reverts(v: &Views<'_>) {
+    let (w, m) = (v.w, v.m);
     // A closed id has no preview.
     let call = Perp::previewPositionCall { posId: m.taker_id };
     assert_eq!(
@@ -333,7 +621,9 @@ async fn check_reverts(w: &V1Fork, m: &V1Market) {
     );
 
     // The only maker cannot close in full with a residual short (W11 fact 1).
-    let maker = view(w, m.perp, Perp::makerDetailsCall { posId: m.maker_id }).await;
+    let maker = v
+        .view(m.perp, Perp::makerDetailsCall { posId: m.maker_id })
+        .await;
     let call = Perp::adjustMakerCall {
         params: AdjustMakerParams {
             posId: m.maker_id,

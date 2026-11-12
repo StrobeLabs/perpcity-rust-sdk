@@ -1,0 +1,120 @@
+[
+  {
+    "type": "function",
+    "name": "fees",
+    "inputs": [
+      {
+        "name": "liquidity",
+        "type": "uint128",
+        "internalType": "uint128"
+      },
+      {
+        "name": "spots",
+        "type": "tuple",
+        "internalType": "struct PricePair",
+        "components": [
+          {
+            "name": "ammPrice",
+            "type": "uint128",
+            "internalType": "uint128"
+          },
+          {
+            "name": "index",
+            "type": "uint128",
+            "internalType": "uint128"
+          }
+        ]
+      },
+      {
+        "name": "emas",
+        "type": "tuple",
+        "internalType": "struct PricePair",
+        "components": [
+          {
+            "name": "ammPrice",
+            "type": "uint128",
+            "internalType": "uint128"
+          },
+          {
+            "name": "index",
+            "type": "uint128",
+            "internalType": "uint128"
+          }
+        ]
+      }
+    ],
+    "outputs": [
+      {
+        "name": "cFee",
+        "type": "uint24",
+        "internalType": "uint24"
+      },
+      {
+        "name": "insFee",
+        "type": "uint24",
+        "internalType": "uint24"
+      },
+      {
+        "name": "lpFee",
+        "type": "uint24",
+        "internalType": "uint24"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "liqFee",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint24",
+        "internalType": "uint24"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "maxSwapFee",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "rateE6",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "utilFees",
+    "inputs": [
+      {
+        "name": "longUtilization",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "shortUtilization",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "longFee",
+        "type": "uint64",
+        "internalType": "uint64"
+      },
+      {
+        "name": "shortFee",
+        "type": "uint64",
+        "internalType": "uint64"
+      }
+    ],
+    "stateMutability": "view"
+  }
+]

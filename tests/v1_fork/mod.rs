@@ -10,10 +10,16 @@
 
 #![allow(dead_code)]
 
+use std::env;
 use std::io::Read;
+use std::net::TcpListener;
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
+use alloy::consensus::Transaction;
+use alloy::contract::{CallBuilder, CallDecoder};
+use alloy::eips::BlockNumberOrTag;
+use alloy::hex;
 use alloy::network::EthereumWallet;
 use alloy::primitives::aliases::{U24, U48};
 use alloy::primitives::{Address, B256, I256, U256, address, keccak256};
@@ -23,6 +29,7 @@ use alloy::signers::SignerSync;
 use alloy::signers::local::PrivateKeySigner;
 use alloy::sol;
 use alloy::sol_types::SolValue;
+use tokio::time::sleep;
 
 use perpcity_sdk::contracts::v1::{
     AdjustMakerParams, AdjustTakerParams, Modules, MoveMakerParams, OpenMakerParams,
@@ -87,8 +94,13 @@ pub const POOL_MANAGER: Address = address!("FB3e0C6F74eB1a21CC1Da29aeC80D2Dfe6C9
 
 /// A fixed gas limit for every send. Anvil's estimate on this fork can be
 /// too tight for the market's try/catch beacon read: the transaction then
-/// mines and reverts below its limit.
+/// mines and reverts below its limit. Each [`Step`] keeps the estimate.
 const SEND_GAS: u64 = 10_000_000;
+
+/// The seconds between two blocks. Anvil's default clock gives two blocks
+/// in the same wall-clock second the same timestamp, and a market accrues
+/// (`CumulativesAccrued`) only when the time has moved since its last touch.
+pub const BLOCK_INTERVAL: u64 = 2;
 
 /// Anvil's default private key #0 (well-known, test-only).
 const ANVIL_KEY: &str = "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
@@ -118,18 +130,23 @@ pub fn index_2() -> U256 {
 }
 
 pub fn fork_url() -> String {
-    std::env::var("SEPOLIA_FORK_URL")
+    env::var("SEPOLIA_FORK_URL")
         .unwrap_or_else(|_| "https://sepolia-rollup.arbitrum.io/rpc".to_string())
 }
 
-/// An Anvil process forking Arbitrum Sepolia at the head.
+/// An Anvil process forking Arbitrum Sepolia at the head, on a free port,
+/// with a block every [`BLOCK_INTERVAL`] seconds of chain time.
 pub struct SepoliaFork {
     child: Child,
     pub url: String,
 }
 
 impl SepoliaFork {
-    pub async fn start(port: u16) -> Self {
+    pub async fn start() -> Self {
+        let port = TcpListener::bind("127.0.0.1:0")
+            .and_then(|l| l.local_addr())
+            .expect("no free local port")
+            .port();
         let url = format!("http://127.0.0.1:{port}");
         let fork_url = fork_url();
         let child = Command::new("anvil")
@@ -150,20 +167,31 @@ impl SepoliaFork {
         let mut fork = Self { child, url };
         let probe = ProviderBuilder::new().connect_http(fork.url.parse().unwrap());
         for _ in 0..120 {
-            tokio::time::sleep(Duration::from_millis(500)).await;
+            sleep(Duration::from_millis(500)).await;
+            fork.check_running();
             if let Ok(id) = probe.get_chain_id().await {
+                // The answer is this process's only if it still runs: an
+                // Anvil that lost the port exits, and another one answers.
+                fork.check_running();
                 assert_eq!(id, SEPOLIA_CHAIN_ID, "the fork is not Arbitrum Sepolia");
+                let _: serde_json::Value = probe
+                    .raw_request("anvil_setBlockTimestampInterval".into(), (BLOCK_INTERVAL,))
+                    .await
+                    .unwrap();
                 return fork;
-            }
-            if let Ok(Some(_)) = fork.child.try_wait() {
-                let mut err = String::new();
-                if let Some(mut stderr) = fork.child.stderr.take() {
-                    let _ = stderr.read_to_string(&mut err);
-                }
-                panic!("anvil exited: {err}");
             }
         }
         panic!("Anvil did not become ready within 60 seconds");
+    }
+
+    fn check_running(&mut self) {
+        if let Ok(Some(status)) = self.child.try_wait() {
+            let mut err = String::new();
+            if let Some(mut stderr) = self.child.stderr.take() {
+                let _ = stderr.read_to_string(&mut err);
+            }
+            panic!("anvil exited ({status}): {err}");
+        }
     }
 }
 
@@ -174,10 +202,13 @@ impl Drop for SepoliaFork {
     }
 }
 
-/// One mined step: its W11 label and its receipt.
+/// One mined step: its W11 label, its receipt, its block's timestamp, and
+/// Anvil's gas estimate for it (`None` when the estimate failed).
 pub struct Step {
     pub label: &'static str,
     pub receipt: TransactionReceipt,
+    pub timestamp: u64,
+    pub estimate: Option<u64>,
 }
 
 /// The market the fourteen steps leave: one open maker (moved, then
@@ -186,6 +217,7 @@ pub struct V1Market {
     pub verifier: Address,
     pub beacon: Address,
     pub perp: Address,
+    pub controller: Address,
     pub maker_id: U256,
     pub taker_id: U256,
 }
@@ -225,9 +257,9 @@ impl V1Fork {
         assert_eq!(factory.PERP_GUARD_HOOK().call().await.unwrap(), HOOK);
     }
 
-    async fn now(&self) -> u64 {
+    async fn block_time(&self, block: BlockNumberOrTag) -> u64 {
         self.provider
-            .get_block_by_number(alloy::eips::BlockNumberOrTag::Latest)
+            .get_block_by_number(block)
             .await
             .unwrap()
             .unwrap()
@@ -235,19 +267,29 @@ impl V1Fork {
             .timestamp
     }
 
+    /// The latest block's timestamp.
+    pub async fn now(&self) -> u64 {
+        self.block_time(BlockNumberOrTag::Latest).await
+    }
+
     /// One hour from the fork's clock.
     pub async fn deadline(&self) -> u64 {
         self.now().await + 3_600
     }
 
-    async fn mined(
+    /// Estimate `call` from the dev wallet, send it with [`SEND_GAS`], and
+    /// keep the mined step. A revert fails the test.
+    async fn send<P: Provider, D: CallDecoder>(
         &mut self,
         label: &'static str,
-        pending: alloy::contract::Result<
-            alloy::providers::PendingTransactionBuilder<alloy::network::Ethereum>,
-        >,
+        call: CallBuilder<P, D>,
     ) -> &TransactionReceipt {
-        let receipt = pending
+        let call = call.from(self.me);
+        let estimate = call.estimate_gas().await.ok();
+        let receipt = call
+            .gas(SEND_GAS)
+            .send()
+            .await
             .unwrap_or_else(|e| panic!("{label}: send failed: {e}"))
             .get_receipt()
             .await
@@ -262,10 +304,17 @@ impl V1Fork {
             panic!(
                 "{label}: reverted, gas used {} of limit {}",
                 receipt.gas_used,
-                alloy::consensus::Transaction::gas_limit(&tx)
+                tx.gas_limit()
             );
         }
-        self.steps.push(Step { label, receipt });
+        let block = receipt.block_number.expect("a mined receipt has a block");
+        let timestamp = self.block_time(block.into()).await;
+        self.steps.push(Step {
+            label,
+            receipt,
+            timestamp,
+            estimate,
+        });
         &self.steps.last().unwrap().receipt
     }
 
@@ -273,21 +322,20 @@ impl V1Fork {
 
     pub async fn mint_usdc(&mut self) {
         let usdc = ITestUsdc::new(USDC, self.provider.clone());
-        let pending = usdc
-            .mint(self.me, U256::from(1_000_000_000u64))
-            .gas(SEND_GAS)
-            .send()
-            .await;
-        self.mined("mint-usdc", pending).await;
+        self.send(
+            "mint-usdc",
+            usdc.mint(self.me, U256::from(1_000_000_000u64)),
+        )
+        .await;
     }
 
     // ── 2-4. verifier, beacon, bind ─────────────────────────────────
 
     pub async fn create_verifier(&mut self) -> Address {
         let factory = IEcdsaVerifierFactory::new(ECDSA_VERIFIER_FACTORY, self.provider.clone());
-        let verifier = factory.createVerifier(self.me).call().await.unwrap();
-        let pending = factory.createVerifier(self.me).gas(SEND_GAS).send().await;
-        self.mined("create-verifier", pending).await;
+        let call = factory.createVerifier(self.me);
+        let verifier = call.call().await.unwrap();
+        self.send("create-verifier", call).await;
         let v = IEcdsaVerifier::new(verifier, &self.provider);
         assert_eq!(v.SIGNER().call().await.unwrap(), self.me);
         assert_eq!(v.binder().call().await.unwrap(), self.me);
@@ -296,17 +344,9 @@ impl V1Fork {
 
     pub async fn create_beacon(&mut self, verifier: Address) -> Address {
         let factory = IIdentityBeaconFactory::new(IDENTITY_BEACON_FACTORY, self.provider.clone());
-        let beacon = factory
-            .createBeacon(verifier, index_1())
-            .call()
-            .await
-            .unwrap();
-        let pending = factory
-            .createBeacon(verifier, index_1())
-            .gas(SEND_GAS)
-            .send()
-            .await;
-        self.mined("create-beacon", pending).await;
+        let call = factory.createBeacon(verifier, index_1());
+        let beacon = call.call().await.unwrap();
+        self.send("create-beacon", call).await;
         let b = IIdentityBeacon::new(beacon, &self.provider);
         assert_eq!(b.verifier().call().await.unwrap(), verifier);
         beacon
@@ -314,8 +354,7 @@ impl V1Fork {
 
     pub async fn bind(&mut self, verifier: Address, beacon: Address) {
         let v = IEcdsaVerifier::new(verifier, self.provider.clone());
-        let pending = v.bind(beacon).gas(SEND_GAS).send().await;
-        self.mined("bind", pending).await;
+        self.send("bind", v.bind(beacon)).await;
         assert_eq!(v.authorizedCaller().call().await.unwrap(), beacon);
     }
 
@@ -340,11 +379,10 @@ impl V1Fork {
         if let Err(e) = update.call().await {
             panic!(
                 "{label}: the update reverts: {e}; sig {}",
-                alloy::hex::encode(sig.as_bytes())
+                hex::encode(sig.as_bytes())
             );
         }
-        let pending = update.gas(SEND_GAS).send().await;
-        self.mined(label, pending).await;
+        self.send(label, update).await;
         assert_eq!(v.lastNonce().call().await.unwrap(), nonce);
     }
 
@@ -376,8 +414,7 @@ impl V1Fork {
             config,
         );
         let perp = call.call().await.unwrap();
-        let pending = call.gas(SEND_GAS).send().await;
-        self.mined("create-perp", pending).await;
+        self.send("create-perp", call).await;
         assert_eq!(
             Perp::new(perp, &self.provider)
                 .owner()
@@ -391,8 +428,8 @@ impl V1Fork {
 
     pub async fn approve_usdc(&mut self, perp: Address) {
         let usdc = ITestUsdc::new(USDC, self.provider.clone());
-        let pending = usdc.approve(perp, U256::MAX).gas(SEND_GAS).send().await;
-        self.mined("approve-usdc", pending).await;
+        self.send("approve-usdc", usdc.approve(perp, U256::MAX))
+            .await;
     }
 
     // ── 8-9. maker and taker opens ──────────────────────────────────
@@ -410,8 +447,7 @@ impl V1Fork {
             maxAmt1In: U256::MAX,
             deadline: self.deadline().await,
         };
-        let pending = p.openMaker(params).gas(SEND_GAS).send().await;
-        self.mined("open-maker", pending).await;
+        self.send("open-maker", p.openMaker(params)).await;
         assert_eq!(p.positionOwner(id).call().await.unwrap(), self.me);
         id
     }
@@ -427,31 +463,31 @@ impl V1Fork {
             maxTotalFee: U256::from(MAX_TOTAL_FEE),
             deadline: self.deadline().await,
         };
-        let pending = p.openTaker(params).gas(SEND_GAS).send().await;
-        self.mined("open-taker", pending).await;
+        self.send("open-taker", p.openTaker(params)).await;
         assert_eq!(p.positionOwner(id).call().await.unwrap(), self.me);
         id
     }
 
     // ── 11-14. touch, taker close, maker move and reduce ────────────
 
-    /// Move the fork's clock: the steps of one test mine within a second,
-    /// and the market accrues only over elapsed time.
+    /// Mine the next block `seconds` after the latest one, in place of the
+    /// [`BLOCK_INTERVAL`]; the blocks after it follow at the interval again.
+    /// (`evm_increaseTime` does not move a clock that runs at an interval.)
     pub async fn warp(&self, seconds: u64) {
+        let next = self.now().await + seconds;
         let _: serde_json::Value = self
             .provider
-            .raw_request("evm_increaseTime".into(), (seconds,))
+            .raw_request("evm_setNextBlockTimestamp".into(), (next,))
             .await
             .unwrap();
     }
 
-    /// A minute after the opens, so the touch accrues (W11 step 11 ran
-    /// seconds after the opens on wall-clock time).
+    /// A minute after the second index, so the touch accrues over more
+    /// than one block interval (W11 step 11 ran a minute after the opens).
     pub async fn touch(&mut self, perp: Address) {
         self.warp(60).await;
         let p = Perp::new(perp, self.provider.clone());
-        let pending = p.touch().gas(SEND_GAS).send().await;
-        self.mined("touch", pending).await;
+        self.send("touch", p.touch()).await;
     }
 
     pub async fn close_taker(&mut self, perp: Address, taker_id: U256) {
@@ -465,8 +501,7 @@ impl V1Fork {
             reduceOnly: true,
             deadline: self.deadline().await,
         };
-        let pending = p.adjustTaker(params).gas(SEND_GAS).send().await;
-        self.mined("close-taker", pending).await;
+        self.send("close-taker", p.adjustTaker(params)).await;
         assert_eq!(
             p.positionOwner(taker_id).call().await.unwrap(),
             Address::ZERO
@@ -487,8 +522,7 @@ impl V1Fork {
             marginDelta: 0,
             deadline: self.deadline().await,
         };
-        let pending = p.moveMaker(params).gas(SEND_GAS).send().await;
-        self.mined("move-maker", pending).await;
+        self.send("move-maker", p.moveMaker(params)).await;
     }
 
     /// A partial reduce. The only maker cannot close in full while it has a
@@ -503,8 +537,7 @@ impl V1Fork {
             amt1Limit: U256::ZERO,
             deadline: self.deadline().await,
         };
-        let pending = p.adjustMaker(params).gas(SEND_GAS).send().await;
-        self.mined("reduce-maker", pending).await;
+        self.send("reduce-maker", p.adjustMaker(params)).await;
     }
 
     /// The fourteen W11 steps, in order.
@@ -517,6 +550,11 @@ impl V1Fork {
         self.push_index("update-1", verifier, beacon, index_1())
             .await;
         let perp = self.create_perp(beacon).await;
+        let controller = Perp::new(perp, &self.provider)
+            .withdrawalController()
+            .call()
+            .await
+            .unwrap();
         self.approve_usdc(perp).await;
         let maker_id = self.open_maker(perp).await;
         let taker_id = self.open_taker(perp).await;
@@ -531,6 +569,7 @@ impl V1Fork {
             verifier,
             beacon,
             perp,
+            controller,
             maker_id,
             taker_id,
         }
