@@ -29,6 +29,7 @@ use alloy::signers::SignerSync;
 use alloy::signers::local::PrivateKeySigner;
 use alloy::sol;
 use alloy::sol_types::SolValue;
+use serde_json::Value;
 use tokio::time::sleep;
 
 use perpcity_sdk::contracts::v1::{
@@ -174,7 +175,7 @@ impl SepoliaFork {
                 // Anvil that lost the port exits, and another one answers.
                 fork.check_running();
                 assert_eq!(id, SEPOLIA_CHAIN_ID, "the fork is not Arbitrum Sepolia");
-                let _: serde_json::Value = probe
+                let _: Value = probe
                     .raw_request("anvil_setBlockTimestampInterval".into(), (BLOCK_INTERVAL,))
                     .await
                     .unwrap();
@@ -475,7 +476,7 @@ impl V1Fork {
     /// (`evm_increaseTime` does not move a clock that runs at an interval.)
     pub async fn warp(&self, seconds: u64) {
         let next = self.now().await + seconds;
-        let _: serde_json::Value = self
+        let _: Value = self
             .provider
             .raw_request("evm_setNextBlockTimestamp".into(), (next,))
             .await

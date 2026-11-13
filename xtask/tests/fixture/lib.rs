@@ -153,4 +153,8 @@ pub mod client {
     pub struct StateAt {
         number: u64,
     }
+
+    /// A function named for a top-level module, as alloy's generated
+    /// `abi::events` is: a link to that module's node must not pick it.
+    pub fn errors() {}
 }
