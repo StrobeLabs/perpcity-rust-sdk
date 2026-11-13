@@ -7,10 +7,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use xtask::design::{Graph, TypeRow};
+use xtask::design::{self, Graph, TypeRow};
 use xtask::index::{Index, Kind};
 use xtask::invariants;
-use xtask::nodes::Node;
+use xtask::nodes::{Link, Node};
 use xtask::rustdoc;
 
 /// Document the fixture with rustdoc and load it.
@@ -336,4 +336,40 @@ fn only_accepted_structure_is_netted_out_of_the_report() {
         !answers.accepts("math", "Price"),
         "a type is accepted by the node that owns it, not by a namesake elsewhere"
     );
+}
+
+/// A link to a top-level module's `DESIGN.md` names that module, not a
+/// function of the same name in the linking node's own component: the
+/// module's `top()` is empty, so the target is matched by `component()`.
+#[test]
+fn a_design_md_link_names_the_top_level_module() {
+    let index = fixture();
+    let module = index
+        .entries
+        .values()
+        .find(|e| e.name == "errors" && e.kind == Kind::Module && e.module.is_empty())
+        .expect("the errors module is indexed");
+    assert!(
+        index
+            .entries
+            .values()
+            .any(|e| e.name == "errors" && e.kind == Kind::Function && e.top() == "client"),
+        "the namesake function is indexed"
+    );
+    assert_eq!(module.top(), "");
+    assert_eq!(module.component(), "errors");
+    let node = Node {
+        name: "client".into(),
+        path: PathBuf::from("src/client/DESIGN.md"),
+        text: String::new(),
+    };
+    let link = Link {
+        text: "errors".into(),
+        target: Some("../errors/DESIGN.md".into()),
+        span: (0, 0),
+        line: 1,
+    };
+    let found = design::resolve(&link, &node, &index).expect("the link resolves");
+    assert_eq!(found.item, module.id);
+    assert_eq!(found.member, None);
 }
