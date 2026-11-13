@@ -41,6 +41,22 @@ EMAs are a view on one and a storage slot on both, so the slot is what
 the SDK reads. `PerpV022` holds what only the newer build has. Nothing
 above the client chooses by era; the client does, once per call shape.
 
+**The audited build is a module of its own.** `v1.0.0` (tag `0df4208`)
+shares no struct shape, trade selector or position event with the two
+beta builds, so its bindings are [`v1`](../contracts/v1.rs#L27), named as
+the `v1.0.0` source names them, beside the beta bindings rather than
+merged into them. Its lock compares each interface with `forge inspect`
+output at the tag, both ways: the selectors, topics and struct strings,
+and the JSON ABI, which carries the names, the return types, the
+`indexed` flags and the mutability. The JSON ABI alloy builds has no
+struct names, so a struct swapped for another of the same layout is
+caught by the names the binding's types carry, set against the
+`internalType` of each item with a tuple, and the `ClaimStatus` order,
+which no selector carries, by its values. A fork test builds a market on the
+deployed Sepolia factory, decodes every log of the market, its factory,
+its withdrawal controller and its beacon, and calls every view of every
+`v1` interface; a view it did not call fails it.
+
 **Events are the era exception, for the eras the crate serves.** A
 market's early logs were emitted by an earlier version, so the event
 bindings include every shape a live market has emitted,
@@ -105,12 +121,16 @@ sets of base slots, one mapping rule.
 | [`SwapResult`](../contracts.rs#L41) | a swap's outcome with its four fee legs | the taker events | [`SwapInfo`](../events/DESIGN.md), in human units. |
 | [`Modules`](../contracts.rs#L41), [`PoolKey`](../contracts.rs#L41) | the five rule modules' addresses; the pool's key and tick spacing | `modules` and `poolKey` | the reads, which resolve a module's address before calling it, and the immutables cache. Never a caller's. |
 | [`Taker`](../contracts.rs#L41), [`FeeFund`](../contracts.rs#L41) | bound, unread | the ABI | nothing. They are locked so a struct change on the deployed contract fails a test here. |
-| `abi_lock` (tests) | selectors, struct shapes and event topics as deployed, with evidence | the on-chain evidence beside each | CI. |
+| [`v1::Perp`](../contracts/v1.rs#L27), [`v1::PerpFactory`](../contracts/v1.rs#L27) | a `v1.0.0` market and its factory, the whole deployed ABI: views, trades with `deadline`, `moveMaker`, `previewPosition`, the owner-keyed position events, all of `Errors.sol` | the ABI, through `sol!`; locked against `forge inspect` | nothing yet: the era dispatch in the client is its first caller; the fork test in `tests/v1_sepolia_fork.rs` decodes it. |
+| [`v1::WithdrawalController`](../contracts/v1.rs#L27) | a market's payout escrow: the instant-payout bucket, the claims and their challenge window, the guardian's and the governor's actions | the ABI; the market's `withdrawalController` gives the address | nothing yet; the claim reads are its first caller. |
+| [`v1::IBeacon`](../contracts/v1.rs#L27) | the `f762da1` beacon: `index` returns the value and its update time | the ABI | nothing yet; the staleness check against `latency` is its first caller. |
+| [`v1::IFees`](../contracts/v1.rs#L27), [`v1::IFunding`](../contracts/v1.rs#L27), [`v1::IMarginRatios`](../contracts/v1.rs#L27), [`v1::IPriceImpact`](../contracts/v1.rs#L27), [`v1::IPricing`](../contracts/v1.rs#L27) | each `v1.0.0` module interface whole, plus the module's own views and setter events | the ABI | nothing yet; the `v1.0.0` market reads in the client will be. |
+| `abi_lock` (tests) | selectors, struct shapes and event topics as deployed, with evidence | the on-chain evidence beside each; for `v1`, `forge inspect` at the tag, its JSON ABI in `contracts/v1/abi` | CI. |
 | `storage::*_slot` (crate-private) | slot derivation: the Solidity mapping rule over transcribed base slots; locked by the reads' golden outcomes | the deployed layouts, the same on both builds for every slot read here | the tick map in the pool read and the fee-growth and tick-funding reads in the maker-equity batch. |
 | `storage::stored_emas` (crate-private) | the stored EMA pair from its one storage word, `ammPrice` low and `index` high; locked by a golden word from a live market beside its `emas()` answer | `eth_getStorageAt` on slot 11, in [`ChainReader`](../client/DESIGN.md) | the mark on [`StateAt`](../client/DESIGN.md) and the snapshot on [`MarketReader`](../client/DESIGN.md), in place of the `emas()` view `v0.2.2` lacks. |
 
-The module doc names both deployed commits and lists what main has that
-neither chain build does. That list is the cutover's checklist.
+The module doc names both beta commits and sends the reader to `v1` for
+the audited build. The cutover's checklist is in the debts below.
 
 ## Edges
 
@@ -130,9 +150,12 @@ neither chain build does. That list is the cutover's checklist.
 
 - **Binding**: a Rust type or function generated from an ABI.
 - **Deployed**: a commit whose bytecode is live; the only thing calls
-  target. Two are: **build `58b42b7`** and **`v0.2.2-upgradeable`**.
+  target. Two serve markets today: **build `58b42b7`** and
+  **`v0.2.2-upgradeable`**. The audited **`v1.0.0`** is deployed on both
+  chains and has its own module, `v1`.
 - **Era**: a contract version. A market's era is read from its pool key
-  and never changes; **next era** is the contracts repository's main.
+  and never changes; the **next era** is `v1.0.0`, bound in `v1` and not
+  yet an `Era`.
 - **ABI lock**: the tests that pin selectors, struct shapes and event
   topics with on-chain evidence.
 - **Selector probe**: a call whose typed revert proves the selector
@@ -172,7 +195,16 @@ crate passes around. These are the ones where that is the whole answer.
   interface being split in two: every market answers the shared part, and
   the client picks the rest by `Era` in one place per call shape.
 
+- **`v1` is bound before it is used.** Its interfaces have no caller in
+  the crate yet; the era dispatch, the reads and the trades that use them
+  come one per change, each against the fork market the harness builds.
+  The bindings come first so that each of those changes is reviewed
+  against a lock that is already settled.
+
 ## Debts
+
+- **`v1` is the third era, and nothing dispatches to it.** `Era` knows
+  two builds, so a `v1.0.0` market today fails its first immutables read.
 
 - **Narrowing is field by field, and invisible to the type graph.**
   `Capacity` is the only binding that crosses into the crate's types

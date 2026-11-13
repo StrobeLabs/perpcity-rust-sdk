@@ -1,0 +1,264 @@
+[
+  {
+    "type": "function",
+    "name": "createPerp",
+    "inputs": [
+      {
+        "name": "owner",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "governor",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "modules",
+        "type": "tuple",
+        "internalType": "struct Modules",
+        "components": [
+          {
+            "name": "beacon",
+            "type": "address",
+            "internalType": "contract IBeacon"
+          },
+          {
+            "name": "fees",
+            "type": "address",
+            "internalType": "contract IFees"
+          },
+          {
+            "name": "funding",
+            "type": "address",
+            "internalType": "contract IFunding"
+          },
+          {
+            "name": "marginRatios",
+            "type": "address",
+            "internalType": "contract IMarginRatios"
+          },
+          {
+            "name": "priceImpact",
+            "type": "address",
+            "internalType": "contract IPriceImpact"
+          },
+          {
+            "name": "pricing",
+            "type": "address",
+            "internalType": "contract IPricing"
+          }
+        ]
+      },
+      {
+        "name": "emaWindow",
+        "type": "uint24",
+        "internalType": "uint24"
+      },
+      {
+        "name": "latency",
+        "type": "uint32",
+        "internalType": "uint32"
+      },
+      {
+        "name": "salt",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      },
+      {
+        "name": "withdrawalConfig",
+        "type": "tuple",
+        "internalType": "struct WithdrawalConfig",
+        "components": [
+          {
+            "name": "capacity",
+            "type": "uint128",
+            "internalType": "uint128"
+          },
+          {
+            "name": "refillPerSecond",
+            "type": "uint128",
+            "internalType": "uint128"
+          },
+          {
+            "name": "challengeWindow",
+            "type": "uint48",
+            "internalType": "uint48"
+          }
+        ]
+      }
+    ],
+    "outputs": [
+      {
+        "name": "perp",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "perpImplementation",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "setPerpImplementation",
+    "inputs": [
+      {
+        "name": "implementation",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "event",
+    "name": "PerpCreated",
+    "inputs": [
+      {
+        "name": "perp",
+        "type": "address",
+        "indexed": false,
+        "internalType": "address"
+      },
+      {
+        "name": "poolId",
+        "type": "bytes32",
+        "indexed": false,
+        "internalType": "PoolId"
+      },
+      {
+        "name": "modules",
+        "type": "tuple",
+        "indexed": false,
+        "internalType": "struct Modules",
+        "components": [
+          {
+            "name": "beacon",
+            "type": "address",
+            "internalType": "contract IBeacon"
+          },
+          {
+            "name": "fees",
+            "type": "address",
+            "internalType": "contract IFees"
+          },
+          {
+            "name": "funding",
+            "type": "address",
+            "internalType": "contract IFunding"
+          },
+          {
+            "name": "marginRatios",
+            "type": "address",
+            "internalType": "contract IMarginRatios"
+          },
+          {
+            "name": "priceImpact",
+            "type": "address",
+            "internalType": "contract IPriceImpact"
+          },
+          {
+            "name": "pricing",
+            "type": "address",
+            "internalType": "contract IPricing"
+          }
+        ]
+      },
+      {
+        "name": "initialIndex",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      },
+      {
+        "name": "emaWindow",
+        "type": "uint24",
+        "indexed": false,
+        "internalType": "uint24"
+      },
+      {
+        "name": "latency",
+        "type": "uint32",
+        "indexed": false,
+        "internalType": "uint32"
+      },
+      {
+        "name": "protocolFee",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      },
+      {
+        "name": "sqrtPriceX96",
+        "type": "uint160",
+        "indexed": false,
+        "internalType": "uint160"
+      },
+      {
+        "name": "tick",
+        "type": "int24",
+        "indexed": false,
+        "internalType": "int24"
+      },
+      {
+        "name": "owner",
+        "type": "address",
+        "indexed": false,
+        "internalType": "address"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "PerpImplementationSet",
+    "inputs": [
+      {
+        "name": "previousImplementation",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      },
+      {
+        "name": "implementation",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "error",
+    "name": "InvalidPerpImplementation",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "NotAContract",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "NotPoolManager",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "NotProtocolOwner",
+    "inputs": []
+  }
+]

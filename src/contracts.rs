@@ -15,9 +15,8 @@
 //! Struct shapes, trade and view selectors, `createPerp` and `PerpCreated`
 //! are identical across the two. A market's build is read from its pool
 //! key: a `58b42b7` pool has no hook, a `v0.2.2` pool carries the
-//! `PerpGuardHook`. Neither build is the contracts repository's `main`,
-//! whose later work (`Position.initMarginRatio`, `lpFeeGrowth*`,
-//! `HealthNotImproved`, `previewPosition`) is on no chain.
+//! `PerpGuardHook`. Neither build is the audited `v1.0.0`, which has its
+//! own bindings in [`v1`].
 //!
 //! Architecture: `PerpFactory` creates `Perp` contracts. There is no
 //! `PerpManager` — each market is its own `Perp` contract (ERC721 for position
@@ -37,6 +36,8 @@
 #![doc = "\n\nThe design of this module: [`src/contracts/DESIGN.md`](https://github.com/StrobeLabs/perpcity-rust-sdk/blob/main/src/contracts/DESIGN.md)."]
 
 use alloy::sol;
+
+pub mod v1;
 
 sol! {
     // ═══════════════════════════════════════════════════════════════════

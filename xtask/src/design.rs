@@ -660,7 +660,7 @@ pub fn resolve(link: &Link, node: &Node, index: &Index) -> Result<Ref, String> {
             cands
                 .iter()
                 .copied()
-                .filter(|id| Some(index.entries[id].top().to_string()) == comp)
+                .filter(|id| Some(index.entries[id].component().to_string()) == comp)
                 .collect()
         } else {
             let abs = fs::canonicalize(node.dir().join(file)).unwrap_or_default();

@@ -1,0 +1,666 @@
+[
+  {
+    "type": "constructor",
+    "inputs": [
+      {
+        "name": "owner",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "_cFee",
+        "type": "uint24",
+        "internalType": "uint24"
+      },
+      {
+        "name": "_insFee",
+        "type": "uint24",
+        "internalType": "uint24"
+      },
+      {
+        "name": "_lpFeeConfig",
+        "type": "tuple",
+        "internalType": "struct Fees.LpFeeConfig",
+        "components": [
+          {
+            "name": "startFee",
+            "type": "uint24",
+            "internalType": "uint24"
+          },
+          {
+            "name": "targetFee",
+            "type": "uint24",
+            "internalType": "uint24"
+          },
+          {
+            "name": "liquidityDecay",
+            "type": "uint128",
+            "internalType": "uint128"
+          },
+          {
+            "name": "volatilityScaler",
+            "type": "uint24",
+            "internalType": "uint24"
+          },
+          {
+            "name": "maxFeeMultiplier",
+            "type": "uint24",
+            "internalType": "uint24"
+          }
+        ]
+      },
+      {
+        "name": "_targetUtilization",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "_slopeBeforeTarget",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "_slopeAfterTarget",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "_liqFee",
+        "type": "uint24",
+        "internalType": "uint24"
+      }
+    ],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "cFee",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint24",
+        "internalType": "uint24"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "cancelOwnershipHandover",
+    "inputs": [],
+    "outputs": [],
+    "stateMutability": "payable"
+  },
+  {
+    "type": "function",
+    "name": "completeOwnershipHandover",
+    "inputs": [
+      {
+        "name": "pendingOwner",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "payable"
+  },
+  {
+    "type": "function",
+    "name": "fees",
+    "inputs": [
+      {
+        "name": "liquidity",
+        "type": "uint128",
+        "internalType": "uint128"
+      },
+      {
+        "name": "spots",
+        "type": "tuple",
+        "internalType": "struct PricePair",
+        "components": [
+          {
+            "name": "ammPrice",
+            "type": "uint128",
+            "internalType": "uint128"
+          },
+          {
+            "name": "index",
+            "type": "uint128",
+            "internalType": "uint128"
+          }
+        ]
+      },
+      {
+        "name": "emas",
+        "type": "tuple",
+        "internalType": "struct PricePair",
+        "components": [
+          {
+            "name": "ammPrice",
+            "type": "uint128",
+            "internalType": "uint128"
+          },
+          {
+            "name": "index",
+            "type": "uint128",
+            "internalType": "uint128"
+          }
+        ]
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint24",
+        "internalType": "uint24"
+      },
+      {
+        "name": "",
+        "type": "uint24",
+        "internalType": "uint24"
+      },
+      {
+        "name": "",
+        "type": "uint24",
+        "internalType": "uint24"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "insFee",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint24",
+        "internalType": "uint24"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "liqFee",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint24",
+        "internalType": "uint24"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "lpFeeConfig",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "startFee",
+        "type": "uint24",
+        "internalType": "uint24"
+      },
+      {
+        "name": "targetFee",
+        "type": "uint24",
+        "internalType": "uint24"
+      },
+      {
+        "name": "liquidityDecay",
+        "type": "uint128",
+        "internalType": "uint128"
+      },
+      {
+        "name": "volatilityScaler",
+        "type": "uint24",
+        "internalType": "uint24"
+      },
+      {
+        "name": "maxFeeMultiplier",
+        "type": "uint24",
+        "internalType": "uint24"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "maxSwapFee",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "rateE6",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "owner",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "result",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "ownershipHandoverExpiresAt",
+    "inputs": [
+      {
+        "name": "pendingOwner",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "result",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "renounceOwnership",
+    "inputs": [],
+    "outputs": [],
+    "stateMutability": "payable"
+  },
+  {
+    "type": "function",
+    "name": "requestOwnershipHandover",
+    "inputs": [],
+    "outputs": [],
+    "stateMutability": "payable"
+  },
+  {
+    "type": "function",
+    "name": "setLiqFee",
+    "inputs": [
+      {
+        "name": "newLiqFee",
+        "type": "uint24",
+        "internalType": "uint24"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "setLpFeeConfig",
+    "inputs": [
+      {
+        "name": "newLpFeeConfig",
+        "type": "tuple",
+        "internalType": "struct Fees.LpFeeConfig",
+        "components": [
+          {
+            "name": "startFee",
+            "type": "uint24",
+            "internalType": "uint24"
+          },
+          {
+            "name": "targetFee",
+            "type": "uint24",
+            "internalType": "uint24"
+          },
+          {
+            "name": "liquidityDecay",
+            "type": "uint128",
+            "internalType": "uint128"
+          },
+          {
+            "name": "volatilityScaler",
+            "type": "uint24",
+            "internalType": "uint24"
+          },
+          {
+            "name": "maxFeeMultiplier",
+            "type": "uint24",
+            "internalType": "uint24"
+          }
+        ]
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "setSwapFees",
+    "inputs": [
+      {
+        "name": "newCFee",
+        "type": "uint24",
+        "internalType": "uint24"
+      },
+      {
+        "name": "newInsFee",
+        "type": "uint24",
+        "internalType": "uint24"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "setUtilFeeCurve",
+    "inputs": [
+      {
+        "name": "newTargetUtilization",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "newSlopeBeforeTarget",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "newSlopeAfterTarget",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "slopeAfterTarget",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "slopeBeforeTarget",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "targetUtilization",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "transferOwnership",
+    "inputs": [
+      {
+        "name": "newOwner",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "payable"
+  },
+  {
+    "type": "function",
+    "name": "utilFees",
+    "inputs": [
+      {
+        "name": "longUtilization",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "shortUtilization",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "longFee",
+        "type": "uint64",
+        "internalType": "uint64"
+      },
+      {
+        "name": "shortFee",
+        "type": "uint64",
+        "internalType": "uint64"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "event",
+    "name": "LiqFeeSet",
+    "inputs": [
+      {
+        "name": "liqFee",
+        "type": "uint24",
+        "indexed": false,
+        "internalType": "uint24"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "LpFeeConfigSet",
+    "inputs": [
+      {
+        "name": "config",
+        "type": "tuple",
+        "indexed": false,
+        "internalType": "struct Fees.LpFeeConfig",
+        "components": [
+          {
+            "name": "startFee",
+            "type": "uint24",
+            "internalType": "uint24"
+          },
+          {
+            "name": "targetFee",
+            "type": "uint24",
+            "internalType": "uint24"
+          },
+          {
+            "name": "liquidityDecay",
+            "type": "uint128",
+            "internalType": "uint128"
+          },
+          {
+            "name": "volatilityScaler",
+            "type": "uint24",
+            "internalType": "uint24"
+          },
+          {
+            "name": "maxFeeMultiplier",
+            "type": "uint24",
+            "internalType": "uint24"
+          }
+        ]
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "OwnershipHandoverCanceled",
+    "inputs": [
+      {
+        "name": "pendingOwner",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "OwnershipHandoverRequested",
+    "inputs": [
+      {
+        "name": "pendingOwner",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "OwnershipTransferred",
+    "inputs": [
+      {
+        "name": "oldOwner",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      },
+      {
+        "name": "newOwner",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "SwapFeesSet",
+    "inputs": [
+      {
+        "name": "cFee",
+        "type": "uint24",
+        "indexed": false,
+        "internalType": "uint24"
+      },
+      {
+        "name": "insFee",
+        "type": "uint24",
+        "indexed": false,
+        "internalType": "uint24"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "UtilFeeCurveSet",
+    "inputs": [
+      {
+        "name": "targetUtilization",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      },
+      {
+        "name": "slopeBeforeTarget",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      },
+      {
+        "name": "slopeAfterTarget",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "error",
+    "name": "AlreadyInitialized",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "InvalidTargetUtilization",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "LiqFeeTooHigh",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "LiquidityDecayZero",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "MaxFeeMultiplierTooLow",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "MaxUtilFeeTooHigh",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "NewOwnerIsZeroAddress",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "NoHandoverRequest",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "PostTargetSlopeTooLow",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "SwapFeesTooHigh",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "TargetFeeAboveStartFee",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "Unauthorized",
+    "inputs": []
+  }
+]

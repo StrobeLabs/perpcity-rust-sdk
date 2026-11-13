@@ -1,0 +1,257 @@
+[
+  {
+    "type": "error",
+    "name": "Abdicated",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "AggregateSwapFeesTooHigh",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "AlreadyInitialized",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "AmountNotDecreased",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "BeaconIndexUnreadable",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "ClaimIsPaused",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "ClaimNotPaused",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "ClaimNotPending",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "ClaimNotReady",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "DeadlineExpired",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "DonationsRestricted",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "EmaWindowTooLow",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "HealthNotImproved",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "IdenticalTicks",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "InsufficientLiquidityToFill",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "InvalidCallbackAction",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "LongCloseCapacityExceeded",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "MarginRatioTooLow",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "MarginTooHigh",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "MarginTooLow",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "MaxAmtExceeded",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "MaxTotalFeeExceeded",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "MinAmtUnmet",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "NegativeEquity",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "NegativeMargin",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "NoSurplus",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "NoSystemFunds",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "NonMakerPosition",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "NonTakerPosition",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "NotGovernor",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "NotGuardian",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "NotLiquidatable",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "NotPerp",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "NotPoolManager",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "PositionDoesNotExist",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "PriceImpactTooHigh",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "PriceOutsideRange",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "ReduceOnlyViolated",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "ReleasesArePaused",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "ShortCloseCapacityExceeded",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "StaleBeaconIndex",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "TicksOutOfBounds",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "TvlCapExceeded",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "UnauthorizedCaller",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "WindowNotIncreased",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "ZeroAddress",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "ZeroAmount",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "ZeroCapacity",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "ZeroDelta",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "ZeroLiquidity",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "ZeroWindow",
+    "inputs": []
+  }
+]
