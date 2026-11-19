@@ -204,10 +204,13 @@ crate passes around. These are the ones where that is the whole answer.
 
 ## Debts
 
-- **A `v1.0.0` market has its era and nothing else.** Its era, pool id
-  and tape addresses read; every other read and every trade still uses
-  the shared `Perp` binding, whose shapes are not `v1.0.0`'s, and the
-  liquidation calldata refuses it with `ContractError::UnsupportedEra`.
+- **A `v1.0.0` market has its era and nothing else.** Only its era and
+  `is_upgradeable` read. The liquidation calldata, the tape addresses
+  and a tape scan that meets a `v1.0.0` position event refuse it with
+  `ContractError::UnsupportedEra`; the pool snapshot and the maker
+  equities fail loudly (Multicall3 "call failed", from the earlier
+  builds' `EMA_WINDOW()` in their batch); every other read still uses
+  the shared `Perp` binding, whose shapes are not `v1.0.0`'s.
 
 - **Narrowing is field by field, and invisible to the type graph.**
   `Capacity` is the only binding that crosses into the crate's types

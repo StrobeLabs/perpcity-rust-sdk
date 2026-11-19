@@ -1,7 +1,11 @@
 //! The tape: custody folded from it, undecodable logs counted, the
 //! three-address read in one chain order.
 
+use alloy::primitives::{I256, Signed};
+
 use super::*;
+use crate::client::Era;
+use crate::contracts::v1;
 
 #[tokio::test]
 async fn custody_folds_out_of_the_tape_and_answers_at_a_point() {
@@ -429,4 +433,63 @@ async fn a_perp_named_twice_is_refused() {
 
     assert!(refused.is_err(), "its logs would land in its tape twice");
     assert!(node.requests().is_empty(), "refused before any request");
+}
+
+/// A tape read from hand-built addresses meets a `v1.0.0` position event,
+/// which the decoder does not know yet: the read is refused, typed and not
+/// transient, rather than returning a tape without the market's positions.
+#[tokio::test]
+async fn a_v1_position_event_refuses_the_tape() {
+    let opened = v1::Perp::MakerOpened {
+        posId: U256::from(1),
+        owner: Address::repeat_byte(0x0A),
+        tickLower: Signed::try_from(-60).unwrap(),
+        tickUpper: Signed::try_from(60).unwrap(),
+        liquidity: 1_000,
+        delta: I256::ZERO,
+        lastCumlFundingX96: I256::ZERO,
+        lastCumlFunding: v1::MakerFunding {
+            belowX96: I256::ZERO,
+            withinInventoryX192: I256::ZERO,
+        },
+    };
+    let logs = vec![
+        mined_event_log(&taker_opened(2), PERP, 10, 0, Some(10)),
+        mined_event_log(&opened, PERP, 20, 0, Some(20)),
+    ];
+    let node = FakeNode::new(logs, u64::MAX);
+    let history = History::new(node.provider());
+    let err = history
+        .market_tape(addresses(), 0, Some(100))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            PerpCityError::Contract(ContractError::UnsupportedEra {
+                era: Era::V1,
+                operation: "market_tape",
+            })
+        ),
+        "{err}"
+    );
+    assert!(!err.is_transient());
+}
+
+/// No `v1.0.0` position topic is a topic of an earlier build, so the
+/// refusal never fires on a `58b42b7` or `v0.2.2` tape.
+#[test]
+fn no_v1_position_topic_is_an_earlier_build_s() {
+    use crate::contracts::{PerpDeployedEvents, PerpV022};
+    use crate::history::tape::V1_POSITION_TOPICS;
+
+    let earlier: Vec<[u8; 32]> = Perp::PerpEvents::SELECTORS
+        .iter()
+        .chain(PerpV022::PerpV022Events::SELECTORS)
+        .chain(PerpDeployedEvents::PerpDeployedEventsEvents::SELECTORS)
+        .copied()
+        .collect();
+    for topic in V1_POSITION_TOPICS {
+        assert!(!earlier.contains(&topic.0), "{topic}");
+    }
 }
