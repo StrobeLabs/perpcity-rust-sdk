@@ -740,6 +740,12 @@ mod tests {
             sepolia.v022_perp_guard_hook,
             address!("f03fF5e350EA455B452a83ef89a3bcbcD6F98aa0")
         );
+        let absent = ChainDeployments {
+            v022_perp_guard_hook: Address::ZERO,
+            v1_perp_guard_hook: Address::ZERO,
+            ..one
+        };
+        assert_eq!(absent.era_of(Address::ZERO), Some(Era::Legacy));
         assert_eq!(one.era_of(sepolia.v1_perp_guard_hook), None);
         assert_eq!(one.era_of(sepolia.v022_perp_guard_hook), None);
         assert_eq!(sepolia.era_of(one.v1_perp_guard_hook), None);
