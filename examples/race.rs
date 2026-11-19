@@ -55,7 +55,7 @@ async fn main() -> Result<()> {
         transport,
         ChainDeployments {
             usdc,
-            pool_manager: ARBITRUM_SEPOLIA_POOL_MANAGER,
+            ..ChainDeployments::ARBITRUM_SEPOLIA
         },
         ARBITRUM_SEPOLIA_CHAIN_ID,
     );

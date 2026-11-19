@@ -21,10 +21,9 @@ use perpcity_sdk::constants::SNAPSHOT_BLOCK_LAG;
 use perpcity_sdk::contracts::{Modules, Perp, PerpFactory};
 use perpcity_sdk::math::liquidity::estimate_liquidity;
 use perpcity_sdk::{
-    ARBITRUM_CHAIN_ID, ARBITRUM_POOL_MANAGER, ARBITRUM_USDC, ChainDeployments, ChainReader,
-    ExactOpenMakerParams, ExactOpenTakerParams, HftTransport, MakerEquityKind, PerpAtoms,
-    PerpCityError, PerpClient, PerpDelta, TickRange, TransactionError, TransportConfig, Urgency,
-    UsdcAtoms,
+    ARBITRUM_CHAIN_ID, ARBITRUM_USDC, ChainDeployments, ChainReader, Era, ExactOpenMakerParams,
+    ExactOpenTakerParams, HftTransport, MakerEquityKind, PerpAtoms, PerpCityError, PerpClient,
+    PerpDelta, TickRange, TransactionError, TransportConfig, Urgency, UsdcAtoms,
 };
 
 sol! {
@@ -208,14 +207,7 @@ async fn send_as(url: &str, from: Address, to: Address, data: Vec<u8>) -> serde_
 }
 
 fn chain(transport: HftTransport) -> ChainReader {
-    ChainReader::new(
-        transport,
-        ChainDeployments {
-            usdc: ARBITRUM_USDC,
-            pool_manager: ARBITRUM_POOL_MANAGER,
-        },
-        ARBITRUM_CHAIN_ID,
-    )
+    ChainReader::new(transport, ChainDeployments::ARBITRUM, ARBITRUM_CHAIN_ID)
 }
 
 /// Create a market on the live `v0.2.2` factory with MEME50's modules and
@@ -286,6 +278,8 @@ async fn v022_market_reads_trades_and_liquidation_probes() {
     client.sync_nonce().await.unwrap();
     client.chain().refresh_gas().await.unwrap();
     client.ensure_approval(U256::MAX).await.unwrap();
+    assert_eq!(client.market().era().await.unwrap(), Era::Upgradeable);
+    assert!(client.market().is_upgradeable().await.unwrap());
 
     // 2. The snapshot reads the stored EMAs from slot 11 (no `emas()` here)
     //    and the mark prices from them.

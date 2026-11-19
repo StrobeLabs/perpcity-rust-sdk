@@ -139,12 +139,23 @@ impl MarketReader {
         Ok(())
     }
 
+    /// The build this market runs: its pool key's hook against the chain's
+    /// deployments ([`ChainDeployments::era_of`](super::ChainDeployments::era_of)).
+    /// Read once per market and cached with the pool key.
+    ///
+    /// # Errors
+    ///
+    /// [`ContractError::UnknownBuild`] for a hook the chain's deployments
+    /// do not name; the transport error from either read.
+    pub async fn era(&self) -> Result<Era> {
+        Ok(self.immutables().await?.era)
+    }
+
     /// Whether this market runs `v0.2.2-upgradeable`, the build the SDK's
-    /// health and equity math ports: its pool carries the `PerpGuardHook`,
-    /// where a build `58b42b7` pool has no hook. Read once per market and
-    /// cached with the pool key.
+    /// health and equity math ports: [`Self::era`] is
+    /// [`Era::Upgradeable`]. False for build `58b42b7` and for `v1.0.0`.
     pub async fn is_upgradeable(&self) -> Result<bool> {
-        Ok(self.immutables().await?.era == Era::Upgradeable)
+        Ok(self.era().await? == Era::Upgradeable)
     }
 
     /// The calldata that liquidates `pos_id` whole on this market's era, for
@@ -170,6 +181,11 @@ impl MarketReader {
                 let amount = self.liquidation_size(role, pos_id).await?;
                 Ok(role.amount_calldata(pos_id, fee_recipient, amount))
             }
+            era @ Era::V1 => Err(ContractError::UnsupportedEra {
+                era,
+                operation: "liquidation_calldata",
+            }
+            .into()),
         }
     }
 
@@ -271,8 +287,8 @@ mod tests {
     use alloy::sol_types::SolCall;
 
     use super::*;
-    use crate::client::mock;
-    use crate::contracts::{Maker, Position};
+    use crate::client::{ChainDeployments, mock};
+    use crate::contracts::{Maker, Position, v1};
     use crate::convert::pack_balance_delta;
     use crate::errors::PerpCityError;
 
@@ -284,14 +300,101 @@ mod tests {
     async fn the_build_is_read_from_the_pool_hook_once() {
         let (chain, rpc) = mock::chain();
         let (legacy, upgradeable) = (Address::repeat_byte(0x01), Address::repeat_byte(0x02));
-        rpc.call::<Perp::POOL_IDCall>(&POOL_ID);
         rpc.call::<Perp::poolKeyCall>(&mock::pool_key(30));
-        assert!(!chain.market(legacy).is_upgradeable().await.unwrap());
         rpc.call::<Perp::POOL_IDCall>(&POOL_ID);
+        assert!(!chain.market(legacy).is_upgradeable().await.unwrap());
         rpc.call::<Perp::poolKeyCall>(&mock::pool_key_hooked(30));
+        rpc.call::<Perp::POOL_IDCall>(&POOL_ID);
         assert!(chain.market(upgradeable).is_upgradeable().await.unwrap());
         assert!(chain.market(upgradeable).is_upgradeable().await.unwrap());
         assert!(rpc.is_drained(), "two reads per market, then the cache");
+    }
+
+    /// Each build by its hook, against the mocked chain's deployments: the
+    /// pool key first, then the era's pool id view, `poolId()` on `v1.0.0`
+    /// (it has no `POOL_ID()`). Only `v0.2.2` is upgradeable.
+    #[tokio::test]
+    async fn each_build_is_its_chain_s_hook() {
+        let (chain, rpc) = mock::chain();
+        let cases = [
+            (Address::ZERO, Era::Legacy),
+            (mock::V022_HOOK, Era::Upgradeable),
+            (mock::V1_HOOK, Era::V1),
+        ];
+        for (i, (hook, era)) in cases.into_iter().enumerate() {
+            let market = chain.market(Address::repeat_byte(0x01 + i as u8));
+            rpc.call::<Perp::poolKeyCall>(&mock::pool_key_with_hook(30, hook));
+            if era == Era::V1 {
+                rpc.call::<v1::Perp::poolIdCall>(&POOL_ID);
+            } else {
+                rpc.call::<Perp::POOL_IDCall>(&POOL_ID);
+            }
+            assert_eq!(market.era().await.unwrap(), era);
+            assert_eq!(market.immutables().await.unwrap().pool_id, POOL_ID);
+            assert_eq!(
+                market.is_upgradeable().await.unwrap(),
+                era == Era::Upgradeable
+            );
+            assert!(rpc.is_drained(), "two reads, then the cache");
+        }
+    }
+
+    /// A hook the chain's deployments do not name is an unknown build:
+    /// refused after the pool key, with no pool id read and nothing
+    /// cached, so the next call asks again. The mocked chain's hooks are
+    /// another chain's here, and a real chain's are unknown on the mock.
+    #[tokio::test]
+    async fn an_unknown_hook_is_refused_after_the_pool_key() {
+        let (chain, rpc) = mock::chain();
+        let market = chain.market(mock::PERP);
+        for hook in [
+            Address::repeat_byte(0x0e),
+            ChainDeployments::ARBITRUM.v022_perp_guard_hook,
+            ChainDeployments::ARBITRUM.v1_perp_guard_hook,
+        ] {
+            rpc.call::<Perp::poolKeyCall>(&mock::pool_key_with_hook(30, hook));
+            let err = market.era().await.unwrap_err();
+            assert!(
+                matches!(
+                    err,
+                    PerpCityError::Contract(ContractError::UnknownBuild { perp, hook: named })
+                        if perp == mock::PERP && named == hook
+                ),
+                "{err}"
+            );
+            assert!(!err.is_transient());
+            assert!(rpc.is_drained(), "one read, nothing cached");
+        }
+        rpc.call::<Perp::poolKeyCall>(&mock::pool_key_with_hook(30, mock::V022_HOOK));
+        rpc.call::<Perp::POOL_IDCall>(&POOL_ID);
+        assert!(market.is_upgradeable().await.unwrap());
+        assert!(rpc.is_drained());
+    }
+
+    /// No liquidation call is sent to a `v1.0.0` market on another era's
+    /// shape: it is refused after the immutables, with no size read.
+    #[tokio::test]
+    async fn a_v1_market_refuses_the_liquidation_calldata() {
+        let (client, rpc) = mock::client();
+        rpc.call::<Perp::poolKeyCall>(&mock::pool_key_with_hook(30, mock::V1_HOOK));
+        rpc.call::<v1::Perp::poolIdCall>(&POOL_ID);
+        let err = client
+            .market()
+            .liquidation_calldata(PositionRole::Taker, U256::from(7u8), RECIPIENT)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                PerpCityError::Contract(ContractError::UnsupportedEra {
+                    era: Era::V1,
+                    operation: "liquidation_calldata",
+                })
+            ),
+            "{err}"
+        );
+        assert!(!err.is_transient());
+        assert!(rpc.is_drained(), "poolKey, poolId");
     }
 
     /// A build `58b42b7` market: the whole-position call, and no read
@@ -299,8 +402,8 @@ mod tests {
     #[tokio::test]
     async fn legacy_market_liquidates_whole_with_the_2_arg_call() {
         let (client, rpc) = mock::client();
-        rpc.call::<Perp::POOL_IDCall>(&POOL_ID);
         rpc.call::<Perp::poolKeyCall>(&mock::pool_key(30));
+        rpc.call::<Perp::POOL_IDCall>(&POOL_ID);
 
         let calldata = client
             .market()
@@ -317,7 +420,7 @@ mod tests {
                 .abi_encode()
             )
         );
-        assert!(rpc.is_drained(), "POOL_ID, poolKey");
+        assert!(rpc.is_drained(), "poolKey, POOL_ID");
     }
 
     /// A `v0.2.2` market: the position's whole size read first, then the
@@ -325,8 +428,8 @@ mod tests {
     #[tokio::test]
     async fn upgradeable_market_reads_the_size_then_liquidates_by_amount() {
         let (client, rpc) = mock::client();
-        rpc.call::<Perp::POOL_IDCall>(&POOL_ID);
         rpc.call::<Perp::poolKeyCall>(&mock::pool_key_hooked(30));
+        rpc.call::<Perp::POOL_IDCall>(&POOL_ID);
         rpc.call::<Perp::positionsCall>(&Position {
             delta: pack_balance_delta(-2_500_000, 3_000_000),
             ..mock::position(1_000_000)
@@ -379,8 +482,8 @@ mod tests {
     #[tokio::test]
     async fn upgradeable_market_names_a_vanished_position() {
         let (client, rpc) = mock::client();
-        rpc.call::<Perp::POOL_IDCall>(&POOL_ID);
         rpc.call::<Perp::poolKeyCall>(&mock::pool_key_hooked(30));
+        rpc.call::<Perp::POOL_IDCall>(&POOL_ID);
         rpc.call::<Perp::makerDetailsCall>(&mock::maker(-60, 60, 0));
 
         let err = client

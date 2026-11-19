@@ -51,7 +51,7 @@ mod transactions;
 pub use chain::{Balances, ChainDeployments, ChainReader};
 pub use maker_equity::{MakerEquityKind, MakerEquityOutcome};
 pub use market::{MarketReader, PositionRole};
-pub use queries::{Bounds, Fees, MarketConfig, MarketSnapshot, OpenInterest};
+pub use queries::{Bounds, Era, Fees, MarketConfig, MarketSnapshot, OpenInterest};
 pub use state::Books;
 pub use state::{
     MAX_ROW_BATCH, MarginRatioTriple, MarginRatios, MarketRates, RowOutcome, SolvencyState, StateAt,
@@ -93,9 +93,46 @@ pub const ARBITRUM_USDC: Address = address!("af88d065e77c8cC2239327C5EDb3A432268
 /// Solady-style ERC20 with an open `mint`.
 pub const ARBITRUM_SEPOLIA_USDC: Address = address!("BEF280BefeE2Cb28c20D1E4Cc1da999B4DA0f1fD");
 
-/// `PerpFactory` on Arbitrum Sepolia (the deployment markets are created from).
+/// The pre-`v1.0.0` `PerpFactory` on Arbitrum Sepolia, whose markets are
+/// hookless ([`Era::Legacy`]).
 pub const ARBITRUM_SEPOLIA_PERP_FACTORY: Address =
     address!("a54F81e7BD5C0d52d6fdE2ba40d0B1123d53E7a7");
+
+/// The `PerpGuardHook` in every `v0.2.2-upgradeable` pool on Arbitrum One
+/// (the factory's `PERP_GUARD_HOOK()`).
+pub const ARBITRUM_V022_PERP_GUARD_HOOK: Address =
+    address!("561Ae0C8d4f3AeeaeB92Fa892281A4dA97De0AA0");
+
+/// The `v1.0.0` `PerpFactory` on Arbitrum One.
+pub const ARBITRUM_V1_PERP_FACTORY: Address = address!("1c4ad3b988d5643dE581d078abf515E77c185E18");
+
+/// The `PerpGuardHook` in every `v1.0.0` pool on Arbitrum One (the
+/// factory's `PERP_GUARD_HOOK()`).
+pub const ARBITRUM_V1_PERP_GUARD_HOOK: Address =
+    address!("63adaa672d90B91e361C3f52552ee885A6D6AaA0");
+
+/// The `v1.0.0` `WithdrawalController` implementation on Arbitrum One, which
+/// every market's controller clones (the factory's
+/// `WITHDRAWAL_CONTROLLER_IMPL()`).
+pub const ARBITRUM_V1_WITHDRAWAL_CONTROLLER_IMPL: Address =
+    address!("9E77b049B0C7320D80B86Cc2de4411CC016b00C4");
+
+/// The `PerpGuardHook` of the `v0.2.2-upgradeable` rehearsal factory
+/// (`0x4C9D…87e0`) on Arbitrum Sepolia.
+pub const ARBITRUM_SEPOLIA_V022_PERP_GUARD_HOOK: Address =
+    address!("f03fF5e350EA455B452a83ef89a3bcbcD6F98aa0");
+
+/// The `v1.0.0` `PerpFactory` on Arbitrum Sepolia.
+pub const ARBITRUM_SEPOLIA_V1_PERP_FACTORY: Address =
+    address!("FD7491670e03c522078448d87411091c23b757Fb");
+
+/// The `PerpGuardHook` in every `v1.0.0` pool on Arbitrum Sepolia.
+pub const ARBITRUM_SEPOLIA_V1_PERP_GUARD_HOOK: Address =
+    address!("9FCBEc9019d37780A0c21573cC4F556691252aA0");
+
+/// The `v1.0.0` `WithdrawalController` implementation on Arbitrum Sepolia.
+pub const ARBITRUM_SEPOLIA_V1_WITHDRAWAL_CONTROLLER_IMPL: Address =
+    address!("7f7F6A8692a9E5dBB8C25BD180A6324ab80255f1");
 
 /// Uniswap V4 `PoolManager` on Arbitrum One.
 ///

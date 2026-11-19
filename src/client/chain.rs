@@ -26,15 +26,24 @@ use crate::storage::{perp_emas_slot, stored_emas};
 use crate::transport::provider::HftTransport;
 use crate::units::UsdcAtoms;
 
-use super::queries::MarketImmutables;
+use super::queries::{Era, MarketImmutables};
 use super::transactions::{classify_simulation_failure, preflight_request};
 use super::{
     ARBITRUM_CHAIN_ID, ARBITRUM_POOL_MANAGER, ARBITRUM_SEPOLIA_CHAIN_ID,
-    ARBITRUM_SEPOLIA_POOL_MANAGER, ARBITRUM_SEPOLIA_USDC, ARBITRUM_USDC, DEFAULT_GAS_TTL_MS,
-    DEFAULT_PRIORITY_FEE, now_ms, now_secs,
+    ARBITRUM_SEPOLIA_POOL_MANAGER, ARBITRUM_SEPOLIA_USDC, ARBITRUM_SEPOLIA_V1_PERP_FACTORY,
+    ARBITRUM_SEPOLIA_V1_PERP_GUARD_HOOK, ARBITRUM_SEPOLIA_V1_WITHDRAWAL_CONTROLLER_IMPL,
+    ARBITRUM_SEPOLIA_V022_PERP_GUARD_HOOK, ARBITRUM_USDC, ARBITRUM_V1_PERP_FACTORY,
+    ARBITRUM_V1_PERP_GUARD_HOOK, ARBITRUM_V1_WITHDRAWAL_CONTROLLER_IMPL,
+    ARBITRUM_V022_PERP_GUARD_HOOK, DEFAULT_GAS_TTL_MS, DEFAULT_PRIORITY_FEE, now_ms, now_secs,
 };
 
-/// The addresses every market on a chain shares.
+/// The addresses every market on a chain shares, and the guard hook that
+/// names each hooked build's pools, by which a market's [`Era`] is read
+/// ([`Self::era_of`]).
+///
+/// A chain with no deployment of a build holds `Address::ZERO` for its
+/// addresses, which no hooked pool names. An address is one chain's: the
+/// same address is another contract on the other chain.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChainDeployments {
     /// The collateral token.
@@ -42,6 +51,56 @@ pub struct ChainDeployments {
     /// The Uniswap V4 `PoolManager` every market's pool lives in (see
     /// `ARBITRUM_POOL_MANAGER` / `ARBITRUM_SEPOLIA_POOL_MANAGER`).
     pub pool_manager: Address,
+    /// The `PerpGuardHook` in every `v0.2.2-upgradeable` pool.
+    pub v022_perp_guard_hook: Address,
+    /// The `PerpGuardHook` in every `v1.0.0` pool.
+    pub v1_perp_guard_hook: Address,
+    /// The `v1.0.0` `PerpFactory`.
+    pub v1_perp_factory: Address,
+    /// The `v1.0.0` `WithdrawalController` implementation, which each
+    /// market's own controller clones.
+    pub v1_withdrawal_controller_impl: Address,
+}
+
+impl ChainDeployments {
+    /// Arbitrum One: Circle USDC, the mainnet `PoolManager`, and the
+    /// `v0.2.2` and `v1.0.0` deployments.
+    pub const ARBITRUM: Self = Self {
+        usdc: ARBITRUM_USDC,
+        pool_manager: ARBITRUM_POOL_MANAGER,
+        v022_perp_guard_hook: ARBITRUM_V022_PERP_GUARD_HOOK,
+        v1_perp_guard_hook: ARBITRUM_V1_PERP_GUARD_HOOK,
+        v1_perp_factory: ARBITRUM_V1_PERP_FACTORY,
+        v1_withdrawal_controller_impl: ARBITRUM_V1_WITHDRAWAL_CONTROLLER_IMPL,
+    };
+
+    /// Arbitrum Sepolia: the deployment's test USDC, the testnet
+    /// `PoolManager`, the `v0.2.2` rehearsal factory's hook and the
+    /// `v1.0.0` deployment.
+    pub const ARBITRUM_SEPOLIA: Self = Self {
+        usdc: ARBITRUM_SEPOLIA_USDC,
+        pool_manager: ARBITRUM_SEPOLIA_POOL_MANAGER,
+        v022_perp_guard_hook: ARBITRUM_SEPOLIA_V022_PERP_GUARD_HOOK,
+        v1_perp_guard_hook: ARBITRUM_SEPOLIA_V1_PERP_GUARD_HOOK,
+        v1_perp_factory: ARBITRUM_SEPOLIA_V1_PERP_FACTORY,
+        v1_withdrawal_controller_impl: ARBITRUM_SEPOLIA_V1_WITHDRAWAL_CONTROLLER_IMPL,
+    };
+
+    /// The era of a market on this chain whose pool key names `hooks`: no
+    /// hook is build `58b42b7`, this chain's `v1.0.0` or `v0.2.2` guard
+    /// hook is that build, and any other hook is a build the SDK does not
+    /// know (`None`), never a guess.
+    pub fn era_of(&self, hooks: Address) -> Option<Era> {
+        if hooks == Address::ZERO {
+            Some(Era::Legacy)
+        } else if hooks == self.v1_perp_guard_hook {
+            Some(Era::V1)
+        } else if hooks == self.v022_perp_guard_hook {
+            Some(Era::Upgradeable)
+        } else {
+            None
+        }
+    }
 }
 
 /// One address's collateral and gas money, read in one call.
@@ -117,28 +176,17 @@ impl ChainReader {
         Self::from_parts(provider, transport, deployments, chain_id)
     }
 
-    /// A reader for Arbitrum One: canonical Circle USDC and the mainnet
-    /// `PoolManager`.
+    /// A reader for Arbitrum One, over [`ChainDeployments::ARBITRUM`].
     pub fn arbitrum(transport: HftTransport) -> Self {
-        Self::new(
-            transport,
-            ChainDeployments {
-                usdc: ARBITRUM_USDC,
-                pool_manager: ARBITRUM_POOL_MANAGER,
-            },
-            ARBITRUM_CHAIN_ID,
-        )
+        Self::new(transport, ChainDeployments::ARBITRUM, ARBITRUM_CHAIN_ID)
     }
 
-    /// A reader for Arbitrum Sepolia: the deployment's test USDC and the
-    /// testnet `PoolManager`.
+    /// A reader for Arbitrum Sepolia, over
+    /// [`ChainDeployments::ARBITRUM_SEPOLIA`].
     pub fn arbitrum_sepolia(transport: HftTransport) -> Self {
         Self::new(
             transport,
-            ChainDeployments {
-                usdc: ARBITRUM_SEPOLIA_USDC,
-                pool_manager: ARBITRUM_SEPOLIA_POOL_MANAGER,
-            },
+            ChainDeployments::ARBITRUM_SEPOLIA,
             ARBITRUM_SEPOLIA_CHAIN_ID,
         )
     }
@@ -586,6 +634,7 @@ fn storage_read_error(error: TransportError) -> PerpCityError {
 
 #[cfg(test)]
 mod tests {
+    use alloy::primitives::address;
     use alloy::rpc::json_rpc::ErrorPayload;
     use alloy::transports::TransportErrorKind;
 
@@ -652,13 +701,60 @@ mod tests {
 
     #[test]
     fn chain_deployments_serde_roundtrip() {
-        let deployments = ChainDeployments {
-            usdc: Address::ZERO,
-            pool_manager: Address::ZERO,
-        };
+        let deployments = ChainDeployments::ARBITRUM;
         let json = serde_json::to_string(&deployments).unwrap();
         let recovered: ChainDeployments = serde_json::from_str(&json).unwrap();
         assert_eq!(deployments, recovered);
+    }
+
+    /// The one rule, on each known chain: no hook is `Legacy`, the chain's
+    /// `v1.0.0` hook is `V1`, its `v0.2.2` hook is `Upgradeable`, and any
+    /// other hook is unknown. A hook is one chain's: the other chain's
+    /// hooks are unknown here.
+    #[test]
+    fn the_era_is_the_chain_s_hook() {
+        let one = ChainDeployments::ARBITRUM;
+        let sepolia = ChainDeployments::ARBITRUM_SEPOLIA;
+        for chain in [one, sepolia] {
+            assert_eq!(chain.era_of(Address::ZERO), Some(Era::Legacy));
+            assert_eq!(chain.era_of(chain.v1_perp_guard_hook), Some(Era::V1));
+            assert_eq!(
+                chain.era_of(chain.v022_perp_guard_hook),
+                Some(Era::Upgradeable)
+            );
+            assert_eq!(chain.era_of(Address::repeat_byte(0x0a)), None);
+        }
+        assert_eq!(
+            one.v1_perp_guard_hook,
+            address!("63adaa672d90B91e361C3f52552ee885A6D6AaA0")
+        );
+        assert_eq!(
+            one.v022_perp_guard_hook,
+            address!("561Ae0C8d4f3AeeaeB92Fa892281A4dA97De0AA0")
+        );
+        assert_eq!(
+            sepolia.v1_perp_guard_hook,
+            address!("9FCBEc9019d37780A0c21573cC4F556691252aA0")
+        );
+        assert_eq!(
+            sepolia.v022_perp_guard_hook,
+            address!("f03fF5e350EA455B452a83ef89a3bcbcD6F98aa0")
+        );
+        assert_eq!(one.era_of(sepolia.v1_perp_guard_hook), None);
+        assert_eq!(one.era_of(sepolia.v022_perp_guard_hook), None);
+        assert_eq!(sepolia.era_of(one.v1_perp_guard_hook), None);
+        assert_eq!(sepolia.era_of(one.v022_perp_guard_hook), None);
+    }
+
+    /// The known chains' readers carry their chain's deployments.
+    #[test]
+    fn the_known_chains_carry_their_deployments() {
+        let one = ChainReader::arbitrum(mock::transport());
+        assert_eq!(one.deployments(), &ChainDeployments::ARBITRUM);
+        assert_eq!(one.chain_id(), ARBITRUM_CHAIN_ID);
+        let sepolia = ChainReader::arbitrum_sepolia(mock::transport());
+        assert_eq!(sepolia.deployments(), &ChainDeployments::ARBITRUM_SEPOLIA);
+        assert_eq!(sepolia.chain_id(), ARBITRUM_SEPOLIA_CHAIN_ID);
     }
 
     /// Balances are cached per holder: another holder's read is another

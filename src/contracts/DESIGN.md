@@ -34,12 +34,13 @@ signatures by topic, with the on-chain evidence in a comment.
 `58b42b7` markets and `v0.2.2-upgradeable` markets share every view and
 trade selector, so one `Perp` binding reads and trades both. Where they
 differ, the difference is a fact about the market, read once from its
-pool key (only a `v0.2.2` pool carries the guard hook) and kept with the
-other immutables as its `Era`: a liquidation is the 2-arg whole-position
-call on one and the 3-arg call by amount on the other, and the stored
-EMAs are a view on one and a storage slot on both, so the slot is what
-the SDK reads. `PerpV022` holds what only the newer build has. Nothing
-above the client chooses by era; the client does, once per call shape.
+pool key (a `v0.2.2` pool carries the chain's `v0.2.2` guard hook, a
+build `58b42b7` pool none) and kept with the other immutables as its
+`Era`: a liquidation is the 2-arg whole-position call on one and the
+3-arg call by amount on the other, and the stored EMAs are a view on one
+and a storage slot on both, so the slot is what the SDK reads.
+`PerpV022` holds what only the newer build has. The client chooses by
+era once per call shape, and a caller reads the era to choose its own.
 
 **The audited build is a module of its own.** `v1.0.0` (tag `0df4208`)
 shares no struct shape, trade selector or position event with the two
@@ -153,9 +154,9 @@ the audited build. The cutover's checklist is in the debts below.
   target. Two serve markets today: **build `58b42b7`** and
   **`v0.2.2-upgradeable`**. The audited **`v1.0.0`** is deployed on both
   chains and has its own module, `v1`.
-- **Era**: a contract version. A market's era is read from its pool key
-  and never changes; the **next era** is `v1.0.0`, bound in `v1` and not
-  yet an `Era`.
+- **Era**: a contract version. A market's era is read from its pool
+  key's hook against the chain's guard hooks and never changes; `v1.0.0`
+  is the third, `Era::V1`, bound in `v1`.
 - **ABI lock**: the tests that pin selectors, struct shapes and event
   topics with on-chain evidence.
 - **Selector probe**: a call whose typed revert proves the selector
@@ -195,16 +196,18 @@ crate passes around. These are the ones where that is the whole answer.
   interface being split in two: every market answers the shared part, and
   the client picks the rest by `Era` in one place per call shape.
 
-- **`v1` is bound before it is used.** Its interfaces have no caller in
-  the crate yet; the era dispatch, the reads and the trades that use them
-  come one per change, each against the fork market the harness builds.
-  The bindings come first so that each of those changes is reviewed
-  against a lock that is already settled.
+- **`v1` is bound before it is used.** Only the era read calls it so far
+  (`poolId()`, for a `v1.0.0` market's immutables); the reads and the
+  trades that use the rest come one per change, each against the fork
+  market the harness builds. The bindings come first so that each of
+  those changes is reviewed against a lock that is already settled.
 
 ## Debts
 
-- **`v1` is the third era, and nothing dispatches to it.** `Era` knows
-  two builds, so a `v1.0.0` market today fails its first immutables read.
+- **A `v1.0.0` market has its era and nothing else.** Its era, pool id
+  and tape addresses read; every other read and every trade still uses
+  the shared `Perp` binding, whose shapes are not `v1.0.0`'s, and the
+  liquidation calldata refuses it with `ContractError::UnsupportedEra`.
 
 - **Narrowing is field by field, and invisible to the type graph.**
   `Capacity` is the only binding that crosses into the crate's types

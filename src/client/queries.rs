@@ -20,7 +20,7 @@ use alloy::primitives::{Address, B256, U256};
 use alloy::providers::MulticallError;
 use serde::{Deserialize, Serialize};
 
-use crate::contracts::{self, IFees, IMarginRatios, Perp, Position};
+use crate::contracts::{self, IFees, IMarginRatios, Perp, Position, v1};
 use crate::convert::{price_x96_to_f64, scale_from_6dec};
 use crate::errors::{ContractError, PerpCityError, Result, ValidationError};
 use crate::hft::state_cache::{CachedBounds, CachedFees};
@@ -185,31 +185,28 @@ pub(super) fn multicall_error(e: MulticallError) -> PerpCityError {
     }
 }
 
-/// Which contract build a market runs. The two live builds share every
-/// view and trade selector; they differ in how a liquidation is called, in
-/// what a close event carries, and in what their liquidation tests check,
-/// and the SDK picks by era where it must. The health ports in `math` are
-/// the upgradeable build's.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Era {
+/// Which contract build a market runs, read once from its pool key's hook
+/// against the chain's [`ChainDeployments`](super::ChainDeployments)
+/// ([`ChainDeployments::era_of`](super::ChainDeployments::era_of)) and
+/// fixed for the market's life. [`MarketReader::era`] answers it.
+///
+/// `Legacy` and `Upgradeable` share every view and trade selector and
+/// differ in how a liquidation is called, in what a close event carries,
+/// and in what their liquidation tests check; the health ports in `math`
+/// are the upgradeable build's. `V1` shares no struct shape, trade
+/// selector or position event with them ([`crate::contracts::v1`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum Era {
     /// Build `58b42b7`: whole-position 2-arg liquidations, tailed close
     /// events, a hookless pool.
     Legacy,
     /// `v0.2.2-upgradeable` (tag `198559a`): an ERC-1967 proxy, 3-arg
     /// liquidations by amount, untailed close events plus `*Liquidated`,
-    /// a pool guarded by the `PerpGuardHook`.
+    /// a pool guarded by the chain's `v0.2.2` `PerpGuardHook`.
     Upgradeable,
-}
-
-impl Era {
-    /// The era a pool key names: only `v0.2.2` pools carry a hook.
-    pub(crate) fn from_hooks(hooks: Address) -> Self {
-        if hooks == Address::ZERO {
-            Self::Legacy
-        } else {
-            Self::Upgradeable
-        }
-    }
+    /// The audited `v1.0.0` (tag `0df4208`): a pool guarded by the chain's
+    /// `v1.0.0` `PerpGuardHook`.
+    V1,
 }
 
 /// Perp/pool values fixed at deployment, cached after the first read that
@@ -241,8 +238,15 @@ impl MarketReader {
 
     /// The deployment-fixed values the pool snapshot and the liquidation
     /// calls need, from the chain reader's per-market cache, or two RPC
-    /// reads the first time any reader of this market asks. Not a block's
-    /// to give, so it lives here rather than on the handle.
+    /// reads the first time any reader of this market asks: the pool key,
+    /// whose hook names the era, then the era's pool id view (`POOL_ID()`
+    /// before `v1.0.0`, `poolId()` on it). Not a block's to give, so it
+    /// lives here rather than on the handle.
+    ///
+    /// # Errors
+    ///
+    /// [`ContractError::UnknownBuild`] when the hook is none the chain's
+    /// deployments name; it reads nothing more and caches nothing.
     pub(super) async fn immutables(&self) -> Result<MarketImmutables> {
         {
             let cached = self.chain.immutables_cache().lock().unwrap();
@@ -251,10 +255,22 @@ impl MarketReader {
             }
         }
 
-        let perp = Perp::new(self.perp, self.chain.provider());
-        let pool_id_call = perp.POOL_ID();
-        let pool_key_call = perp.poolKey();
-        let (pool_id, pool_key) = tokio::try_join!(pool_id_call.call(), pool_key_call.call())?;
+        let provider = self.chain.provider();
+        let pool_key = Perp::new(self.perp, provider).poolKey().call().await?;
+        let era =
+            self.chain
+                .deployments()
+                .era_of(pool_key.hooks)
+                .ok_or(ContractError::UnknownBuild {
+                    perp: self.perp,
+                    hook: pool_key.hooks,
+                })?;
+        let pool_id = match era {
+            Era::Legacy | Era::Upgradeable => {
+                Perp::new(self.perp, provider).POOL_ID().call().await?
+            }
+            Era::V1 => v1::Perp::new(self.perp, provider).poolId().call().await?,
+        };
         let tick_spacing = i24_to_i32(pool_key.tickSpacing);
         if tick_spacing <= 0 {
             return Err(ValidationError::InvalidConfig {
@@ -265,7 +281,7 @@ impl MarketReader {
         let immutables = MarketImmutables {
             pool_id,
             tick_spacing,
-            era: Era::from_hooks(pool_key.hooks),
+            era,
         };
 
         self.chain

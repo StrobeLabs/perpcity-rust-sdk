@@ -47,6 +47,11 @@ pub(super) const PRICE_IMPACT: Address = Address::repeat_byte(0xd1);
 pub(super) const PRICING: Address = Address::repeat_byte(0xd2);
 /// Arbitrum One, so chain-bound paths take the mainnet branch.
 pub(super) const CHAIN_ID: u64 = 42_161;
+/// The mocked chain's `v0.2.2` guard hook, the one [`pool_key_hooked`]
+/// names; a known build only because the mocked deployments list it.
+pub(super) const V022_HOOK: Address = Address::repeat_byte(0x0a);
+/// The mocked chain's `v1.0.0` guard hook.
+pub(super) const V1_HOOK: Address = Address::repeat_byte(0x0b);
 
 /// A client whose every RPC is answered by the returned [`Rpc`].
 pub(super) fn client() -> (PerpClient, Rpc) {
@@ -93,6 +98,10 @@ fn chain_with(provider: RootProvider<Ethereum>, transport: HftTransport) -> Chai
     let deployments = ChainDeployments {
         usdc: USDC,
         pool_manager: POOL_MANAGER,
+        v022_perp_guard_hook: V022_HOOK,
+        v1_perp_guard_hook: V1_HOOK,
+        v1_perp_factory: Address::repeat_byte(0x0c),
+        v1_withdrawal_controller_impl: Address::repeat_byte(0x0d),
     };
     ChainReader::from_parts(provider, transport, deployments, CHAIN_ID)
 }
@@ -323,10 +332,16 @@ pub(super) fn pool_key(tick_spacing: i32) -> PoolKey {
     }
 }
 
-/// `poolKey()` with the guard hook set: a `v0.2.2-upgradeable` market.
+/// `poolKey()` with the mocked chain's `v0.2.2` guard hook: a
+/// `v0.2.2-upgradeable` market.
 pub(super) fn pool_key_hooked(tick_spacing: i32) -> PoolKey {
+    pool_key_with_hook(tick_spacing, V022_HOOK)
+}
+
+/// `poolKey()` naming `hooks`.
+pub(super) fn pool_key_with_hook(tick_spacing: i32, hooks: Address) -> PoolKey {
     PoolKey {
-        hooks: Address::repeat_byte(0x0a),
+        hooks,
         ..pool_key(tick_spacing)
     }
 }

@@ -35,9 +35,8 @@ use alloy::signers::local::PrivateKeySigner;
 use perpcity_sdk::math::liquidity::estimate_liquidity;
 use perpcity_sdk::math::tick::{align_tick_down, align_tick_up, price_to_tick};
 use perpcity_sdk::{
-    ARBITRUM_SEPOLIA_CHAIN_ID, ARBITRUM_SEPOLIA_POOL_MANAGER, ARBITRUM_SEPOLIA_USDC,
-    ChainDeployments, ChainReader, HftTransport, OpenMakerParams, PerpClient, TickRange,
-    TransportConfig, Urgency, UsdcAtoms,
+    ARBITRUM_SEPOLIA_CHAIN_ID, ARBITRUM_SEPOLIA_USDC, ChainDeployments, ChainReader, HftTransport,
+    OpenMakerParams, PerpClient, TickRange, TransportConfig, Urgency, UsdcAtoms,
 };
 
 /// How far above/below the current price to set the range, as a fraction.
@@ -73,7 +72,7 @@ fn load_chain(transport: HftTransport) -> ChainReader {
         transport,
         ChainDeployments {
             usdc,
-            pool_manager: ARBITRUM_SEPOLIA_POOL_MANAGER,
+            ..ChainDeployments::ARBITRUM_SEPOLIA
         },
         ARBITRUM_SEPOLIA_CHAIN_ID,
     )
