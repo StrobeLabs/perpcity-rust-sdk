@@ -1679,7 +1679,7 @@ mod tests {
     /// `4606.div_euclid(256) = 17` — 36 words, word `w` at offset `w + 18`.
     const BITMAP_WORDS: usize = 36;
 
-    /// The two immutables the first snapshot reads, in `try_join!` order.
+    /// The two immutables the first snapshot reads: the pool key, then the pool id.
     fn immutables_answers(rpc: &Rpc) {
         rpc.call::<Perp::poolKeyCall>(&mock::pool_key(SPACING));
         rpc.call::<Perp::POOL_IDCall>(&POOL_ID);
