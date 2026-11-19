@@ -307,11 +307,11 @@ impl MarketReader {
     /// [`ContractError::ModuleNotRegistered`] when the perp has no beacon;
     /// the transport error from either read.
     pub async fn tape_addresses(&self) -> Result<TapeAddresses> {
-        let perp = Perp::new(self.perp, self.chain.provider());
-        let (modules, immutables) = tokio::try_join!(
-            async { perp.modules().call().await.map_err(PerpCityError::from) },
-            self.immutables(),
-        )?;
+        let immutables = self.immutables().await?;
+        let modules = Perp::new(self.perp, self.chain.provider())
+            .modules()
+            .call()
+            .await?;
         Ok(TapeAddresses {
             perp: self.perp,
             beacon: registered_module(modules.beacon, "IBeacon")?,

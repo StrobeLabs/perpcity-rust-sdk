@@ -371,6 +371,24 @@ mod tests {
         assert!(rpc.is_drained());
     }
 
+    /// The tape addresses resolve the build before the modules, so an
+    /// unknown build is refused after the pool key alone and no `modules()`
+    /// request can fail first and hide it.
+    #[tokio::test]
+    async fn tape_addresses_refuse_an_unknown_build_before_the_modules() {
+        let (chain, rpc) = mock::chain();
+        rpc.call::<Perp::poolKeyCall>(&mock::pool_key_with_hook(30, Address::repeat_byte(0x0e)));
+        let err = chain.market(mock::PERP).tape_addresses().await.unwrap_err();
+        assert!(
+            matches!(
+                err,
+                PerpCityError::Contract(ContractError::UnknownBuild { .. })
+            ),
+            "{err}"
+        );
+        assert!(rpc.is_drained(), "poolKey only, no modules");
+    }
+
     /// No liquidation call is sent to a `v1.0.0` market on another era's
     /// shape: it is refused after the immutables, with no size read.
     #[tokio::test]
