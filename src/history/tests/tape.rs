@@ -475,21 +475,3 @@ async fn a_v1_position_event_refuses_the_tape() {
     );
     assert!(!err.is_transient());
 }
-
-/// No `v1.0.0` position topic is a topic of an earlier build, so the
-/// refusal never fires on a `58b42b7` or `v0.2.2` tape.
-#[test]
-fn no_v1_position_topic_is_an_earlier_build_s() {
-    use crate::contracts::{PerpDeployedEvents, PerpV022};
-    use crate::history::tape::V1_POSITION_TOPICS;
-
-    let earlier: Vec<[u8; 32]> = Perp::PerpEvents::SELECTORS
-        .iter()
-        .chain(PerpV022::PerpV022Events::SELECTORS)
-        .chain(PerpDeployedEvents::PerpDeployedEventsEvents::SELECTORS)
-        .copied()
-        .collect();
-    for topic in V1_POSITION_TOPICS {
-        assert!(!earlier.contains(&topic.0), "{topic}");
-    }
-}

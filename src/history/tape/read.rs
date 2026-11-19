@@ -11,9 +11,9 @@ use alloy::sol_types::SolEvent;
 use futures_util::TryStreamExt;
 
 use crate::client::Era;
-use crate::contracts::{IPoolManagerState, v1};
+use crate::contracts::IPoolManagerState;
 use crate::errors::{ContractError, Result, ValidationError};
-use crate::events::{MarketEvent, decode_log};
+use crate::events::{MarketEvent, decode_log, is_v1_only};
 use crate::history::scan::{
     SharedWidths, block_timestamps, check_block_range, scan_all, scan_newest,
 };
@@ -346,25 +346,6 @@ pub(in crate::history) async fn markets_tape_with<P: Provider>(
     Ok(tapes)
 }
 
-/// The topic of each `v1.0.0` position event. No earlier build has one of
-/// these topics, and the decoder knows none of them yet, so a scan that
-/// meets one is refused rather than missing the market's positions.
-pub(in crate::history) const V1_POSITION_TOPICS: [B256; 13] = [
-    v1::Perp::MakerOpened::SIGNATURE_HASH,
-    v1::Perp::MakerAdjusted::SIGNATURE_HASH,
-    v1::Perp::MakerClosed::SIGNATURE_HASH,
-    v1::Perp::MakerConverted::SIGNATURE_HASH,
-    v1::Perp::MakerLiquidated::SIGNATURE_HASH,
-    v1::Perp::MakerBackstopped::SIGNATURE_HASH,
-    v1::Perp::MakerMoved::SIGNATURE_HASH,
-    v1::Perp::TakerOpened::SIGNATURE_HASH,
-    v1::Perp::TakerAdjusted::SIGNATURE_HASH,
-    v1::Perp::TakerClosed::SIGNATURE_HASH,
-    v1::Perp::TakerLiquidated::SIGNATURE_HASH,
-    v1::Perp::TakerBackstopped::SIGNATURE_HASH,
-    v1::Perp::PositionOwnerUpdated::SIGNATURE_HASH,
-];
-
 /// Decodes the logs this vocabulary recognizes, each kept with its log.
 ///
 /// A log of another vocabulary is skipped, which is what a filter on one
@@ -376,9 +357,9 @@ pub(in crate::history) const V1_POSITION_TOPICS: [B256; 13] = [
 ///
 /// # Errors
 ///
-/// [`ContractError::UnsupportedEra`] for a `v1.0.0` position event
-/// ([`V1_POSITION_TOPICS`]): skipping it would drop the market's
-/// positions with no gap counted.
+/// [`ContractError::UnsupportedEra`] for a `v1.0.0` event no earlier build
+/// emits, which the decoder does not know yet: skipping it would drop a
+/// `v1.0.0` market's events with no gap counted.
 fn decode_known(logs: Vec<Log>, widths: &SharedWidths) -> Result<Vec<(Log, MarketEvent)>> {
     let mut undecodable = 0;
     let mut decoded = Vec::new();
@@ -386,10 +367,7 @@ fn decode_known(logs: Vec<Log>, widths: &SharedWidths) -> Result<Vec<(Log, Marke
         match decode_log(&log) {
             Ok(Some(event)) => decoded.push((log, event)),
             Ok(None) => {
-                if log
-                    .topic0()
-                    .is_some_and(|topic| V1_POSITION_TOPICS.contains(topic))
-                {
+                if is_v1_only(&log) {
                     return Err(ContractError::UnsupportedEra {
                         era: Era::V1,
                         operation: "market_tape",
