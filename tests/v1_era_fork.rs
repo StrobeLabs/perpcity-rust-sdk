@@ -14,9 +14,10 @@
 
 mod v1_fork;
 
-use alloy::primitives::{Address, address, keccak256};
+use alloy::primitives::{Address, U256, address, keccak256};
 use alloy::sol_types::SolValue;
 
+use perpcity_sdk::client::PositionRole;
 use perpcity_sdk::contracts::{
     Perp as PerpV022Surface,
     v1::{Perp, PerpFactory},
@@ -88,10 +89,39 @@ async fn each_build_reads_as_its_era_on_a_sepolia_fork() {
         .await
         .unwrap();
     assert_eq!(pool_id, keccak256(key.abi_encode()));
-    let tape = v1_market.tape_addresses().await.unwrap();
-    assert_eq!(tape.pool_id, pool_id, "immutables() reads poolId() on v1");
-    assert_eq!(tape.beacon, beacon);
     println!("v1: era V1, pool id {pool_id}");
+
+    // Every read that passes the immutables on a v1 market either is
+    // refused by era or fails loudly; none returns a value.
+    let unsupported = |err: &PerpCityError, operation: &str| {
+        matches!(
+            err,
+            PerpCityError::Contract(ContractError::UnsupportedEra { era: Era::V1, operation: o })
+                if *o == operation
+        )
+    };
+    let err = v1_market.tape_addresses().await.unwrap_err();
+    assert!(unsupported(&err, "tape_addresses"), "{err}");
+    let recipient = Address::repeat_byte(0x44);
+    let err = v1_market
+        .liquidation_calldata(PositionRole::Taker, U256::from(1u8), recipient)
+        .await
+        .unwrap_err();
+    assert!(unsupported(&err, "liquidation_calldata"), "{err}");
+    let err = v1_market
+        .simulate_liquidate_maker(w.me, U256::from(1u8), recipient)
+        .await
+        .unwrap_err();
+    assert!(unsupported(&err, "liquidation_calldata"), "{err}");
+    let err = v1_market.get_pool_snapshot().await.unwrap_err();
+    assert!(!err.is_transient(), "pool snapshot: {err}");
+    println!("v1 get_pool_snapshot fails loudly: {err}");
+    let err = v1_market
+        .get_maker_equities(&[U256::from(1u8)])
+        .await
+        .unwrap_err();
+    assert!(!err.is_transient(), "maker equities: {err}");
+    println!("v1 get_maker_equities fails loudly: {err}");
 
     for (perp, era) in [(V022_PERP, Era::Upgradeable), (LEGACY_PERP, Era::Legacy)] {
         let market = chain.market(perp);

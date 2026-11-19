@@ -389,6 +389,32 @@ mod tests {
         assert!(rpc.is_drained(), "poolKey only, no modules");
     }
 
+    /// A `v1.0.0` market's tape is refused after the immutables, before the
+    /// modules and before any log request: the decoder has no `v1.0.0`
+    /// position events yet, and a tape without them would report no gap.
+    #[tokio::test]
+    async fn a_v1_market_refuses_its_tape_addresses() {
+        let (chain, rpc) = mock::chain();
+        rpc.call::<Perp::poolKeyCall>(&mock::pool_key_with_hook(30, mock::V1_HOOK));
+        rpc.call::<v1::Perp::poolIdCall>(&POOL_ID);
+        let err = chain.market(mock::PERP).tape_addresses().await.unwrap_err();
+        assert!(
+            matches!(
+                err,
+                PerpCityError::Contract(ContractError::UnsupportedEra {
+                    era: Era::V1,
+                    operation: "tape_addresses",
+                })
+            ),
+            "{err}"
+        );
+        assert!(!err.is_transient());
+        assert!(
+            rpc.is_drained(),
+            "poolKey, poolId; no modules, no eth_getLogs"
+        );
+    }
+
     /// No liquidation call is sent to a `v1.0.0` market on another era's
     /// shape: it is refused after the immutables, with no size read.
     #[tokio::test]

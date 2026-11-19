@@ -304,10 +304,21 @@ impl MarketReader {
     ///
     /// # Errors
     ///
+    /// [`ContractError::UnsupportedEra`] for a `v1.0.0` market, before any
+    /// module or log read: the tape decoder knows no `v1.0.0` position
+    /// event yet, so its tape would drop them with no gap;
+    /// [`ContractError::UnknownBuild`] for an unknown build;
     /// [`ContractError::ModuleNotRegistered`] when the perp has no beacon;
-    /// the transport error from either read.
+    /// the transport error from any read.
     pub async fn tape_addresses(&self) -> Result<TapeAddresses> {
         let immutables = self.immutables().await?;
+        if immutables.era == Era::V1 {
+            return Err(ContractError::UnsupportedEra {
+                era: Era::V1,
+                operation: "tape_addresses",
+            }
+            .into());
+        }
         let modules = Perp::new(self.perp, self.chain.provider())
             .modules()
             .call()
