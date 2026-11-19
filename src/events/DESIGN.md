@@ -197,6 +197,10 @@ one kind may.
 
 ## Debts
 
+- **The `v1.0.0` events are recognised, not decoded.** `is_v1_only` names
+  the 29 `v1.0.0` topics no earlier build emits, and a tape scan refuses
+  one with `ContractError::UnsupportedEra` rather than skip it; their
+  `MarketEvent` arms come with the full `v1.0.0` vocabulary (2b-9).
 - **Maker events carry no price and no amounts.** What a band moved is on
   the tape only through the pool's own events: each liquidity change
   priced at the exact price and tick the last `PoolSwapped` stated, which

@@ -64,7 +64,7 @@ use alloy::sol_types::SolEvent;
 use serde::{Deserialize, Serialize};
 
 use crate::contracts::{
-    Cumulatives, IBeacon, IPoolManagerState, Perp, PerpDeployedEvents, PerpV022, SwapResult,
+    Cumulatives, IBeacon, IPoolManagerState, Perp, PerpDeployedEvents, PerpV022, SwapResult, v1,
 };
 use crate::convert::unpack_balance_delta;
 use crate::errors::ValidationError;
@@ -371,6 +371,53 @@ pub enum ModuleKind {
     PriceImpact,
     /// The fair price the contract marks at.
     Pricing,
+}
+
+/// The topic of each `v1.0.0` market event that no earlier build emits,
+/// from the `v1` bindings. This vocabulary decodes none of them yet (the
+/// `v1.0.0` arms come with their own change), so a reader that meets one
+/// refuses it rather than dropping a `v1.0.0` market's events with no gap.
+/// The events whose topic an earlier build shares are left out: the proxy
+/// and ownership events, `Abdicate`, `CreatorFeesCollected`,
+/// `ProtocolFeesCollected` and `ProtocolFeeSynced`, which a `v0.2.2`
+/// market emits too.
+const V1_ONLY_TOPICS: [B256; 29] = [
+    v1::Perp::BadDebtAccounted::SIGNATURE_HASH,
+    v1::Perp::BeaconRecoveryUsed::SIGNATURE_HASH,
+    v1::Perp::CumulativesAccrued::SIGNATURE_HASH,
+    v1::Perp::MakerAdjusted::SIGNATURE_HASH,
+    v1::Perp::MakerBackstopped::SIGNATURE_HASH,
+    v1::Perp::MakerClosed::SIGNATURE_HASH,
+    v1::Perp::MakerConverted::SIGNATURE_HASH,
+    v1::Perp::MakerLiquidated::SIGNATURE_HASH,
+    v1::Perp::MakerMoved::SIGNATURE_HASH,
+    v1::Perp::MakerOpened::SIGNATURE_HASH,
+    v1::Perp::PermissionlessDonationsEnabledSet::SIGNATURE_HASH,
+    v1::Perp::PhysicalCapacityUpdated::SIGNATURE_HASH,
+    v1::Perp::PositionOwnerUpdated::SIGNATURE_HASH,
+    v1::Perp::QuoteFolded::SIGNATURE_HASH,
+    v1::Perp::RatesAndEmasRefreshed::SIGNATURE_HASH,
+    v1::Perp::SetEmaWindow::SIGNATURE_HASH,
+    v1::Perp::SetGovernor::SIGNATURE_HASH,
+    v1::Perp::SetLatency::SIGNATURE_HASH,
+    v1::Perp::SetTvlCap::SIGNATURE_HASH,
+    v1::Perp::SetWithdrawalController::SIGNATURE_HASH,
+    v1::Perp::SwapFeesRemovedFromMargin::SIGNATURE_HASH,
+    v1::Perp::TakerAdjusted::SIGNATURE_HASH,
+    v1::Perp::TakerBackstopped::SIGNATURE_HASH,
+    v1::Perp::TakerClosed::SIGNATURE_HASH,
+    v1::Perp::TakerLiquidated::SIGNATURE_HASH,
+    v1::Perp::TakerOpened::SIGNATURE_HASH,
+    v1::Perp::UtilizationAccrued::SIGNATURE_HASH,
+    v1::Perp::UtilizationReserveRealized::SIGNATURE_HASH,
+    v1::Perp::UtilizationReserveRemovedFromMargin::SIGNATURE_HASH,
+];
+
+/// Whether `log` is a `v1.0.0` market event that no earlier build emits
+/// ([`V1_ONLY_TOPICS`]), which [`decode_log`] does not decode yet.
+pub(crate) fn is_v1_only(log: &Log) -> bool {
+    log.topic0()
+        .is_some_and(|topic| V1_ONLY_TOPICS.contains(topic))
 }
 
 /// Decode a raw Alloy [`Log`] into a [`MarketEvent`], if recognized.
@@ -798,6 +845,70 @@ pub(crate) fn rpc_log<E: SolEvent>(event: &E, address: Address) -> Log {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloy::json_abi::JsonAbi;
+
+    /// The table is complete and none of it is an earlier build's: each
+    /// `v1.0.0` `Perp` event is in it exactly when its topic is not a topic
+    /// of the earlier builds' bindings and not one of the shared topics the
+    /// table names, so the refusal never fires on a `58b42b7` or `v0.2.2`
+    /// log, and no `v1.0.0`-only event is dropped.
+    #[test]
+    fn v1_only_topics_are_every_v1_event_no_earlier_build_emits() {
+        let earlier: Vec<[u8; 32]> = Perp::PerpEvents::SELECTORS
+            .iter()
+            .chain(PerpV022::PerpV022Events::SELECTORS)
+            .chain(PerpDeployedEvents::PerpDeployedEventsEvents::SELECTORS)
+            .copied()
+            .collect();
+        // Emitted by a `v0.2.2` market too, with the same signature, and
+        // not bound because this vocabulary does not decode them.
+        let shared = [
+            "Abdicate",
+            "CreatorFeesCollected",
+            "Initialized",
+            "OwnershipHandoverCanceled",
+            "OwnershipHandoverRequested",
+            "OwnershipTransferred",
+            "ProtocolFeeSynced",
+            "ProtocolFeesCollected",
+            "Upgraded",
+        ];
+        let abi: JsonAbi = v1::Perp::abi::contract();
+        let mut expected: Vec<B256> = abi
+            .events()
+            .filter(|e| !earlier.contains(&e.selector().0) && !shared.contains(&e.name.as_str()))
+            .map(|e| e.selector())
+            .collect();
+        expected.sort();
+        let mut table = V1_ONLY_TOPICS.to_vec();
+        table.sort();
+        assert_eq!(table, expected);
+        for topic in V1_ONLY_TOPICS {
+            assert!(!earlier.contains(&topic.0), "{topic}");
+            let log = RpcLog {
+                inner: alloy::primitives::Log {
+                    address: Address::repeat_byte(0x11),
+                    data: LogData::new_unchecked(vec![topic], Default::default()),
+                },
+                ..Default::default()
+            };
+            assert!(is_v1_only(&log), "{topic}");
+            assert!(
+                matches!(decode_log(&log), Ok(None)),
+                "{topic} is not decoded"
+            );
+        }
+        let earlier_log = rpc_log(
+            &Perp::MakerOpened {
+                posId: U256::from(1),
+            },
+            Address::repeat_byte(0x11),
+        );
+        assert!(
+            !is_v1_only(&earlier_log),
+            "a v0.2.2 MakerOpened is not refused"
+        );
+    }
     use alloy::primitives::{Address, B256, LogData, U256};
     use alloy::rpc::types::Log as RpcLog;
 

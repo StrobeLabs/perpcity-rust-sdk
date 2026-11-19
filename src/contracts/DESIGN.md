@@ -206,7 +206,7 @@ crate passes around. These are the ones where that is the whole answer.
 
 - **A `v1.0.0` market has its era and nothing else.** Only its era and
   `is_upgradeable` read. The liquidation calldata, the tape addresses
-  and a tape scan that meets a `v1.0.0` position event refuse it with
+  and a tape scan that meets a `v1.0.0`-only event refuse it with
   `ContractError::UnsupportedEra`; the pool snapshot and the maker
   equities fail loudly (Multicall3 "call failed", from the earlier
   builds' `EMA_WINDOW()` in their batch); every other read still uses
