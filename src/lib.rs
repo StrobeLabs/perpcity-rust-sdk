@@ -59,12 +59,16 @@ pub use client::Books;
 pub use client::{
     ARBITRUM_CHAIN_ID, ARBITRUM_POOL_MANAGER, ARBITRUM_SEPOLIA_CHAIN_ID,
     ARBITRUM_SEPOLIA_PERP_FACTORY, ARBITRUM_SEPOLIA_POOL_MANAGER, ARBITRUM_SEPOLIA_USDC,
-    ARBITRUM_USDC, AdjustMakerParams, AdjustMakerResult, AdjustTakerParams, AdjustTakerResult,
-    Balances, Bounds, ChainDeployments, ChainReader, ExactAdjustMakerParams,
-    ExactAdjustTakerParams, ExactOpenMakerParams, ExactOpenTakerParams, Fees, MAX_ROW_BATCH,
-    MakerEquityKind, MakerEquityOutcome, MarginRatioTriple, MarginRatios, MarketConfig,
-    MarketRates, MarketReader, MarketSnapshot, OpenInterest, OpenMakerParams, OpenResult,
-    OpenTakerParams, PerpClient, RowOutcome, SolvencyState, StateAt, TxBuilder,
+    ARBITRUM_SEPOLIA_V1_PERP_FACTORY, ARBITRUM_SEPOLIA_V1_PERP_GUARD_HOOK,
+    ARBITRUM_SEPOLIA_V1_WITHDRAWAL_CONTROLLER_IMPL, ARBITRUM_SEPOLIA_V022_PERP_GUARD_HOOK,
+    ARBITRUM_USDC, ARBITRUM_V1_PERP_FACTORY, ARBITRUM_V1_PERP_GUARD_HOOK,
+    ARBITRUM_V1_WITHDRAWAL_CONTROLLER_IMPL, ARBITRUM_V022_PERP_GUARD_HOOK, AdjustMakerParams,
+    AdjustMakerResult, AdjustTakerParams, AdjustTakerResult, Balances, Bounds, ChainDeployments,
+    ChainReader, Era, ExactAdjustMakerParams, ExactAdjustTakerParams, ExactOpenMakerParams,
+    ExactOpenTakerParams, Fees, MAX_ROW_BATCH, MakerEquityKind, MakerEquityOutcome,
+    MarginRatioTriple, MarginRatios, MarketConfig, MarketRates, MarketReader, MarketSnapshot,
+    OpenInterest, OpenMakerParams, OpenResult, OpenTakerParams, PerpClient, RowOutcome,
+    SolvencyState, StateAt, TxBuilder,
 };
 
 #[doc(inline)]

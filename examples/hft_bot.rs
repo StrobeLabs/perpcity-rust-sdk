@@ -42,9 +42,8 @@ use perpcity_sdk::hft::latency::LatencyTracker;
 use perpcity_sdk::hft::position_manager::{ManagedPosition, PositionManager, TriggerType};
 use perpcity_sdk::transport::config::Strategy;
 use perpcity_sdk::{
-    ARBITRUM_SEPOLIA_CHAIN_ID, ARBITRUM_SEPOLIA_POOL_MANAGER, ARBITRUM_SEPOLIA_USDC,
-    ChainDeployments, ChainReader, HftTransport, OpenTakerParams, PerpClient, TransportConfig,
-    Urgency,
+    ARBITRUM_SEPOLIA_CHAIN_ID, ARBITRUM_SEPOLIA_USDC, ChainDeployments, ChainReader, HftTransport,
+    OpenTakerParams, PerpClient, TransportConfig, Urgency,
 };
 
 /// Number of blocks to run the HFT loop before exiting.
@@ -91,7 +90,7 @@ fn load_chain(transport: HftTransport) -> ChainReader {
         transport,
         ChainDeployments {
             usdc,
-            pool_manager: ARBITRUM_SEPOLIA_POOL_MANAGER,
+            ..ChainDeployments::ARBITRUM_SEPOLIA
         },
         ARBITRUM_SEPOLIA_CHAIN_ID,
     )

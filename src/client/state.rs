@@ -1681,8 +1681,8 @@ mod tests {
 
     /// The two immutables the first snapshot reads, in `try_join!` order.
     fn immutables_answers(rpc: &Rpc) {
-        rpc.call::<Perp::POOL_IDCall>(&POOL_ID);
         rpc.call::<Perp::poolKeyCall>(&mock::pool_key(SPACING));
+        rpc.call::<Perp::POOL_IDCall>(&POOL_ID);
     }
 
     /// The `Perp` views behind a mark, in one multicall at `block`: pool
@@ -1895,8 +1895,8 @@ mod tests {
     async fn a_non_positive_tick_spacing_is_rejected_and_asked_again() {
         let (client, rpc) = mock::client();
         for spacing in [0, -30] {
-            rpc.call::<Perp::POOL_IDCall>(&POOL_ID);
             rpc.call::<Perp::poolKeyCall>(&mock::pool_key(spacing));
+            rpc.call::<Perp::POOL_IDCall>(&POOL_ID);
 
             let err = client.market().get_pool_snapshot().await.unwrap_err();
             assert!(

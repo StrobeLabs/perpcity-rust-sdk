@@ -221,7 +221,7 @@ fn chain(transport: HftTransport) -> ChainReader {
         transport,
         ChainDeployments {
             usdc: USDC,
-            pool_manager: perpcity_sdk::ARBITRUM_SEPOLIA_POOL_MANAGER,
+            ..ChainDeployments::ARBITRUM_SEPOLIA
         },
         CHAIN_ID,
     )

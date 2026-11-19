@@ -3,6 +3,8 @@
 use alloy::primitives::{Address, U256};
 use thiserror::Error;
 
+use crate::client::Era;
+
 /// Errors from querying on-chain protocol state.
 #[derive(Error, Debug)]
 #[non_exhaustive]
@@ -112,5 +114,28 @@ pub enum ContractError {
         expected: u64,
         /// The chain the endpoint answered `eth_chainId` with.
         served: u64,
+    },
+
+    /// The market's pool key names a hook that none of the chain's
+    /// deployments name, so its build is unknown and nothing is read or
+    /// sent on a guessed one. Not transient: the hook is fixed for the
+    /// market's life; the deployments may be missing it.
+    #[error("market {perp} runs an unknown build: its pool hook {hook} is none this chain names")]
+    UnknownBuild {
+        /// The market.
+        perp: Address,
+        /// The hook its pool key names.
+        hook: Address,
+    },
+
+    /// The market's era has no implementation of this call in the SDK yet,
+    /// and another era's call shape is never sent in its place. Not
+    /// transient: the era is fixed for the market's life.
+    #[error("{operation} is not supported on a {era:?} market")]
+    UnsupportedEra {
+        /// The market's era.
+        era: Era,
+        /// The call refused.
+        operation: &'static str,
     },
 }

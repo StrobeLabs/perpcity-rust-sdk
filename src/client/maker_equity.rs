@@ -1065,8 +1065,8 @@ mod tests {
     /// stored EMAs' word.
     fn market_answers(rpc: &Rpc) {
         let one = x96(1, 0);
-        rpc.call::<Perp::POOL_IDCall>(&POOL_ID);
         rpc.call::<Perp::poolKeyCall>(&mock::pool_key(30));
+        rpc.call::<Perp::POOL_IDCall>(&POOL_ID);
         rpc.aggregate(
             92,
             [
