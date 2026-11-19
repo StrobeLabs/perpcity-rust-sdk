@@ -283,14 +283,15 @@ pub(super) fn validate_fee_recipient(
 
 #[cfg(test)]
 mod tests {
-    use alloy::primitives::{Address, B256, U256};
-    use alloy::sol_types::SolCall;
+    use alloy::primitives::{Address, B256, U256, address, keccak256};
+    use alloy::sol_types::{SolCall, SolValue};
 
     use super::*;
     use crate::client::{ChainDeployments, mock};
     use crate::contracts::{Maker, Position, v1};
     use crate::convert::pack_balance_delta;
     use crate::errors::PerpCityError;
+    use crate::{HftTransport, TransportConfig};
 
     const POOL_ID: B256 = B256::repeat_byte(0x99);
     const RECIPIENT: Address = Address::repeat_byte(0x44);
@@ -413,6 +414,37 @@ mod tests {
             rpc.is_drained(),
             "poolKey, poolId; no modules, no eth_getLogs"
         );
+    }
+
+    /// The three-way pool id check on a deployed `v1.0.0` market (the one
+    /// the Sepolia `v1.0.0` factory created): the id the immutables cache is
+    /// the market's `poolId()`, and that is the keccak of its `poolKey()`.
+    /// A crate test, because the cached record is crate-private.
+    #[tokio::test]
+    #[ignore = "network: reads a v1.0.0 market on Arbitrum Sepolia"]
+    async fn a_live_v1_market_caches_its_pool_id() {
+        let perp = address!("63da3c7589964e7cddb10db51797c0098428d854");
+        let url = std::env::var("SEPOLIA_FORK_URL")
+            .unwrap_or_else(|_| "https://sepolia-rollup.arbitrum.io/rpc".to_string());
+        let transport = HftTransport::new(
+            TransportConfig::builder()
+                .shared_endpoint(&url)
+                .build()
+                .unwrap(),
+        )
+        .unwrap();
+        let chain = ChainReader::arbitrum_sepolia(transport)
+            .checked()
+            .await
+            .unwrap();
+        let cached = chain.market(perp).immutables().await.unwrap();
+        assert_eq!(cached.era, Era::V1);
+        let market = v1::Perp::new(perp, chain.provider());
+        let key = market.poolKey().call().await.unwrap();
+        let pool_id = market.poolId().call().await.unwrap();
+        assert_eq!(cached.pool_id, pool_id, "immutables() caches poolId()");
+        assert_eq!(pool_id, keccak256(key.abi_encode()));
+        assert_eq!(cached.tick_spacing, key.tickSpacing.as_i32());
     }
 
     /// No liquidation call is sent to a `v1.0.0` market on another era's

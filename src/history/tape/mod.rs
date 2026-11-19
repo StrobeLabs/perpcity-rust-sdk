@@ -49,6 +49,8 @@ pub use self::custody::{OwnershipLog, Positioned, Wallets};
 pub use self::lenses::{Swap, SwapAction};
 pub use self::read::{latest_market_events, market_events, market_tape};
 
+#[cfg(test)]
+pub(in crate::history) use self::read::V1_POSITION_TOPICS;
 pub(in crate::history) use self::read::{
     latest_market_events_with, market_events_with, market_logs_with, market_tape_with,
     markets_tape_with, stamp_timestamps,

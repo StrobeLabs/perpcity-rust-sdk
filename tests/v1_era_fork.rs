@@ -15,9 +15,12 @@
 mod v1_fork;
 
 use alloy::primitives::{Address, U256, address, keccak256};
+use alloy::providers::Provider;
 use alloy::sol_types::SolValue;
+use alloy::transports::RpcError;
 
 use perpcity_sdk::client::PositionRole;
+use perpcity_sdk::constants::SNAPSHOT_BLOCK_LAG;
 use perpcity_sdk::contracts::{
     Perp as PerpV022Surface,
     v1::{Perp, PerpFactory},
@@ -113,14 +116,42 @@ async fn each_build_reads_as_its_era_on_a_sepolia_fork() {
         .await
         .unwrap_err();
     assert!(unsupported(&err, "liquidation_calldata"), "{err}");
+    // The two block-pinned reads read the head less SNAPSHOT_BLOCK_LAG: mine
+    // past it, so the pinned block holds the market's code.
+    let lag = U256::from(SNAPSHOT_BLOCK_LAG + 2);
+    let _: serde_json::Value = w
+        .provider
+        .raw_request("anvil_mine".into(), (lag,))
+        .await
+        .unwrap();
+    let pinned = v1_market.state().await.unwrap().block().number;
+    let code = w
+        .provider
+        .get_code_at(v1_perp)
+        .block_id(pinned.into())
+        .await
+        .unwrap();
+    assert!(
+        !code.is_empty(),
+        "the pinned block {pinned} holds the v1 market"
+    );
+    // Their multicalls hold the earlier builds' `EMA_WINDOW()`, which v1
+    // lacks (it has `emaWindow()`), so Multicall3 reverts the whole batch.
+    let multicall_reverted = |err: &PerpCityError| {
+        matches!(
+            err,
+            PerpCityError::Abi(alloy::contract::Error::TransportError(RpcError::ErrorResp(payload)))
+                if payload.code == 3 && payload.message.contains("Multicall3: call failed")
+        ) && !err.is_transient()
+    };
     let err = v1_market.get_pool_snapshot().await.unwrap_err();
-    assert!(!err.is_transient(), "pool snapshot: {err}");
+    assert!(multicall_reverted(&err), "pool snapshot: {err:?}");
     println!("v1 get_pool_snapshot fails loudly: {err}");
     let err = v1_market
         .get_maker_equities(&[U256::from(1u8)])
         .await
         .unwrap_err();
-    assert!(!err.is_transient(), "maker equities: {err}");
+    assert!(multicall_reverted(&err), "maker equities: {err:?}");
     println!("v1 get_maker_equities fails loudly: {err}");
 
     for (perp, era) in [(V022_PERP, Era::Upgradeable), (LEGACY_PERP, Era::Legacy)] {
