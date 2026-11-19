@@ -288,7 +288,7 @@ let chain = ChainReader::arbitrum_sepolia(transport); // test USDC 0xBEF280Be…
 let client = PerpClient::new(chain.market(perp), signer);
 ```
 
-For Arbitrum One, `ChainReader::arbitrum(transport)` uses canonical Circle USDC (`0xaf88d065e77c8cC2239327C5EDb3A432268e5831`) and chain id 42161. For any other collateral token or chain, build the reader with `ChainReader::new(transport, ChainDeployments { usdc, ..ChainDeployments::ARBITRUM }, chain_id)`, or a `ChainDeployments` of its own: its guard hooks are how each market's build is read, and a market whose pool hook none of them names is refused. Reads need no signer: `chain.market(perp)` on its own answers every market read, and one chain reader serves any number of markets and clients.
+For Arbitrum One, `ChainReader::arbitrum(transport)` uses canonical Circle USDC (`0xaf88d065e77c8cC2239327C5EDb3A432268e5831`) and chain id 42161. To change one address on Arbitrum One, such as the collateral token, override that field of the known deployments, as in `ChainReader::new(transport, ChainDeployments { usdc, ..ChainDeployments::ARBITRUM }, ARBITRUM_CHAIN_ID)`. Another chain needs its own full `ChainDeployments` (its USDC, `PoolManager`, guard hooks, factory and controller implementation), never Arbitrum One's: the guard hooks are how each market's build is read, and a market whose pool hook none of them names is refused. Reads need no signer: `chain.market(perp)` on its own answers every market read, and one chain reader serves any number of markets and clients.
 
 ### Release Profile
 

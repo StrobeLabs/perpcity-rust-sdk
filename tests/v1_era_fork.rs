@@ -17,7 +17,10 @@ mod v1_fork;
 use alloy::primitives::{Address, address, keccak256};
 use alloy::sol_types::SolValue;
 
-use perpcity_sdk::contracts::{Perp as PerpV022Surface, v1::Perp};
+use perpcity_sdk::contracts::{
+    Perp as PerpV022Surface,
+    v1::{Perp, PerpFactory},
+};
 use perpcity_sdk::{
     ARBITRUM_CHAIN_ID, ChainDeployments, ChainReader, ContractError, Era, HftTransport,
     PerpCityError, TransportConfig,
@@ -62,6 +65,13 @@ async fn each_build_reads_as_its_era_on_a_sepolia_fork() {
         &ChainDeployments::ARBITRUM_SEPOLIA,
         "the fork reader carries the Sepolia deployments"
     );
+
+    let sepolia = ChainDeployments::ARBITRUM_SEPOLIA;
+    let factory = PerpFactory::new(sepolia.v1_perp_factory, &w.provider);
+    let hook = factory.PERP_GUARD_HOOK().call().await.unwrap();
+    assert_eq!(hook, sepolia.v1_perp_guard_hook);
+    let controller_impl = factory.WITHDRAWAL_CONTROLLER_IMPL().call().await.unwrap();
+    assert_eq!(controller_impl, sepolia.v1_withdrawal_controller_impl);
 
     let v1_market = chain.market(v1_perp);
     assert_eq!(v1_market.era().await.unwrap(), Era::V1);
