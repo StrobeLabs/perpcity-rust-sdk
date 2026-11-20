@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- V1 trade receipts expose the position ID, emitted margin and full trade event. A missing event reports the mined transaction hash and tells callers to avoid a second send.
+
 - V1 pinned reads expose position previews and the collateral cap. Legacy valuation batches on v1 direct callers to the preview. Physical headroom uses the depth consumed by the swap direction.
 
 - V1 marks and snapshots call the pinned market’s `readBeaconIndex` and preserve its revert data. For a revert shorter than four bytes, `ContractError::RevertedWithoutSelector` carries the complete payload. Outer RPC errors propagate. The timestamp API reads the beacon directly.

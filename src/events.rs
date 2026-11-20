@@ -35,7 +35,9 @@
 //!
 //! ```rust,no_run
 //! use perpcity_sdk::feeds::events::{MarketEvent, decode_log};
-//! # use alloy::rpc::types::Log;
+//! # pub mod receipt;
+
+use alloy::rpc::types::Log;
 //! # fn example(log: &Log) {
 //! match decode_log(log) {
 //!     // A log this vocabulary covers.
