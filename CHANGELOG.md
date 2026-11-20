@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-- V1 marks and snapshots call the pinned market’s `readBeaconIndex` and preserve its revert data. Outer RPC errors propagate. The timestamp API reads the beacon directly.
+- V1 marks and snapshots call the pinned market’s `readBeaconIndex` and preserve its revert data. For a revert shorter than four bytes, `ContractError::RevertedWithoutSelector` carries the complete payload. Outer RPC errors propagate. The timestamp API reads the beacon directly.
 
 ### Breaking
 

@@ -582,8 +582,8 @@ impl ChainReader {
         if !row.success {
             let data = row.returnData.to_string();
             let (error_name, selector) =
-                decode_revert(&data).ok_or_else(|| ContractError::MulticallFailed {
-                    reason: format!("readBeaconIndex reverted without a selector ({data})"),
+                decode_revert(&data).ok_or_else(|| ContractError::RevertedWithoutSelector {
+                    data: row.returnData.clone(),
                 })?;
             return Err(TransactionError::SimulationReverted {
                 selector: selector.into(),
@@ -730,6 +730,23 @@ mod tests {
             selector, revert_data: Some(payload), ..
         }) if selector.0 == [0xde, 0xad, 0xbe, 0xef] && payload == data.to_string())
         );
+
+        for length in 0..4 {
+            let payload = data.slice(..length);
+            rpc.aggregate3(vec![IMulticall3::Result {
+                success: false,
+                returnData: payload.clone(),
+            }]);
+            let err = chain
+                .v1_market_index_at(Address::ZERO, Address::ZERO, BlockId::latest())
+                .await
+                .unwrap_err();
+            assert!(!err.is_transient());
+            assert!(err.revert_class().is_none());
+            assert!(matches!(err, PerpCityError::Contract(
+                ContractError::RevertedWithoutSelector { data }
+            ) if data == payload));
+        }
 
         rpc.fails("execution reverted");
         let err = chain
