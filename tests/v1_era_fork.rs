@@ -93,7 +93,8 @@ async fn each_build_reads_as_its_era_on_a_sepolia_fork() {
     assert_eq!(pool_id, keccak256(key.abi_encode()));
     println!("v1: era V1, pool id {pool_id}");
 
-    // The tape and liquidation paths still refuse v1.
+    // The tape path still refuses v1; the liquidation path reads the v1
+    // rows and builds the v1 call.
     let unsupported = |err: &PerpCityError, operation: &str| {
         matches!(
             err,
@@ -108,12 +109,24 @@ async fn each_build_reads_as_its_era_on_a_sepolia_fork() {
         .liquidation_calldata(PositionRole::Taker, U256::from(1u8), recipient)
         .await
         .unwrap_err();
-    assert!(unsupported(&err, "liquidation_calldata"), "{err}");
+    assert!(
+        matches!(
+            err,
+            PerpCityError::Contract(ContractError::PositionNotFound { .. })
+        ),
+        "{err}"
+    );
     let err = v1_market
         .simulate_liquidate_maker(w.me, U256::from(1u8), recipient)
         .await
         .unwrap_err();
-    assert!(unsupported(&err, "liquidation_calldata"), "{err}");
+    assert!(
+        matches!(
+            err,
+            PerpCityError::Contract(ContractError::PositionNotFound { .. })
+        ),
+        "{err}"
+    );
     // The two block-pinned reads read the head less SNAPSHOT_BLOCK_LAG: mine
     // past it, so the pinned block holds the market's code.
     let lag = U256::from(SNAPSHOT_BLOCK_LAG + 2);

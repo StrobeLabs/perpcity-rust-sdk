@@ -6,7 +6,7 @@ The parser matches the emitting market, event signature and optional position ID
 |---|---|---|---|
 | [`sealed::Sealed`](../receipt.rs#L13) | Only this crate can implement the receipt event trait. | Implemented by the supported event bindings. | Supertrait of the receipt parser bound. |
 | [`V1PositionEvent`](../receipt.rs#L17) | Sealed position ID and checked post-fee margin exposed by a v1 event | Implemented by eight v1 contract event bindings | Type bound for the receipt parser. |
-| [`V1TradeResult`](../receipt.rs#L61) | A mined trade, its position ID, post-fee margin and full v1 event | [`parse_v1_receipt_for`](../receipt.rs#L96) selects the event by market, signature and optional position ID and indexed owner | Receipt consumers record the executed fill and margin directly. |
+| [`V1TradeResult`](../receipt.rs#L61) | A mined trade, its position ID, post-fee margin and full v1 event | [`parse_v1_receipt_for`](../receipt.rs#L96) selects the event by market, signature and optional position ID and indexed owner; the `v1.0.0` taker writes [`PerpClient::open_taker_v1`](../../client/DESIGN.md) and [`PerpClient::close_taker_v1`](../../client/DESIGN.md) return it from their receipts | Receipt consumers record the executed fill and margin directly. |
 | [`MakerExit`](../receipt.rs#L149) | Full maker removal closes or converts the position. | [`parse_maker_exit`](../receipt.rs#L157) selects the emitted outcome. | Strategy layer matches the non-exhaustive exit. A missing event names both supported outcomes. |
 
 ## Accepted structure

@@ -279,7 +279,7 @@ fn closing_perp_delta(position: &PositionRow) -> PerpDelta {
 }
 
 /// Refuse a margin below the protocol's opening minimum.
-fn check_opening_margin(margin: UsdcAtoms) -> std::result::Result<(), ValidationError> {
+pub(super) fn check_opening_margin(margin: UsdcAtoms) -> std::result::Result<(), ValidationError> {
     if margin.atoms() < u128::from(MIN_OPENING_MARGIN) {
         return Err(ValidationError::InvalidMargin {
             reason: format!("margin must be at least {MIN_OPENING_MARGIN} atoms"),

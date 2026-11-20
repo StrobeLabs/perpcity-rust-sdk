@@ -67,8 +67,9 @@ pub use client::{
     ChainReader, Era, ExactAdjustMakerParams, ExactAdjustTakerParams, ExactOpenMakerParams,
     ExactOpenTakerParams, Fees, LpFee, LpFeeCurve, MAX_ROW_BATCH, MakerEquityKind,
     MakerEquityOutcome, MarginRatioTriple, MarginRatios, MarketConfig, MarketRates, MarketReader,
-    MarketSnapshot, OpenInterest, OpenMakerParams, OpenResult, OpenTakerParams, PerpClient,
-    PositionRow, RowOutcome, SolvencyState, StateAt, StoredMarginRatios, TvlCap, TxBuilder,
+    MarketSnapshot, MaxTotalFee, OpenInterest, OpenMakerParams, OpenResult, OpenTakerParams,
+    PerpClient, PositionRow, RowOutcome, SolvencyState, StateAt, StoredMarginRatios, TvlCap,
+    TxBuilder, V1_TRADE_DEADLINE, V1TakerAdjustment, V1TakerReplacement,
 };
 
 #[doc(inline)]
@@ -126,7 +127,10 @@ pub use math::tick::{
 };
 
 #[doc(inline)]
-pub use math::swap::{PoolSnapshot, QuoteConstraints, QuoteLimit, TakerQuote, TickLiquidity};
+pub use math::swap::{
+    MAX_TOTAL_FEE_SLACK, PoolSnapshot, QuoteConstraints, QuoteLimit, TakerFeeRates, TakerQuote,
+    TickLiquidity,
+};
 
 #[doc(inline)]
 pub use math::capacity::{

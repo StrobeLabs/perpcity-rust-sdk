@@ -107,7 +107,7 @@ above can be measured rather than asserted.
 |---|---|---|---|
 | [`NonceManager`](nonce.rs#L42), [`PendingTx`](nonce.rs#L25) | the account's nonce sequence: acquire is lock-free; every nonce handed out is tracked until resolved or failed | [`NonceManager::new`](nonce.rs#L51) from the chain's transaction count, once at sync | [`TxPipeline`](pipeline.rs#L125), which owns one and is its only caller. It is a separate type so that ownership of the sequence has one home and the pipeline's state machine sits above it. |
 | [`PipelineConfig`](pipeline.rs#L104) | the pipeline's limits: in-flight cap, stuck timeout | the caller; `Default` is the trading defaults | [`TxPipeline::new`](pipeline.rs#L146). |
-| [`TxPipeline`](pipeline.rs#L125) | preparing a send: `prepare` makes no RPC; a desynced sequence refuses sends until it can resync; every in-flight transaction is tracked by hash | [`TxPipeline::new`](pipeline.rs#L146) from a starting nonce and a [`PipelineConfig`](pipeline.rs#L104) | [`PerpClient`](../client/DESIGN.md), which holds one per signer, and whose `TxBuilder::send` is the only path that calls `prepare`, `record_submission`, `resolve` and the desync handling. One caller is the point: the execution model is enforced in one place. |
+| [`TxPipeline`](pipeline.rs#L125) | preparing a send: `prepare` makes no RPC; a desynced sequence refuses sends until it can resync; every in-flight transaction is tracked by hash, and `is_in_flight` says whether its send still waits | [`TxPipeline::new`](pipeline.rs#L146) from a starting nonce and a [`PipelineConfig`](pipeline.rs#L104) | [`PerpClient`](../client/DESIGN.md), which holds one per signer, and whose `TxBuilder::send` is the only path that calls `prepare`, `record_submission`, `resolve` and the desync handling; `PerpClient::replace_v1_taker` only asks `is_in_flight`. One caller is the point: the execution model is enforced in one place. |
 | [`PreparedTx`](pipeline.rs#L61) | nonce, fees and gas limit resolved locally; nothing sent | [`TxPipeline::prepare`](pipeline.rs#L162) | [`TxPipeline::record_submission`](pipeline.rs#L208), once the broadcast has a hash; between the two, `TxBuilder::send` signs exactly what it says. It carries the nonce so that a signing failure can hand it back. |
 | [`TxRequest`](pipeline.rs#L46) | what a send asks the pipeline for: destination, calldata, value, an optional limit, the urgency | the client's builder, from its parameters | [`TxPipeline::prepare`](pipeline.rs#L162). It exists so the pipeline never sees the client's types. |
 | [`InFlightTx`](pipeline.rs#L74) | a submitted transaction the pipeline tracks: its nonce, hash, fees and submission time | `record_submission`, which stores one per broadcast | [`TxPipeline`](pipeline.rs#L125), which holds them until resolved or failed and reads their fees and times for `prepare_bump` and the stuck check. |
@@ -216,7 +216,11 @@ This module's specification is a number: zero requests on the hot path.
 - **`BumpParams` is the strategy layer's and the table does not say so.**
   `prepare_bump` computes a replacement's fees and nothing in the crate
   sends one, so the type reads as a dead end rather than as part of the
-  surface a caller builds on.
+  surface a caller builds on. A `v1.0.0` trade must not be bumped with
+  it: its calldata carries a deadline, so the same bytes signed again can
+  mine as `DeadlineExpired`. `PerpClient::replace_v1_taker` is that
+  replacement, with a new deadline and its own fees; the pipeline only
+  answers `is_in_flight` for it.
 - **`position_manager` is a bot's strategy state, not chain truth.** It
   predates the boundary rule and is the one module here an outside
   market maker would not want from an SDK. It should move to the strategy

@@ -299,9 +299,9 @@ async fn position_reads_agree_with_the_v1_market() {
                 Perp::LongCloseCapacityExceeded::SELECTOR
             );
         }
-        // Anvil serves the head block from its live state, which
-        // `anvil_setStorageAt` writes: an empty block makes this one history
-        // before the next write.
+        // Anvil stores a block's state when it mines the next block, and
+        // `anvil_setStorageAt` writes the live head: an empty block stores
+        // this one before the next write.
         let _: Value = w.provider.raw_request("evm_mine".into(), ()).await.unwrap();
     }
     // Both handles read again at a head one unit below the boundary: each
