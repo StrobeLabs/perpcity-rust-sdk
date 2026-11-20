@@ -277,7 +277,10 @@ pub enum NotReplaceableReason {
     /// node's `from` field is not trusted.
     WrongSender,
     /// It is signed for another chain than this client's, or, as a legacy
-    /// transaction, for no chain.
+    /// transaction, for no chain. This holds for a mined transaction too:
+    /// a mined legacy call with no chain id is refused, and its mined
+    /// outcome is not reported; read it with
+    /// [`PerpClient::poll_receipt`](crate::PerpClient::poll_receipt).
     OtherChain {
         /// The chain id it is signed for.
         chain_id: Option<u64>,
@@ -287,7 +290,10 @@ pub enum NotReplaceableReason {
     OtherMarket,
     /// It is from this client to this market, but its call is not one
     /// that the method replaces, such as a maker trade, a liquidation, or
-    /// a taker call that carries value.
+    /// a taker call that carries value. This holds for a mined transaction
+    /// too: a mined call with value is refused, and its mined outcome is
+    /// not reported; read it with
+    /// [`PerpClient::poll_receipt`](crate::PerpClient::poll_receipt).
     UnsupportedCall,
     /// Its own send still waits for its receipt.
     InFlight,

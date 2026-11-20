@@ -25,9 +25,11 @@ strategy.
 again to any endpoint with no consequence. A write that fails after the
 transaction was signed may already be in a mempool, and sending it again
 is either idempotent (the same bytes) or catastrophic (a new nonce). So
-the transport classifies every request, retries reads freely and writes
-only on a pre-mempool rejection or on no answer, and never invents a
-second transaction. The execution model is: reads are cheap to repeat,
+the transport classifies every request, retries reads freely, retries an
+`eth_sendRawTransaction` only as the same signed bytes, after an error
+answer or no answer, sends a request with an `eth_sendTransaction` (which
+the node signs with a nonce it picks) once, and never invents a second
+transaction. The execution model is: reads are cheap to repeat,
 writes are cheap to repeat only as the same bytes, and the caller
 reconciles a doubtful write by its receipt.
 
@@ -75,14 +77,14 @@ rotation until a probe succeeds.
         ┌──────────────────────┐             ┌──────────────────────┐
         │ Strategy             │             │ one endpoint         │
         │  round robin         │             │ same signed bytes    │
-        │  latency-based       │             └──────────┬───────────┘
-        │  hedged: fan out,    │                        │
-        │   first answer wins, │              answered?
-        │   others cancelled   │           no │        │ rejected pre-mempool
-        └──────────┬───────────┘              │        │ (nonce too low, gas, …)
-                   │                          │        ▼
-             answered?                        │   retry, same bytes
-        no │            │ declined            │
+        │  latency-based       │             │ (eth_sendTransaction:│
+        │  hedged: fan out,    │             │  sent once)          │
+        │   first answer wins, │             └──────────┬───────────┘
+        │   others cancelled   │              answered?
+        └──────────┬───────────┘           no │        │ error answer
+                   │                          │        │ (underpriced, funds, …)
+             answered?                        │        ▼
+        no │            │ declined            │   retry, same bytes
            ▼            ▼                     ▼
      retry w/ backoff  return as is,     retry, same bytes; outcome of
      (endpoint failed  health untouched  the first attempt unknown →
@@ -114,17 +116,24 @@ failures, lets one probe through after the cooldown, and closes again
 only when the probe succeeds.
 
 A read retries with backoff when the endpoint failed to answer, never
-when it declined. A write retries when the node rejected it before the
-mempool, and when the node did not answer, with the same signed bytes;
-the caller trusts the receipt over the error. A write's last explicit
+when it declined. An `eth_sendRawTransaction` retries after an error
+answer and after no answer, with the same signed bytes; the caller trusts
+the receipt over the error. A request that holds an `eth_sendTransaction`
+is sent once: the node signs it with a nonce it picks, so a resend after
+a lost reply could be signed with the next nonce as a second
+transaction, and a lost reply is a transport error with an unknown
+outcome. A write's last explicit
 rejection (`underpriced`, a fee or funds answer) is passed on as the
 node's answer only when every attempt got one: after an attempt with no
 answer, or with another answer (`already known`, `nonce too low`), a node
 can hold the transaction, and the rejection comes back as a transport
 error that names it. A batch's evidence is the whole batch's: an attempt
-counts as rejected only when every write in it was, since alloy's batch
-response names only its first error, and a doubtful batch's last
-rejection fails the whole batch.
+counts as rejected only when every write in it was, each by the one
+response with its id, since alloy's batch response names only its first
+error, and a doubtful batch's last rejection fails the whole batch. A
+response that does not answer each write once by its id (one error
+object for a whole batch, a missing or a repeated id) is no evidence
+either: its rejection fails the whole request the same way.
 
 The WebSocket manager is the subscription side of the same idea: one
 socket, many subscriptions, reconnect with capped backoff, and the
@@ -138,7 +147,7 @@ callers re-subscribe.
 | [`TransportConfig`](config.rs#L146), [`TransportConfigBuilder`](config.rs#L180) | the pools and their policies: shared, read and write pools; per-endpoint timeouts; the retry and breaker settings; validated once at [`build`](config.rs#L280) | the builder, and only the builder | [`HftTransport::new`](provider.rs#L539). The strategy layer assembles one from its environment; the builder is where a keyed URL enters the crate. |
 | [`Strategy`](config.rs#L52) | how a read is routed: round robin, latency-based, or hedged; a caller's choice | the caller | [`TransportConfigBuilder::strategy`](config.rs#L253). Hedging costs N requests per read, which is why it is a choice and not a default. |
 | [`ReadRetryConfig`](config.rs#L89) | what a read retries: no answer only, with backoff | the caller; `Default` is 2 retries | [`TransportConfigBuilder::read_retry`](config.rs#L265). |
-| [`WriteRetryConfig`](config.rs#L114) | what a write retries: pre-mempool rejection or no answer, the same bytes | the caller; `Default` is 3 retries | [`TransportConfigBuilder::write_retry`](config.rs#L271). |
+| [`WriteRetryConfig`](config.rs#L114) | what an `eth_sendRawTransaction` retries: an error answer or no answer, the same bytes; an `eth_sendTransaction` is sent once | the caller; `Default` is 3 retries | [`TransportConfigBuilder::write_retry`](config.rs#L271). |
 | [`CircuitBreakerConfig`](config.rs#L68) | when a breaker trips: failure threshold, cooldown, probe | the caller; `Default` is the trading defaults | [`TransportConfigBuilder::circuit_breaker`](config.rs#L259); [`EndpointHealth::new`](health.rs#L90), one breaker per endpoint. |
 | [`EndpointHealth`](health.rs#L57), [`ProbePermit`](provider.rs#L190), [`Reserved`](health.rs#L27) | one endpoint's health: breaker, latency EMA, decaying error rate, readable without a lock; one half-open probe at a time; an endpoint held for a purpose | [`EndpointHealth::new`](health.rs#L90), one per endpoint in a pool | the pools inside the transport, which select over it. Internal: nothing outside this module selects an endpoint, and the pool type is hidden from the documentation for that reason, which is why this row draws no edge. |
 | [`EndpointStatus`](health.rs#L75), [`CircuitState`](health.rs#L37) | one endpoint's health, read out | [`HftTransport::health_status`](provider.rs#L558) | nothing in the crate. The strategy layer's metrics, which is why it is a plain value and not a handle. |

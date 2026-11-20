@@ -102,14 +102,19 @@ impl Default for ReadRetryConfig {
     }
 }
 
-/// Retry configuration for write operations.
+/// Retry configuration for `eth_sendRawTransaction`.
 ///
-/// A write is retried after an error answer (e.g. `-32003 insufficient
-/// funds` from a stale read replica) and after no answer, always as the
-/// same signed bytes. An earlier attempt may have succeeded: a timeout or
-/// a dropped connection can follow the node taking the transaction. The
+/// It is retried after an error answer (e.g. `-32003 insufficient funds`
+/// from a stale read replica) and after no answer, always as the same
+/// signed bytes. An earlier attempt may have succeeded: a timeout or a
+/// dropped connection can follow the node taking the transaction. The
 /// identical bytes can only be that one transaction, so a resend cannot
 /// make a second; it can be answered `already known` or `nonce too low`.
+///
+/// A request that holds an `eth_sendTransaction` is sent once whatever
+/// this says: the node signs it with a nonce it picks, so a resend could
+/// be a second transaction. A lost reply is a transport error, and the
+/// outcome is unknown.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WriteRetryConfig {
     /// Maximum number of retry attempts (0 = no retries, just the initial try).
@@ -128,7 +133,8 @@ impl Default for WriteRetryConfig {
 }
 
 impl WriteRetryConfig {
-    /// Whether a JSON-RPC response to a write is retried: any error answer.
+    /// Whether a JSON-RPC response to an `eth_sendRawTransaction` is
+    /// retried: any error answer.
     ///
     /// The node that answered does not hold the transaction only for an
     /// explicit rejection, and another attempt may already have reached a
