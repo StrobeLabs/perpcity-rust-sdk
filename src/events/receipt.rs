@@ -72,7 +72,12 @@ pub struct V1TradeResult<E> {
 impl<E> V1TradeResult<E> {
     #[doc(hidden)]
     pub fn new(tx_hash: B256, pos_id: U256, margin: Option<UsdcAtoms>, event: E) -> Self {
-        Self { tx_hash, pos_id, margin, event }
+        Self {
+            tx_hash,
+            pos_id,
+            margin,
+            event,
+        }
     }
 }
 
@@ -160,12 +165,14 @@ pub fn parse_maker_exit(
         Err(crate::PerpCityError::Contract(ContractError::MinedEventMissing { .. })) => {
             match parse_v1_receipt_for(receipt, perp, Some(pos_id), owner) {
                 Ok(trade) => Ok(MakerExit::Converted(trade)),
-                Err(crate::PerpCityError::Contract(ContractError::MinedEventMissing { tx_hash, .. })) => {
-                    Err(ContractError::MinedEventMissing {
-                        tx_hash,
-                        event: "MakerClosed or MakerConverted",
-                    }.into())
+                Err(crate::PerpCityError::Contract(ContractError::MinedEventMissing {
+                    tx_hash,
+                    ..
+                })) => Err(ContractError::MinedEventMissing {
+                    tx_hash,
+                    event: "MakerClosed or MakerConverted",
                 }
+                .into()),
                 Err(error) => Err(error),
             }
         }

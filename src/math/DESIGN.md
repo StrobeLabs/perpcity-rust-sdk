@@ -274,7 +274,7 @@ with no allocation on the hot path beyond the tick map a snapshot owns.
 - **Golden vector**: a real on-chain outcome a port must reproduce exactly.
 ## Accepted structure
 
-`MarketCapacity` returns headroom in `PerpAtoms` and takes a swap size in the same unit in `fits_swap`.
+`MarketCapacity` returns headroom in `PerpAtoms` and takes requested and filled sizes in the same unit in `fits_swap`.
 - **`Emas` and `PricePair` convert both ways.** `stored` lifts the
   contract's two `uint128` words into prices that know their touch and
   `pair` narrows them back for the arithmetic that is transcribed over the
