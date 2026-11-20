@@ -36,7 +36,8 @@ landed, so the hash is carried and the nonce is never reused. The
 variant is the stage.
 
 **Typed reverts are answers.** A contract revert decoded to its selector
-is not an error to retry; it is the contract answering a question. A
+is, but for the two transient classes below, not an error to retry; it
+is the contract answering a question. A
 liquidation probe's `NotLiquidatable` is "healthy"; `NonMakerPosition` is
 "wrong kind". `is_revert::<E>` is how a caller reads the answer, and the
 decode module is how a raw revert becomes one.
@@ -45,13 +46,14 @@ decode module is how a raw revert becomes one.
 `v1.0.0` reverts are about the moment or the market, not the call:
 `StaleBeaconIndex` and `DeadlineExpired` pass on a later try (after the
 next beacon update; with the call built again with a new deadline), so
-they are transient; a beacon that
-gives no usable index (`BeaconIndexUnreadable`, `PriceOutsideRange`)
-fails every call that reads it until the beacon is fixed (from
-`setBeacon` or `createPerp` the fault is the named beacon's, not the
-market's), and a market near its TVL cap (`TvlCapExceeded`) refuses an
-add of margin that does not fit until the cap or the TVL moves. The last two are not the position's fault and not transient:
-a caller holds the market or the add, and does not drop the position.
+they are transient; a beacon that gives no usable index
+(`BeaconIndexUnreadable`, `PriceOutsideRange`) fails every call that
+reads it until the beacon is fixed (from `setBeacon` or `createPerp` the
+fault is the named beacon's, not the market's), and a market near its
+TVL cap (`TvlCapExceeded`) refuses an add that does not fit until the
+cap or the TVL moves, while a smaller add can fit. The last two are not
+the position's fault and not transient: a caller holds the market or the
+add, and does not drop the position.
 `RevertClass` is that verdict, decided once from the selector.
 
 **Validation fails before the chain is asked.** A price that is not
@@ -91,10 +93,10 @@ answers for all of them.
 |---|---|---|---|
 | [`ValidationError`](validation.rs#L11) | the caller's input refused, typed per input kind; never transient, no request was sent. A variant names only what the caller could not have known: `NoBandCapacity` carries the band's ticks; `InvalidAmount`, the text an amount's parse refused; `BlockMismatch`, the two blocks inputs meant for one came from | every constructor, conversion and parse that checks its input, [`TickRange::new`](../math/DESIGN.md) and [`TransportConfigBuilder::build`](../transport/DESIGN.md) among them; every port in `math` and function in `convert`, since pure code fails only on its inputs | [`PerpCityError`](mod.rs#L46), by conversion. The strategy layer refuses a config before any request is made. |
 | [`ContractError`](contract.rs#L11) | the chain's state refusing: each variant states its transience in its doc; [`BlockUnavailable`](contract.rs#L62) and [`StateUnavailable`](contract.rs#L72) are the pair every pinned read distinguishes | chosen in the pinned reads (pruned state, missing block), the batches (a failed multicall or storage read), `ChainReader::checked` (another chain), a market's immutables (an unknown build), the liquidation and tape reads (an unsupported era), the scans in `history` (a range no narrowing serves) and the receipt parsers (an event not emitted) | [`PerpCityError`](mod.rs#L46), by conversion. A retry loop keys on the transience the variant states; a forensic read keys on which of the pair it was. |
-| [`TransactionError`](transaction.rs#L13) | the send's stages: the variant is the stage; every variant after broadcast carries `tx_hash`; [`is_revert`](transaction.rs#L223) reads a typed revert; `is_unconfirmed` names the two stages whose send may still land | [`TxPipeline::prepare`](../hft/DESIGN.md), the one signature that names it; the stages of `TxBuilder::send` choose the rest inside the crate's `Result`, and the simulation stage names a revert through `try_extract_revert`, the bridge from the node's hex to a selector | [`PerpCityError`](mod.rs#L46), by conversion. The strategy layer reads the stage to know whether money may have moved, and the hash to find out. |
-| [`RevertClass`](decode.rs#L200) | what a typed revert means for a retry: `Answer` for every selector but five `v1.0.0` errors; `Transient` (`StaleBeaconIndex`, `DeadlineExpired`) is the only class it calls transient; `BeaconFault` and `Hold` are not the position's fault | [`revert_class`](decode.rs#L254), from the selector alone, so the class of a selector cannot depend on the path that saw the revert (a path that keeps no selector gives none: a debt); [`TransactionError::revert_class`](transaction.rs#L244) for a simulation revert, and [`PerpCityError::revert_class`](mod.rs#L157) through it | [`RevertClass::is_transient`](decode.rs#L237), which `PerpCityError::is_transient` asks for a simulation revert. The strategy layer holds a market on a `BeaconFault`, an add on a `Hold`, and quarantines only on an `Answer`. |
-| [`PerpCityError`](mod.rs#L46) | the umbrella: one enum for every failure; [`PerpCityError::is_transient`](mod.rs#L136) answers for all; [`PerpCityError::tx_hash`](mod.rs#L179) for any post-broadcast send; `is_unconfirmed` for one that may still land, which a retry of transients must not resend | conversion from [`ValidationError`](validation.rs#L11), [`ContractError`](contract.rs#L11), [`TransactionError`](transaction.rs#L13), the transport's and the ABI's errors, the JSON parser's, Circle's attestation service's ([`IrisError`](../cctp/DESIGN.md)), and the filesystem's for a recording read or written; nothing constructs it directly | [`Result`](mod.rs#L188); [`MakerEquityKind`](../client/DESIGN.md), as the `Failed` payload of an outcome. The strategy layer's retry loops and per-position decisions key on `is_transient` and never re-classify. |
-| [`Result`](mod.rs#L188) | the crate's result: `PerpCityError` throughout; `Result<T, ValidationError>` only inside `math` and `convert`, where nothing else can fail | every read, scan and send | the strategy layer, which adds context at its binaries and nowhere else. |
+| [`TransactionError`](transaction.rs#L13) | the send's stages: the variant is the stage; every variant after broadcast carries `tx_hash`; [`is_revert`](transaction.rs#L225) reads a typed revert; `is_unconfirmed` names the two stages whose send may still land | [`TxPipeline::prepare`](../hft/DESIGN.md), the one signature that names it; the stages of `TxBuilder::send` choose the rest inside the crate's `Result`, and the simulation stage names a revert through `try_extract_revert`, the bridge from the node's hex to a selector | [`PerpCityError`](mod.rs#L46), by conversion. The strategy layer reads the stage to know whether money may have moved, and the hash to find out. |
+| [`RevertClass`](decode.rs#L201) | what a typed revert means for a retry: `Answer` for every selector but five `v1.0.0` errors; `Transient` (`StaleBeaconIndex`, `DeadlineExpired`) is the only class it calls transient; `BeaconFault` and `Hold` are not the position's fault | [`revert_class`](decode.rs#L260), from the selector alone, so the class of a selector cannot depend on the path that saw the revert (a path that keeps no selector gives none: a debt); [`TransactionError::revert_class`](transaction.rs#L247) for a simulation revert, and [`PerpCityError::revert_class`](mod.rs#L158) through it | [`RevertClass::is_transient`](decode.rs#L243), which `PerpCityError::is_transient` asks for a simulation revert. The strategy layer holds a market on a `BeaconFault`, an add on a `Hold`, and quarantines only on an `Answer`. |
+| [`PerpCityError`](mod.rs#L46) | the umbrella: one enum for every failure; [`PerpCityError::is_transient`](mod.rs#L137) answers for all; [`PerpCityError::tx_hash`](mod.rs#L180) for any post-broadcast send; `is_unconfirmed` for one that may still land, which a retry of transients must not resend | conversion from [`ValidationError`](validation.rs#L11), [`ContractError`](contract.rs#L11), [`TransactionError`](transaction.rs#L13), the transport's and the ABI's errors, the JSON parser's, Circle's attestation service's ([`IrisError`](../cctp/DESIGN.md)), and the filesystem's for a recording read or written; nothing constructs it directly | [`Result`](mod.rs#L189); [`MakerEquityKind`](../client/DESIGN.md), as the `Failed` payload of an outcome. The strategy layer's retry loops and per-position decisions key on `is_transient` (and, for a simulation revert, on `revert_class`) and never re-classify. |
+| [`Result`](mod.rs#L189) | the crate's result: `PerpCityError` throughout; `Result<T, ValidationError>` only inside `math` and `convert`, where nothing else can fail | every read, scan and send | the strategy layer, which adds context at its binaries and nowhere else. |
 
 The enums are `#[non_exhaustive]`. A new variant is added when a caller
 would branch on it, and existing callers with a wildcard keep compiling.
@@ -116,7 +118,9 @@ would branch on it, and existing callers with a wildcard keep compiling.
   math can fail only on its inputs.
 - Out to the strategy layer: retry loops, the maker-equity batch's
   per-position retry decision, a forensic tool's refusal to treat a
-  pruned block as a missing position, all key on `is_transient`. The
+  pruned block as a missing position, all key on `is_transient`, and,
+  for a simulation revert, on `revert_class`, so a beacon fault holds a
+  market instead of dropping its positions. The
   layer above adds context at its binaries and never re-classifies.
 
 ## Terminology
@@ -129,10 +133,11 @@ would branch on it, and existing callers with a wildcard keep compiling.
   not a failure, unless its class says otherwise.
 - **Revert class**: what a typed revert means for a retry: an answer, a
   transient, a beacon fault, or a hold.
-- **Beacon fault**: the market's beacon gives no usable index; every
-  call that reads the index fails until the beacon is fixed.
-- **Hold**: a refusal of the market's state (a TVL cap) that clears only
-  when that state moves; the caller waits on the market, not the call.
+- **Beacon fault**: a beacon gives no usable index: the market's own
+  (every call that reads the index fails until it is fixed), or, from
+  `setBeacon` or `createPerp`, the beacon the call names.
+- **Hold**: a refusal of this amount by the market's state (a TVL cap);
+  a smaller amount can fit, and this one waits until that state moves.
 - **Stage**: where in a send a failure happened; the transaction
   variants are the stages.
 - **Refused**: the caller's input rejected before any request.
