@@ -1,6 +1,6 @@
 # V1 pinned reads
 
-The [client](../../DESIGN.md) pins each read to the snapshot block. A position preview returns the fifteen contract fields. Batch previews preserve input order and map the missing-position revert to an empty row. Physical close capacity reports long and short depth in perp atoms.
+The [client](../../DESIGN.md) pins each read to the snapshot block. A position preview returns the fifteen contract fields. Batch previews preserve input order and map the missing-position revert to an empty row. Other reverts retain their bytes and selector classification. Both preview paths require exactly fifteen words. Physical close capacity reports long and short depth in perp atoms.
 
 | Type | Invariant | Produced by | Consumed by |
 |---|---|---|---|

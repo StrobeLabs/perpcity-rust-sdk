@@ -112,6 +112,33 @@ impl MarketCapacity {
         interest.long <= depth.long && interest.short <= depth.short
     }
 
+    /// Rotate whole-atom close depth for a buy (Long) or sell (Short),
+    /// then check both sides against the proposed post-swap interest.
+    pub fn fits_swap(interest: Capacity, depth: Capacity, direction: Side, size: PerpAtoms) -> bool {
+        let Some(remaining) = depth.on(direction.opposite()).atoms().checked_sub(size.atoms()) else {
+            return false;
+        };
+        let Some(gained) = depth.on(direction).atoms().checked_add(size.atoms()) else {
+            return false;
+        };
+        let (long, short) = match direction {
+            Side::Long => (gained, remaining),
+            Side::Short => (remaining, gained),
+        };
+        Self::fits_close_capacity(interest, Capacity::new(PerpAtoms::new(long), PerpAtoms::new(short)))
+    }
+
+    /// Remove a band's whole-atom contribution. Its short side backs long
+    /// closes. Removing the last maker clears both depths.
+    pub fn fits_maker_removal(interest: Capacity, depth: Capacity, band: Capacity, last: bool) -> bool {
+        let after = if last {
+            Capacity::default()
+        } else {
+            Capacity::new(depth.long.saturating_sub(band.short), depth.short.saturating_sub(band.long))
+        };
+        Self::fits_close_capacity(interest, after)
+    }
+
     /// Utilization on one side as the Perp passes it to the fees module:
     /// `openInterest * 1e6 / capacity`, rounded down.
     ///
@@ -304,16 +331,16 @@ mod tests {
             market.physical_headroom(Side::Short),
             Some(PerpAtoms::new(3))
         );
-        // Closing two shorts buys two atoms, moving depth from short to long.
-        assert!(MarketCapacity::fits_close_capacity(
-            pair(6, 0),
-            pair(11, 10)
-        ));
-        assert!(!MarketCapacity::fits_close_capacity(
-            pair(6, 2),
-            pair(5, 12)
-        ));
-        assert!(!MarketCapacity::fits_close_capacity(pair(6, 2), pair(9, 1)));
+        // A close or liquidation of two shorts buys two. Long OI fills long depth.
+        let depth = pair(6, 2);
+        for size in [1, 2] {
+            assert!(MarketCapacity::fits_swap(pair(6, 2 - size), depth, Side::Long, PerpAtoms::new(size)));
+            assert!(MarketCapacity::fits_swap(pair(2 - size, 6), pair(2, 6), Side::Short, PerpAtoms::new(size)));
+        }
+        assert!(!MarketCapacity::fits_swap(pair(6, 0), depth, Side::Long, PerpAtoms::new(3)));
+        assert!(!MarketCapacity::fits_maker_removal(pair(6, 1), depth, pair(0, 1), false));
+        assert!(MarketCapacity::fits_maker_removal(pair(6, 1), depth, pair(1, 0), false));
+        assert!(!MarketCapacity::fits_maker_removal(pair(1, 0), depth, pair(0, 0), true));
     }
 
     fn range(lower: i32, upper: i32) -> TickRange {

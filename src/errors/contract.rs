@@ -56,6 +56,15 @@ pub enum ContractError {
         event: &'static str,
     },
 
+    /// A matching event in a successful receipt has invalid data.
+    #[error("invalid event in transaction {tx_hash}: {reason}")]
+    MinedEventInvalid {
+        /// Final transaction hash.
+        tx_hash: B256,
+        /// Event decoding or arithmetic failure.
+        reason: String,
+    },
+
     /// A contract read reverted with fewer than four bytes. Not transient.
     #[error("contract read reverted without a selector: {data}")]
     RevertedWithoutSelector {

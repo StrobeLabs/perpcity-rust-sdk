@@ -2,9 +2,9 @@
 //! tests/fixtures/sepolia-v1-63da3c.json. Receipt gas fields are synthetic.
 use alloy::primitives::{Address, B256, U256};
 use alloy::rpc::types::TransactionReceipt;
-use alloy::sol_types::SolEvent;
+use alloy::primitives::b256;
 use perpcity_sdk::contracts::v1::Perp;
-use perpcity_sdk::events::receipt::{V1PositionEvent, parse_v1_receipt};
+use perpcity_sdk::events::receipt::{MakerExit, V1PositionEvent, minted_position_id, parse_maker_exit, parse_v1_receipt, parse_v1_receipt_for};
 use perpcity_sdk::{ContractError, PerpCityError};
 use serde_json::{Value, json};
 
@@ -21,7 +21,9 @@ fn receipt(mut value: Value) -> TransactionReceipt {
         log["removed"] = json!(false);
     }
     value["type"] = json!("0x2");
-    value["status"] = json!("0x1");
+    if value["status"].is_null() {
+        value["status"] = json!("0x1");
+    }
     value["cumulativeGasUsed"] = json!("0x1");
     value["gasUsed"] = json!("0x1");
     value["effectiveGasPrice"] = json!("0x1");
@@ -50,9 +52,17 @@ fn recorded_position_changes() {
         open.pos_id,
         id::<Perp::PositionOwnerUpdated>(&rows[2], perp)
     );
-    assert_eq!(open.margin.unwrap().atoms(), open.event.margin);
+    let posted = open.margin.unwrap().atoms();
+    assert_eq!(posted, 199_392_201);
     let adjust = parse_v1_receipt::<Perp::TakerAdjusted>(&rows[3], perp, None).unwrap();
-    assert_eq!(adjust.margin.unwrap().atoms(), adjust.event.margin);
+    assert_eq!(adjust.margin.unwrap().atoms(), 249_391_265);
+    assert_eq!(
+        posted.checked_add_signed(adjust.event.marginDelta).unwrap()
+            - u128::try_from(adjust.event.utilFees).unwrap(),
+        adjust.event.margin
+    );
+    assert_eq!(minted_position_id(&rows[2], perp, None).unwrap(), open.pos_id);
+    assert!(minted_position_id(&rows[4], perp, None).is_err());
     for row in &rows[4..] {
         assert_eq!(
             id::<Perp::TakerClosed>(row, perp),
@@ -63,36 +73,56 @@ fn recorded_position_changes() {
         panic!("unexpected maker close");
     };
     assert!(
-        matches!(&err, ContractError::MinedEventMissing { tx_hash, .. } if *tx_hash == rows[2].transaction_hash)
+        matches!(&err, PerpCityError::Contract(ContractError::MinedEventMissing { tx_hash, .. }) if *tx_hash == rows[2].transaction_hash)
     );
-    assert!(!PerpCityError::from(err).is_transient());
+    assert_eq!(err.tx_hash(), Some(rows[2].transaction_hash));
+    assert!(!err.is_transient());
 }
 
 #[test]
 fn maker_adjust_and_close_report_margin() {
     let perp = Address::repeat_byte(1);
     let pos_id = U256::from(42);
-    for topic in [
-        Perp::MakerAdjusted::SIGNATURE_HASH,
-        Perp::MakerClosed::SIGNATURE_HASH,
-    ] {
-        // Ten static words after the indexed ID and owner, with margin in slot five.
+    let adjusted = b256!("867c59df8ef3ea10a16a572ab85d718d1972f7feabfe847d83d818e60929ca1e");
+    let closed = b256!("181a101fe3eb4e5adcaea5a4409bc933dd26341a7c7179252d17b863b99fa671");
+    let converted = b256!("5dfddc3ff94e76acf24a54b00d5a855ffd7704f0f7ff0eb2cb54f65df66bc8cc");
+    for (topic, expected) in [(adjusted, 19), (closed, 0), (converted, 27)] {
         let mut words = [0_u8; 320];
-        words[191] = 19;
-        let row = receipt(json!({
+        words[191] = expected;
+        let mut input = json!({
             "transactionHash": B256::ZERO, "from": perp, "to": perp,
             "logs": [{"address": perp, "topics": [topic, B256::from(pos_id), B256::ZERO],
                       "data": alloy::hex::encode_prefixed(words)}]
-        }));
-        let margin = if topic == Perp::MakerClosed::SIGNATURE_HASH {
-            parse_v1_receipt::<Perp::MakerClosed>(&row, perp, Some(pos_id))
-                .unwrap()
-                .margin
+        });
+        let row = receipt(input.clone());
+        let margin = if topic == adjusted {
+            let mut second = input["logs"][0].clone();
+            second["topics"][1] = json!(B256::from(U256::from(43)));
+            second["topics"][2] = json!(perp.into_word());
+            input["logs"].as_array_mut().unwrap().push(second);
+            let trade = parse_v1_receipt_for::<Perp::MakerAdjusted>(
+                &receipt(input.clone()), perp, None, Some(perp),
+            ).unwrap();
+            assert_eq!(trade.pos_id, U256::from(43));
+            trade.margin
         } else {
-            parse_v1_receipt::<Perp::MakerAdjusted>(&row, perp, Some(pos_id))
-                .unwrap()
-                .margin
+            match parse_maker_exit(&row, perp, pos_id, None).unwrap() {
+                MakerExit::Closed(trade) if topic == closed => trade.margin,
+                MakerExit::Converted(trade) if topic == converted => trade.margin,
+                _ => panic!("wrong maker exit"),
+            }
         };
-        assert_eq!(margin.unwrap().atoms(), 19);
+        assert_eq!(margin.unwrap().atoms(), u128::from(expected));
+        input["logs"][0]["data"] = json!("0xff");
+        let invalid = parse_v1_receipt::<Perp::MakerAdjusted>(&receipt(input.clone()), perp, None);
+        if topic == adjusted {
+            let error = invalid.err().unwrap();
+            assert!(matches!(error, PerpCityError::Contract(ContractError::MinedEventInvalid { .. })));
+            assert_eq!(error.tx_hash(), Some(B256::ZERO));
+        }
+        input["status"] = json!("0x0");
+        let error = parse_v1_receipt::<Perp::MakerClosed>(&receipt(input), perp, None).err().unwrap();
+        assert!(matches!(error, PerpCityError::Transaction(perpcity_sdk::TransactionError::Reverted { .. })));
+        assert_eq!(error.tx_hash(), Some(B256::ZERO));
     }
 }
