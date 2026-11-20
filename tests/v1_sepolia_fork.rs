@@ -212,6 +212,15 @@ async fn check_trade_receipts(w: &V1Fork, market: &V1Market) {
                         .unwrap(),
                     Address::ZERO
                 );
+                assert_eq!(
+                    raw.positions(market.taker_id)
+                        .block(at)
+                        .call()
+                        .await
+                        .unwrap()
+                        .margin,
+                    0
+                );
                 assert!(minted_position_id(receipt, market.perp, None).is_err());
             }
             "reduce-maker" => {

@@ -2336,7 +2336,8 @@ mod tests {
 
     /// The single preview reads a revert as a batch row does: a stale
     /// beacon keeps its selector and is transient, a missing position is
-    /// `None`, and a fifteen-word answer decodes.
+    /// `None`, a fifteen-word answer decodes, and a revert without data
+    /// is the batch's empty row.
     #[tokio::test]
     async fn single_preview_matches_the_batch_row() {
         let (state, rpc) = state().await;
@@ -2355,9 +2356,23 @@ mod tests {
         rpc.raw(&words);
         let preview = state.preview_position(U256::ONE).await.unwrap().unwrap();
         assert!(preview.isMaker);
+        rpc.fails("execution reverted");
+        let single = state.preview_position(U256::ONE).await.err().unwrap();
+        rpc.aggregate3(vec![mock::failed_row()]);
+        let rows = state.preview_positions(&[U256::ONE]).await.unwrap();
+        for error in [&single, rows[0].row.as_ref().err().unwrap()] {
+            assert!(
+                matches!(
+                    error,
+                    PerpCityError::Contract(ContractError::RevertedWithoutSelector { data })
+                        if data.is_empty()
+                ),
+                "{error}"
+            );
+        }
         assert_eq!(
             rpc.selectors()[2..].to_vec(),
-            vec![v1::Perp::previewPositionCall::SELECTOR; 3]
+            vec![v1::Perp::previewPositionCall::SELECTOR; 5]
         );
         assert!(rpc.is_drained());
     }
@@ -2366,7 +2381,9 @@ mod tests {
     /// handle's block, and the maker total from `fundingState()`.
     #[tokio::test]
     async fn removal_inputs_read_the_v1_market() {
-        let (state, rpc) = state().await;
+        let (client, rpc) = mock::client();
+        let hash = rpc.block(92, TIMESTAMP);
+        let state = client.market().state_at(92).await.unwrap();
         rpc.immutables(Era::V1);
         let long = (U256::from(9u8) << 64) + U256::from(3u8);
         let short = U256::from(7u8) << 64;
@@ -2377,6 +2394,7 @@ mod tests {
             PerSide::new(long, short)
         );
         assert_eq!(rpc.slots(), [U256::from(21u8), U256::from(22u8)]);
+        assert_eq!(rpc.storage_blocks(), [BlockId::hash(hash); 2]);
         rpc.call::<v1::Perp::fundingStateCall>(&v1::FundingState {
             baseX96: I256::ZERO,
             inventoryX96: I256::ZERO,
@@ -2386,7 +2404,9 @@ mod tests {
         assert!(rpc.is_drained());
     }
 
-    /// An empty preview batch checks the era first, as the other batches do.
+    /// An empty preview batch checks the era first, as `maker_equities`
+    /// and `taker_healths` do; `positions`, `owners` and `maker_bands`
+    /// return an empty batch with no request.
     #[tokio::test]
     async fn empty_preview_batch_refuses_an_earlier_build() {
         let (state, rpc) = state().await;
