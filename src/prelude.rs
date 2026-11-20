@@ -8,7 +8,7 @@
 //! `HftTransport`, `TransportConfig`, `TxBuilder`), the
 //! well-known chain ids/addresses (`ARBITRUM_CHAIN_ID`,
 //! `ARBITRUM_SEPOLIA_USDC`, ...), errors (`PerpCityError`, `Result`,
-//! `ContractError`, `TransactionError`, `ValidationError`), gas/urgency
+//! `ContractError`, `TransactionError`, `ValidationError`, `RevertClass`), gas/urgency
 //! (`GasLimits`, `Urgency`), the event vocabulary and the feed that
 //! streams it (`MarketEvent`, `decode_log`, `MarketFeed`, ...), the
 //! client-facing params/result types
@@ -46,11 +46,11 @@ pub use crate::{
     MakerEquityBreakdown, MakerEquityKind, MakerEquityOutcome, MakerMarketSnapshot, MakerState,
     MarginRatioTriple, MarginRatios, Mark, MarketCapacity, MarketConfig, MarketEvent, MarketFeed,
     MarketReader, MarketSnapshot, OpenInterest, OpenMakerParams, OpenResult, OpenTakerParams,
-    PerSide, PerpAtoms, PerpCityError, PerpClient, PerpDelta, Price, Ratio, Result, RowOutcome,
-    Share, Side, SolvencyState, SqrtPrice, StateAt, TickFunding, TickRange, TransactionError,
-    TransportConfig, TxBuilder, Urgency, UsdcAtoms, UsdcDelta, UtilizationRate, ValidationError,
-    align_tick_down, align_tick_up, amounts_for_liquidity, band_capacity, decode_log,
-    estimate_liquidity, fair_price, fair_price_f64, get_sqrt_ratio_at_tick, get_tick_at_sqrt_ratio,
-    liquidity_for_capacity, liquidity_for_target_ratio, margin_for_liquidity, price_to_tick,
-    tick_to_price,
+    PerSide, PerpAtoms, PerpCityError, PerpClient, PerpDelta, Price, Ratio, Result, RevertClass,
+    RowOutcome, Share, Side, SolvencyState, SqrtPrice, StateAt, TickFunding, TickRange,
+    TransactionError, TransportConfig, TxBuilder, Urgency, UsdcAtoms, UsdcDelta, UtilizationRate,
+    ValidationError, align_tick_down, align_tick_up, amounts_for_liquidity, band_capacity,
+    decode_log, estimate_liquidity, fair_price, fair_price_f64, get_sqrt_ratio_at_tick,
+    get_tick_at_sqrt_ratio, liquidity_for_capacity, liquidity_for_target_ratio,
+    margin_for_liquidity, price_to_tick, tick_to_price,
 };

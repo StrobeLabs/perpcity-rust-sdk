@@ -4,6 +4,8 @@ use alloy::primitives::{FixedBytes, U256};
 use alloy::transports::TransportError;
 use thiserror::Error;
 
+use super::decode::{RevertClass, revert_class};
+
 /// Errors arising from the transaction lifecycle: simulation, signing,
 /// broadcasting, receipt polling, and gas resolution.
 #[derive(Error, Debug)]
@@ -11,7 +13,10 @@ use thiserror::Error;
 pub enum TransactionError {
     /// Pre-flight simulation (`eth_estimateGas` or `eth_call`) detected a
     /// contract revert. The transaction was **not** broadcast — no gas was
-    /// burned. Not transient: it is the contract's answer to this call.
+    /// burned. [`Self::revert_class`] says what the revert means for a
+    /// retry: transient only for the two `v1.0.0` reverts that time fixes
+    /// (`StaleBeaconIndex`, `DeadlineExpired`); every other revert is the
+    /// contract's answer to this call.
     #[error("simulation reverted: {error_name} ({selector})")]
     SimulationReverted {
         /// Human-readable error name decoded from the 4-byte selector
@@ -220,5 +225,26 @@ impl TransactionError {
             self,
             Self::SimulationReverted { selector, .. } if selector.0 == E::SELECTOR
         )
+    }
+
+    /// The [`RevertClass`] of a [`Self::SimulationReverted`], by its
+    /// selector; `None` for every other variant (a mined revert carries no
+    /// selector).
+    ///
+    /// ```rust,ignore
+    /// use perpcity_sdk::RevertClass;
+    ///
+    /// match err.revert_class() {
+    ///     Some(RevertClass::Transient) => {}   // a new deadline, or the next beacon update
+    ///     Some(RevertClass::BeaconFault) => {} // hold the market until its beacon is fixed
+    ///     Some(RevertClass::Hold) => {}        // the market is at its TVL cap
+    ///     _ => {}
+    /// }
+    /// ```
+    pub fn revert_class(&self) -> Option<RevertClass> {
+        match self {
+            Self::SimulationReverted { selector, .. } => Some(revert_class(selector.0)),
+            _ => None,
+        }
     }
 }

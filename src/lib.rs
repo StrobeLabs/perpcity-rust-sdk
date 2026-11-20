@@ -85,7 +85,9 @@ pub use feeds::{
 };
 
 #[doc(inline)]
-pub use errors::{ContractError, PerpCityError, Result, TransactionError, ValidationError};
+pub use errors::{
+    ContractError, PerpCityError, Result, RevertClass, TransactionError, ValidationError,
+};
 
 #[doc(inline)]
 pub use hft::gas::{GasLimits, Urgency};
