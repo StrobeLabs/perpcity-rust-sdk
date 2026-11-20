@@ -146,6 +146,7 @@ impl PerpCityError {
                 | Self::Transaction(TransactionError::NonceDesynced { .. })
                 | Self::Transaction(TransactionError::TooManyInFlight { .. })
                 | Self::Transaction(TransactionError::TakerNotClosed { .. })
+                | Self::Transaction(TransactionError::MakerNotClosed { .. })
                 | Self::Contract(ContractError::BlockUnavailable { .. })
                 | Self::Contract(ContractError::StorageReadFailed {
                     source: Some(_),
@@ -273,6 +274,16 @@ mod tests {
             "the close reads the delta again on retry, so the next attempt can close"
         );
         assert_eq!(not_closed.tx_hash(), Some([0x22; 32].into()));
+        let maker_not_closed: PerpCityError = TransactionError::MakerNotClosed {
+            tx_hash: [0x23; 32].into(),
+            pos_id: U256::from(7u64),
+        }
+        .into();
+        assert!(
+            maker_not_closed.is_transient(),
+            "the close reads the liquidity again on retry"
+        );
+        assert_eq!(maker_not_closed.tx_hash(), Some([0x23; 32].into()));
 
         let range: PerpCityError = ValidationError::InvalidBlockRange {
             from_block: 2,

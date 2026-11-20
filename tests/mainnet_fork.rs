@@ -62,7 +62,10 @@ struct AnvilInstance {
 
 impl AnvilInstance {
     async fn fork() -> Self {
-        let port = 48600;
+        Self::fork_on(48600).await
+    }
+
+    async fn fork_on(port: u16) -> Self {
         let url = format!("http://127.0.0.1:{port}");
         let fork_url = fork_url();
         let child = Command::new("anvil")
@@ -382,24 +385,60 @@ async fn v022_market_reads_trades_and_liquidation_probes() {
     println!("taker closed in {}: {closed:?}", closed.tx_hash);
     assert!(closed.perp_delta.atoms() < 0, "the close sold the long");
 
-    // The maker still uses the v0.2.2 open and adjust calldata, including
-    // the full removal. No v1 deadline appears in either transaction.
-    // A second band covers the first band's rounding residual under the
-    // v0.2.2 utilization check.
+    println!("\n=== v0.2.2 fork test passed! ===");
+}
+
+/// The v0.2.2 maker open and full removal keep their v0.2.2 calldata: no
+/// v1 deadline in either transaction. A second band covers the first
+/// band's rounding residual under the v0.2.2 utilization check.
+#[tokio::test]
+#[ignore] // Requires `anvil` and an Arbitrum One endpoint.
+async fn v022_maker_open_and_close_keep_their_calldata() {
+    let anvil = AnvilInstance::fork_on(48601).await;
+    let signer: alloy::signers::local::PrivateKeySigner = ANVIL_KEY.parse().unwrap();
+    let address = signer.address();
+    let transport = HftTransport::new(
+        TransportConfig::builder()
+            .shared_endpoint(&anvil.url)
+            .build()
+            .unwrap(),
+    )
+    .unwrap();
+    let chain = chain(transport);
+    deal_eth(&anvil.url, address).await;
+    deal_usdc(&anvil.url, address, U256::from(100_000_000_000u64)).await;
+    let bootstrap = PerpClient::new(chain.market(MODULE_SOURCE), signer.clone());
+    let perp = create_v022_market(&bootstrap, address, &anvil.url).await;
+    mine_past_lag(&anvil.url).await;
+    let client = PerpClient::new(chain.market(perp), signer);
+    client.sync_nonce().await.unwrap();
     client.chain().refresh_gas().await.unwrap();
-    client
-        .open_maker_exact(
-            &ExactOpenMakerParams {
-                margin,
-                range,
-                liquidity,
-                max_amt0_in: PerpAtoms::new(u128::MAX),
-                max_amt1_in: UsdcAtoms::new(u128::MAX),
-            },
-            Urgency::Normal,
-        )
-        .await
-        .unwrap();
+    client.ensure_approval(U256::MAX).await.unwrap();
+    assert_eq!(client.market().era().await.unwrap(), Era::Upgradeable);
+
+    let (_, snapshot) = client.market().get_snapshot().await.unwrap();
+    let pool_price = snapshot.pool_price;
+    let range = TickRange::between(pool_price * 0.8, pool_price * 1.25).unwrap();
+    let margin = UsdcAtoms::try_from(5_000.0).unwrap();
+    let liquidity = estimate_liquidity(&range, margin).unwrap();
+    let params = ExactOpenMakerParams {
+        margin,
+        range,
+        liquidity,
+        max_amt0_in: PerpAtoms::new(u128::MAX),
+        max_amt1_in: UsdcAtoms::new(u128::MAX),
+    };
+    let mut opened = Vec::new();
+    for _ in 0..2 {
+        client.chain().refresh_gas().await.unwrap();
+        opened.push(
+            client
+                .open_maker_exact(&params, Urgency::Normal)
+                .await
+                .unwrap(),
+        );
+    }
+    let maker = &opened[0];
     client.chain().refresh_gas().await.unwrap();
     let removed = client
         .close_maker(maker.pos_id, liquidity, Urgency::Normal)
@@ -457,6 +496,4 @@ async fn v022_market_reads_trades_and_liquidation_probes() {
         "v0.2.2 maker open and close calldata match: {}",
         removed.tx_hash
     );
-
-    println!("\n=== v0.2.2 fork test passed! ===");
 }

@@ -14,7 +14,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use alloy::eips::BlockId;
-use alloy::primitives::{Address, B256, Signed, U256, Uint};
+use alloy::primitives::{Address, B256, Bytes, Signed, U256, Uint};
 use alloy::providers::{MulticallError, Provider};
 use alloy::sol_types::{SolCall, SolError, SolType};
 use alloy::transports::{RpcError, TransportError};
@@ -27,7 +27,7 @@ use crate::contracts::{
     v1,
 };
 use crate::convert::unpack_balance_delta;
-use crate::errors::{ContractError, PerpCityError, Result, ValidationError};
+use crate::errors::{ContractError, PerpCityError, Result, TransactionError, ValidationError};
 use crate::events::{CumulativesInfo, V1Cumulatives};
 use crate::math::BlockContext;
 use crate::math::capacity::{Capacity, MarketCapacity};
@@ -42,6 +42,7 @@ use crate::units::{
 
 use super::market::MarketReader;
 use super::queries::{Era, MarketImmutables, multicall_error, registered_module};
+use super::transactions::{classify_simulation_failure, preflight_request};
 use super::{i24_to_i32, u24_to_u32};
 
 /// Maximum position ids per multicall inside a batched row read.
@@ -494,6 +495,24 @@ impl StateAt {
 
     pub(super) fn id(&self) -> BlockId {
         BlockId::hash(self.block.hash)
+    }
+
+    /// `calldata` from `from` to the perp, as an `eth_call` at this block:
+    /// the contract's answer to that call against this block's state.
+    pub(super) async fn simulate_from(
+        &self,
+        from: Address,
+        calldata: &Bytes,
+    ) -> std::result::Result<(), TransactionError> {
+        let tx = preflight_request(from, self.market.perp, calldata, 0, None);
+        self.market
+            .chain
+            .provider()
+            .call(tx)
+            .block(self.id())
+            .await
+            .map_err(|e| classify_simulation_failure(&e, "eth_call"))?;
+        Ok(())
     }
 
     /// A read's failure, typed for this handle's block by

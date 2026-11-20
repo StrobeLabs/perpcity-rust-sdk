@@ -86,6 +86,21 @@ pub enum TransactionError {
         pos_id: U256,
     },
 
+    /// A `v1.0.0` maker close mined, but the contract adjusted the band
+    /// instead of removing it: the band held more liquidity than the close
+    /// read, so the position is still open. Gas was burned.
+    /// [`PerpClient::close_maker_v1`](crate::PerpClient::close_maker_v1)
+    /// removes the liquidity it reads, so the band changed between that
+    /// read and the block the close landed in. Transient: a retry reads
+    /// the liquidity again.
+    #[error("maker close left position {pos_id} open: {tx_hash}")]
+    MakerNotClosed {
+        /// Hash of the mined transaction.
+        tx_hash: FixedBytes<32>,
+        /// The position that is still open.
+        pos_id: U256,
+    },
+
     /// Receipt polling timed out before the transaction was confirmed.
     ///
     /// The transaction was broadcast and may still mine, so the send path
@@ -391,6 +406,7 @@ impl TransactionError {
             | Self::Reverted { tx_hash, .. }
             | Self::OutOfGas { tx_hash, .. }
             | Self::TakerNotClosed { tx_hash, .. }
+            | Self::MakerNotClosed { tx_hash, .. }
             | Self::NotReplaceable { tx_hash, .. } => Some(*tx_hash),
             _ => None,
         }
