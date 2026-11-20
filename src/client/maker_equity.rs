@@ -326,7 +326,7 @@ impl StateAt {
         pos_ids: &[U256],
         mark: Price,
     ) -> Result<Vec<MakerEquityOutcome>> {
-        if mark.is_zero() {
+        if !pos_ids.is_empty() && mark.is_zero() {
             return Err(ValidationError::InvalidPrice {
                 reason: "the what-if mark must be non-zero".into(),
             }
@@ -795,12 +795,46 @@ mod tests {
     use alloy::primitives::{Address, I256, Uint};
 
     use super::*;
+    use crate::Era;
     use crate::client::mock::{self, PERP, Rpc, returns, x96};
+    use crate::constants::SNAPSHOT_BLOCK_LAG;
     use crate::contracts::{Cumulatives, IBeacon, IMulticall3, Rates};
 
     const TIMESTAMP: u64 = 1_700_000_000;
     /// The pool's id, as `POOL_ID()` reports it.
     const POOL_ID: B256 = B256::repeat_byte(0x99);
+
+    #[tokio::test]
+    async fn empty_maker_reads_check_the_market_era() {
+        for era in [Era::V1, Era::Upgradeable] {
+            for at_mark in [false, true] {
+                let (client, rpc) = mock::client();
+                rpc.quantity(100);
+                rpc.block(100 - SNAPSHOT_BLOCK_LAG, TIMESTAMP);
+                rpc.immutables(era);
+                let market = client.market();
+                let result = if at_mark {
+                    market
+                        .get_maker_equities_at_mark(&[], Price::from_x96(U256::ZERO))
+                        .await
+                } else {
+                    market.get_maker_equities(&[]).await
+                };
+                if era == Era::V1 {
+                    assert!(matches!(
+                        result,
+                        Err(PerpCityError::Contract(ContractError::UnsupportedEra {
+                            era: Era::V1,
+                            operation: "maker_equities (use preview_positions)"
+                        }))
+                    ));
+                } else {
+                    assert!(result.unwrap().is_empty());
+                }
+                assert!(rpc.is_drained());
+            }
+        }
+    }
 
     /// A handle pinned to block 92 by name, over a mocked reader.
     async fn state() -> (StateAt, Rpc) {

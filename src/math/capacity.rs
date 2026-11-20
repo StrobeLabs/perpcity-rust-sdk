@@ -401,18 +401,41 @@ mod tests {
         ));
         // A terminal buy requests three and fills one.
         assert!(!MarketCapacity::fits_swap(
-            pair(7, 0), depth, Side::Long, PerpAtoms::new(3), PerpAtoms::new(1)
+            pair(7, 0),
+            depth,
+            Side::Long,
+            PerpAtoms::new(3),
+            PerpAtoms::new(1)
         ));
         assert!(!MarketCapacity::fits_swap(
-            pair(8, 0), pair(6, 3), Side::Long, PerpAtoms::new(3), PerpAtoms::new(1)
+            pair(8, 0),
+            pair(6, 3),
+            Side::Long,
+            PerpAtoms::new(3),
+            PerpAtoms::new(1)
         ));
         let quarter = U256::ONE << 62;
         let depth = PerSide::new(quarter * U256::from(41), U256::ZERO);
         let band = PerSide::new(U256::ZERO, quarter * U256::from(3));
         // 10.25 - 0.75 leaves 9.5 atoms for long closes.
-        assert!(!MarketCapacity::fits_maker_removal(pair(10, 0), depth, band, false));
-        assert!(MarketCapacity::fits_maker_removal(pair(9, 0), depth, band, false));
-        assert!(!MarketCapacity::fits_maker_removal(pair(1, 0), depth, band, true));
+        assert!(!MarketCapacity::fits_maker_removal(
+            pair(10, 0),
+            depth,
+            band,
+            false
+        ));
+        assert!(MarketCapacity::fits_maker_removal(
+            pair(9, 0),
+            depth,
+            band,
+            false
+        ));
+        assert!(!MarketCapacity::fits_maker_removal(
+            pair(1, 0),
+            depth,
+            band,
+            true
+        ));
     }
 
     fn range(lower: i32, upper: i32) -> TickRange {

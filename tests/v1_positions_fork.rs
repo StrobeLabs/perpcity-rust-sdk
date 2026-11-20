@@ -24,8 +24,9 @@ use perpcity_sdk::contracts::v1::{AdjustMakerParams, AdjustTakerParams, OpenTake
 use perpcity_sdk::contracts::{Perp as EarlierPerp, v1::Perp};
 use perpcity_sdk::errors::decode::try_extract_revert;
 use perpcity_sdk::{
-    Capacity, ChainReader, ContractError, Era, HftTransport, LUnits, MakerBand, MarketCapacity, PerSide, PerpAtoms, PerpCityError, PositionRow, Side,
-    StateAt, TickRange, TransportConfig, band_capacity_x64,
+    Capacity, ChainReader, ContractError, Era, HftTransport, LUnits, MakerBand, MarketCapacity,
+    PerSide, PerpAtoms, PerpCityError, PositionRow, Side, StateAt, TickRange, TransportConfig,
+    band_capacity_x64,
 };
 use serde_json::Value;
 
@@ -209,7 +210,13 @@ async fn position_reads_agree_with_the_v1_market() {
     };
     set_depth(outside).await.unwrap();
     let _: Value = w.provider.raw_request("evm_mine".into(), ()).await.unwrap();
-    let lowered = market.state_at_head().await.unwrap().capacity().await.unwrap();
+    let lowered = market
+        .state_at_head()
+        .await
+        .unwrap()
+        .capacity()
+        .await
+        .unwrap();
     assert!(!fits_close(lowered));
     let error = raw
         .adjustTaker(close)
@@ -232,7 +239,11 @@ async fn position_reads_agree_with_the_v1_market() {
         amt1Limit: U256::ZERO,
         deadline: w.deadline().await,
     };
-    let short_depth = w.provider.get_storage_at(m.perp, slot + U256::ONE).await.unwrap();
+    let short_depth = w
+        .provider
+        .get_storage_at(m.perp, slot + U256::ONE)
+        .await
+        .unwrap();
     let band = state.maker_band(m.maker_id).await.unwrap().unwrap();
     let price = state.pool().await.unwrap().sqrt_price;
     let partial = MakerBand::new(band.range, LUnits::new(1));
@@ -244,17 +255,32 @@ async fn position_reads_agree_with_the_v1_market() {
     let below = boundary - U256::ONE;
     set_depth(below).await.unwrap();
     assert!(!MarketCapacity::fits_maker_removal(
-        interest, PerSide::new(below, short_depth), contribution, false
+        interest,
+        PerSide::new(below, short_depth),
+        contribution,
+        false
     ));
-    let partial_remove = AdjustMakerParams { liquidityDelta: -1, ..remove.clone() };
-    let error = raw.adjustMaker(partial_remove).from(w.me).call().await.err().unwrap();
+    let partial_remove = AdjustMakerParams {
+        liquidityDelta: -1,
+        ..remove.clone()
+    };
+    let error = raw
+        .adjustMaker(partial_remove)
+        .from(w.me)
+        .call()
+        .await
+        .err()
+        .unwrap();
     assert_eq!(
         try_extract_revert(&error.to_string()).unwrap().1,
         Perp::LongCloseCapacityExceeded::SELECTOR
     );
     set_depth(saved).await.unwrap();
     assert!(!MarketCapacity::fits_maker_removal(
-        interest, PerSide::new(saved, short_depth), band_capacity_x64(price, &band).unwrap(), true
+        interest,
+        PerSide::new(saved, short_depth),
+        band_capacity_x64(price, &band).unwrap(),
+        true
     ));
     let error = raw
         .adjustMaker(remove)
