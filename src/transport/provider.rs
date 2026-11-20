@@ -11,13 +11,16 @@
 //! - **Per-endpoint circuit breaker**: automatically routes around dead endpoints
 //! - **Strategy-based selection**: round-robin, latency-based, or hedged reads
 //! - **Read/write classification**: a read is retried when the endpoint
-//!   failed to answer, never when it declined the request. A write is
-//!   retried on a pre-mempool rejection (safe: the transaction never
-//!   landed) and also when the endpoint did not answer — where the same
-//!   signed bytes are idempotent at the node, but the outcome of the
-//!   earlier attempt is unknown, so a caller reconciling a send should
-//!   trust the receipt rather than the error
-//!   ([`TransactionError::tx_hash`](crate::errors::TransactionError::tx_hash))
+//!   failed to answer, never when it declined the request. An
+//!   `eth_sendRawTransaction` is retried as the same signed bytes after an
+//!   error answer and after no answer. The bytes are one transaction, so a
+//!   resend cannot make a second, but the outcome of an earlier attempt is
+//!   unknown, so a caller reconciling a send should trust the receipt
+//!   rather than the error
+//!   ([`TransactionError::tx_hash`](crate::errors::TransactionError::tx_hash)).
+//!   A request that holds an `eth_sendTransaction`, which the node signs
+//!   with a nonce it picks, is sent once: a lost reply is a transport
+//!   error, and the outcome is unknown
 //! - **Hedged requests**: fan out reads to N endpoints, take the fastest response;
 //!   losing requests are **cancelled** via `JoinSet::abort_all` to save RPC rate limits
 //! - **Lock-free endpoint selection**: read path uses atomic mirrors, zero mutex
@@ -604,10 +607,10 @@ impl HftTransport {
 
 // ── JSON-RPC method classification ──────────────────────────────────
 
-/// Returns true if the JSON-RPC method is a write (state-changing) operation.
+/// Whether `req` holds a write: a call that sends a transaction.
 ///
-/// Write methods must NOT be retried — double-sends could cause double spends.
-/// All other methods are treated as reads (safe to retry/hedge).
+/// A write is never hedged, and only the same signed bytes are sent again
+/// ([`node_signs`]). All other methods are reads, safe to retry and hedge.
 fn is_write_method(req: &RequestPacket) -> bool {
     match req {
         RequestPacket::Single(call) => is_write_method_name(call.method()),
@@ -619,8 +622,18 @@ fn is_write_method_name(method: &str) -> bool {
     matches!(method, "eth_sendRawTransaction" | "eth_sendTransaction")
 }
 
-/// The answers in `response` to the write calls of `req`, by JSON-RPC
-/// id; `None` for a write the response does not answer.
+/// Whether `req` asks a node to sign and send a transaction
+/// (`eth_sendTransaction`). The node picks the nonce, so a resend after a
+/// lost reply can be signed with the next nonce as a second transaction:
+/// such a request is sent once, whatever its answer.
+fn node_signs(req: &RequestPacket) -> bool {
+    req.method_names()
+        .any(|method| method == "eth_sendTransaction")
+}
+
+/// The answers in `response` to the write calls of `req`: for each write,
+/// the one response with its JSON-RPC id, or `None` when no response or
+/// more than one has that id, so the answer to that write is unknown.
 fn write_answers<'a>(
     req: &'a RequestPacket,
     response: &'a ResponsePacket,
@@ -628,12 +641,15 @@ fn write_answers<'a>(
     req.requests()
         .iter()
         .filter(|call| is_write_method_name(call.method()))
-        .map(move |call| match response {
-            ResponsePacket::Single(answer) => Some(&answer.payload),
-            ResponsePacket::Batch(answers) => answers
+        .map(move |call| {
+            let mut answers = response
+                .responses()
                 .iter()
-                .find(|answer| answer.id == *call.id())
-                .map(|answer| &answer.payload),
+                .filter(|answer| answer.id == *call.id());
+            match (answers.next(), answers.next()) {
+                (Some(answer), None) => Some(&answer.payload),
+                _ => None,
+            }
         })
 }
 
@@ -645,23 +661,49 @@ fn rejects(payload: Option<&ResponsePayload>) -> bool {
 }
 
 /// Whether every write call of `req` got an explicit rejection in
-/// `response`. A batch whose writes got anything else, or no answer, may
-/// have left one of them with the node.
+/// `response`, as the one response with its id. A batch whose writes got
+/// anything else, no answer, or answers that do not match their ids one to
+/// one may have left one of them with the node.
 fn every_write_rejected(req: &RequestPacket, response: &ResponsePacket) -> bool {
     write_answers(req, response).all(rejects)
 }
 
-/// A write's last answer, which explicitly rejects one of its calls,
-/// after an earlier attempt that may have left a transaction with a node:
-/// an error that is not the node's answer, so no caller reads it as a
-/// rejection. Applies to a whole batch.
-fn rejected_after_doubt(req: &RequestPacket, response: &ResponsePacket) -> Option<TransportError> {
-    let error = write_answers(req, response)
-        .find(|payload| rejects(*payload))
-        .flatten()
-        .and_then(ResponsePayload::as_error)?;
+/// The error that replaces a write's last answer when that answer holds an
+/// explicit rejection that is not the node's answer: after an earlier
+/// attempt that may have left a transaction with a node (`may_be_held`),
+/// or when the answer does not answer each write call once by its id, so
+/// which write a rejection is for is unknown. A transport error, so no
+/// caller reads it as a rejection; it applies to the whole request.
+fn uncertain_rejection(
+    req: &RequestPacket,
+    response: &ResponsePacket,
+    may_be_held: bool,
+) -> Option<TransportError> {
+    let answers: Vec<_> = write_answers(req, response).collect();
+    let by_id = answers.iter().all(Option::is_some);
+    if by_id && !may_be_held {
+        return None;
+    }
+    let error = if by_id {
+        answers
+            .into_iter()
+            .flatten()
+            .filter_map(ResponsePayload::as_error)
+            .find(|error| is_rejection(error))
+    } else {
+        response.iter_errors().find(|error| is_rejection(error))
+    }?;
+    let write = match req {
+        RequestPacket::Single(_) => "the write",
+        RequestPacket::Batch(_) => "a write of this batch",
+    };
+    let doubt = if may_be_held {
+        "after an earlier attempt that may have left a transaction with a node"
+    } else {
+        "in a response that does not answer each write once by its id"
+    };
     Some(TransportErrorKind::custom_str(&format!(
-        "write answered {} {:?} after an earlier attempt that may have reached a node",
+        "{write} was answered {} {:?} {doubt}",
         error.code, error.message
     )))
 }
@@ -707,22 +749,27 @@ impl Router {
 
     /// Route a request through the best endpoint, with retry.
     ///
-    /// Reads retry on any transport or RPC error. Writes retry on an error
-    /// answer (e.g. `-32003 insufficient funds` from a stale read replica)
-    /// and on no answer, always as the same signed bytes. A write's last
+    /// Reads retry on any transport or RPC error. An
+    /// `eth_sendRawTransaction` retries on an error answer (e.g. `-32003
+    /// insufficient funds` from a stale read replica) and on no answer,
+    /// always as the same signed bytes; a request that holds an
+    /// `eth_sendTransaction` is sent once ([`node_signs`]). A write's last
     /// error answer is returned as the node gave it only when no earlier
-    /// attempt may have left the transaction with a node: when an attempt
-    /// got no answer, or an answer other than an explicit rejection
-    /// ([`is_rejection`]) for any write call of a batch, a last explicit
-    /// rejection of any call comes back as a transport error for the whole
-    /// request, so no caller reads it as proof that no node holds the
-    /// transaction.
+    /// attempt may have left the transaction with a node and the answer
+    /// answers each write call once by its id: when an attempt got no
+    /// answer, or an answer other than an explicit rejection
+    /// ([`is_rejection`]) for any write call of a batch, or an answer that
+    /// does not match the write calls by id, a last explicit rejection of
+    /// any call comes back as a transport error for the whole request, so
+    /// no caller reads it as proof that no node holds the transaction.
     async fn route_request(
         self: &Arc<Self>,
         req: RequestPacket,
     ) -> Result<ResponsePacket, TransportError> {
         let is_write = is_write_method(&req);
-        let (max_attempts, base_delay) = if is_write {
+        let (max_attempts, base_delay) = if node_signs(&req) {
+            (1, std::time::Duration::ZERO)
+        } else if is_write {
             (
                 1 + self.config.write_retry.max_retries,
                 self.config.write_retry.base_delay,
@@ -766,8 +813,9 @@ impl Router {
 
             match result {
                 Ok(Ok(response)) => {
-                    // For writes, check if the response is a pre-mempool rejection
-                    // that is safe to retry (tx was never accepted).
+                    // A write's error answer is retried as the same signed
+                    // bytes; whether a node can hold the transaction turns on
+                    // the answer to every write of the request.
                     if is_write && self.config.write_retry.is_retriable(&response) {
                         let rejected = every_write_rejected(&req, &response);
                         // Stale-replica rejections are not evidence of an
@@ -784,17 +832,15 @@ impl Router {
                                 max_attempts,
                                 endpoint = %pool.label(idx),
                                 error_code = response.first_error_code(),
-                                "write rejected pre-mempool, retrying"
+                                "write answered with an error, retrying"
                             );
                         } else {
                             tracing::warn!(
                                 endpoint = %pool.label(idx),
                                 error_code = response.first_error_code(),
-                                "write rejected after all retries exhausted"
+                                "write answered with an error on its last attempt"
                             );
-                            if may_be_held
-                                && let Some(error) = rejected_after_doubt(&req, &response)
-                            {
+                            if let Some(error) = uncertain_rejection(&req, &response, may_be_held) {
                                 return Err(error);
                             }
                             return Ok(response);
@@ -1005,8 +1051,8 @@ impl Service<RequestPacket> for HftTransport {
 
 #[cfg(test)]
 mod tests {
-    use alloy::primitives::{B256, Bytes};
-    use serde_json::json;
+    use alloy::primitives::{Address, B256, Bytes};
+    use serde_json::{Value, json};
 
     use super::*;
     use crate::transport::config::{TransportConfig, WriteRetryConfig};
@@ -1349,15 +1395,25 @@ mod tests {
     /// A batch of two writes, `a` and `b`, answered in each attempt by
     /// the script for each. A rejection in the batch's last answer is
     /// passed on only when every attempt rejected every write of the batch:
-    /// one write's rejection is no evidence about the other.
+    /// one write's rejection is no evidence about the other. Otherwise the
+    /// whole batch fails with a transport error that names the rejection,
+    /// and no write of it, not even one the node answered with a hash,
+    /// gets an answer.
     #[tokio::test]
     async fn a_batch_rejection_is_the_nodes_answer_only_when_every_write_got_one() {
         const U: &str = "replacement transaction underpriced";
-        let scripts: [(&[(&str, &str)], bool); 4] = [
+        let scripts: [(&[(&str, &str)], bool); 8] = [
             (&[(U, U), (U, U)], true),
             (&[(U, "already known"), (U, U)], false),
             (&[("already known", U), (U, U)], false),
             (&[(U, "ok"), (U, "ok")], false),
+            (&[("ok", U), ("ok", U)], false),
+            (&[("ok", U), ("already known", U)], false),
+            (
+                &[("already known", "already known"), ("already known", U)],
+                false,
+            ),
+            (&[("ok", "nonce too low"), ("already known", U)], false),
         ];
         for (script, passed_on) in scripts {
             let attempts = Arc::new(AtomicUsize::new(0));
@@ -1384,16 +1440,26 @@ mod tests {
             let b = batch
                 .add_call::<_, B256>("eth_sendRawTransaction", &(Bytes::from_static(&[2, 2]),))
                 .unwrap();
-            let _ = batch.send().await;
+            let sent = batch.send().await;
             let (a, b) = (a.await, b.await);
             assert_eq!(attempts.load(Ordering::SeqCst), script.len(), "{script:?}");
+            let last = script[script.len() - 1];
+            if passed_on {
+                sent.unwrap();
+            } else {
+                let error = sent.expect_err("the whole batch fails").to_string();
+                assert!(
+                    error.contains("a write of this batch was answered") && error.contains(U),
+                    "{script:?}: {error}"
+                );
+                assert!(a.is_err() && b.is_err(), "{script:?}: {a:?} {b:?}");
+            }
             for (name, answer) in [("a", &a), ("b", &b)] {
                 let rejected = answer
                     .as_ref()
                     .err()
                     .and_then(|error| error.as_error_resp())
                     .is_some_and(is_rejection);
-                let last = script[script.len() - 1];
                 let rejected_last = if name == "a" { last.0 } else { last.1 } == U;
                 assert_eq!(
                     rejected,
@@ -1401,6 +1467,205 @@ mod tests {
                     "{name} of {script:?}: {answer:?}"
                 );
             }
+        }
+    }
+
+    /// A batch of a read and a write: the read's answer is no evidence
+    /// about the write, so a write rejected on every attempt has its
+    /// rejection passed on, and the read keeps its answer.
+    #[tokio::test]
+    async fn a_batch_read_is_no_evidence_about_its_write() {
+        const U: &str = "replacement transaction underpriced";
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&attempts);
+        let url = scripted::endpoint(move |method, _| {
+            if method == "eth_chainId" {
+                counter.fetch_add(1, Ordering::SeqCst);
+                Answer::Result(json!("0x1"))
+            } else {
+                Answer::Error(-32_000, U.into())
+            }
+        })
+        .await;
+        let client = write_client(&url, 1);
+        let mut batch = client.new_batch();
+        let read = batch.add_call::<_, String>("eth_chainId", &()).unwrap();
+        let write = batch
+            .add_call::<_, B256>("eth_sendRawTransaction", &(Bytes::from_static(&[2, 2]),))
+            .unwrap();
+        batch.send().await.unwrap();
+        let (read, write) = (read.await, write.await);
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+        assert_eq!(read.unwrap(), "0x1");
+        let rejected = write
+            .as_ref()
+            .err()
+            .and_then(|error| error.as_error_resp())
+            .is_some_and(is_rejection);
+        assert!(rejected, "{write:?}");
+    }
+
+    /// The answers to two writes, ids 1 and 2, count as rejections only
+    /// when each write has exactly one response with its id: one error
+    /// object for the whole batch (under a null id or a write's id), a
+    /// missing, a wrong or a repeated id are no evidence. A rejection in
+    /// such a response is never passed on, even with no earlier doubt.
+    #[test]
+    fn a_write_is_answered_only_by_the_one_response_with_its_id() {
+        const U: &str = r#"{"code":-32000,"message":"replacement transaction underpriced"}"#;
+        let answer = |id: &str| format!(r#"{{"jsonrpc":"2.0","id":{id},"error":{U}}}"#);
+        let batch: RequestPacket = [
+            make_request("eth_sendRawTransaction", 1),
+            make_request("eth_sendRawTransaction", 2),
+        ]
+        .into_iter()
+        .collect();
+        let single = RequestPacket::Single(make_request("eth_sendRawTransaction", 1));
+        let rows = [
+            (&batch, answer("null"), false),
+            (&batch, answer("1"), false),
+            (&batch, format!("[{}]", answer("1")), false),
+            (&batch, format!("[{},{}]", answer("1"), answer("1")), false),
+            (&batch, format!("[{},{}]", answer("1"), answer("3")), false),
+            (
+                &batch,
+                format!("[{},{},{}]", answer("1"), answer("2"), answer("2")),
+                false,
+            ),
+            (&batch, format!("[{},{}]", answer("2"), answer("1")), true),
+            (&single, answer("1"), true),
+            (&single, answer("null"), false),
+            (&single, answer("2"), false),
+        ];
+        for (req, body, by_id) in rows {
+            let response: ResponsePacket = serde_json::from_str(&body).unwrap();
+            assert_eq!(every_write_rejected(req, &response), by_id, "{body}");
+            assert_eq!(
+                uncertain_rejection(req, &response, false).is_none(),
+                by_id,
+                "{body}"
+            );
+            assert!(
+                uncertain_rejection(req, &response, true).is_some(),
+                "{body}"
+            );
+        }
+    }
+
+    /// One error object for a whole batch of two writes is no evidence
+    /// that the node holds neither: after it, a batch that rejects both
+    /// fails as a whole, and so does that object as the last answer.
+    #[tokio::test]
+    async fn one_error_object_for_a_batch_is_no_rejection_of_its_writes() {
+        const U: &str = "replacement transaction underpriced";
+        let lone = |id: Value| {
+            Answer::Body(
+                json!({ "jsonrpc": "2.0", "id": id, "error": { "code": -32_000, "message": U } }),
+            )
+        };
+        for (first, last) in [
+            (Some(json!(0)), None),
+            (Some(Value::Null), None),
+            (None, Some(Value::Null)),
+            (None, Some(json!(0))),
+        ] {
+            let attempts = Arc::new(AtomicUsize::new(0));
+            let counter = Arc::clone(&attempts);
+            let url = scripted::endpoint(move |_, params| {
+                let attempt = if params[0] == "0x0201" {
+                    counter.fetch_add(1, Ordering::SeqCst)
+                } else {
+                    counter.load(Ordering::SeqCst) - 1
+                };
+                match (attempt, &first, &last) {
+                    (0, Some(id), _) | (1, _, Some(id)) => lone(id.clone()),
+                    _ => Answer::Error(-32_000, U.into()),
+                }
+            })
+            .await;
+            let client = write_client(&url, 1);
+            let mut batch = client.new_batch();
+            let a = batch
+                .add_call::<_, B256>("eth_sendRawTransaction", &(Bytes::from_static(&[2, 1]),))
+                .unwrap();
+            let b = batch
+                .add_call::<_, B256>("eth_sendRawTransaction", &(Bytes::from_static(&[2, 2]),))
+                .unwrap();
+            let sent = batch.send().await;
+            let (a, b) = (a.await, b.await);
+            assert_eq!(attempts.load(Ordering::SeqCst), 2);
+            let error = sent.expect_err("the whole batch fails").to_string();
+            assert!(
+                error.contains("a write of this batch was answered") && error.contains(U),
+                "{error}"
+            );
+            for answer in [&a, &b] {
+                let rejected = answer
+                    .as_ref()
+                    .err()
+                    .and_then(|error| error.as_error_resp())
+                    .is_some_and(is_rejection);
+                assert!(!rejected, "{answer:?}");
+            }
+        }
+    }
+
+    /// A request with an `eth_sendTransaction`, which the node signs with
+    /// a nonce it picks, is sent once: after an HTTP 503 or no answer, a
+    /// resend could be signed with the next nonce as a second trade. The
+    /// lost reply is a transport error; an error answer is the node's.
+    /// A batch that holds one is sent once too.
+    #[tokio::test]
+    async fn a_node_signed_send_is_sent_once() {
+        const U: &str = "replacement transaction underpriced";
+        for (first, batched) in [
+            ("HTTP 503", false),
+            ("no answer", false),
+            (U, false),
+            ("HTTP 503", true),
+        ] {
+            let requests = Arc::new(AtomicUsize::new(0));
+            let counter = Arc::clone(&requests);
+            let url = scripted::endpoint(move |method, _| {
+                if method != "eth_sendTransaction" {
+                    return Answer::Result(json!(B256::repeat_byte(0xbb)));
+                }
+                if counter.fetch_add(1, Ordering::SeqCst) > 0 {
+                    return Answer::Result(json!(B256::repeat_byte(0xcc)));
+                }
+                match first {
+                    "HTTP 503" => Answer::Status(503),
+                    "no answer" => Answer::Silence,
+                    answer => Answer::Error(-32_000, answer.into()),
+                }
+            })
+            .await;
+            let client = write_client(&url, 3);
+            let call =
+                json!({ "from": Address::repeat_byte(0x11), "to": Address::repeat_byte(0x22) });
+            let error = if batched {
+                let mut batch = client.new_batch();
+                let raw = batch
+                    .add_call::<_, B256>("eth_sendRawTransaction", &(Bytes::from_static(&[2, 1]),))
+                    .unwrap();
+                let signed = batch
+                    .add_call::<_, B256>("eth_sendTransaction", &(call,))
+                    .unwrap();
+                let sent = batch.send().await.expect_err("a lost reply");
+                assert!(raw.await.is_err() && signed.await.is_err());
+                sent
+            } else {
+                client
+                    .request::<_, B256>("eth_sendTransaction", (call,))
+                    .await
+                    .expect_err("one attempt, no answer")
+            };
+            assert_eq!(requests.load(Ordering::SeqCst), 1, "{first}: {error}");
+            assert_eq!(
+                error.as_error_resp().is_some_and(is_rejection),
+                first == U,
+                "{first}: {error}"
+            );
         }
     }
 

@@ -9,7 +9,6 @@ use alloy::consensus::transaction::SignerRecoverable;
 use alloy::consensus::{Transaction as ConsensusTransaction, TxType};
 use alloy::contract::Error as CallError;
 use alloy::eips::eip2718::Encodable2718;
-use alloy::hex;
 use alloy::network::TransactionBuilder;
 use alloy::primitives::{Address, B256, Bytes, I256, U256, keccak256};
 use alloy::providers::Provider;
@@ -277,53 +276,92 @@ fn era_read_error(error: PerpCityError) -> PerpCityError {
     }
 }
 
+/// Parts of an error answer's message that report an execution error of
+/// the call: a revert, in the wordings of geth, Nitro, Hardhat and
+/// Erigon, or an exceptional halt.
+const EXECUTION_WORDINGS: [&str; 7] = [
+    "revert",
+    "vm exception",
+    "vm execution error",
+    "out of gas",
+    "invalid opcode",
+    "invalid jump",
+    "stack limit",
+];
+
 /// Parts of an error answer's message that report no answer from the
-/// node behind the endpoint: a timeout, or a gateway with no node to ask.
-const NO_ANSWER_WORDINGS: [&str; 8] = [
+/// node behind the endpoint: a timeout or a cancelled request, a gateway
+/// with no node to ask, a node behind the block asked for, or a quota.
+const NO_ANSWER_WORDINGS: [&str; 15] = [
     "timeout",
     "timed out",
+    "deadline exceeded",
+    "context canceled",
+    "unexpected eof",
     "no backend",
     "unavailable",
     "bad gateway",
     "upstream",
     "overloaded",
     "connection",
+    "block not found",
+    "failed to get block",
+    "quota",
+    "limit exceeded",
 ];
 
-/// Whether a failed read got no answer from the node: a failure of the
-/// endpoint ([`Fault::Endpoint`], which counts a rate limit), or an error
-/// answer that reports one (an internal error, `-32603`, or a wording in
-/// [`NO_ANSWER_WORDINGS`]). An error answer that is an execution revert,
-/// by its message or by revert data in `data`, is the contract's answer,
-/// whatever its code.
+/// Whether a failed read got no answer from the node.
+///
+/// An error answer is the node's answer first when it reports an
+/// execution error, by the execution error code `3` or by its message
+/// ([`EXECUTION_WORDINGS`]), or a method the endpoint does not serve
+/// (`-32601`), whatever else its message says. Else it is no answer when
+/// it reports one (a wording in [`NO_ANSWER_WORDINGS`], or a bare `EOF`),
+/// unless its `data` holds revert data, which is the contract's answer;
+/// empty revert data (`0x`) is no evidence against a wording that reports
+/// no answer. An error answer with neither is no answer when it is a rate
+/// limit ([`Fault::Endpoint`]) or a bare internal error (`-32603`). Any
+/// other failure is no answer when it is the endpoint's
+/// ([`Fault::Endpoint`]).
 fn is_no_answer(error: &TransportError) -> bool {
     let Some(resp) = error.as_error_resp() else {
         return fault(error) == Fault::Endpoint;
     };
     let message = resp.message.to_ascii_lowercase();
-    !message.contains("execution reverted")
-        && !carries_revert_data(resp)
-        && (fault(error) == Fault::Endpoint
-            || resp.code == -32_603
-            || NO_ANSWER_WORDINGS.iter().any(|w| message.contains(w)))
+    if resp.code == 3
+        || resp.code == -32_601
+        || EXECUTION_WORDINGS.iter().any(|w| message.contains(w))
+    {
+        return false;
+    }
+    let reports_no_answer =
+        message.trim() == "eof" || NO_ANSWER_WORDINGS.iter().any(|w| message.contains(w));
+    match revert_data_len(resp) {
+        Some(0) if reports_no_answer => true,
+        Some(_) => false,
+        None => reports_no_answer || fault(error) == Fault::Endpoint || resp.code == -32_603,
+    }
 }
 
-/// Whether an error answer's `data` holds revert data: a hex string, as
-/// it is or under a `data` key, as nodes nest it.
-fn carries_revert_data(resp: &ErrorPayload) -> bool {
-    fn is_revert_data(value: &Value) -> bool {
+/// The length in hex digits of the longest revert data in an error
+/// answer's `data`: a `0x` hex string, as it is or under any key at any
+/// depth, as nodes and wallets nest it (`data`, `originalError`).
+/// `Some(0)` for `0x` alone, `None` for no hex string.
+fn revert_data_len(resp: &ErrorPayload) -> Option<usize> {
+    fn longest(value: &Value) -> Option<usize> {
         match value {
             Value::String(text) => text
                 .strip_prefix("0x")
-                .is_some_and(|digits| hex::decode(digits).is_ok()),
-            Value::Object(fields) => fields.get("data").is_some_and(is_revert_data),
-            _ => false,
+                .filter(|digits| digits.bytes().all(|digit| digit.is_ascii_hexdigit()))
+                .map(str::len),
+            Value::Object(fields) => fields.values().filter_map(longest).max(),
+            _ => None,
         }
     }
     resp.data
         .as_ref()
         .and_then(|data| serde_json::from_str::<Value>(data.get()).ok())
-        .is_some_and(|value| is_revert_data(&value))
+        .and_then(|value| longest(&value))
 }
 
 /// The adjustment `receipt` mined for `pos_id` on `perp`.
@@ -2080,39 +2118,51 @@ mod tests {
     /// transient.
     #[tokio::test(start_paused = true)]
     async fn failed_receipt_reads_never_report_the_nonce_used() {
-        let (client, rpc) = mock::client();
-        client.chain().set_base_fee(100);
-        let (hash, tx) = pending_trade(&client, stuck_open(&client, NOW + 600).abi_encode()).await;
-        rpc.immutables(Era::V1);
-        rpc.response(&tx);
-        rpc.raw(&[]);
-        rpc.fails("already known");
-        for _ in 0..=RECEIPT_TIMEOUT.as_secs() / RECEIPT_POLL_INTERVAL.as_secs() {
-            rpc.quantity(STUCK_NONCE + 1);
-            rpc.response(&None::<TransactionReceipt>);
-            rpc.fails("upstream timeout");
+        for foreign in [false, true] {
+            let (client, rpc) = mock::client();
+            client.chain().set_base_fee(100);
+            let (hash, tx) =
+                pending_trade(&client, stuck_open(&client, NOW + 600).abi_encode()).await;
+            let other = B256::repeat_byte(0x0e);
+            rpc.immutables(Era::V1);
+            rpc.response(&tx);
+            rpc.raw(&[]);
+            rpc.fails("already known");
+            for _ in 0..=RECEIPT_TIMEOUT.as_secs() / RECEIPT_POLL_INTERVAL.as_secs() {
+                rpc.quantity(STUCK_NONCE + 1);
+                rpc.response(&None::<TransactionReceipt>);
+                if foreign {
+                    rpc.foreign_receipt(&mined_trade_receipt(
+                        &client,
+                        other,
+                        &opened_event(&client),
+                    ));
+                } else {
+                    rpc.fails("upstream timeout");
+                }
+            }
+            let started = tokio::time::Instant::now();
+            let err = client
+                .replace_v1_taker(hash, Urgency::Normal)
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(
+                    err,
+                    PerpCityError::Transaction(TransactionError::ReplacementUnconfirmed {
+                        refused: false,
+                        ..
+                    })
+                ),
+                "foreign {foreign}: {err}"
+            );
+            assert!(err.is_transient() && err.is_unconfirmed(), "{err}");
+            assert_eq!(started.elapsed(), RECEIPT_TIMEOUT, "foreign {foreign}");
+            assert!(
+                rpc.is_drained(),
+                "foreign {foreign}: one look per poll interval, then the timeout"
+            );
         }
-        let started = tokio::time::Instant::now();
-        let err = client
-            .replace_v1_taker(hash, Urgency::Normal)
-            .await
-            .unwrap_err();
-        assert!(
-            matches!(
-                err,
-                PerpCityError::Transaction(TransactionError::ReplacementUnconfirmed {
-                    refused: false,
-                    ..
-                })
-            ),
-            "{err}"
-        );
-        assert!(err.is_transient() && err.is_unconfirmed());
-        assert_eq!(started.elapsed(), RECEIPT_TIMEOUT);
-        assert!(
-            rpc.is_drained(),
-            "one look per poll interval, then the timeout"
-        );
     }
 
     /// After an explicit rejection, a used nonce gets one more look after
@@ -2292,14 +2342,60 @@ mod tests {
         }
     }
 
-    /// What counts as no answer from the node for an era read: revert
-    /// data, under any code, is the contract's answer; a bare internal
-    /// error and a gateway with no node to ask are no answer.
+    /// What counts as no answer from the node for an era read: an
+    /// execution error, by code `3` or by its wording, and a method the
+    /// endpoint does not serve are answers whatever else the message says;
+    /// revert data, under any code and nested at any depth, is the
+    /// contract's answer; a bare internal error, a gateway with no node to
+    /// ask, a timeout and a quota are no answer, and empty revert data does
+    /// not change that.
     #[test]
     fn no_answer_is_a_failure_of_the_node_never_its_answer() {
         const REVERT: &str = r#""0x08c379a0""#;
         const NESTED: &str = r#"{"message":"execution reverted","data":"0xbcffc83f"}"#;
+        const ORIGINAL: &str =
+            r#"{"originalError":{"code":3,"data":"0xbcffc83f","message":"execution reverted"}}"#;
+        const EMPTY: &str = r#""0x""#;
         for (code, message, data, no_answer) in [
+            (-32_000, "execution aborted (timeout = 5s)", None, true),
+            (-32_002, "request timed out", None, true),
+            (-32_000, "context deadline exceeded", None, true),
+            (-32_000, "context canceled", None, true),
+            (-32_000, "EOF", None, true),
+            (-32_000, "unexpected EOF", None, true),
+            (-32_000, "failed to get block", None, true),
+            (-32_000, "block not found", None, true),
+            (-32_001, "Exceeded the quota usage", None, true),
+            (-32_016, "over rate limit", None, true),
+            (-32_005, "limit exceeded", None, true),
+            (-32_097, "rate limit exceeded", None, true),
+            (-32_000, "gateway timeout", Some(EMPTY), true),
+            (-32_603, "request timed out", Some(EMPTY), true),
+            (-32_000, "service unavailable", Some(EMPTY), true),
+            (
+                3,
+                "VM Exception while processing transaction: revert service unavailable",
+                None,
+                false,
+            ),
+            (3, "upstream timeout", None, false),
+            (-32_000, "execution reverted: upstream timeout", None, false),
+            (-32_603, "Internal JSON-RPC error.", Some(ORIGINAL), false),
+            (
+                -32_015,
+                "VM execution error.",
+                Some(r#""Reverted 0x08c379a0""#),
+                false,
+            ),
+            (-32_015, "VM execution error.", Some(r#""revert""#), false),
+            (-32_603, "internal error", Some(r#""0xABCDEF""#), false),
+            (-32_603, "internal error", Some(r#""0xabc""#), false),
+            (-32_000, "out of gas", None, false),
+            (-32_000, "invalid opcode: INVALID", None, false),
+            (-32_000, "invalid jump destination", None, false),
+            (-32_000, "stack limit reached 1024 (1023)", None, false),
+            (-32_601, "method eth_call is unavailable", None, false),
+            (-32_601, "method unavailable on this plan", None, false),
             (-32_603, "upstream timeout", None, true),
             (-32_000, "request timed out", None, true),
             (-32_000, "upstream timeout", None, true),
@@ -2812,8 +2908,9 @@ mod tests {
     }
 
     /// The replacement carries no value, so a taker call that carried
-    /// value is not one it replaces: an open or an adjustment with value
-    /// is refused, and nothing is preflighted, signed or sent.
+    /// value is not one it replaces: an open or an adjustment with value,
+    /// pending or mined, is refused, and nothing is polled, preflighted,
+    /// signed or sent.
     #[tokio::test]
     async fn a_taker_call_with_value_is_refused() {
         let (client, _) = mock::client();
@@ -2821,11 +2918,14 @@ mod tests {
             stuck_open(&client, NOW + 600).abi_encode(),
             adjust_call(&adjust(-400_000), UsdcAtoms::new(1_000), true, NOW + 600).abi_encode(),
         ];
-        for input in calls {
+        for (input, block) in calls
+            .into_iter()
+            .flat_map(|input| [(input.clone(), None), (input, Some(92))])
+        {
             let (client, rpc) = mock::client();
             client.chain().set_base_fee(100);
             let request = trade_request(&client, input).with_value(U256::from(1));
-            let (hash, tx) = as_seen(&client, request, client.address(), None).await;
+            let (hash, tx) = as_seen(&client, request, client.address(), block).await;
             rpc.immutables(Era::V1);
             rpc.response(&tx);
             let err = client
@@ -2845,8 +2945,9 @@ mod tests {
 
     /// A node that answers a receipt read with the receipt of another
     /// hash gave no answer for the hash asked for. After a refused
-    /// replacement, that look is pending, not the other trade's outcome.
-    #[tokio::test]
+    /// replacement, that look is pending, not the other trade's outcome,
+    /// and gets no second look.
+    #[tokio::test(start_paused = true)]
     async fn a_receipt_of_another_hash_is_no_answer() {
         let (client, rpc) = mock::client();
         client.chain().set_base_fee(100);
@@ -2859,6 +2960,7 @@ mod tests {
         rpc.quantity(STUCK_NONCE + 1);
         rpc.foreign_receipt(&mined_trade_receipt(&client, other, &opened_event(&client)));
         rpc.response(&None::<TransactionReceipt>);
+        let started = tokio::time::Instant::now();
         let err = client
             .replace_v1_taker(hash, Urgency::Normal)
             .await
@@ -2875,6 +2977,7 @@ mod tests {
             "{err:?}"
         );
         assert_eq!(err.tx_hash(), Some(hash));
+        assert_eq!(started.elapsed(), Duration::ZERO, "no second look");
         assert!(rpc.is_drained());
     }
 

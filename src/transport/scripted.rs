@@ -19,6 +19,10 @@ pub(crate) enum Answer {
     Status(u16),
     /// Nothing, until the caller times out.
     Silence,
+    /// This JSON as the whole response body, in place of the request's
+    /// own answers: one error object for a whole batch, an answer under
+    /// another id.
+    Body(Value),
 }
 
 /// The answer to a request, from its method and params.
@@ -26,8 +30,8 @@ pub(crate) type Script = dyn Fn(&str, &Value) -> Answer + Send + Sync;
 
 /// Start an endpoint that answers every request by `script`, and return
 /// its URL. One connection's requests are answered in order, and a batch's
-/// calls each by `script`; a status or silence for any call answers the
-/// whole batch.
+/// calls each by `script`; a status, silence or body for any call answers
+/// the whole batch.
 pub(crate) async fn endpoint(
     script: impl Fn(&str, &Value) -> Answer + Send + Sync + 'static,
 ) -> String {
@@ -55,11 +59,11 @@ async fn serve(mut socket: TcpStream, script: Arc<Script>) {
                 .collect()
             {
                 Ok(bodies) => (200, Value::Array(bodies).to_string()),
-                Err(status) => (status, String::new()),
+                Err(whole) => whole,
             },
             call => match answer(script.as_ref(), call) {
                 Ok(body) => (200, body.to_string()),
-                Err(status) => (status, String::new()),
+                Err(whole) => whole,
             },
         };
         if status == 0 {
@@ -77,8 +81,8 @@ async fn serve(mut socket: TcpStream, script: Arc<Script>) {
 }
 
 /// The JSON-RPC answer to one call, or the HTTP status (`0` for silence)
-/// that answers its whole request.
-fn answer(script: &Script, call: &Value) -> Result<Value, u16> {
+/// and body that answer its whole request.
+fn answer(script: &Script, call: &Value) -> Result<Value, (u16, String)> {
     let id = call["id"].clone();
     let method = call["method"].as_str().unwrap_or_default();
     match script(method, &call["params"]) {
@@ -86,8 +90,9 @@ fn answer(script: &Script, call: &Value) -> Result<Value, u16> {
         Answer::Error(code, message) => {
             Ok(json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message } }))
         }
-        Answer::Status(status) => Err(status),
-        Answer::Silence => Err(0),
+        Answer::Status(status) => Err((status, String::new())),
+        Answer::Silence => Err((0, String::new())),
+        Answer::Body(body) => Err((200, body.to_string())),
     }
 }
 
