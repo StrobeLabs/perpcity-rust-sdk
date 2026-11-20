@@ -129,7 +129,7 @@ pub use math::tick::{
 pub use math::swap::{PoolSnapshot, QuoteConstraints, QuoteLimit, TakerQuote, TickLiquidity};
 
 #[doc(inline)]
-pub use math::capacity::{Capacity, MarketCapacity, band_capacity, liquidity_for_capacity};
+pub use math::capacity::{Capacity, MarketCapacity, band_capacity, band_capacity_x64, liquidity_for_capacity};
 
 #[doc(inline)]
 pub use math::range::{MakerBand, TickRange};
