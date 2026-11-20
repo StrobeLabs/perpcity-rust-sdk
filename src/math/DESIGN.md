@@ -274,7 +274,7 @@ with no allocation on the hot path beyond the tick map a snapshot owns.
 - **Golden vector**: a real on-chain outcome a port must reproduce exactly.
 ## Accepted structure
 
-- `fits_swap` takes requested and filled sizes in `PerpAtoms`. For removals, `band_capacity_x64` takes a `MakerBand` and the current `SqrtPrice`. Its `PerSide<U256>` result preserves all 64 fractional bits until `fits_maker_removal` rounds down the remaining depth.
+- `MarketCapacity` returns headroom in `PerpAtoms`. Its `fits_swap` takes requested and filled sizes in the same unit. For removals, `band_capacity_x64` takes a `MakerBand` and the current `SqrtPrice`. Its `PerSide<U256>` result preserves all 64 fractional bits until `fits_maker_removal` rounds down the remaining depth.
 - **`Emas` and `PricePair` convert both ways.** `stored` lifts the
   contract's two `uint128` words into prices that know their touch and
   `pair` narrows them back for the arithmetic that is transcribed over the

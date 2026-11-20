@@ -615,7 +615,7 @@ async fn maker_equities_via_batched_reads() {
     .unwrap();
     let client = PerpClient::new(chain(transport).market(PERP), signer);
 
-    // 3. Empty input short-circuits without touching the chain.
+    // 3. An empty batch on this earlier market returns no equity rows.
     assert!(
         client
             .market()
