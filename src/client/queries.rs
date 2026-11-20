@@ -30,7 +30,7 @@ use crate::math::pricing::{Emas, Mark};
 use crate::units::{PerSide, PerpAtoms, Price, Ratio, UsdcAtoms};
 
 use super::market::MarketReader;
-use super::state::{PositionRow, decode_exact, ema_window_secs, pinned_read_error};
+use super::state::{PositionRow, ema_window_secs, pinned_read_error};
 use super::{PerpClient, i24_to_i32, now_secs, u24_to_u32};
 
 /// Funding/utilization rates are scaled by 1e18 per day on-chain.
@@ -396,11 +396,10 @@ impl MarketReader {
                     .await?,
             ),
             Era::V1 => {
-                let data = v1::Perp::new(self.perp, provider)
-                    .positions(pos_id)
-                    .call_raw()
-                    .await?;
-                decode_exact::<v1::Perp::positionsCall>(pos_id, &data, "position")?.into()
+                return self
+                    .v1_position(pos_id, Default::default())
+                    .await?
+                    .ok_or_else(|| ContractError::PositionNotFound { pos_id }.into());
             }
         };
         row.held()
@@ -1137,11 +1136,14 @@ mod tests {
     async fn get_position_reads_the_v1_row() {
         let (client, rpc) = mock::client();
         rpc.immutables(Era::V1);
-        rpc.call::<v1::Perp::positionsCall>(&v1::Position {
-            delta: pack_balance_delta(-400_000, 9_000_000),
-            margin: 10_000_000,
-            lastCumlFundingX96: alloy::primitives::I256::ZERO,
-        });
+        rpc.aggregate3(vec![
+            ok_row(returns::<v1::Perp::positionsCall>(&v1::Position {
+                delta: pack_balance_delta(-400_000, 9_000_000),
+                margin: 10_000_000,
+                lastCumlFundingX96: alloy::primitives::I256::ZERO,
+            })),
+            ok_row(returns::<v1::Perp::positionOwnerCall>(&BEACON)),
+        ]);
         let row = client.market().get_position(U256::from(2u8)).await.unwrap();
         assert_eq!(
             (row.perp, row.usd, row.margin, row.stored_margin_ratios),
@@ -1153,11 +1155,14 @@ mod tests {
             )
         );
 
-        rpc.call::<v1::Perp::positionsCall>(&v1::Position {
-            delta: alloy::primitives::I256::ZERO,
-            margin: 0,
-            lastCumlFundingX96: alloy::primitives::I256::ZERO,
-        });
+        rpc.aggregate3(vec![
+            ok_row(returns::<v1::Perp::positionsCall>(&v1::Position {
+                delta: alloy::primitives::I256::ZERO,
+                margin: 0,
+                lastCumlFundingX96: alloy::primitives::I256::ZERO,
+            })),
+            ok_row(returns::<v1::Perp::positionOwnerCall>(&Address::ZERO)),
+        ]);
         let err = client
             .market()
             .get_position(U256::from(3u8))
