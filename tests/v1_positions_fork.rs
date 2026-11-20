@@ -202,8 +202,9 @@ async fn reads_agree_with_raw_calls(
     );
     for (((&pos_id, row), owner), band) in ids.iter().zip(rows).zip(owners).zip(bands) {
         let position = raw.positions(pos_id).block(at).call().await.unwrap();
-        let expected_row = (position.margin != 0 || !position.delta.is_zero())
-            .then(|| PositionRow::from(position));
+        let holder = raw.positionOwner(pos_id).block(at).call().await.unwrap();
+        let expected_owner = (holder != Address::ZERO).then_some(holder);
+        let expected_row = expected_owner.map(|_| PositionRow::from(position));
         assert_eq!(row.row.unwrap(), expected_row, "{pos_id}: positions");
         assert_eq!(
             state.position(pos_id).await.unwrap(),
@@ -211,8 +212,6 @@ async fn reads_agree_with_raw_calls(
             "{pos_id}: position"
         );
 
-        let holder = raw.positionOwner(pos_id).block(at).call().await.unwrap();
-        let expected_owner = (holder != Address::ZERO).then_some(holder);
         assert_eq!(owner.row.unwrap(), expected_owner, "{pos_id}: owners");
 
         let maker = raw.makerDetails(pos_id).block(at).call().await.unwrap();
