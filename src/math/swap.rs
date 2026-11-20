@@ -193,14 +193,12 @@ impl TakerFeeRates {
         slack: UsdcAtoms,
     ) -> Result<UsdcAtoms, ValidationError> {
         let rate = u128::from(self.max_swap_fee.e6()) + u128::from(self.protocol_fee.e6());
-        volume
-            .atoms()
-            .checked_mul(rate)
-            .and_then(|scaled| scaled.checked_add(999_999))
-            .map(|scaled| scaled / 1_000_000)
-            .and_then(|fee| fee.checked_add(slack.atoms()))
+        let fee = (U256::from(volume.atoms()) * U256::from(rate))
+            .div_ceil(U256::from(1_000_000u64))
+            + U256::from(slack.atoms());
+        u128::try_from(fee)
             .map(UsdcAtoms::new)
-            .ok_or_else(|| ValidationError::Overflow {
+            .map_err(|_| ValidationError::Overflow {
                 context: format!("maxTotalFee for a volume of {volume} USDC"),
             })
     }
@@ -661,8 +659,17 @@ mod tests {
                 .unwrap(),
             MAX_TOTAL_FEE_SLACK
         );
+        let rates = TakerFeeRates {
+            protocol_fee: Ratio::from_e6(0).unwrap(),
+            ..rates
+        };
+        let volume = UsdcAtoms::new(u128::MAX);
+        assert_eq!(
+            rates.max_total_fee(volume, MAX_TOTAL_FEE_SLACK).unwrap(),
+            UsdcAtoms::new(2_926_428_355_520_070_785_785_021_623_913_206_719)
+        );
         assert!(matches!(
-            rates.max_total_fee(UsdcAtoms::new(u128::MAX), MAX_TOTAL_FEE_SLACK),
+            rates.max_total_fee(volume, volume),
             Err(ValidationError::Overflow { .. })
         ));
     }

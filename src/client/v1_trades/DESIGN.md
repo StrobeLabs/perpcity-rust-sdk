@@ -1,6 +1,6 @@
 # `v1_trades`: the `v1.0.0` taker writes
 
-Up: [`client`](../DESIGN.md). Each write refuses another build after the era read, carries a deadline `V1_TRADE_DEADLINE` after the signing time and a `maxTotalFee`, and returns the receipt's parsed event from [`events::receipt`](../../events/DESIGN.md), so no `v1.0.0` taker write reports success without its event. A stuck trade is replaced with a new deadline, never with its own bytes, which could mine as `DeadlineExpired`.
+Up: [`client`](../DESIGN.md). Each write refuses another build after the era read, carries a deadline `V1_TRADE_DEADLINE` after the signing time and a `maxTotalFee`, and returns the receipt's parsed event from [`events::receipt`](../../events/DESIGN.md), so no `v1.0.0` taker write reports success without its event. A replacement has a strictly later deadline. At the maximum deadline, the SDK refuses to replace a pending trade.
 
 | Type | Invariant | Produced by | Consumed by |
 |---|---|---|---|
@@ -10,6 +10,6 @@ Up: [`client`](../DESIGN.md). Each write refuses another build after the era rea
 
 ## Accepted structure
 
-The writes take the earlier builds' exact parameters (`ExactOpenTakerParams`, `ExactAdjustTakerParams`) and add the `v1.0.0` fields as arguments, so those structs and their callers are unchanged. The fee bound is a volume, not a rate: the caller knows the trade's USDC leg and the market knows the rates, which are read at the send and not cached.
+The writes take the earlier builds' exact parameters (`ExactOpenTakerParams`, `ExactAdjustTakerParams`) and add the `v1.0.0` fields as arguments, so those structs and their callers are unchanged. The fee bound is a volume, not a rate: the caller knows the trade's USDC leg and the market knows the rates, which are read with the fees module address at one pinned head block for each volume-based write. The close takes an explicit fee bound from the caller. The reduce-only check reverses the stored amount in `I256`, and close checks that the result fits `PerpDelta` before sending.
 
-The replacement is a client method and not a pipeline step: the pipeline's send waits for one hash, and a replacement must poll two. It runs only after that send returned, which `TxPipeline::is_in_flight` checks.
+The replacement is a client method and not a pipeline step: the pipeline's send waits for one hash, and a replacement must poll two. It runs only after that send returned, which `TxPipeline::is_in_flight` checks. A failed preflight checks the original receipt. A broadcast attempt checks both hashes even when the node reports an error. `TransactionError::ReplacementUnconfirmed` gives the caller the hashes to reconcile when no receipt is available.

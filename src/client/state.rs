@@ -33,7 +33,7 @@ use crate::math::BlockContext;
 use crate::math::capacity::{Capacity, MarketCapacity};
 use crate::math::pricing::{BeaconIndex, Emas, Mark, PricePair, calculate_emas};
 use crate::math::range::{MakerBand, TickRange};
-use crate::math::swap::{PoolSnapshot, TickLiquidity, active_liquidity};
+use crate::math::swap::{PoolSnapshot, TakerFeeRates, TickLiquidity, active_liquidity};
 use crate::storage::{v4_tick_bitmap_slot, v4_tick_slot};
 use crate::units::{
     Funding, FundingRate, LDelta, LUnits, PerSide, PerpAtoms, PerpDelta, Price, Ratio, SqrtPrice,
@@ -842,6 +842,41 @@ impl StateAt {
                 .await
             }
         }
+    }
+
+    /// Read the v1 fee module and trade rates at this handle's block.
+    pub(super) async fn taker_fee_rates(&self) -> Result<TakerFeeRates> {
+        let perp = v1::Perp::new(self.market.perp, self.market.chain.provider());
+        let modules = perp
+            .modules()
+            .block(self.id())
+            .call()
+            .await
+            .map_err(|e| self.read_error(e))?;
+        let fees = v1::IFees::new(
+            registered_module(modules.fees, "IFees")?,
+            self.market.chain.provider(),
+        );
+        let (max_swap_fee, protocol_fee) = self
+            .market
+            .chain
+            .multicall_at(self.id())
+            .add(fees.maxSwapFee())
+            .add(perp.protocolFee())
+            .aggregate()
+            .await
+            .map_err(|e| self.multicall_read_error(e))?;
+        let ratio = |e6: U256, name: &str| {
+            u32::try_from(e6)
+                .map_err(|_| ValidationError::Overflow {
+                    context: format!("{name} {e6} exceeds uint32"),
+                })
+                .and_then(Ratio::from_e6)
+        };
+        Ok(TakerFeeRates {
+            max_swap_fee: ratio(max_swap_fee, "maxSwapFee")?,
+            protocol_fee: ratio(protocol_fee, "protocolFee")?,
+        })
     }
 
     /// The module in force for each kind at this block: `modules()`.

@@ -22,19 +22,19 @@ mod v1_fork;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use alloy::consensus::Transaction as _;
+use alloy::eips::BlockId;
 use alloy::primitives::{Address, I256, U256};
 use alloy::providers::Provider;
 use alloy::rpc::types::TransactionReceipt;
 use alloy::signers::local::PrivateKeySigner;
 use alloy::sol_types::{SolCall, SolError, SolEvent};
 use perpcity_sdk::client::PositionRole;
-use perpcity_sdk::contracts::v1::{AdjustTakerParams, OpenMakerParams, Perp};
+use perpcity_sdk::contracts::v1::{AdjustTakerParams, IFees, OpenMakerParams, Perp, SwapResult};
 use perpcity_sdk::errors::decode::try_extract_revert;
 use perpcity_sdk::{
-    ChainReader, Era, ExactAdjustTakerParams, ExactOpenTakerParams, HftTransport,
-    MAX_TOTAL_FEE_SLACK, MaxTotalFee, PerpCityError, PerpClient, PerpDelta, TransactionError,
-    TransportConfig, Urgency, UsdcAtoms, UsdcDelta, V1TakerAdjustment, V1TakerReplacement,
-    ValidationError,
+    ChainReader, Era, ExactAdjustTakerParams, ExactOpenTakerParams, HftTransport, MaxTotalFee,
+    PerpCityError, PerpClient, PerpDelta, TransactionError, TransportConfig, Urgency, UsdcAtoms,
+    UsdcDelta, V1TakerAdjustment, V1TakerReplacement, ValidationError,
 };
 use serde_json::Value;
 use tokio::time::sleep;
@@ -71,6 +71,25 @@ async fn input_of<P: Provider>(provider: &P, hash: alloy::primitives::B256) -> V
         .expect("the node has the transaction")
         .input()
         .to_vec()
+}
+
+/// The cap from the tagged contract views and the fixed 100-atom slack.
+async fn expected_fee_cap(provider: &impl Provider, market: Address, volume: UsdcAtoms) -> U256 {
+    let block = BlockId::number(provider.get_block_number().await.unwrap());
+    let perp = Perp::new(market, provider);
+    let modules = perp.modules().block(block).call().await.unwrap();
+    let fees = IFees::new(modules.fees, provider);
+    let swap_rate = fees.maxSwapFee().block(block).call().await.unwrap();
+    let protocol_rate = perp.protocolFee().block(block).call().await.unwrap();
+    let scale = U256::from(1_000_000);
+    (U256::from(volume.atoms()) * (swap_rate + protocol_rate) + scale - U256::ONE) / scale
+        + U256::from(100)
+}
+
+fn assert_swap_fees(swap: &SwapResult, cap: U256) {
+    let charged = swap.lpFeeAmt + swap.protocolFeeAmt + swap.creatorFeeAmt + swap.insuranceFeeAmt;
+    assert_eq!(swap.totalFeeAmt, I256::try_from(charged).unwrap());
+    assert!(charged <= cap);
 }
 
 /// The initialized ticks a swap from `start` to `end` passes.
@@ -147,8 +166,6 @@ async fn v1_taker_writes_on_a_sepolia_fork() {
     let client = PerpClient::new(chain.market(perp), signer);
     client.sync_nonce().await.unwrap();
     assert_eq!(client.market().era().await.unwrap(), Era::V1);
-    let rates = client.market().get_taker_fee_rates().await.unwrap();
-    println!("fee rates: {rates:?}");
 
     // ── Open: a swap across three initialized ticks, equal to the quote ──
     let pool = client
@@ -166,6 +183,7 @@ async fn v1_taker_writes_on_a_sepolia_fork() {
     );
     assert!(quote.ticks_crossed.len() >= 3, "{:?}", quote.ticks_crossed);
     let amt1_limit = quote.amt1_limit(100);
+    let expected_cap = expected_fee_cap(&w.provider, perp, amt1_limit).await;
     client.chain().refresh_gas().await.unwrap();
     let before = wall_secs();
     let opened = client
@@ -203,18 +221,16 @@ async fn v1_taker_writes_on_a_sepolia_fork() {
     let sent = Perp::openTakerCall::abi_decode(&input_of(&w.provider, opened.tx_hash).await)
         .unwrap()
         .params;
-    assert_eq!(
-        sent.maxTotalFee,
-        U256::from(
-            rates
-                .max_total_fee(amt1_limit, MAX_TOTAL_FEE_SLACK)
-                .unwrap()
-                .atoms()
-        )
-    );
+    assert_eq!(sent.maxTotalFee, expected_cap);
     assert!((before + 600..=after + 600).contains(&sent.deadline));
     assert_eq!(sent.amt1Limit, U256::from(amt1_limit.atoms()));
-    assert!(opened.event.sr.totalFeeAmt <= I256::try_from(sent.maxTotalFee).unwrap());
+    assert_swap_fees(&opened.event.sr, sent.maxTotalFee);
+    assert!(
+        opened.event.sr.feeFundFeeAmt > U256::ZERO,
+        "the fixture credits the fee fund"
+    );
+    let charged = u128::try_from(opened.event.sr.totalFeeAmt).unwrap();
+    assert_eq!(opened.margin, Some(UsdcAtoms::new(10_000_000 - charged)));
 
     // ── Adjust: a reduce-only partial sell ──────────────────────────
     let state = client.market().state_at_head().await.unwrap();
@@ -225,6 +241,7 @@ async fn v1_taker_writes_on_a_sepolia_fork() {
         .quote_perp(PerpDelta::new(-REDUCE_SIZE))
         .unwrap();
     let volume = UsdcAtoms::new(sell.usd_delta.magnitude().atoms() * 101 / 100);
+    let expected_cap = expected_fee_cap(&w.provider, perp, volume).await;
     client.chain().refresh_gas().await.unwrap();
     let reduced = client
         .adjust_taker_v1(
@@ -249,6 +266,8 @@ async fn v1_taker_writes_on_a_sepolia_fork() {
         .params;
     assert!(sent.reduceOnly);
     assert!(sent.deadline >= after + 600);
+    assert_eq!(sent.maxTotalFee, expected_cap);
+    assert_swap_fees(&reduced.event.sr, sent.maxTotalFee);
 
     // ── The flip refusal: the SDK before the send, the chain on the call ─
     let left = OPEN_SIZE - REDUCE_SIZE;
@@ -313,6 +332,7 @@ async fn v1_taker_writes_on_a_sepolia_fork() {
         .quote_perp(PerpDelta::new(-left))
         .unwrap();
     let volume = UsdcAtoms::new(buyback.usd_delta.magnitude().atoms() * 101 / 100);
+    let expected_cap = expected_fee_cap(&w.provider, perp, volume).await;
     client.chain().refresh_gas().await.unwrap();
     let closed = client
         .close_taker_v1(taker, None, MaxTotalFee::ForVolume(volume), Urgency::Normal)
@@ -329,12 +349,15 @@ async fn v1_taker_writes_on_a_sepolia_fork() {
         .params;
     assert!(sent.reduceOnly);
     assert_eq!(sent.perpDelta, I256::try_from(-left).unwrap());
+    assert_eq!(sent.maxTotalFee, expected_cap);
+    assert_swap_fees(&closed.event.sr, sent.maxTotalFee);
     println!("taker {taker} closed in {}", closed.tx_hash);
 
     // ── The deadline bump: a stuck open, replaced ───────────────────
     raw(&fork, "evm_setAutomine", serde_json::json!([false])).await;
     client.chain().refresh_gas().await.unwrap();
     let small = UsdcAtoms::new(6_000_000);
+    let expected_cap = expected_fee_cap(&w.provider, perp, small).await;
     let err = client
         .open_taker_v1(
             &open_params(10_000_000, 100_000, small),
@@ -377,6 +400,13 @@ async fn v1_taker_writes_on_a_sepolia_fork() {
         .unwrap()
         .unwrap();
     assert_eq!(replacement_tx.nonce(), stuck_tx.nonce(), "same nonce");
+    let old_max = stuck_tx.max_fee_per_gas();
+    let old_priority = stuck_tx.max_priority_fee_per_gas().unwrap();
+    assert!(replacement_tx.max_fee_per_gas() >= old_max + old_max.div_ceil(8));
+    assert!(
+        replacement_tx.max_priority_fee_per_gas().unwrap()
+            >= old_priority + old_priority.div_ceil(8)
+    );
     assert_ne!(
         replacement_tx.input(),
         stuck_tx.input(),
@@ -398,6 +428,8 @@ async fn v1_taker_writes_on_a_sepolia_fork() {
     );
     assert_eq!(renewed.perpDelta, stuck_call.perpDelta);
     assert_eq!(renewed.maxTotalFee, stuck_call.maxTotalFee);
+    assert_eq!(renewed.maxTotalFee, expected_cap);
+    assert_swap_fees(&replaced.event.sr, renewed.maxTotalFee);
     assert!(
         w.provider
             .get_transaction_receipt(stuck)

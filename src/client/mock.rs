@@ -102,7 +102,7 @@ fn mocked() -> (RootProvider<Ethereum>, Rpc) {
 #[derive(Clone)]
 struct Recorder {
     mock: MockTransport,
-    calls: Arc<Mutex<Vec<Bytes>>>,
+    calls: Arc<Mutex<Vec<(Bytes, BlockId)>>>,
     slots: Arc<Mutex<Vec<U256>>>,
     storage_blocks: Arc<Mutex<Vec<BlockId>>>,
 }
@@ -139,7 +139,13 @@ impl Service<RequestPacket> for Recorder {
             let input = call["input"].as_str().or_else(|| call["data"].as_str());
             if let Some(input) = input {
                 let calldata = hex::decode(input).expect("calldata is hex");
-                self.calls.lock().unwrap().push(calldata.into());
+                let block = if params[1].is_null() {
+                    BlockId::latest()
+                } else {
+                    serde_json::from_value(params[1].clone())
+                        .expect("an eth_call block parses as a BlockId")
+                };
+                self.calls.lock().unwrap().push((calldata.into(), block));
             }
         }
         self.mock.call(req)
@@ -207,12 +213,17 @@ fn signer() -> PrivateKeySigner {
 /// it was asked.
 pub(super) struct Rpc {
     asserter: Asserter,
-    calls: Arc<Mutex<Vec<Bytes>>>,
+    calls: Arc<Mutex<Vec<(Bytes, BlockId)>>>,
     slots: Arc<Mutex<Vec<U256>>>,
     storage_blocks: Arc<Mutex<Vec<BlockId>>>,
 }
 
 impl Rpc {
+    /// The next request returns an RPC object or null.
+    pub(super) fn response(&self, result: &impl serde::Serialize) {
+        self.asserter.push_success(result);
+    }
+
     /// The next `eth_call` returns `ret`, encoded as `C`'s return.
     pub(super) fn call<C: SolCall>(&self, ret: &C::Return) {
         self.asserter.push_success(&Bytes::from(returns::<C>(ret)));
@@ -247,7 +258,22 @@ impl Rpc {
     /// The calldata of every `eth_call` asked so far, in order; a
     /// multicall is one entry.
     pub(super) fn calls(&self) -> Vec<Bytes> {
-        self.calls.lock().unwrap().clone()
+        self.calls
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(data, _)| data.clone())
+            .collect()
+    }
+
+    /// The block of every `eth_call`, in arrival order.
+    pub(super) fn call_blocks(&self) -> Vec<BlockId> {
+        self.calls
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(_, block)| *block)
+            .collect()
     }
 
     /// The slot of every `eth_getStorageAt` asked so far, in order.
