@@ -116,7 +116,12 @@ only when the probe succeeds.
 A read retries with backoff when the endpoint failed to answer, never
 when it declined. A write retries when the node rejected it before the
 mempool, and when the node did not answer, with the same signed bytes;
-the caller trusts the receipt over the error.
+the caller trusts the receipt over the error. A write's last explicit
+rejection (`underpriced`, a fee or funds answer) is passed on as the
+node's answer only when every attempt got one: after an attempt with no
+answer, or with another answer (`already known`, `nonce too low`), a node
+can hold the transaction, and the rejection comes back as a transport
+error that names it.
 
 The WebSocket manager is the subscription side of the same idea: one
 socket, many subscriptions, reconnect with capped backoff, and the
@@ -194,7 +199,8 @@ trade is a setting a caller chose.
 - **Retry**: the same request again, under the kind's rule. **Hedge**:
   the same read to several endpoints at once, first answer wins.
 - **Decline**: the endpoint answered no to this request; not a failure of
-  the endpoint. **No answer**: timeout or dropped connection; a failure
+  the endpoint. **Explicit rejection**: a node's answer to a write that
+  says it does not hold the transaction. **No answer**: timeout or dropped connection; a failure
   of the endpoint.
 - **Breaker**: per-endpoint state that takes it out of rotation;
   **closed, open, half-open**: its states; **probe**: the one request that

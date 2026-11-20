@@ -699,6 +699,7 @@ async fn v1_taker_writes_on_a_sepolia_fork() {
             PerpCityError::Transaction(TransactionError::NotReplaceable {
                 tx_hash,
                 reason: NotReplaceableReason::UnknownToNode,
+                ..
             }) if tx_hash == s
         ),
         "{again:?}"

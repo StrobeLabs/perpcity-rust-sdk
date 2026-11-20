@@ -162,8 +162,10 @@ the node did not reject, else the original.
 - **`is_transient` is by wrapping path for bare contract calls** (SDK
   #115). A transport failure inside a now-read surfaces as an ABI error
   the classification does not recognise. The pinned reads fixed their
-  half; of the head reads, only the era read of
-  `PerpClient::replace_v1_taker` has.
+  half; of the head reads, only the era read of the `v1.0.0` writes
+  (`PerpClient::open_taker_v1`, `adjust_taker_v1`, `close_taker_v1` and
+  `replace_v1_taker`) has: no answer is `Rpc` and transient, and an
+  answer (a revert, a refused method) stays an ABI error, not transient.
 - **`MulticallFailed` carries a string.** The reasons a batch fails are
   few and known; they should be variants a caller can branch on.
 - **A revert that keeps no selector has no class.** A mined revert

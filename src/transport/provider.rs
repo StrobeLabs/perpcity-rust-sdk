@@ -52,11 +52,11 @@ use std::task::{Context, Poll};
 use std::time::Instant;
 
 use alloy::rpc::json_rpc::{RequestPacket, ResponsePacket};
-use alloy::transports::{TransportError, TransportFut};
+use alloy::transports::{TransportError, TransportErrorKind, TransportFut};
 use tower::Service;
 
 use super::config::{Strategy, TransportConfig};
-use super::fault::{Fault, fault};
+use super::fault::{Fault, fault, is_rejection};
 use super::health::{CircuitState, EndpointHealth, EndpointStatus, Reserved};
 
 // ── Packed atomic state constants ────────────────────────────────────
@@ -619,6 +619,19 @@ fn is_write_method_name(method: &str) -> bool {
     matches!(method, "eth_sendRawTransaction" | "eth_sendTransaction")
 }
 
+/// A write's last answer, an explicit rejection, after an earlier attempt
+/// that may have left the transaction with a node: an error that is not
+/// the node's answer, so no caller reads it as a rejection.
+fn rejected_after_doubt(response: &ResponsePacket) -> TransportError {
+    let (code, message) = response
+        .as_error()
+        .map(|error| (error.code, error.message.as_ref()))
+        .unwrap_or_default();
+    TransportErrorKind::custom_str(&format!(
+        "write answered {code} {message:?} after an earlier attempt that may have reached a node"
+    ))
+}
+
 // ── Pool-aware routing ─────────────────────────────────────────────
 
 impl Router {
@@ -660,10 +673,15 @@ impl Router {
 
     /// Route a request through the best endpoint, with retry.
     ///
-    /// Reads retry on any transport or RPC error. Writes only retry when the
-    /// RPC node rejects the transaction before mempool inclusion (e.g. `-32003
-    /// insufficient funds` from a stale read replica). A rejected tx never
-    /// lands on-chain, so resending the same signed bytes is idempotent.
+    /// Reads retry on any transport or RPC error. Writes retry on an error
+    /// answer (e.g. `-32003 insufficient funds` from a stale read replica)
+    /// and on no answer, always as the same signed bytes. A write's last
+    /// error answer is returned as the node gave it only when no earlier
+    /// attempt may have left the transaction with a node: when an attempt
+    /// got no answer, or an answer other than an explicit rejection
+    /// ([`is_rejection`]), a last explicit rejection comes back as a
+    /// transport error, so no caller reads it as proof that no node holds
+    /// the transaction.
     async fn route_request(
         self: &Arc<Self>,
         req: RequestPacket,
@@ -690,6 +708,7 @@ impl Router {
 
         // Standard path: select endpoint from appropriate pool, try with retry
         let mut last_err = None;
+        let mut may_be_held = false;
 
         for attempt in 0..max_attempts {
             // Per attempt, not per call: a retry sequence spans its
@@ -715,9 +734,11 @@ impl Router {
                     // For writes, check if the response is a pre-mempool rejection
                     // that is safe to retry (tx was never accepted).
                     if is_write && self.config.write_retry.is_retriable(&response) {
+                        let rejected = response.as_error().is_some_and(is_rejection);
                         // Stale-replica rejections are not evidence of an
                         // unhealthy endpoint — don't touch the circuit breaker.
                         if attempt + 1 < max_attempts {
+                            may_be_held |= !rejected;
                             // This attempt is over and the next one selects
                             // again, so give any probe slot back now rather
                             // than hold it through the backoff, where it
@@ -736,6 +757,9 @@ impl Router {
                                 error_code = response.first_error_code(),
                                 "write rejected after all retries exhausted"
                             );
+                            if rejected && may_be_held {
+                                return Err(rejected_after_doubt(&response));
+                            }
                             return Ok(response);
                         }
                     } else {
@@ -765,6 +789,7 @@ impl Router {
                     if !is_write && fault(&e) == Fault::Request {
                         return Err(e);
                     }
+                    may_be_held = true;
                     last_err = Some(e);
                 }
                 Err(_timeout) => {
@@ -777,6 +802,7 @@ impl Router {
                         is_write,
                         "request timed out"
                     );
+                    may_be_held = true;
                     last_err = Some(TransportError::local_usage_str("request timed out"));
                 }
             }
@@ -943,7 +969,8 @@ impl Service<RequestPacket> for HftTransport {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::transport::config::TransportConfig;
+    use crate::transport::config::{TransportConfig, WriteRetryConfig};
+    use crate::transport::scripted::{self, Answer};
 
     /// Helper to create a SerializedRequest for testing.
     fn make_request(method: &'static str, id: u64) -> alloy::rpc::json_rpc::SerializedRequest {
@@ -1219,6 +1246,67 @@ mod tests {
             alloy::transports::BoxTransport::new(transport),
             false,
         ))
+    }
+
+    /// A write's answers by attempt, through the real transport. An
+    /// explicit rejection is passed on as the node's answer only when every
+    /// attempt got one; after an attempt with no answer or with another
+    /// answer, the node can hold the transaction, so the last rejection
+    /// comes back as a transport error that names it.
+    #[tokio::test]
+    async fn a_write_rejection_is_the_nodes_answer_only_when_every_attempt_got_one() {
+        const UNDERPRICED: &str = "replacement transaction underpriced";
+        // The first attempt's answer: an error message, an HTTP status, or
+        // none.
+        for (first, passed_on) in [
+            (UNDERPRICED, true),
+            ("already known", false),
+            ("nonce too low", false),
+            ("HTTP 503", false),
+            ("no answer", false),
+        ] {
+            let attempts = Arc::new(AtomicUsize::new(0));
+            let counter = Arc::clone(&attempts);
+            let url = scripted::endpoint(move |method, _| {
+                assert_eq!(method, "eth_sendRawTransaction");
+                match (counter.fetch_add(1, Ordering::SeqCst), first) {
+                    (0, "no answer") => Answer::Silence,
+                    (0, "HTTP 503") => Answer::Status(503),
+                    (0, answer) => Answer::Error(-32_000, answer.into()),
+                    _ => Answer::Error(-32_000, UNDERPRICED.into()),
+                }
+            })
+            .await;
+            let transport = HftTransport::new(
+                TransportConfig::builder()
+                    .shared_endpoint(&url)
+                    .request_timeout(std::time::Duration::from_millis(300))
+                    .write_retry(WriteRetryConfig {
+                        max_retries: 1,
+                        base_delay: std::time::Duration::from_millis(1),
+                    })
+                    .build()
+                    .unwrap(),
+            )
+            .unwrap();
+            let provider = alloy::providers::RootProvider::<alloy::network::Ethereum>::new(
+                alloy::rpc::client::RpcClient::new(
+                    alloy::transports::BoxTransport::new(transport),
+                    false,
+                ),
+            );
+            let error = provider
+                .send_raw_transaction(&[0x02, 0x01])
+                .await
+                .expect_err("the last attempt is rejected");
+            assert_eq!(attempts.load(Ordering::SeqCst), 2, "{first}");
+            assert_eq!(
+                error.as_error_resp().is_some_and(is_rejection),
+                passed_on,
+                "{first}: {error}"
+            );
+            assert!(error.to_string().contains(UNDERPRICED), "{first}: {error}");
+        }
     }
 
     /// The width search narrows by being told no, so a declined request

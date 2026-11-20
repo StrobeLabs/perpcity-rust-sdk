@@ -7,8 +7,8 @@ use alloy::sol_types::SolError;
 use alloy::transports::TransportError;
 use thiserror::Error;
 
-use super::PerpCityError;
 use super::decode::{RevertClass, revert_class};
+use super::{ContractError, PerpCityError};
 
 /// Errors arising from the transaction lifecycle: simulation, signing,
 /// broadcasting, receipt polling, and gas resolution.
@@ -133,7 +133,8 @@ pub enum TransactionError {
     ///
     /// A market of another build, refused before `original` is looked
     /// up, is this variant too, with the era error as `source`: nothing
-    /// about `original` was read.
+    /// about `original` was read, and the method does not replace on that
+    /// market.
     ///
     /// The transience, [`Self::revert_class`] and [`Self::is_revert`]
     /// follow `source`: a preflight revert such as `MaxAmtExceeded` keeps
@@ -144,6 +145,7 @@ pub enum TransactionError {
     #[error(
         "v1 trade replacement unconfirmed for original {original} and replacement {replacement:?}"
     )]
+    #[non_exhaustive]
     ReplacementUnconfirmed {
         /// Hash of the stuck transaction.
         original: FixedBytes<32>,
@@ -155,8 +157,11 @@ pub enum TransactionError {
         /// Hash of the signed replacement, if broadcast was attempted.
         replacement: Option<FixedBytes<32>>,
         /// Whether the node refused `replacement` with an explicit
-        /// rejection (an underpriced fee, a used nonce, missing funds), so
-        /// `original` is still the transaction the node holds.
+        /// rejection (an underpriced fee, a fee above a cap, missing
+        /// funds) on every attempt the transport made, so `original` is
+        /// still the transaction the node holds. A `nonce too low`, an
+        /// `already known`, a wording the SDK does not know, or no answer
+        /// on any attempt is not a refusal: a node can hold `replacement`.
         refused: bool,
         /// The failure that stopped the replacement, when one occurred.
         #[source]
@@ -173,6 +178,7 @@ pub enum TransactionError {
     /// The effect is unknown, so this is [unconfirmed](Self::is_unconfirmed):
     /// read the position before a new send. Not transient.
     #[error("nonce {nonce} of {original} advanced, but no receipt was found for either hash")]
+    #[non_exhaustive]
     ReplacementNonceUsed {
         /// Hash of the stuck transaction.
         original: FixedBytes<32>,
@@ -246,6 +252,7 @@ pub enum TransactionError {
     /// `tx_hash` can still land and the error is
     /// [unconfirmed](Self::is_unconfirmed).
     #[error("cannot replace {tx_hash}: {reason}")]
+    #[non_exhaustive]
     NotReplaceable {
         /// Hash of the stuck transaction.
         tx_hash: FixedBytes<32>,
@@ -259,9 +266,11 @@ pub enum TransactionError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum NotReplaceableReason {
-    /// The node does not know the hash.
+    /// The node does not know the hash, or answers with a transaction
+    /// whose signed fields hash to another hash.
     UnknownToNode,
-    /// It is not from this client's address.
+    /// Its signature does not recover to this client's address; the
+    /// node's `from` field is not trusted.
     WrongSender,
     /// It is from this client, to another address than this client's
     /// market: a call that another client or method sends.
@@ -295,7 +304,7 @@ impl fmt::Display for NotReplaceableReason {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::UnknownToNode => f.write_str("the node does not know it"),
-            Self::WrongSender => f.write_str("not from this client"),
+            Self::WrongSender => f.write_str("not signed by this client"),
             Self::OtherMarket => f.write_str("not to this client's market"),
             Self::UnsupportedCall => f.write_str("not a call this method replaces"),
             Self::InFlight => f.write_str("its send still waits for the receipt"),
@@ -329,8 +338,9 @@ impl TransactionError {
     /// Hash of the signed transaction, for every failure from the broadcast
     /// onward: `BroadcastFailed`, `ReceiptTimeout`, `Reverted`, `OutOfGas`
     /// and `TakerNotClosed`. A replacement's error gives the replacement's
-    /// hash, else the stuck one's; [`Self::hash_to_replace`] gives the hash
-    /// to replace again. `None` means nothing was sent.
+    /// hash, else the stuck one's: the stuck one's too when the node
+    /// refused the replacement, which cannot land. [`Self::hash_to_replace`]
+    /// gives the hash to replace again. `None` means nothing was sent.
     ///
     /// A `Some` hash may have landed on chain even when the error says the
     /// send failed, so look up its receipt before treating the effect as
@@ -340,9 +350,13 @@ impl TransactionError {
             Self::ReplacementUnconfirmed {
                 original,
                 replacement,
+                refused,
                 ..
-            }
-            | Self::ReplacementNonceUsed {
+            } => Some(match replacement {
+                Some(replacement) if !refused => *replacement,
+                _ => *original,
+            }),
+            Self::ReplacementNonceUsed {
                 original,
                 replacement,
                 ..
@@ -357,27 +371,49 @@ impl TransactionError {
         }
     }
 
-    /// The hash to give
+    /// Which hash to give
     /// [`PerpClient::replace_v1_taker`](crate::PerpClient::replace_v1_taker)
-    /// to replace the same trade again:
+    /// to replace the same trade again; not whether to. A caller checks
+    /// that a retry can help first: [`PerpCityError::is_transient`], and
+    /// [`Self::revert_class`] for a preflight revert. A cause that is not
+    /// transient, such as a failed signing or a revert that is the
+    /// contract's answer, fails the same way again.
     ///
     /// - `ReceiptTimeout` and `BroadcastFailed`: the send's hash.
     /// - `ReplacementUnconfirmed` with a replacement the node did not
-    ///   refuse (accepted, or an answer such as `already known` or a
-    ///   timeout): the replacement, whose fees are the highest at the
-    ///   nonce. If the node later says it does not know that hash
-    ///   ([`NotReplaceableReason::UnknownToNode`]), give `original`.
+    ///   refuse (accepted, or an answer such as `already known`, `nonce too
+    ///   low` or a timeout on any attempt): the replacement, whose fees are
+    ///   the highest at the nonce. If the node later says it does not know
+    ///   that hash ([`NotReplaceableReason::UnknownToNode`]), give
+    ///   `original`.
     /// - `ReplacementUnconfirmed` with no replacement, or one that the node
     ///   refused: `original`.
     ///
-    /// `None` for every other error, and so after a refusal
-    /// (`NotReplaceable`, which names the hash it was given), a used nonce
-    /// or a mined receipt: nothing at the nonce is left to replace, or the
-    /// method does not replace it.
+    /// `None` means this error gives no next hash: a `ReplacementUnconfirmed`
+    /// whose `source` refuses the market's build
+    /// ([`ContractError::UnsupportedEra`] or
+    /// [`ContractError::UnknownBuild`]), a used nonce, a mined receipt, a
+    /// refusal (`NotReplaceable`, which names the hash it was given) and
+    /// every other error. After [`NotReplaceableReason::InFlight`], wait
+    /// for the result of the send that is still active; after
+    /// [`NotReplaceableReason::UnknownToNode`], keep the hashes you know
+    /// and check their receipts or the position's state.
     pub fn hash_to_replace(&self) -> Option<FixedBytes<32>> {
         match self {
             Self::ReceiptTimeout { tx_hash, .. } | Self::BroadcastFailed { tx_hash, .. } => {
                 Some(*tx_hash)
+            }
+            Self::ReplacementUnconfirmed {
+                source: Some(source),
+                ..
+            } if matches!(
+                source.as_ref(),
+                PerpCityError::Contract(
+                    ContractError::UnsupportedEra { .. } | ContractError::UnknownBuild { .. }
+                )
+            ) =>
+            {
+                None
             }
             Self::ReplacementUnconfirmed {
                 original,

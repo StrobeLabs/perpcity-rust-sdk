@@ -2,7 +2,9 @@
 //! characterised without a node.
 //!
 //! The mock answers requests in arrival order from a queue the test fills
-//! beforehand, and answers without inspecting a request. A test therefore
+//! beforehand, and answers without inspecting a request, except that a
+//! queued receipt answers `eth_getTransactionReceipt` only for its own
+//! hash (any other hash gets `null`). A test therefore
 //! pins four things about a read: how many RPCs it makes (an unanswered
 //! request fails, and [`Rpc::is_drained`] proves none was left over), what
 //! it makes of the bytes it gets back, what it remembers between calls,
@@ -16,11 +18,13 @@ use alloy::consensus::Header as ConsensusHeader;
 use alloy::eips::BlockId;
 use alloy::hex;
 use alloy::network::Ethereum;
-use alloy::primitives::{Address, B256, Bytes, I256, Signed, U64, U256, Uint};
+use alloy::primitives::{Address, B256, Bytes, I256, Signed, U64, U256, Uint, keccak256};
 use alloy::providers::RootProvider;
 use alloy::providers::bindings::IMulticall3 as Multicall;
 use alloy::rpc::client::RpcClient;
-use alloy::rpc::json_rpc::{ErrorPayload, RequestPacket, ResponsePacket};
+use alloy::rpc::json_rpc::{
+    ErrorPayload, RequestPacket, Response, ResponsePacket, ResponsePayload,
+};
 use alloy::rpc::types::{
     Block, BlockTransactions, EIP1186AccountProofResponse, EIP1186StorageProof, Header,
 };
@@ -65,6 +69,10 @@ pub(super) const V022_HOOK: Address = Address::repeat_byte(0x0a);
 pub(super) const V1_HOOK: Address = Address::repeat_byte(0x0b);
 /// The pool id [`Rpc::immutables`] answers.
 pub(super) const POOL_ID: B256 = B256::repeat_byte(0x99);
+/// A stand-in, in a queued answer, for the hash of the last transaction
+/// sent with `eth_sendRawTransaction`, which a test cannot know before
+/// the code under test signs it.
+pub(super) const SENT: B256 = B256::repeat_byte(0x5e);
 
 /// A client whose every RPC is answered by the returned [`Rpc`].
 pub(super) fn client() -> (PerpClient, Rpc) {
@@ -86,18 +94,23 @@ fn mocked() -> (RootProvider<Ethereum>, Rpc) {
         calls: Arc::default(),
         slots: Arc::default(),
         storage_blocks: Arc::default(),
+        receipts: Arc::default(),
+        sent: Arc::default(),
     };
     let rpc = Rpc {
         asserter: recorder.mock.asserter().clone(),
         calls: Arc::clone(&recorder.calls),
         slots: Arc::clone(&recorder.slots),
         storage_blocks: Arc::clone(&recorder.storage_blocks),
+        receipts: Arc::clone(&recorder.receipts),
+        sent: Arc::clone(&recorder.sent),
     };
     (RootProvider::new(RpcClient::new(recorder, true)), rpc)
 }
 
-/// The mock transport, keeping the calldata of every `eth_call` and the
-/// slot and block of every `eth_getStorageAt` it is asked, in arrival
+/// The mock transport, keeping the calldata of every `eth_call`, the
+/// slot and block of every `eth_getStorageAt`, the hash of every
+/// `eth_getTransactionReceipt` and of every transaction sent, in arrival
 /// order.
 #[derive(Clone)]
 struct Recorder {
@@ -105,6 +118,8 @@ struct Recorder {
     calls: Arc<Mutex<Vec<(Bytes, BlockId)>>>,
     slots: Arc<Mutex<Vec<U256>>>,
     storage_blocks: Arc<Mutex<Vec<BlockId>>>,
+    receipts: Arc<Mutex<Vec<B256>>>,
+    sent: Arc<Mutex<Vec<B256>>>,
 }
 
 impl Service<RequestPacket> for Recorder {
@@ -117,10 +132,24 @@ impl Service<RequestPacket> for Recorder {
     }
 
     fn call(&mut self, req: RequestPacket) -> Self::Future {
+        let mut receipt_of = None;
         for req in req.requests() {
             let params: serde_json::Value =
                 serde_json::from_str(req.params().map_or("null", RawValue::get))
                     .expect("a request's params are JSON");
+            if req.method() == "eth_getTransactionReceipt" {
+                let hash: B256 =
+                    serde_json::from_value(params[0].clone()).expect("a receipt read names a hash");
+                self.receipts.lock().unwrap().push(hash);
+                receipt_of = Some(hash);
+                continue;
+            }
+            if req.method() == "eth_sendRawTransaction" {
+                let raw = hex::decode(params[0].as_str().expect("raw bytes are hex"))
+                    .expect("raw bytes are hex");
+                self.sent.lock().unwrap().push(keccak256(raw));
+                continue;
+            }
             if req.method() == "eth_getStorageAt" {
                 let slot = params[1].as_str().expect("a slot is a hex quantity");
                 self.slots
@@ -148,8 +177,43 @@ impl Service<RequestPacket> for Recorder {
                 self.calls.lock().unwrap().push((calldata.into(), block));
             }
         }
-        self.mock.call(req)
+        let answer = self.mock.call(req);
+        let Some(asked) = receipt_of else {
+            return answer;
+        };
+        let sent = self.sent.lock().unwrap().last().copied();
+        Box::pin(async move { Ok(receipt_only_for(asked, sent, answer.await?)) })
     }
+}
+
+/// A queued receipt answer for `asked`: as queued, with [`SENT`] standing
+/// for `sent`, when it is `null` or the receipt of `asked`, and `null`
+/// when it is another hash's receipt.
+fn receipt_only_for(asked: B256, sent: Option<B256>, response: ResponsePacket) -> ResponsePacket {
+    let ResponsePacket::Single(Response {
+        id,
+        payload: ResponsePayload::Success(result),
+    }) = response
+    else {
+        return response;
+    };
+    let mut text = result.get().to_owned();
+    if let Some(sent) = sent {
+        text = text.replace(&hex::encode_prefixed(SENT), &hex::encode_prefixed(sent));
+    }
+    let value: serde_json::Value = serde_json::from_str(&text).expect("a queued answer is JSON");
+    let answered = value.get("transactionHash").map(|hash| {
+        serde_json::from_value::<B256>(hash.clone()).expect("a receipt names its hash")
+    });
+    if answered.is_some_and(|hash| hash != asked) {
+        text = "null".to_owned();
+    }
+    ResponsePacket::Single(Response {
+        id,
+        payload: ResponsePayload::Success(
+            RawValue::from_string(text).expect("a queued answer is JSON"),
+        ),
+    })
 }
 
 /// A client over any provider — a mocked one, or a
@@ -216,6 +280,8 @@ pub(super) struct Rpc {
     calls: Arc<Mutex<Vec<(Bytes, BlockId)>>>,
     slots: Arc<Mutex<Vec<U256>>>,
     storage_blocks: Arc<Mutex<Vec<BlockId>>>,
+    receipts: Arc<Mutex<Vec<B256>>>,
+    sent: Arc<Mutex<Vec<B256>>>,
 }
 
 impl Rpc {
@@ -274,6 +340,17 @@ impl Rpc {
             .iter()
             .map(|(_, block)| *block)
             .collect()
+    }
+
+    /// The hash of every `eth_getTransactionReceipt` asked so far, in
+    /// order.
+    pub(super) fn receipt_hashes(&self) -> Vec<B256> {
+        self.receipts.lock().unwrap().clone()
+    }
+
+    /// The hash of every transaction sent so far, in order.
+    pub(super) fn sent(&self) -> Vec<B256> {
+        self.sent.lock().unwrap().clone()
     }
 
     /// The slot of every `eth_getStorageAt` asked so far, in order.

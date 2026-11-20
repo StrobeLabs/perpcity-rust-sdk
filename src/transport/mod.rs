@@ -42,6 +42,8 @@ pub(crate) mod fault;
 pub mod health;
 pub mod provider;
 mod redact;
+#[cfg(test)]
+pub(crate) mod scripted;
 pub mod ws;
 
 pub use redact::{redact_text, redact_url};
