@@ -21,6 +21,7 @@ pub mod transaction;
 pub mod validation;
 
 pub use contract::ContractError;
+pub use decode::RevertClass;
 pub use transaction::TransactionError;
 pub use validation::ValidationError;
 
@@ -120,6 +121,14 @@ impl PerpCityError {
     ///
     /// `Iris` is transient when Circle's service failed to answer, rate
     /// limited, or erred on its side.
+    ///
+    /// A `SimulationReverted` is transient only when its
+    /// [`RevertClass`] is [`Transient`](RevertClass::Transient): the
+    /// `v1.0.0` `StaleBeaconIndex` and `DeadlineExpired`. A
+    /// [`BeaconFault`](RevertClass::BeaconFault) or a
+    /// [`Hold`](RevertClass::Hold) is not: the same call fails until the
+    /// beacon or the cap changes; [`revert_class`](Self::revert_class)
+    /// says which.
     pub fn is_transient(&self) -> bool {
         matches!(
             self,
@@ -136,6 +145,16 @@ impl PerpCityError {
                     ..
                 })
         ) || matches!(self, Self::Iris(e) if e.is_transient())
+            || self.revert_class().is_some_and(RevertClass::is_transient)
+    }
+
+    /// The [`RevertClass`] of a simulation revert; see
+    /// [`TransactionError::revert_class`]. `None` for every other error.
+    pub fn revert_class(&self) -> Option<RevertClass> {
+        match self {
+            Self::Transaction(e) => e.revert_class(),
+            _ => None,
+        }
     }
 
     /// A transaction broadcast and not confirmed either way; see
@@ -381,6 +400,84 @@ mod tests {
             reason: "down".into(),
         };
         assert!(!other.is_revert::<Perp::NotLiquidatable>());
+    }
+
+    /// A simulation revert is transient only for the two v1 reverts that
+    /// time fixes; a beacon fault and a TVL cap hold are not, and a mined
+    /// revert has no class.
+    #[test]
+    fn v1_revert_classes_set_transience() {
+        use alloy::sol_types::SolError;
+
+        use crate::contracts::v1::Perp;
+
+        fn reverted<E: SolError>(name: &str) -> PerpCityError {
+            TransactionError::SimulationReverted {
+                error_name: name.into(),
+                selector: E::SELECTOR.into(),
+                revert_data: None,
+            }
+            .into()
+        }
+        let cases = [
+            (
+                reverted::<Perp::StaleBeaconIndex>("StaleBeaconIndex"),
+                RevertClass::Transient,
+                true,
+            ),
+            (
+                reverted::<Perp::DeadlineExpired>("DeadlineExpired"),
+                RevertClass::Transient,
+                true,
+            ),
+            (
+                reverted::<Perp::BeaconIndexUnreadable>("BeaconIndexUnreadable"),
+                RevertClass::BeaconFault,
+                false,
+            ),
+            (
+                reverted::<Perp::PriceOutsideRange>("PriceOutsideRange"),
+                RevertClass::BeaconFault,
+                false,
+            ),
+            (
+                reverted::<Perp::TvlCapExceeded>("TvlCapExceeded"),
+                RevertClass::Hold,
+                false,
+            ),
+            (
+                reverted::<Perp::MaxTotalFeeExceeded>("MaxTotalFeeExceeded"),
+                RevertClass::Answer,
+                false,
+            ),
+            (
+                reverted::<Perp::NotLiquidatable>("NotLiquidatable"),
+                RevertClass::Answer,
+                false,
+            ),
+        ];
+        for (err, class, transient) in &cases {
+            assert_eq!(err.revert_class(), Some(*class), "{err}");
+            assert_eq!(err.is_transient(), *transient, "{err}");
+            assert!(!err.is_unconfirmed() && err.tx_hash().is_none(), "{err}");
+        }
+        let PerpCityError::Transaction(stale) = &cases[0].0 else {
+            unreachable!()
+        };
+        assert!(stale.is_revert::<Perp::StaleBeaconIndex>());
+        assert!(!stale.is_revert::<Perp::DeadlineExpired>());
+
+        let mined: PerpCityError = TransactionError::Reverted {
+            tx_hash: [0x66; 32].into(),
+            reason: "reverted".into(),
+        }
+        .into();
+        assert_eq!(mined.revert_class(), None);
+        let gas: PerpCityError = TransactionError::GasUnavailable {
+            reason: "down".into(),
+        }
+        .into();
+        assert_eq!(gas.revert_class(), None);
     }
 
     /// The read-path errors documented as retryable must classify as

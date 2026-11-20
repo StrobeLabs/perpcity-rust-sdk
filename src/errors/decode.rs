@@ -1,14 +1,15 @@
 //! Contract error selector decoding.
 //!
 //! Maps 4-byte error selectors from the PerpCity contracts to human-readable
-//! names. The selector values are taken from the generated `sol!` bindings
-//! (`Perp`, `PerpV022` and `PerpFactory` error types), so they cannot drift
-//! from the contracts' `Errors.sol`. The standard Solidity `Error(string)`
-//! and `Panic(uint256)` selectors are included as well.
+//! names, and says what a typed revert means for a retry ([`RevertClass`]).
+//! The selector values are taken from the generated `sol!` bindings
+//! (`Perp`, `PerpV022`, `PerpFactory` and the `v1` error types), so they
+//! cannot drift from the contracts' `Errors.sol`. The standard Solidity
+//! `Error(string)` and `Panic(uint256)` selectors are included as well.
 
 use alloy::sol_types::SolError;
 
-use crate::contracts::{Perp, PerpFactory, PerpV022};
+use crate::contracts::{Perp, PerpFactory, PerpV022, v1};
 
 /// `Error(string)` — the standard Solidity revert-string selector.
 const ERROR_STRING_SELECTOR: [u8; 4] = [0x08, 0xc3, 0x79, 0xa0];
@@ -109,6 +110,69 @@ fn name_for_selector(selector: [u8; 4]) -> Option<&'static str> {
             Perp::TransferToNonERC721ReceiverImplementer::SELECTOR,
             "TransferToNonERC721ReceiverImplementer",
         ),
+        // v1.0.0: the 30 errors only in its Errors.sol; the rest are above.
+        (
+            v1::Perp::AggregateSwapFeesTooHigh::SELECTOR,
+            "AggregateSwapFeesTooHigh",
+        ),
+        (v1::Perp::AlreadyInitialized::SELECTOR, "AlreadyInitialized"),
+        (v1::Perp::AmountNotDecreased::SELECTOR, "AmountNotDecreased"),
+        (
+            v1::Perp::BeaconIndexUnreadable::SELECTOR,
+            "BeaconIndexUnreadable",
+        ),
+        (v1::Perp::ClaimIsPaused::SELECTOR, "ClaimIsPaused"),
+        (v1::Perp::ClaimNotPaused::SELECTOR, "ClaimNotPaused"),
+        (v1::Perp::ClaimNotPending::SELECTOR, "ClaimNotPending"),
+        (v1::Perp::ClaimNotReady::SELECTOR, "ClaimNotReady"),
+        (v1::Perp::DeadlineExpired::SELECTOR, "DeadlineExpired"),
+        (
+            v1::Perp::DonationsRestricted::SELECTOR,
+            "DonationsRestricted",
+        ),
+        (v1::Perp::EmaWindowTooLow::SELECTOR, "EmaWindowTooLow"),
+        (v1::Perp::HealthNotImproved::SELECTOR, "HealthNotImproved"),
+        (v1::Perp::IdenticalTicks::SELECTOR, "IdenticalTicks"),
+        (
+            v1::Perp::InvalidCallbackAction::SELECTOR,
+            "InvalidCallbackAction",
+        ),
+        (
+            v1::Perp::LongCloseCapacityExceeded::SELECTOR,
+            "LongCloseCapacityExceeded",
+        ),
+        (v1::Perp::MarginTooHigh::SELECTOR, "MarginTooHigh"),
+        (
+            v1::Perp::MaxTotalFeeExceeded::SELECTOR,
+            "MaxTotalFeeExceeded",
+        ),
+        (v1::Perp::NotGovernor::SELECTOR, "NotGovernor"),
+        (v1::Perp::NotGuardian::SELECTOR, "NotGuardian"),
+        (v1::Perp::NotPerp::SELECTOR, "NotPerp"),
+        (v1::Perp::PriceOutsideRange::SELECTOR, "PriceOutsideRange"),
+        (v1::Perp::ReduceOnlyViolated::SELECTOR, "ReduceOnlyViolated"),
+        (v1::Perp::ReleasesArePaused::SELECTOR, "ReleasesArePaused"),
+        (
+            v1::Perp::ShortCloseCapacityExceeded::SELECTOR,
+            "ShortCloseCapacityExceeded",
+        ),
+        (v1::Perp::StaleBeaconIndex::SELECTOR, "StaleBeaconIndex"),
+        (v1::Perp::TvlCapExceeded::SELECTOR, "TvlCapExceeded"),
+        (v1::Perp::WindowNotIncreased::SELECTOR, "WindowNotIncreased"),
+        (v1::Perp::ZeroAmount::SELECTOR, "ZeroAmount"),
+        (v1::Perp::ZeroCapacity::SELECTOR, "ZeroCapacity"),
+        (v1::Perp::ZeroWindow::SELECTOR, "ZeroWindow"),
+        // v1.0.0: the proxy and ownership bases, and the factory.
+        (v1::Perp::AddressEmptyCode::SELECTOR, "AddressEmptyCode"),
+        (v1::Perp::FailedCall::SELECTOR, "FailedCall"),
+        (v1::Perp::NotInitializing::SELECTOR, "NotInitializing"),
+        (
+            v1::Perp::NewOwnerIsZeroAddress::SELECTOR,
+            "NewOwnerIsZeroAddress",
+        ),
+        (v1::Perp::NoHandoverRequest::SELECTOR, "NoHandoverRequest"),
+        (v1::Perp::Unauthorized::SELECTOR, "Unauthorized"),
+        (v1::PerpFactory::NotAContract::SELECTOR, "NotAContract"),
         // Solady SafeTransferLib (used throughout the contracts for USDC moves).
         ([0x79, 0x39, 0xf4, 0x24], "TransferFromFailed"),
         ([0x90, 0xb8, 0xec, 0x18], "TransferFailed"),
@@ -123,6 +187,71 @@ fn name_for_selector(selector: [u8; 4]) -> Option<&'static str> {
         .iter()
         .find(|(s, _)| *s == selector)
         .map(|(_, name)| *name)
+}
+
+/// What a typed revert says about trying the call again.
+///
+/// Only four `v1.0.0` errors are not [`Answer`](Self::Answer): none of them
+/// exists in an earlier build, so every revert of a legacy or `v0.2.2`
+/// market stays an answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum RevertClass {
+    /// The contract's answer to this call on this state: the same call
+    /// gets it again. Not transient.
+    Answer,
+    /// Time fixes it, not the caller's input: `StaleBeaconIndex` (the
+    /// beacon's last update is older than the market's `latency()`; the
+    /// call can pass after the next update) and `DeadlineExpired` (the
+    /// call ran after its deadline; a resend with a new deadline can pass).
+    /// Transient.
+    Transient,
+    /// The market's beacon cannot give a usable index:
+    /// `BeaconIndexUnreadable` (the `index()` call failed or returned short
+    /// data) and `PriceOutsideRange` (the index is outside
+    /// `[2^96 / 1e6, 2^96 * 1e6]`). Every call that reads the index fails
+    /// the same way until the beacon is fixed, whatever the position or the
+    /// size: hold the market, not the position. Not transient. It is not a
+    /// price-impact refusal: a smaller trade gets the same answer.
+    BeaconFault,
+    /// `TvlCapExceeded`: the market holds as much as its owner's cap
+    /// allows, so a call that adds margin fails until the cap is raised or
+    /// the market's TVL falls. Hold the add, not the position. Not
+    /// transient.
+    Hold,
+}
+
+impl RevertClass {
+    /// Whether a retry of the call can help without a change to the
+    /// market, its beacon or its owner's cap; only [`Self::Transient`].
+    pub fn is_transient(self) -> bool {
+        matches!(self, Self::Transient)
+    }
+}
+
+/// The [`RevertClass`] of a 4-byte error selector. A selector that is not
+/// one of the four `v1.0.0` errors named in [`RevertClass`], known or not,
+/// is an [`RevertClass::Answer`].
+///
+/// ```
+/// use alloy::sol_types::SolError;
+/// use perpcity_sdk::contracts::v1::Perp;
+/// use perpcity_sdk::errors::decode::{RevertClass, revert_class};
+///
+/// assert_eq!(revert_class(Perp::StaleBeaconIndex::SELECTOR), RevertClass::Transient);
+/// assert_eq!(revert_class(Perp::NotLiquidatable::SELECTOR), RevertClass::Answer);
+/// ```
+pub fn revert_class(selector: [u8; 4]) -> RevertClass {
+    match selector {
+        v1::Perp::StaleBeaconIndex::SELECTOR | v1::Perp::DeadlineExpired::SELECTOR => {
+            RevertClass::Transient
+        }
+        v1::Perp::BeaconIndexUnreadable::SELECTOR | v1::Perp::PriceOutsideRange::SELECTOR => {
+            RevertClass::BeaconFault
+        }
+        v1::Perp::TvlCapExceeded::SELECTOR => RevertClass::Hold,
+        _ => RevertClass::Answer,
+    }
 }
 
 /// Decode a hex-encoded revert data string into an error name.
@@ -280,6 +409,178 @@ mod tests {
         assert_eq!(name, "MarginTooLow");
         assert_eq!(selector, Perp::MarginTooLow::SELECTOR);
         assert!(data.is_some());
+    }
+
+    /// The errors that only `v1.0.0`'s `Errors.sol` has (map SDK row 62).
+    const V1_ONLY: [&str; 30] = [
+        "AggregateSwapFeesTooHigh",
+        "AlreadyInitialized",
+        "AmountNotDecreased",
+        "BeaconIndexUnreadable",
+        "ClaimIsPaused",
+        "ClaimNotPaused",
+        "ClaimNotPending",
+        "ClaimNotReady",
+        "DeadlineExpired",
+        "DonationsRestricted",
+        "EmaWindowTooLow",
+        "HealthNotImproved",
+        "IdenticalTicks",
+        "InvalidCallbackAction",
+        "LongCloseCapacityExceeded",
+        "MarginTooHigh",
+        "MaxTotalFeeExceeded",
+        "NotGovernor",
+        "NotGuardian",
+        "NotPerp",
+        "PriceOutsideRange",
+        "ReduceOnlyViolated",
+        "ReleasesArePaused",
+        "ShortCloseCapacityExceeded",
+        "StaleBeaconIndex",
+        "TvlCapExceeded",
+        "WindowNotIncreased",
+        "ZeroAmount",
+        "ZeroCapacity",
+        "ZeroWindow",
+    ];
+
+    /// The errors of the `v1.0.0` proxy and ownership bases that no earlier
+    /// binding has.
+    const V1_BASES: [&str; 6] = [
+        "AddressEmptyCode",
+        "FailedCall",
+        "NotInitializing",
+        "NewOwnerIsZeroAddress",
+        "NoHandoverRequest",
+        "Unauthorized",
+    ];
+
+    /// Every selector of an earlier build's binding, with its name.
+    fn earlier_errors() -> Vec<([u8; 4], &'static str)> {
+        let mut all = Vec::new();
+        for (selectors, names) in [
+            (Perp::PerpErrors::SELECTORS, Perp::PerpErrors::VARIANT_NAMES),
+            (
+                PerpV022::PerpV022Errors::SELECTORS,
+                PerpV022::PerpV022Errors::VARIANT_NAMES,
+            ),
+            (
+                PerpFactory::PerpFactoryErrors::SELECTORS,
+                PerpFactory::PerpFactoryErrors::VARIANT_NAMES,
+            ),
+        ] {
+            all.extend(selectors.iter().copied().zip(names.iter().copied()));
+        }
+        all
+    }
+
+    #[test]
+    fn every_v1_error_decodes_to_its_binding_name() {
+        let bound = v1::Perp::PerpErrors::SELECTORS
+            .iter()
+            .chain(v1::PerpFactory::PerpFactoryErrors::SELECTORS)
+            .chain(v1::WithdrawalController::WithdrawalControllerErrors::SELECTORS);
+        for selector in bound {
+            let name = v1::Perp::PerpErrors::name_by_selector(*selector)
+                .or_else(|| v1::PerpFactory::PerpFactoryErrors::name_by_selector(*selector))
+                .or_else(|| {
+                    v1::WithdrawalController::WithdrawalControllerErrors::name_by_selector(
+                        *selector,
+                    )
+                })
+                .unwrap();
+            assert_eq!(
+                name_for_selector(*selector),
+                Some(name),
+                "{}",
+                sel_hex(*selector)
+            );
+        }
+    }
+
+    /// The v1-only market errors are the 30 of row 62 plus the six of the
+    /// bases: every other `v1.0.0` market error has an earlier market
+    /// binding with its selector. (`EmaWindowTooLow` was a factory error
+    /// before `v1.0.0` moved it into the market's `Errors.sol`.)
+    #[test]
+    fn v1_only_errors_are_the_thirty_and_the_bases() {
+        let earlier: Vec<[u8; 4]> = Perp::PerpErrors::SELECTORS
+            .iter()
+            .chain(PerpV022::PerpV022Errors::SELECTORS)
+            .copied()
+            .collect();
+        let mut only: Vec<&str> = v1::Perp::PerpErrors::SELECTORS
+            .iter()
+            .zip(v1::Perp::PerpErrors::VARIANT_NAMES)
+            .filter(|(s, _)| !earlier.contains(s))
+            .map(|(_, n)| *n)
+            .collect();
+        only.sort_unstable();
+        let mut expected: Vec<&str> = V1_ONLY.iter().chain(&V1_BASES).copied().collect();
+        expected.sort_unstable();
+        assert_eq!(only, expected);
+        for name in V1_ONLY.iter().chain(&V1_BASES) {
+            let selector = v1::Perp::PerpErrors::SELECTORS[v1::Perp::PerpErrors::VARIANT_NAMES
+                .iter()
+                .position(|n| n == name)
+                .unwrap()];
+            assert_eq!(decode_revert_data(&sel_hex(selector)).unwrap().0, *name);
+        }
+    }
+
+    /// Every selector of an earlier build decodes to the name it had and is
+    /// an answer: the v1 rows change nothing for a legacy or v0.2.2 market.
+    #[test]
+    fn earlier_errors_keep_their_names_and_are_answers() {
+        for (selector, name) in earlier_errors() {
+            assert_eq!(
+                name_for_selector(selector),
+                Some(name),
+                "{}",
+                sel_hex(selector)
+            );
+            assert_eq!(revert_class(selector), RevertClass::Answer, "{name}");
+        }
+    }
+
+    #[test]
+    fn four_v1_errors_are_not_answers() {
+        let classes = [
+            (v1::Perp::StaleBeaconIndex::SELECTOR, RevertClass::Transient),
+            (v1::Perp::DeadlineExpired::SELECTOR, RevertClass::Transient),
+            (
+                v1::Perp::BeaconIndexUnreadable::SELECTOR,
+                RevertClass::BeaconFault,
+            ),
+            (
+                v1::Perp::PriceOutsideRange::SELECTOR,
+                RevertClass::BeaconFault,
+            ),
+            (v1::Perp::TvlCapExceeded::SELECTOR, RevertClass::Hold),
+        ];
+        for (selector, class) in classes {
+            assert_eq!(revert_class(selector), class, "{}", sel_hex(selector));
+        }
+        let others = v1::Perp::PerpErrors::SELECTORS
+            .iter()
+            .chain(v1::PerpFactory::PerpFactoryErrors::SELECTORS)
+            .chain(v1::WithdrawalController::WithdrawalControllerErrors::SELECTORS)
+            .filter(|s| !classes.iter().any(|(c, _)| c == *s));
+        for selector in others {
+            assert_eq!(
+                revert_class(*selector),
+                RevertClass::Answer,
+                "{}",
+                sel_hex(*selector)
+            );
+        }
+        assert_eq!(revert_class([0xde, 0xad, 0xbe, 0xef]), RevertClass::Answer);
+        assert_eq!(revert_class(ERROR_STRING_SELECTOR), RevertClass::Answer);
+        assert!(RevertClass::Transient.is_transient());
+        assert!(!RevertClass::BeaconFault.is_transient());
+        assert!(!RevertClass::Hold.is_transient());
+        assert!(!RevertClass::Answer.is_transient());
     }
 
     #[test]
