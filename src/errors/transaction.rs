@@ -14,9 +14,11 @@ pub enum TransactionError {
     /// Pre-flight simulation (`eth_estimateGas` or `eth_call`) detected a
     /// contract revert. The transaction was **not** broadcast — no gas was
     /// burned. [`Self::revert_class`] says what the revert means for a
-    /// retry: transient only for the two `v1.0.0` reverts that time fixes
-    /// (`StaleBeaconIndex`, `DeadlineExpired`); every other revert is the
-    /// contract's answer to this call.
+    /// retry ([`RevertClass`] has each case): transient only for the
+    /// `v1.0.0` `StaleBeaconIndex` (it can pass after a beacon update) and
+    /// `DeadlineExpired` (the call must be built again with a new deadline;
+    /// the same calldata fails again); every other revert is the contract's
+    /// answer to this call.
     #[error("simulation reverted: {error_name} ({selector})")]
     SimulationReverted {
         /// Human-readable error name decoded from the 4-byte selector
@@ -235,9 +237,10 @@ impl TransactionError {
     /// use perpcity_sdk::RevertClass;
     ///
     /// match err.revert_class() {
-    ///     Some(RevertClass::Transient) => {}   // a new deadline, or the next beacon update
-    ///     Some(RevertClass::BeaconFault) => {} // hold the market until its beacon is fixed
-    ///     Some(RevertClass::Hold) => {}        // the market is at its TVL cap
+    ///     Some(RevertClass::Transient) => {}   // build the call again: a new deadline, or after a beacon update
+    ///     Some(RevertClass::BeaconFault) => {} // a trade: hold the market until its beacon is fixed;
+    ///                                          // setBeacon or createPerp: the named beacon is bad
+    ///     Some(RevertClass::Hold) => {}        // this add does not fit under the TVL cap; a smaller one can
     ///     _ => {}
     /// }
     /// ```

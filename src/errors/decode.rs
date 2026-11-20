@@ -110,8 +110,9 @@ fn name_for_selector(selector: [u8; 4]) -> Option<&'static str> {
             Perp::TransferToNonERC721ReceiverImplementer::SELECTOR,
             "TransferToNonERC721ReceiverImplementer",
         ),
-        // v1.0.0: the 30 errors only in its Errors.sol (`EmaWindowTooLow`,
-        // before a factory error, is the row above); the rest are above.
+        // v1.0.0: the errors only in its Errors.sol, 29 rows here;
+        // `EmaWindowTooLow` has the earlier factory's row above (same
+        // selector). The errors shared with earlier builds are above.
         (
             v1::Perp::AggregateSwapFeesTooHigh::SELECTOR,
             "AggregateSwapFeesTooHigh",
@@ -209,7 +210,10 @@ pub enum RevertClass {
     ///   new deadline.
     /// - `StaleBeaconIndex`: the beacon's last update is older than the
     ///   market's `latency()`, or is dated after the block. The call can
-    ///   pass after an update whose time the market accepts.
+    ///   pass after an update whose time the market accepts (or, for an
+    ///   update dated ahead, once the block time reaches it). From
+    ///   `setBeacon` or `createPerp`, the stale beacon is the one the call
+    ///   names.
     Transient,
     /// A beacon gives no usable index: `BeaconIndexUnreadable` (its
     /// `index()` call failed or returned short data) or `PriceOutsideRange`
@@ -219,21 +223,23 @@ pub enum RevertClass {
     /// own: every call that reads the index fails the same way until the
     /// beacon is fixed, whatever the position or the size, so hold the
     /// market, not the position. It is not a price-impact refusal: a
-    /// smaller trade gets the same answer. From `setBeacon`, `createPerp`
-    /// or `readBeaconIndex`, the beacon is the one the call names, and the
-    /// fault is that beacon's: the market's own beacon is not proved bad.
+    /// smaller trade gets the same answer. From `setBeacon` or `createPerp`
+    /// (or the view `readBeaconIndex`), the beacon is the one the call
+    /// names, and the fault is that beacon's: the market's own beacon is
+    /// not proved bad.
     BeaconFault,
     /// `TvlCapExceeded`: the USDC this call brings in (margin, or a
     /// donation) would take the market's accounted TVL past its `tvlCap()`.
     /// A smaller amount can still fit; this one fails until the governor
-    /// raises the cap or the TVL falls (the owner can only lower the cap).
+    /// raises the cap (the owner can only lower it, and a governor that
+    /// abdicated `setTvlCap` cannot) or the TVL falls.
     /// Hold the add, not the position. Not transient.
     Hold,
 }
 
 impl RevertClass {
-    /// Whether a retry of the call can help without a change to the
-    /// market, its beacon or its owner's cap; only [`Self::Transient`].
+    /// Whether a later attempt can pass with no change to the caller's
+    /// intent; only [`Self::Transient`].
     pub fn is_transient(self) -> bool {
         matches!(self, Self::Transient)
     }
@@ -509,7 +515,7 @@ mod tests {
         }
     }
 
-    /// The v1-only market errors are the 30 of row 62 plus the six of the
+    /// The v1-only market errors are the 30 of `V1_ONLY` plus the six of the
     /// bases: every other `v1.0.0` market error has an earlier market
     /// binding with its selector. (`EmaWindowTooLow` was a factory error
     /// before `v1.0.0` moved it into the market's `Errors.sol`.)

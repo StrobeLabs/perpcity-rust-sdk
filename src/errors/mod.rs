@@ -131,8 +131,9 @@ impl PerpCityError {
     /// deadline; the same calldata fails again). A
     /// [`BeaconFault`](RevertClass::BeaconFault) or a
     /// [`Hold`](RevertClass::Hold) is not: the same call fails until the
-    /// beacon or the cap changes; [`revert_class`](Self::revert_class)
-    /// says which.
+    /// beacon, the cap or the TVL changes; [`revert_class`](Self::revert_class)
+    /// says which, and a caller that must not drop a position on a beacon
+    /// fault keys on it.
     pub fn is_transient(&self) -> bool {
         matches!(
             self,
