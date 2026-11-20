@@ -121,7 +121,10 @@ rejection (`underpriced`, a fee or funds answer) is passed on as the
 node's answer only when every attempt got one: after an attempt with no
 answer, or with another answer (`already known`, `nonce too low`), a node
 can hold the transaction, and the rejection comes back as a transport
-error that names it.
+error that names it. A batch's evidence is the whole batch's: an attempt
+counts as rejected only when every write in it was, since alloy's batch
+response names only its first error, and a doubtful batch's last
+rejection fails the whole batch.
 
 The WebSocket manager is the subscription side of the same idea: one
 socket, many subscriptions, reconnect with capped backoff, and the
@@ -132,11 +135,11 @@ callers re-subscribe.
 | Type | Invariant | Produced by | Consumed by |
 |---|---|---|---|
 | [`HftTransport`](provider.rs#L529) | the provider's transport: many endpoints, one `tower::Service`; every request classified read or write before routing | [`HftTransport::new`](provider.rs#L539) from a [`TransportConfig`](config.rs#L146) | [`ChainReader::new`](../client/DESIGN.md), [`ChainReader::arbitrum`](../client/DESIGN.md) and [`ChainReader::arbitrum_sepolia`](../client/DESIGN.md), which build the provider over it, so every read and send in the crate passes through it. The strategy layer builds one per process, and a second one for scans so their declines and timeouts never touch the trading endpoints' health. |
-| [`TransportConfig`](config.rs#L146), [`TransportConfigBuilder`](config.rs#L179) | the pools and their policies: shared, read and write pools; per-endpoint timeouts; the retry and breaker settings; validated once at [`build`](config.rs#L279) | the builder, and only the builder | [`HftTransport::new`](provider.rs#L539). The strategy layer assembles one from its environment; the builder is where a keyed URL enters the crate. |
-| [`Strategy`](config.rs#L52) | how a read is routed: round robin, latency-based, or hedged; a caller's choice | the caller | [`TransportConfigBuilder::strategy`](config.rs#L252). Hedging costs N requests per read, which is why it is a choice and not a default. |
-| [`ReadRetryConfig`](config.rs#L89) | what a read retries: no answer only, with backoff | the caller; `Default` is 2 retries | [`TransportConfigBuilder::read_retry`](config.rs#L264). |
-| [`WriteRetryConfig`](config.rs#L112) | what a write retries: pre-mempool rejection or no answer, the same bytes | the caller; `Default` is 3 retries | [`TransportConfigBuilder::write_retry`](config.rs#L270). |
-| [`CircuitBreakerConfig`](config.rs#L68) | when a breaker trips: failure threshold, cooldown, probe | the caller; `Default` is the trading defaults | [`TransportConfigBuilder::circuit_breaker`](config.rs#L258); [`EndpointHealth::new`](health.rs#L90), one breaker per endpoint. |
+| [`TransportConfig`](config.rs#L146), [`TransportConfigBuilder`](config.rs#L180) | the pools and their policies: shared, read and write pools; per-endpoint timeouts; the retry and breaker settings; validated once at [`build`](config.rs#L280) | the builder, and only the builder | [`HftTransport::new`](provider.rs#L539). The strategy layer assembles one from its environment; the builder is where a keyed URL enters the crate. |
+| [`Strategy`](config.rs#L52) | how a read is routed: round robin, latency-based, or hedged; a caller's choice | the caller | [`TransportConfigBuilder::strategy`](config.rs#L253). Hedging costs N requests per read, which is why it is a choice and not a default. |
+| [`ReadRetryConfig`](config.rs#L89) | what a read retries: no answer only, with backoff | the caller; `Default` is 2 retries | [`TransportConfigBuilder::read_retry`](config.rs#L265). |
+| [`WriteRetryConfig`](config.rs#L114) | what a write retries: pre-mempool rejection or no answer, the same bytes | the caller; `Default` is 3 retries | [`TransportConfigBuilder::write_retry`](config.rs#L271). |
+| [`CircuitBreakerConfig`](config.rs#L68) | when a breaker trips: failure threshold, cooldown, probe | the caller; `Default` is the trading defaults | [`TransportConfigBuilder::circuit_breaker`](config.rs#L259); [`EndpointHealth::new`](health.rs#L90), one breaker per endpoint. |
 | [`EndpointHealth`](health.rs#L57), [`ProbePermit`](provider.rs#L190), [`Reserved`](health.rs#L27) | one endpoint's health: breaker, latency EMA, decaying error rate, readable without a lock; one half-open probe at a time; an endpoint held for a purpose | [`EndpointHealth::new`](health.rs#L90), one per endpoint in a pool | the pools inside the transport, which select over it. Internal: nothing outside this module selects an endpoint, and the pool type is hidden from the documentation for that reason, which is why this row draws no edge. |
 | [`EndpointStatus`](health.rs#L75), [`CircuitState`](health.rs#L37) | one endpoint's health, read out | [`HftTransport::health_status`](provider.rs#L558) | nothing in the crate. The strategy layer's metrics, which is why it is a plain value and not a handle. |
 | [`WsManager`](ws.rs#L69) | the subscription side: one socket; reconnect with capped backoff; re-subscription is the caller's | [`WsManager::connect`](ws.rs#L94) with a [`ReconnectConfig`](ws.rs#L43) | [`MarketFeed::subscribe`](../feeds/DESIGN.md), [`BlockHeaderFeed::subscribe`](../feeds/DESIGN.md) and [`LiveTakerMarket::subscribe`](../feeds/DESIGN.md), each one subscription over it. The strategy layer holds one per process. |
@@ -155,9 +158,9 @@ trade is a setting a caller chose.
 - **A read retries up to 2 more times**, with backoff, and only when the
   endpoint failed to answer. A decline costs the one request and no
   retry.
-- **A write retries up to 3 times**, only on a pre-mempool rejection or
-  no answer, always as the same signed bytes, so a retry can never cost
-  a second transaction's gas.
+- **A write retries up to 3 times**, on an error answer or no answer,
+  always as the same signed bytes, so a retry can never cost a second
+  transaction's gas, even after an attempt that may have succeeded.
 - **Selection is lock-free in the steady state.** Health is read from
   atomic mirrors, so choosing an endpoint costs no contention when every
   endpoint is healthy.

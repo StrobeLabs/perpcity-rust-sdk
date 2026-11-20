@@ -186,6 +186,10 @@ pub enum TransactionError {
         nonce: u64,
         /// Hash of the signed replacement, if broadcast was attempted.
         replacement: Option<FixedBytes<32>>,
+        /// Whether the node refused `replacement` on every attempt, as
+        /// in [`Self::ReplacementUnconfirmed`]: then it cannot have used
+        /// the nonce.
+        refused: bool,
     },
 
     /// Transaction signing failed. Not transient; nothing left the process.
@@ -272,11 +276,18 @@ pub enum NotReplaceableReason {
     /// Its signature does not recover to this client's address; the
     /// node's `from` field is not trusted.
     WrongSender,
+    /// It is signed for another chain than this client's, or, as a legacy
+    /// transaction, for no chain.
+    OtherChain {
+        /// The chain id it is signed for.
+        chain_id: Option<u64>,
+    },
     /// It is from this client, to another address than this client's
     /// market: a call that another client or method sends.
     OtherMarket,
     /// It is from this client to this market, but its call is not one
-    /// that the method replaces, such as a maker trade or a liquidation.
+    /// that the method replaces, such as a maker trade, a liquidation, or
+    /// a taker call that carries value.
     UnsupportedCall,
     /// Its own send still waits for its receipt.
     InFlight,
@@ -305,6 +316,10 @@ impl fmt::Display for NotReplaceableReason {
         match self {
             Self::UnknownToNode => f.write_str("the node does not know it"),
             Self::WrongSender => f.write_str("not signed by this client"),
+            Self::OtherChain {
+                chain_id: Some(chain_id),
+            } => write!(f, "signed for chain {chain_id}"),
+            Self::OtherChain { chain_id: None } => f.write_str("signed for no chain"),
             Self::OtherMarket => f.write_str("not to this client's market"),
             Self::UnsupportedCall => f.write_str("not a call this method replaces"),
             Self::InFlight => f.write_str("its send still waits for the receipt"),
@@ -352,15 +367,16 @@ impl TransactionError {
                 replacement,
                 refused,
                 ..
+            }
+            | Self::ReplacementNonceUsed {
+                original,
+                replacement,
+                refused,
+                ..
             } => Some(match replacement {
                 Some(replacement) if !refused => *replacement,
                 _ => *original,
             }),
-            Self::ReplacementNonceUsed {
-                original,
-                replacement,
-                ..
-            } => Some(replacement.unwrap_or(*original)),
             Self::BroadcastFailed { tx_hash, .. }
             | Self::ReceiptTimeout { tx_hash, .. }
             | Self::Reverted { tx_hash, .. }

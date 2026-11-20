@@ -51,7 +51,7 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::Instant;
 
-use alloy::rpc::json_rpc::{RequestPacket, ResponsePacket};
+use alloy::rpc::json_rpc::{RequestPacket, ResponsePacket, ResponsePayload};
 use alloy::transports::{TransportError, TransportErrorKind, TransportFut};
 use tower::Service;
 
@@ -619,17 +619,51 @@ fn is_write_method_name(method: &str) -> bool {
     matches!(method, "eth_sendRawTransaction" | "eth_sendTransaction")
 }
 
-/// A write's last answer, an explicit rejection, after an earlier attempt
-/// that may have left the transaction with a node: an error that is not
-/// the node's answer, so no caller reads it as a rejection.
-fn rejected_after_doubt(response: &ResponsePacket) -> TransportError {
-    let (code, message) = response
-        .as_error()
-        .map(|error| (error.code, error.message.as_ref()))
-        .unwrap_or_default();
-    TransportErrorKind::custom_str(&format!(
-        "write answered {code} {message:?} after an earlier attempt that may have reached a node"
-    ))
+/// The answers in `response` to the write calls of `req`, by JSON-RPC
+/// id; `None` for a write the response does not answer.
+fn write_answers<'a>(
+    req: &'a RequestPacket,
+    response: &'a ResponsePacket,
+) -> impl Iterator<Item = Option<&'a ResponsePayload>> + 'a {
+    req.requests()
+        .iter()
+        .filter(|call| is_write_method_name(call.method()))
+        .map(move |call| match response {
+            ResponsePacket::Single(answer) => Some(&answer.payload),
+            ResponsePacket::Batch(answers) => answers
+                .iter()
+                .find(|answer| answer.id == *call.id())
+                .map(|answer| &answer.payload),
+        })
+}
+
+/// Whether `payload` is an explicit rejection ([`is_rejection`]).
+fn rejects(payload: Option<&ResponsePayload>) -> bool {
+    payload
+        .and_then(ResponsePayload::as_error)
+        .is_some_and(is_rejection)
+}
+
+/// Whether every write call of `req` got an explicit rejection in
+/// `response`. A batch whose writes got anything else, or no answer, may
+/// have left one of them with the node.
+fn every_write_rejected(req: &RequestPacket, response: &ResponsePacket) -> bool {
+    write_answers(req, response).all(rejects)
+}
+
+/// A write's last answer, which explicitly rejects one of its calls,
+/// after an earlier attempt that may have left a transaction with a node:
+/// an error that is not the node's answer, so no caller reads it as a
+/// rejection. Applies to a whole batch.
+fn rejected_after_doubt(req: &RequestPacket, response: &ResponsePacket) -> Option<TransportError> {
+    let error = write_answers(req, response)
+        .find(|payload| rejects(*payload))
+        .flatten()
+        .and_then(ResponsePayload::as_error)?;
+    Some(TransportErrorKind::custom_str(&format!(
+        "write answered {} {:?} after an earlier attempt that may have reached a node",
+        error.code, error.message
+    )))
 }
 
 // ── Pool-aware routing ─────────────────────────────────────────────
@@ -679,9 +713,10 @@ impl Router {
     /// error answer is returned as the node gave it only when no earlier
     /// attempt may have left the transaction with a node: when an attempt
     /// got no answer, or an answer other than an explicit rejection
-    /// ([`is_rejection`]), a last explicit rejection comes back as a
-    /// transport error, so no caller reads it as proof that no node holds
-    /// the transaction.
+    /// ([`is_rejection`]) for any write call of a batch, a last explicit
+    /// rejection of any call comes back as a transport error for the whole
+    /// request, so no caller reads it as proof that no node holds the
+    /// transaction.
     async fn route_request(
         self: &Arc<Self>,
         req: RequestPacket,
@@ -734,7 +769,7 @@ impl Router {
                     // For writes, check if the response is a pre-mempool rejection
                     // that is safe to retry (tx was never accepted).
                     if is_write && self.config.write_retry.is_retriable(&response) {
-                        let rejected = response.as_error().is_some_and(is_rejection);
+                        let rejected = every_write_rejected(&req, &response);
                         // Stale-replica rejections are not evidence of an
                         // unhealthy endpoint — don't touch the circuit breaker.
                         if attempt + 1 < max_attempts {
@@ -757,8 +792,10 @@ impl Router {
                                 error_code = response.first_error_code(),
                                 "write rejected after all retries exhausted"
                             );
-                            if rejected && may_be_held {
-                                return Err(rejected_after_doubt(&response));
+                            if may_be_held
+                                && let Some(error) = rejected_after_doubt(&req, &response)
+                            {
+                                return Err(error);
                             }
                             return Ok(response);
                         }
@@ -968,6 +1005,9 @@ impl Service<RequestPacket> for HftTransport {
 
 #[cfg(test)]
 mod tests {
+    use alloy::primitives::{B256, Bytes};
+    use serde_json::json;
+
     use super::*;
     use crate::transport::config::{TransportConfig, WriteRetryConfig};
     use crate::transport::scripted::{self, Answer};
@@ -1248,65 +1288,145 @@ mod tests {
         ))
     }
 
-    /// A write's answers by attempt, through the real transport. An
-    /// explicit rejection is passed on as the node's answer only when every
+    /// A write that every attempt answered with an error: an explicit
+    /// rejection is passed on as the node's answer only when every
     /// attempt got one; after an attempt with no answer or with another
     /// answer, the node can hold the transaction, so the last rejection
-    /// comes back as a transport error that names it.
+    /// comes back as a transport error that names it. Two, three and four
+    /// attempts, the doubtful one anywhere but last.
     #[tokio::test]
     async fn a_write_rejection_is_the_nodes_answer_only_when_every_attempt_got_one() {
-        const UNDERPRICED: &str = "replacement transaction underpriced";
-        // The first attempt's answer: an error message, an HTTP status, or
-        // none.
-        for (first, passed_on) in [
-            (UNDERPRICED, true),
-            ("already known", false),
-            ("nonce too low", false),
-            ("HTTP 503", false),
-            ("no answer", false),
-        ] {
+        const U: &str = "replacement transaction underpriced";
+        let scripts: [(&[&str], bool); 17] = [
+            (&[U, U], true),
+            (&["already known", U], false),
+            (&["nonce too low", U], false),
+            (&["HTTP 503", U], false),
+            (&["no answer", U], false),
+            (&[U, U, U], true),
+            (&["no answer", U, U], false),
+            (&[U, "no answer", U], false),
+            (&[U, "HTTP 503", U], false),
+            (&["HTTP 503", U, U], false),
+            (&[U, "already known", U], false),
+            (&["nonce too low", U, U], false),
+            (&["insufficient funds", U, U], true),
+            (&[U, U, U, U], true),
+            (&[U, U, "no answer", U], false),
+            (&["already known", U, U, U], false),
+            (
+                &[U, "insufficient funds", "Transaction Underpriced", U],
+                true,
+            ),
+        ];
+        for (script, passed_on) in scripts {
             let attempts = Arc::new(AtomicUsize::new(0));
             let counter = Arc::clone(&attempts);
             let url = scripted::endpoint(move |method, _| {
                 assert_eq!(method, "eth_sendRawTransaction");
-                match (counter.fetch_add(1, Ordering::SeqCst), first) {
-                    (0, "no answer") => Answer::Silence,
-                    (0, "HTTP 503") => Answer::Status(503),
-                    (0, answer) => Answer::Error(-32_000, answer.into()),
-                    _ => Answer::Error(-32_000, UNDERPRICED.into()),
+                match script[counter.fetch_add(1, Ordering::SeqCst)] {
+                    "no answer" => Answer::Silence,
+                    "HTTP 503" => Answer::Status(503),
+                    answer => Answer::Error(-32_000, answer.into()),
                 }
             })
             .await;
-            let transport = HftTransport::new(
-                TransportConfig::builder()
-                    .shared_endpoint(&url)
-                    .request_timeout(std::time::Duration::from_millis(300))
-                    .write_retry(WriteRetryConfig {
-                        max_retries: 1,
-                        base_delay: std::time::Duration::from_millis(1),
-                    })
-                    .build()
-                    .unwrap(),
-            )
-            .unwrap();
-            let provider = alloy::providers::RootProvider::<alloy::network::Ethereum>::new(
-                alloy::rpc::client::RpcClient::new(
-                    alloy::transports::BoxTransport::new(transport),
-                    false,
-                ),
-            );
-            let error = provider
+            let retries = u32::try_from(script.len() - 1).unwrap();
+            let error = write_provider(&url, retries)
                 .send_raw_transaction(&[0x02, 0x01])
                 .await
                 .expect_err("the last attempt is rejected");
-            assert_eq!(attempts.load(Ordering::SeqCst), 2, "{first}");
+            assert_eq!(attempts.load(Ordering::SeqCst), script.len(), "{script:?}");
             assert_eq!(
                 error.as_error_resp().is_some_and(is_rejection),
                 passed_on,
-                "{first}: {error}"
+                "{script:?}: {error}"
             );
-            assert!(error.to_string().contains(UNDERPRICED), "{first}: {error}");
+            assert!(error.to_string().contains(U), "{script:?}: {error}");
         }
+    }
+
+    /// A batch of two writes, `a` and `b`, answered in each attempt by
+    /// the script for each. A rejection in the batch's last answer is
+    /// passed on only when every attempt rejected every write of the batch:
+    /// one write's rejection is no evidence about the other.
+    #[tokio::test]
+    async fn a_batch_rejection_is_the_nodes_answer_only_when_every_write_got_one() {
+        const U: &str = "replacement transaction underpriced";
+        let scripts: [(&[(&str, &str)], bool); 4] = [
+            (&[(U, U), (U, U)], true),
+            (&[(U, "already known"), (U, U)], false),
+            (&[("already known", U), (U, U)], false),
+            (&[(U, "ok"), (U, "ok")], false),
+        ];
+        for (script, passed_on) in scripts {
+            let attempts = Arc::new(AtomicUsize::new(0));
+            let counter = Arc::clone(&attempts);
+            // The batch asks `a` first, so `a` counts the attempts.
+            let url = scripted::endpoint(move |_, params| {
+                let answer = if params[0] == "0x0201" {
+                    script[counter.fetch_add(1, Ordering::SeqCst)].0
+                } else {
+                    script[counter.load(Ordering::SeqCst) - 1].1
+                };
+                match answer {
+                    "ok" => Answer::Result(json!(B256::repeat_byte(0xbb))),
+                    answer => Answer::Error(-32_000, answer.into()),
+                }
+            })
+            .await;
+            let retries = u32::try_from(script.len() - 1).unwrap();
+            let client = write_client(&url, retries);
+            let mut batch = client.new_batch();
+            let a = batch
+                .add_call::<_, B256>("eth_sendRawTransaction", &(Bytes::from_static(&[2, 1]),))
+                .unwrap();
+            let b = batch
+                .add_call::<_, B256>("eth_sendRawTransaction", &(Bytes::from_static(&[2, 2]),))
+                .unwrap();
+            let _ = batch.send().await;
+            let (a, b) = (a.await, b.await);
+            assert_eq!(attempts.load(Ordering::SeqCst), script.len(), "{script:?}");
+            for (name, answer) in [("a", &a), ("b", &b)] {
+                let rejected = answer
+                    .as_ref()
+                    .err()
+                    .and_then(|error| error.as_error_resp())
+                    .is_some_and(is_rejection);
+                let last = script[script.len() - 1];
+                let rejected_last = if name == "a" { last.0 } else { last.1 } == U;
+                assert_eq!(
+                    rejected,
+                    passed_on && rejected_last,
+                    "{name} of {script:?}: {answer:?}"
+                );
+            }
+        }
+    }
+
+    /// A provider over one endpoint that retries a write `retries` times.
+    fn write_provider(
+        url: &str,
+        retries: u32,
+    ) -> alloy::providers::RootProvider<alloy::network::Ethereum> {
+        alloy::providers::RootProvider::new(write_client(url, retries))
+    }
+
+    /// A client over one endpoint that retries a write `retries` times.
+    fn write_client(url: &str, retries: u32) -> alloy::rpc::client::RpcClient {
+        let transport = HftTransport::new(
+            TransportConfig::builder()
+                .shared_endpoint(url)
+                .request_timeout(std::time::Duration::from_millis(300))
+                .write_retry(WriteRetryConfig {
+                    max_retries: retries,
+                    base_delay: std::time::Duration::from_millis(1),
+                })
+                .build()
+                .unwrap(),
+        )
+        .unwrap();
+        alloy::rpc::client::RpcClient::new(alloy::transports::BoxTransport::new(transport), false)
     }
 
     /// The width search narrows by being told no, so a declined request
