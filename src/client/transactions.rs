@@ -625,6 +625,107 @@ mod tests {
         })
     }
 
+    /// The F0 fixtures: the node's answers to eight `v1.0.0` reverts, each
+    /// triggered on the deployed Sepolia bytecode on an Anvil fork and
+    /// checked against `forge inspect` at the tag
+    /// (`src/errors/fixtures/v1-reverts.json`; its `fork_block` and the
+    /// script that made it are named in the file). Each answer, sent through
+    /// the simulation classifier as the node sent it, is a typed revert with
+    /// the error's name, its binding's selector, and its class.
+    #[test]
+    fn v1_fork_reverts_are_typed_with_their_class() {
+        use alloy::sol_types::SolError;
+        use serde_json::Value;
+        use serde_json::value::RawValue;
+
+        use crate::contracts::v1::Perp;
+        use crate::errors::RevertClass;
+
+        let fixtures: Value =
+            serde_json::from_str(include_str!("../errors/fixtures/v1-reverts.json")).unwrap();
+        assert_eq!(fixtures["contracts_tag"], "v1.0.0");
+        assert_eq!(fixtures["chain_id"], 421_614);
+        let expected = [
+            (
+                Perp::DeadlineExpired::SELECTOR,
+                "DeadlineExpired",
+                RevertClass::Transient,
+            ),
+            (
+                Perp::StaleBeaconIndex::SELECTOR,
+                "StaleBeaconIndex",
+                RevertClass::Transient,
+            ),
+            (
+                Perp::PriceOutsideRange::SELECTOR,
+                "PriceOutsideRange",
+                RevertClass::BeaconFault,
+            ),
+            (
+                Perp::BeaconIndexUnreadable::SELECTOR,
+                "BeaconIndexUnreadable",
+                RevertClass::BeaconFault,
+            ),
+            (
+                Perp::TvlCapExceeded::SELECTOR,
+                "TvlCapExceeded",
+                RevertClass::Hold,
+            ),
+            (
+                Perp::MaxTotalFeeExceeded::SELECTOR,
+                "MaxTotalFeeExceeded",
+                RevertClass::Answer,
+            ),
+            (
+                Perp::LongCloseCapacityExceeded::SELECTOR,
+                "LongCloseCapacityExceeded",
+                RevertClass::Answer,
+            ),
+            (
+                Perp::ShortCloseCapacityExceeded::SELECTOR,
+                "ShortCloseCapacityExceeded",
+                RevertClass::Answer,
+            ),
+        ];
+        let reverts = fixtures["reverts"].as_array().unwrap();
+        assert_eq!(reverts.len(), expected.len());
+        for (selector, name, class) in expected {
+            let fixture = reverts
+                .iter()
+                .find(|r| r["name"] == name)
+                .unwrap_or_else(|| panic!("no {name} fixture"));
+            assert_eq!(
+                fixture["selector"],
+                format!("0x{}", alloy::hex::encode(selector)),
+                "{name}"
+            );
+            let answer = &fixture["eth_call_error"];
+            let payload = alloy::rpc::json_rpc::ErrorPayload {
+                code: answer["code"].as_i64().unwrap(),
+                message: answer["message"].as_str().unwrap().to_owned().into(),
+                data: Some(RawValue::from_string(answer["data"].to_string()).unwrap()),
+            };
+            let classified = classify_simulation_failure(
+                &alloy::transports::TransportError::ErrorResp(payload),
+                "eth_call",
+            );
+            let TransactionError::SimulationReverted {
+                error_name,
+                selector: typed,
+                revert_data,
+            } = &classified
+            else {
+                panic!("{name}: {classified}");
+            };
+            assert_eq!(error_name, name);
+            assert_eq!(typed.0, selector, "{name}");
+            assert_eq!(revert_data, &None, "{name} has no arguments");
+            assert_eq!(classified.revert_class(), Some(class), "{name}");
+            let err: PerpCityError = classified.into();
+            assert_eq!(err.is_transient(), class.is_transient(), "{name}");
+        }
+    }
+
     /// One variant used to carry both "the node said the call fails" and
     /// "the node could not be reached", and `is_transient()` could not
     /// tell them apart — a liquidation bot retrying on it would loop on an
