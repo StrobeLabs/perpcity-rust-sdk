@@ -9,6 +9,7 @@ use alloy::network::Ethereum;
 use alloy::primitives::{Address, Bytes, U256};
 use alloy::providers::{Empty, MulticallBuilder, Provider, RootProvider};
 use alloy::rpc::client::RpcClient;
+use alloy::rpc::types::BlockOverrides;
 use alloy::sol_types::{SolCall, SolValue};
 use alloy::transports::{BoxTransport, RpcError, TransportError};
 use serde::{Deserialize, Serialize};
@@ -28,6 +29,7 @@ use crate::transport::provider::HftTransport;
 use crate::units::UsdcAtoms;
 
 use super::queries::{Era, MarketImmutables};
+use super::state::pinned_block_failure;
 use super::transactions::{classify_simulation_failure, preflight_request};
 use super::{
     ARBITRUM_CHAIN_ID, ARBITRUM_POOL_MANAGER, ARBITRUM_SEPOLIA_CHAIN_ID,
@@ -684,13 +686,174 @@ impl ChainReader {
         value: u128,
         gas_limit: Option<u64>,
     ) -> std::result::Result<(), TransactionError> {
-        let tx = preflight_request(from, to, calldata, value, gas_limit);
-        self.inner
-            .provider
-            .call(tx)
+        self.preflight_call_in(from, to, calldata, value, gas_limit, None)
             .await
-            .map_err(|e| classify_simulation_failure(&e, "eth_call"))?;
-        Ok(())
+    }
+
+    /// The block after the head for a `v1.0.0` trade's simulation, or
+    /// `None` once an endpoint of the transport has refused block
+    /// overrides, when the simulation runs at the endpoint's own block.
+    pub(super) async fn next_block(&self) -> Result<Option<NextBlock>> {
+        if !self.inner.transport.supports_block_overrides() {
+            return Ok(None);
+        }
+        let head = self
+            .inner
+            .provider
+            .get_block_by_number(BlockNumberOrTag::Latest)
+            .await?
+            .ok_or_else(|| TransactionError::GasUnavailable {
+                reason: "the endpoint returned no head block".into(),
+            })?;
+        Ok(Some(NextBlock::after(
+            head.header.number,
+            head.header.timestamp,
+        )))
+    }
+
+    /// [`Self::preflight_call`] in `next` when it is given.
+    pub(super) async fn preflight_call_in(
+        &self,
+        from: Address,
+        to: Address,
+        calldata: &Bytes,
+        value: u128,
+        gas_limit: Option<u64>,
+        next: Option<&NextBlock>,
+    ) -> std::result::Result<(), TransactionError> {
+        let tx = preflight_request(from, to, calldata, value, gas_limit);
+        let provider = &self.inner.provider;
+        let answer = match next {
+            None => provider.call(tx).await,
+            Some(next) => match provider
+                .call(tx.clone())
+                .block(next.state())
+                .with_block_overrides(next.overrides())
+                .await
+            {
+                Err(refusal) if refuses_overrides(&refusal) => {
+                    self.without_overrides(&refusal, provider.call(tx).await)
+                }
+                answer => answer,
+            },
+        };
+        answer
+            .map(drop)
+            .map_err(|e| simulation_failure(&e, "eth_call", next))
+    }
+
+    /// `eth_estimateGas` for the call from `from`, in `next` when it is
+    /// given, with a contract revert decoded.
+    pub(super) async fn estimate_gas_in(
+        &self,
+        from: Address,
+        to: Address,
+        calldata: &Bytes,
+        value: u128,
+        next: Option<&NextBlock>,
+    ) -> std::result::Result<u64, TransactionError> {
+        let tx = preflight_request(from, to, calldata, value, None);
+        let provider = &self.inner.provider;
+        let answer = match next {
+            None => provider.estimate_gas(tx).await,
+            Some(next) => match provider
+                .estimate_gas(tx.clone())
+                .block(next.state())
+                .with_block_overrides(next.overrides())
+                .await
+            {
+                Err(refusal) if refuses_overrides(&refusal) => {
+                    self.without_overrides(&refusal, provider.estimate_gas(tx).await)
+                }
+                answer => answer,
+            },
+        };
+        answer.map_err(|e| simulation_failure(&e, "eth_estimateGas", next))
+    }
+
+    /// The answer `plain` to a simulation the endpoint refused with block
+    /// overrides, sent again without them. A refusal of `plain` too is not
+    /// about the overrides; any other answer latches the transport off
+    /// them, so later trades simulate at the head's time and their gas
+    /// floors carry them.
+    fn without_overrides<T>(
+        &self,
+        refusal: &TransportError,
+        plain: std::result::Result<T, TransportError>,
+    ) -> std::result::Result<T, TransportError> {
+        if !plain.as_ref().is_err_and(refuses_overrides) {
+            self.inner.transport.note_block_overrides_unsupported();
+            tracing::warn!(
+                error = %refusal,
+                "endpoint refuses block overrides; v1 trades simulate at the head's time"
+            );
+        }
+        plain
+    }
+}
+
+/// The block a `v1.0.0` trade is simulated in before its send: the head's
+/// state, with the next block's number and a timestamp one second after
+/// the head's. A trade accrues its market's rates, walking the initialized
+/// ticks of the utilization band, only in a second other than the market's
+/// last touch, and an endpoint runs a simulation at the head's own time,
+/// so without the override a simulation in the second of the last touch
+/// skips work the mined trade does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct NextBlock {
+    head: u64,
+    head_time: u64,
+}
+
+impl NextBlock {
+    /// The block after the head numbered `head`, stamped `head_time`.
+    pub(super) fn after(head: u64, head_time: u64) -> Self {
+        Self { head, head_time }
+    }
+
+    /// The head, whose state the simulation reads.
+    fn state(&self) -> BlockId {
+        BlockId::number(self.head)
+    }
+
+    /// The next block's number and time.
+    fn overrides(&self) -> BlockOverrides {
+        BlockOverrides {
+            number: Some(U256::from(self.head + 1)),
+            time: Some(self.head_time + 1),
+            ..BlockOverrides::default()
+        }
+    }
+}
+
+/// Whether a node refused a request's params (JSON-RPC `-32602`), as a
+/// node without block overrides refuses a fourth one.
+fn refuses_overrides(error: &TransportError) -> bool {
+    error
+        .as_error_resp()
+        .is_some_and(|resp| resp.code == -32602)
+}
+
+/// A failed simulation, sorted by [`classify_simulation_failure`], with a
+/// node that lacks the head `next` pins read as no answer.
+fn simulation_failure(
+    error: &TransportError,
+    what: &str,
+    next: Option<&NextBlock>,
+) -> TransactionError {
+    let failure = classify_simulation_failure(error, what);
+    match (next, &failure) {
+        (Some(next), TransactionError::SimulationFailed { .. })
+            if error
+                .as_error_resp()
+                .and_then(|resp| pinned_block_failure(&resp.message, next.head))
+                .is_some() =>
+        {
+            TransactionError::GasUnavailable {
+                reason: format!("{what} at block {} failed: {error}", next.head),
+            }
+        }
+        _ => failure,
     }
 }
 

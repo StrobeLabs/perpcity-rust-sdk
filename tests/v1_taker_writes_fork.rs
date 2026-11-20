@@ -35,7 +35,9 @@ use alloy::signers::local::PrivateKeySigner;
 use alloy::sol;
 use alloy::sol_types::{SolCall, SolError, SolEvent};
 use perpcity_sdk::client::PositionRole;
-use perpcity_sdk::contracts::v1::{AdjustTakerParams, IFees, OpenMakerParams, Perp, SwapResult};
+use perpcity_sdk::contracts::v1::{
+    AdjustTakerParams, IFees, MoveMakerParams, OpenMakerParams, Perp, SwapResult,
+};
 use perpcity_sdk::errors::decode::try_extract_revert;
 use perpcity_sdk::{
     ChainReader, Era, ExactAdjustTakerParams, ExactOpenTakerParams, HftTransport, MaxTotalFee,
@@ -51,6 +53,19 @@ use v1_fork::{SepoliaFork, V1Fork};
 /// index of 50), each with this liquidity, inside the wide maker's band.
 const ADJACENT: [(i32, i32); 3] = [(39_150, 39_180), (39_180, 39_210), (39_210, 39_240)];
 const ADJACENT_LIQUIDITY: u128 = 200_000_000;
+/// Six more 30-tick bands above the adjacent ones, from tick 39,240, and
+/// eight thin ones below tick 39,120 that a sell crosses one by one: each
+/// boundary is an initialized tick that a trade in a new second walks.
+const MORE_ABOVE: i32 = 6;
+const THIN_BELOW: i32 = 8;
+const THIN_LIQUIDITY: u128 = 20_000_000;
+/// The quiet seconds before the flip, so it accrues over a long gap.
+const QUIET: u64 = 300;
+/// The range the wide maker moves to at the end, its liquidity there and
+/// the margin it adds.
+const WIDE: (i32, i32) = (33_000, 45_000);
+const WIDE_LIQUIDITY: u128 = 100_000_000;
+const WIDE_MARGIN: i128 = 1_000_000_000;
 const OPEN_SIZE: i128 = 450_000;
 const REDUCE_SIZE: i128 = 150_000;
 const SHORT_SIZE: i128 = 120_000;
@@ -190,7 +205,7 @@ async fn v1_taker_writes_on_a_sepolia_fork() {
         .await;
     let perp = w.create_perp(beacon).await;
     w.approve_usdc(perp).await;
-    w.open_maker(perp).await;
+    let wide_maker = w.open_maker(perp).await;
     let raw_perp = Perp::new(perp, w.provider.clone());
     for (lower, upper) in ADJACENT {
         let params = OpenMakerParams {
@@ -206,7 +221,29 @@ async fn v1_taker_writes_on_a_sepolia_fork() {
         w.send("open-adjacent-maker", raw_perp.openMaker(params))
             .await;
     }
-    println!("v1 market {perp}: four makers");
+    for _ in 0..4 {
+        w.mint_usdc().await;
+    }
+    let above = (0..MORE_ABOVE).map(|i| (39_240 + 30 * i, 39_270 + 30 * i, ADJACENT_LIQUIDITY));
+    let below = (0..THIN_BELOW).map(|i| (39_090 - 30 * i, 39_120 - 30 * i, THIN_LIQUIDITY));
+    for (lower, upper, liquidity) in above.chain(below) {
+        let params = OpenMakerParams {
+            holder: w.me,
+            margin: v1_fork::MAKER_MARGIN,
+            tickLower: lower.try_into().unwrap(),
+            tickUpper: upper.try_into().unwrap(),
+            liquidity,
+            maxAmt0In: U256::MAX,
+            maxAmt1In: U256::MAX,
+            deadline: w.deadline().await,
+        };
+        let hash = w
+            .send("open-band-maker", raw_perp.openMaker(params))
+            .await
+            .transaction_hash;
+        v1_fork::measure_gas(&w.provider, hash, &format!("band-maker-open-{lower}")).await;
+    }
+    println!("v1 market {perp}: {} makers", 4 + MORE_ABOVE + THIN_BELOW);
 
     // ── A nonzero protocol fee: set by the owner, synced to the market ──
     let fee_manager = raw_perp.protocolFeeManager().call().await.unwrap();
@@ -420,7 +457,10 @@ async fn v1_taker_writes_on_a_sepolia_fork() {
         Perp::ReduceOnlyViolated::SELECTOR
     );
 
-    // ── A permitted flip: the same change without reduce-only ──────
+    // ── A permitted flip after a quiet gap: the same change without
+    // reduce-only, across the thin bands, in a new second ───────────
+    w.warp(QUIET).await;
+    raw(&fork, "evm_mine", serde_json::json!([])).await;
     client.chain().refresh_gas().await.unwrap();
     let flipped = client
         .adjust_taker_v1(
@@ -435,7 +475,26 @@ async fn v1_taker_writes_on_a_sepolia_fork() {
         panic!("a flip leaves the position open: {flipped:?}");
     };
     assert_eq!(unpack(flipped.event.delta).0, -left, "now a short");
-    v1_fork::measure_gas(&w.provider, flipped.tx_hash, "taker-flip").await;
+    let gas = v1_fork::measure_gas(&w.provider, flipped.tx_hash, "taker-flip").await;
+    let flip_ticks =
+        ticks_crossed_event(&client.poll_receipt(flipped.tx_hash).await.unwrap(), perp);
+    let band = raw_perp.utilizationBand().call().await.unwrap();
+    let tick_of =
+        |sqrt_x96: u128| (2.0 * (sqrt_x96 as f64 / 2f64.powi(96)).ln() / 1.0001f64.ln()) as i32;
+    let (band_lower, band_upper) = (tick_of(band.lower), tick_of(band.upper));
+    let in_band = pool
+        .ticks
+        .keys()
+        .filter(|tick| (band_lower..=band_upper).contains(*tick))
+        .count();
+    println!(
+        "flip after {QUIET} s from tick {} to {}, {in_band} initialized ticks in the utilization band {band_lower}..{band_upper}: used {}, sent limit {}",
+        flip_ticks.startingTick.as_i32(),
+        flip_ticks.endingTick.as_i32(),
+        gas.used,
+        gas.sent
+    );
+    assert!(in_band >= 12, "the band holds the extra makers' ticks");
     let sent = Perp::adjustTakerCall::abi_decode(&input_of(&w.provider, flipped.tx_hash).await)
         .unwrap()
         .params;
@@ -900,6 +959,43 @@ async fn v1_taker_writes_on_a_sepolia_fork() {
         "taker {} liquidated in {}",
         lev.pos_id, receipt.transaction_hash
     );
+
+    // ── The wide maker moved wider after a quiet gap, sent by the SDK ──
+    // A new provider again: the liquidation used a nonce of the same wallet.
+    let mut w = V1Fork::new(&fork);
+    w.mint_usdc().await;
+    w.mint_usdc().await;
+    w.warp(QUIET).await;
+    raw(&fork, "evm_mine", serde_json::json!([])).await;
+    client.sync_nonce().await.unwrap();
+    client.chain().refresh_gas().await.unwrap();
+    let move_wide = Perp::moveMakerCall {
+        params: MoveMakerParams {
+            posId: wide_maker,
+            tickLower: WIDE.0.try_into().unwrap(),
+            tickUpper: WIDE.1.try_into().unwrap(),
+            liquidity: WIDE_LIQUIDITY,
+            removeAmt0Min: U256::ZERO,
+            removeAmt1Min: U256::ZERO,
+            addAmt0Max: U256::MAX,
+            addAmt1Max: U256::MAX,
+            marginDelta: WIDE_MARGIN,
+            deadline: w.deadline().await,
+        },
+    };
+    let moved = client
+        .tx(perp, move_wide.abi_encode().into())
+        .send()
+        .await
+        .unwrap();
+    let gas =
+        v1_fork::measure_gas(&w.provider, moved.transaction_hash, "maker-move-wide-bands").await;
+    println!(
+        "wide maker {wide_maker} moved to {WIDE:?} after {QUIET} s: used {}, sent limit {}",
+        gas.used, gas.sent
+    );
+    let band = raw_perp.makerDetails(wide_maker).call().await.unwrap();
+    assert_eq!((band.tickLower.as_i32(), band.tickUpper.as_i32()), WIDE);
     println!("\n=== v1 taker writes fork test passed ===");
 }
 

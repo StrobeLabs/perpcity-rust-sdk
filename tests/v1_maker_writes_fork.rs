@@ -11,7 +11,9 @@ use alloy::primitives::aliases::U48;
 use alloy::primitives::{Address, B256, Bytes, U256};
 use alloy::providers::Provider;
 use alloy::sol_types::{SolCall, SolError};
-use perpcity_sdk::contracts::v1::{AdjustMakerParams, OpenMakerParams, Perp, WithdrawalConfig};
+use perpcity_sdk::contracts::v1::{
+    AdjustMakerParams, MoveMakerParams, OpenMakerParams, Perp, WithdrawalConfig,
+};
 use perpcity_sdk::events::receipt::MakerExit;
 use perpcity_sdk::math::liquidity::band_amounts;
 use perpcity_sdk::{
@@ -25,6 +27,12 @@ use tokio::time::sleep;
 use tracing::instrument::WithSubscriber;
 
 use v1_fork::{SepoliaFork, V1Fork};
+
+/// The quiet seconds before the wide move, so it accrues over a long gap.
+const QUIET: u64 = 300;
+/// The range the W11 maker moves to, and the margin it adds.
+const WIDE: (i32, i32) = (33_000, 45_000);
+const WIDE_MARGIN: i128 = 500_000_000;
 
 fn wall_secs() -> u64 {
     SystemTime::now()
@@ -105,6 +113,45 @@ async fn v1_maker_writes_on_a_sepolia_fork() {
         .checked()
         .await
         .unwrap();
+    // ── The W11 maker moved wide after a quiet gap, sent by the SDK ──
+    w.mint_usdc().await;
+    w.mint_usdc().await;
+    w.warp(QUIET).await;
+    let _: Value = w.provider.raw_request("evm_mine".into(), ()).await.unwrap();
+    let wide = PerpClient::new(chain.market(residual_market.perp), w.signer.clone());
+    wide.sync_nonce().await.unwrap();
+    chain.refresh_gas().await.unwrap();
+    let move_wide = Perp::moveMakerCall {
+        params: MoveMakerParams {
+            posId: residual_market.maker_id,
+            tickLower: WIDE.0.try_into().unwrap(),
+            tickUpper: WIDE.1.try_into().unwrap(),
+            liquidity: v1_fork::MOVE_LIQUIDITY - v1_fork::REDUCE_LIQUIDITY,
+            removeAmt0Min: U256::ZERO,
+            removeAmt1Min: U256::ZERO,
+            addAmt0Max: U256::MAX,
+            addAmt1Max: U256::MAX,
+            marginDelta: WIDE_MARGIN,
+            deadline: w.deadline().await,
+        },
+    };
+    let moved = wide
+        .tx(residual_market.perp, move_wide.abi_encode().into())
+        .send()
+        .await
+        .unwrap();
+    let gas = v1_fork::measure_gas(&w.provider, moved.transaction_hash, "maker-move-wide").await;
+    println!(
+        "wide move after {QUIET} s: used {}, sent limit {}",
+        gas.used, gas.sent
+    );
+    let band = Perp::new(residual_market.perp, &w.provider)
+        .makerDetails(residual_market.maker_id)
+        .call()
+        .await
+        .unwrap();
+    assert_eq!((band.tickLower.as_i32(), band.tickUpper.as_i32()), WIDE);
+
     let client = PerpClient::new(chain.market(perp), w.signer.clone());
     client.sync_nonce().await.unwrap();
     assert_eq!(client.market().era().await.unwrap(), Era::V1);

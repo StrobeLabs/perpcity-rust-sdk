@@ -611,6 +611,8 @@ pub struct GasMeasure {
     pub used: u64,
     pub estimate: u64,
     pub floor: u64,
+    /// The limit the transaction was sent with.
+    pub sent: u64,
 }
 
 /// Measure `hash` and check that its selector's floor is at least 120% of
@@ -669,8 +671,9 @@ pub async fn measure_gas(provider: &impl Provider, hash: B256, label: &str) -> G
     let mut limits = GasLimitCache::new();
     limits.put(selector, 1, 0);
     let floor = limits.get(&selector, 0).unwrap();
+    let sent = tx.gas_limit();
     println!(
-        "gas {label}: used {} estimate {at_parent} at block {}, {at_mined_time} at block {block}'s time, floor {floor} tx {hash}",
+        "gas {label}: used {} estimate {at_parent} at block {}, {at_mined_time} at block {block}'s time, floor {floor}, sent {sent} tx {hash}",
         receipt.gas_used,
         block - 1
     );
@@ -685,6 +688,7 @@ pub async fn measure_gas(provider: &impl Provider, hash: B256, label: &str) -> G
         used: receipt.gas_used,
         estimate,
         floor,
+        sent,
     }
 }
 
