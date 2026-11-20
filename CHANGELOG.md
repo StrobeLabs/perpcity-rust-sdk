@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- V1 beacon reads report `BeaconIndexUnreadable` when the beacon reverts or returns fewer than 64 bytes.
+
 ### Breaking
 
 - Market reads use the deployed build. Match `Fees::lp_fee` on `LpFee::Fixed` or `LpFee::Curve`. On v1, snapshots and pinned marks advance the slot 23 EMAs and ask the pricing module for the mark. V1 marks reject stale, future-dated and out-of-range beacon observations. Snapshot fees use the same block as the mark. Capacity includes physical close depth. Use `StateAt::v1_cumulatives` for the eight v1 accumulator words and `StateAt::beacon_index` for the timestamp and latency.

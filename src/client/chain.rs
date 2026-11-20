@@ -9,7 +9,7 @@ use alloy::network::Ethereum;
 use alloy::primitives::{Address, Bytes, U256};
 use alloy::providers::{Empty, MulticallBuilder, Provider, RootProvider};
 use alloy::rpc::client::RpcClient;
-use alloy::sol_types::{SolCall, SolValue};
+use alloy::sol_types::{SolCall, SolError, SolValue};
 use alloy::transports::{BoxTransport, RpcError, TransportError};
 use serde::{Deserialize, Serialize};
 
@@ -547,12 +547,35 @@ impl ChainReader {
         beacon: Address,
         block: BlockId,
     ) -> Result<(U256, U256)> {
-        let reading = v1::IBeacon::new(beacon, &self.inner.provider)
+        let unreadable = || TransactionError::SimulationReverted {
+            selector: v1::Perp::BeaconIndexUnreadable::SELECTOR.into(),
+            error_name: "BeaconIndexUnreadable".into(),
+            revert_data: None,
+        };
+        let data = v1::IBeacon::new(beacon, &self.inner.provider)
             .index()
             .block(block)
-            .call()
-            .await?;
-        Ok((reading.index, reading.updatedAt))
+            .call_raw()
+            .await
+            .map_err(|err| match &err {
+                alloy::contract::Error::TransportError(RpcError::ErrorResp(resp))
+                    if resp.code == 3
+                        || resp
+                            .message
+                            .to_ascii_lowercase()
+                            .contains("execution reverted") =>
+                {
+                    PerpCityError::from(unreadable())
+                }
+                _ => err.into(),
+            })?;
+        if data.len() < 64 {
+            return Err(unreadable().into());
+        }
+        Ok((
+            U256::from_be_slice(&data[..32]),
+            U256::from_be_slice(&data[32..64]),
+        ))
     }
 
     /// [`Self::get_index_price`] at `block`.
@@ -669,6 +692,27 @@ mod tests {
 
     use super::*;
     use crate::client::mock;
+
+    #[tokio::test]
+    async fn beacon_read_preserves_node_errors() {
+        let (chain, rpc) = mock::chain();
+        rpc.fails("header not found");
+        let err = chain
+            .v1_index_at(Address::ZERO, BlockId::latest())
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, PerpCityError::Abi(alloy::contract::Error::TransportError(RpcError::ErrorResp(resp))) if resp.message == "header not found")
+        );
+        // An exhausted mock transport cannot deliver an RPC response.
+        let err = chain
+            .v1_index_at(Address::ZERO, BlockId::latest())
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, PerpCityError::Abi(alloy::contract::Error::TransportError(err)) if err.as_error_resp().is_none())
+        );
+    }
 
     /// A dropped connection on the slot read retries; the node's own
     /// answer is left for the pinned-read mapping to classify.

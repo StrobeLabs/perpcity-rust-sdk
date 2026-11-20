@@ -305,7 +305,7 @@ async fn market_reads_match_raw_views() {
     // Return controlled index observations from the local beacon. The real
     // Perp preview and the SDK then consume the same words at the same block.
     let latency = raw.latency().call().await.unwrap();
-    for (price, age, refusal) in [
+    let observations = [
         (V1_MIN_INDEX_X96, i64::from(latency), None),
         (V1_MAX_INDEX_X96, 0, None),
         (
@@ -324,11 +324,22 @@ async fn market_reads_match_raw_views() {
             0,
             Some(Perp::PriceOutsideRange::SELECTOR),
         ),
-    ] {
+    ];
+    let cases = observations
+        .into_iter()
+        .map(|(price, age, refusal)| (Some(price), age, refusal, ""))
+        .chain(
+            ["0x60006000fd", "0x603f6000f3"]
+                .map(|code| (None, 0, Some(Perp::BeaconIndexUnreadable::SELECTOR), code)),
+        );
+    for (price, age, refusal, code) in cases {
         let timestamp = w.now().await + 100;
         let updated = timestamp.checked_add_signed(-age).unwrap();
         // PUSH32 price, MSTORE(0), PUSH32 updated, MSTORE(32), RETURN(0,64).
-        let code = format!("0x7f{price:064x}6000527f{updated:064x}60205260406000f3");
+        let code = price.map_or_else(
+            || code.to_owned(),
+            |price| format!("0x7f{price:064x}6000527f{updated:064x}60205260406000f3"),
+        );
         let _: Value = w
             .provider
             .raw_request("anvil_setCode".into(), (m.beacon, code))
