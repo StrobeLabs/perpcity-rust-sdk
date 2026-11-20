@@ -121,6 +121,9 @@ impl Read {
     /// The answers to the read's own calls, in `shape`.
     fn answer(self, rpc: &Rpc, shape: Shape) {
         match self {
+            Self::GetPosition | Self::Position | Self::Positions if shape == Shape::V1 => {
+                rpc.aggregate3(vec![ok_row(shape.position()), ok_row(shape.owner())])
+            }
             Self::GetPosition | Self::Position => rpc.raw(&shape.position()),
             Self::GetPositionsByOwner => {
                 rpc.call::<Perp::nextPosIdCall>(&U256::from(2u8));
@@ -137,7 +140,11 @@ impl Read {
     fn selectors(self, shape: Shape) -> Vec<[u8; 4]> {
         match self {
             Self::GetPosition | Self::Position | Self::Positions => {
-                vec![Perp::positionsCall::SELECTOR]
+                if shape == Shape::V1 {
+                    vec![Perp::positionsCall::SELECTOR, shape.owner_selector()]
+                } else {
+                    vec![Perp::positionsCall::SELECTOR]
+                }
             }
             Self::GetPositionsByOwner => {
                 vec![Perp::nextPosIdCall::SELECTOR, shape.owner_selector()]

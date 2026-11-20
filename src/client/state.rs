@@ -179,8 +179,7 @@ pub struct MarketRates {
 /// backstop ratios the position stored at open; `v1.0.0` reads both live
 /// from the margin-ratio module, so its row has none.
 ///
-/// An empty row is how every build reports an id never minted or closed,
-/// so a read hands back `None` (or `PositionNotFound`) for it, never this.
+/// On V1 a position with a holder can have zero margin and zero legs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PositionRow {
     /// The perp leg: `amount0` of the stored `BalanceDelta`.
@@ -209,17 +208,77 @@ pub struct StoredMarginRatios {
 }
 
 impl PositionRow {
-    /// The row, or `None` for the empty row of an id never minted or
-    /// closed: no margin and both legs zero. This is the row rule. On
-    /// `v1.0.0` the contract's own existence rule is `positionOwner != 0`
-    /// (`Perp.sol:604`), and an active position may hold all-zero economic
-    /// fields, so a holder is read from `positionOwner`
-    /// ([`StateAt::owners`]), never from this.
+    /// The two earlier builds identify inactive positions by their empty economic fields.
     pub(super) fn held(self) -> Option<Self> {
         (self.margin != UsdcAtoms::ZERO
             || self.perp != PerpDelta::ZERO
             || self.usd != UsdcDelta::ZERO)
             .then_some(self)
+    }
+}
+
+fn v1_position_calls(pos_id: U256) -> [Vec<u8>; 2] {
+    [
+        v1::Perp::positionsCall { posId: pos_id }.abi_encode(),
+        v1::Perp::positionOwnerCall { posId: pos_id }.abi_encode(),
+    ]
+}
+
+fn decode_v1_position(
+    pos_id: U256,
+    [row, owner]: &[IMulticall3::Result; 2],
+) -> Result<Option<PositionRow>> {
+    let position = decode_exact_row::<v1::Perp::positionsCall>(pos_id, row, "position")?;
+    let holder = decode_row::<v1::Perp::positionOwnerCall>(pos_id, owner, "owner")?;
+    Ok((holder != Address::ZERO).then(|| position.into()))
+}
+
+impl MarketReader {
+    pub(super) async fn v1_position(
+        &self,
+        pos_id: U256,
+        block: BlockId,
+    ) -> Result<Option<PositionRow>> {
+        let rows = self.read_rows(&[pos_id], v1_position_calls, block).await?;
+        decode_v1_position(
+            pos_id,
+            rows.as_slice()
+                .try_into()
+                .expect("read_rows checked the result count"),
+        )
+    }
+
+    async fn read_rows<const CALLS: usize>(
+        &self,
+        pos_ids: &[U256],
+        encode: impl Fn(U256) -> [Vec<u8>; CALLS],
+        block: BlockId,
+    ) -> Result<Vec<IMulticall3::Result>> {
+        let calls = pos_ids
+            .iter()
+            .flat_map(|&pos_id| encode(pos_id))
+            .map(|calldata| IMulticall3::Call3 {
+                target: self.perp,
+                allowFailure: true,
+                callData: calldata.into(),
+            })
+            .collect();
+        let rows = IMulticall3::new(MULTICALL3, self.chain.provider())
+            .aggregate3(calls)
+            .block(block)
+            .call()
+            .await?;
+        if rows.len() != CALLS * pos_ids.len() {
+            return Err(ContractError::MulticallFailed {
+                reason: format!(
+                    "row multicall returned {} results, expected {}",
+                    rows.len(),
+                    CALLS * pos_ids.len()
+                ),
+            }
+            .into());
+        }
+        Ok(rows)
     }
 }
 
@@ -554,13 +613,11 @@ impl StateAt {
                     .map_err(|e| self.read_error(e))?,
             ),
             Era::V1 => {
-                let data = v1::Perp::new(self.market.perp, provider)
-                    .positions(pos_id)
-                    .block(self.id())
-                    .call_raw()
+                return self
+                    .market
+                    .v1_position(pos_id, self.id())
                     .await
-                    .map_err(|e| self.read_error(e))?;
-                decode_exact::<v1::Perp::positionsCall>(pos_id, &data, "position")?.into()
+                    .map_err(|e| pinned_read_error(e, self.block.number));
             }
         };
         Ok(row.held())
@@ -593,16 +650,8 @@ impl StateAt {
                 .await
             }
             Ok(Era::V1) => {
-                self.rows(
-                    pos_ids,
-                    |pos_id| [v1::Perp::positionsCall { posId: pos_id }.abi_encode()],
-                    |pos_id, [row]| {
-                        let position =
-                            decode_exact_row::<v1::Perp::positionsCall>(pos_id, row, "position")?;
-                        Ok(PositionRow::from(position).held())
-                    },
-                )
-                .await
+                self.rows(pos_ids, v1_position_calls, decode_v1_position)
+                    .await
             }
         }
     }
@@ -704,32 +753,10 @@ impl StateAt {
         pos_ids: &[U256],
         encode: impl Fn(U256) -> [Vec<u8>; CALLS],
     ) -> Result<Vec<IMulticall3::Result>> {
-        let calls = pos_ids
-            .iter()
-            .flat_map(|&pos_id| encode(pos_id))
-            .map(|calldata| IMulticall3::Call3 {
-                target: self.market.perp,
-                allowFailure: true,
-                callData: calldata.into(),
-            })
-            .collect();
-        let rows = IMulticall3::new(MULTICALL3, self.market.chain.provider())
-            .aggregate3(calls)
-            .block(self.id())
-            .call()
+        self.market
+            .read_rows(pos_ids, encode, self.id())
             .await
-            .map_err(|e| self.read_error(e))?;
-        if rows.len() != CALLS * pos_ids.len() {
-            return Err(ContractError::MulticallFailed {
-                reason: format!(
-                    "row multicall returned {} results, expected {}",
-                    rows.len(),
-                    CALLS * pos_ids.len()
-                ),
-            }
-            .into());
-        }
-        Ok(rows)
+            .map_err(|e| pinned_read_error(e, self.block.number))
     }
 
     /// One position's band, or `None` if it holds no liquidity there: a
@@ -1779,7 +1806,7 @@ mod tests {
 
         let (state, rpc) = state().await;
         rpc.immutables(Era::V1);
-        rpc.raw(&v1_row);
+        rpc.aggregate3(vec![mock::ok_row(v1_row), owner_row(PERP)]);
         let row = state.position(U256::from(4)).await.unwrap().unwrap();
         assert_eq!(
             (row.perp, row.usd, row.margin, row.stored_margin_ratios),
@@ -1791,7 +1818,10 @@ mod tests {
             )
         );
         // A closed v1 taker: the contract deletes the row.
-        rpc.raw(&v1_position_words(0, 0, 0, 0));
+        rpc.aggregate3(vec![
+            mock::ok_row(v1_position_words(0, 0, 0, 0)),
+            owner_row(Address::ZERO),
+        ]);
         assert!(state.position(U256::from(5)).await.unwrap().is_none());
         assert_eq!(
             rpc.selectors(),
@@ -1799,9 +1829,51 @@ mod tests {
                 Perp::poolKeyCall::SELECTOR,
                 v1::Perp::poolIdCall::SELECTOR,
                 v1::Perp::positionsCall::SELECTOR,
+                v1::Perp::positionOwnerCall::SELECTOR,
                 v1::Perp::positionsCall::SELECTOR,
+                v1::Perp::positionOwnerCall::SELECTOR,
             ]
         );
+        assert!(rpc.is_drained());
+    }
+
+    fn owner_row(owner: Address) -> IMulticall3::Result {
+        mock::ok_row(returns::<v1::Perp::positionOwnerCall>(&owner))
+    }
+
+    #[tokio::test]
+    async fn v1_single_zero_rows_follow_the_owner() {
+        let (state, rpc) = state().await;
+        rpc.immutables(Era::V1);
+        for latest in [true, false] {
+            for owner in [Some(PERP), None, Some(Address::ZERO)] {
+                rpc.aggregate3(vec![
+                    mock::ok_row(v1_position_words(0, 0, 0, 0)),
+                    owner.map_or_else(mock::failed_row, owner_row),
+                ]);
+                let result = if latest {
+                    state.market().get_position(U256::ONE).await.map(Some)
+                } else {
+                    state.position(U256::ONE).await
+                };
+                match owner {
+                    None => assert!(matches!(
+                        result,
+                        Err(PerpCityError::Contract(
+                            ContractError::MulticallFailed { .. }
+                        ))
+                    )),
+                    Some(a) if a == Address::ZERO && latest => assert!(matches!(
+                        result,
+                        Err(PerpCityError::Contract(
+                            ContractError::PositionNotFound { .. }
+                        ))
+                    )),
+                    Some(a) if a == Address::ZERO => assert!(result.unwrap().is_none()),
+                    Some(_) => assert_eq!(result.unwrap().unwrap().margin, UsdcAtoms::ZERO),
+                }
+            }
+        }
         assert!(rpc.is_drained());
     }
 
@@ -1875,17 +1947,26 @@ mod tests {
         let earlier_maker = returns::<Perp::makerDetailsCall>(&mock::maker(-600, 1_200, 7));
         let (state, rpc) = state().await;
         rpc.immutables(Era::V1);
-        rpc.raw(&earlier_position);
+        rpc.aggregate3(vec![
+            mock::ok_row(earlier_position.clone()),
+            owner_row(PERP),
+        ]);
         assert!(decode_failed(&state.position(U256::ONE).await));
         rpc.raw(&earlier_maker);
         assert!(decode_failed(&state.maker_band(U256::ONE).await));
-        rpc.aggregate3(vec![mock::ok_row(earlier_position.clone())]);
+        rpc.aggregate3(vec![
+            mock::ok_row(earlier_position.clone()),
+            owner_row(PERP),
+        ]);
         let rows = state.positions(&[U256::ONE]).await;
         assert!(decode_failed(&rows[0].row), "{:?}", rows[0].row);
         rpc.aggregate3(vec![mock::ok_row(earlier_maker)]);
         let rows = state.maker_bands(&[U256::ONE]).await;
         assert!(decode_failed(&rows[0].row), "{:?}", rows[0].row);
-        rpc.raw(&earlier_position);
+        rpc.aggregate3(vec![
+            mock::ok_row(earlier_position.clone()),
+            owner_row(PERP),
+        ]);
         assert!(decode_failed(&state.market().get_position(U256::ONE).await));
         assert!(rpc.is_drained());
     }
@@ -1943,22 +2024,39 @@ mod tests {
         rpc.immutables(Era::V1);
         rpc.aggregate3(vec![
             mock::ok_row(v1_position_words(0, -9_000, 100_000_000, 3)),
+            owner_row(PERP),
             mock::ok_row(v1_position_words(0, 0, 0, 0)),
+            owner_row(Address::ZERO),
+            mock::ok_row(v1_position_words(0, 0, 0, 0)),
+            mock::failed_row(),
+            mock::ok_row(v1_position_words(0, 0, 0, 0)),
+            owner_row(PERP),
         ]);
-        let rows = state.positions(&[U256::ONE, U256::from(2u8)]).await;
+        let rows = state.positions(&[1, 2, 3, 4].map(U256::from)).await;
         let maker = rows[0].row.as_ref().unwrap().unwrap();
         assert_eq!(
             (maker.usd, maker.margin, maker.stored_margin_ratios),
             (UsdcDelta::new(-9_000), UsdcAtoms::new(100_000_000), None)
         );
         assert!(rows[1].row.as_ref().unwrap().is_none(), "the closed taker");
+        assert!(rows[2].row.is_err());
+        assert_eq!(
+            rows[3].row.as_ref().unwrap().unwrap().margin,
+            UsdcAtoms::ZERO
+        );
         assert_eq!(
             rpc.selectors(),
             [
                 Perp::poolKeyCall::SELECTOR,
                 v1::Perp::poolIdCall::SELECTOR,
                 v1::Perp::positionsCall::SELECTOR,
+                v1::Perp::positionOwnerCall::SELECTOR,
                 v1::Perp::positionsCall::SELECTOR,
+                v1::Perp::positionOwnerCall::SELECTOR,
+                v1::Perp::positionsCall::SELECTOR,
+                v1::Perp::positionOwnerCall::SELECTOR,
+                v1::Perp::positionsCall::SELECTOR,
+                v1::Perp::positionOwnerCall::SELECTOR,
             ]
         );
         assert!(rpc.is_drained(), "poolKey, poolId, one multicall");
