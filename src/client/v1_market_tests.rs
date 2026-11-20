@@ -137,6 +137,7 @@ fn v1_mark_answers(rpc: &Rpc, block: u64) {
             returns::<v1::Perp::poolStateCall>(&v1_pool_state()),
             returns::<v1::Perp::ratesCall>(&v1_rates()),
             returns::<v1::Perp::emaWindowCall>(&e6(WINDOW)),
+            returns::<v1::Perp::latencyCall>(&3600),
         ],
     );
     rpc.call::<v1::IBeacon::indexCall>(&v1::IBeacon::indexReturn {
@@ -638,6 +639,7 @@ async fn a_v1_snapshot_marks_by_the_pricing_module_at_the_lagged_block() {
                 returns::<v1::Perp::ratesCall>(&v1_rates()),
                 returns::<v1::Perp::openInterestCall>(&v1::OpenInterest { long: 3, short: 4 }),
                 returns::<v1::Perp::emaWindowCall>(&e6(WINDOW)),
+                returns::<v1::Perp::latencyCall>(&3600),
             ],
         );
         rpc.call::<v1::IBeacon::indexCall>(&v1::IBeacon::indexReturn {
