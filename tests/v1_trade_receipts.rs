@@ -9,6 +9,17 @@ use perpcity_sdk::{ContractError, PerpCityError};
 use serde_json::{Value, json};
 
 fn receipt(mut value: Value) -> TransactionReceipt {
+    value["blockNumber"] = json!("0x1");
+    value["blockHash"] = json!(B256::ZERO);
+    value["transactionIndex"] = json!("0x0");
+    value["contractAddress"] = Value::Null;
+    for log in value["logs"].as_array_mut().unwrap() {
+        log["blockNumber"] = json!("0x1");
+        log["blockHash"] = json!(B256::ZERO);
+        log["transactionIndex"] = json!("0x0");
+        log["logIndex"] = json!("0x0");
+        log["removed"] = json!(false);
+    }
     value["type"] = json!("0x2");
     value["status"] = json!("0x1");
     value["cumulativeGasUsed"] = json!("0x1");
@@ -24,24 +35,36 @@ fn id<E: V1PositionEvent>(receipt: &TransactionReceipt, perp: Address) -> U256 {
 
 #[test]
 fn recorded_position_changes() {
-    let rows: Vec<Value> = serde_json::from_str(include_str!("fixtures/v1-trade-logs.json")).unwrap();
+    let rows: Vec<Value> =
+        serde_json::from_str(include_str!("fixtures/v1-trade-logs.json")).unwrap();
     let rows: Vec<_> = rows.into_iter().map(receipt).collect();
     let perp = rows[0].inner.logs()[0].address();
     for row in &rows[..2] {
-        assert_eq!(id::<Perp::MakerOpened>(row, perp), id::<Perp::PositionOwnerUpdated>(row, perp));
+        assert_eq!(
+            id::<Perp::MakerOpened>(row, perp),
+            id::<Perp::PositionOwnerUpdated>(row, perp)
+        );
     }
     let open = parse_v1_receipt::<Perp::TakerOpened>(&rows[2], perp, None).unwrap();
-    assert_eq!(open.pos_id, id::<Perp::PositionOwnerUpdated>(&rows[2], perp));
+    assert_eq!(
+        open.pos_id,
+        id::<Perp::PositionOwnerUpdated>(&rows[2], perp)
+    );
     assert_eq!(open.margin.unwrap().atoms(), open.event.margin);
     let adjust = parse_v1_receipt::<Perp::TakerAdjusted>(&rows[3], perp, None).unwrap();
     assert_eq!(adjust.margin.unwrap().atoms(), adjust.event.margin);
     for row in &rows[4..] {
-        assert_eq!(id::<Perp::TakerClosed>(row, perp), id::<Perp::PositionOwnerUpdated>(row, perp));
+        assert_eq!(
+            id::<Perp::TakerClosed>(row, perp),
+            id::<Perp::PositionOwnerUpdated>(row, perp)
+        );
     }
     let Err(err) = parse_v1_receipt::<Perp::MakerClosed>(&rows[2], perp, None) else {
         panic!("unexpected maker close");
     };
-    assert!(matches!(&err, ContractError::MinedEventMissing { tx_hash, .. } if *tx_hash == rows[2].transaction_hash));
+    assert!(
+        matches!(&err, ContractError::MinedEventMissing { tx_hash, .. } if *tx_hash == rows[2].transaction_hash)
+    );
     assert!(!PerpCityError::from(err).is_transient());
 }
 
@@ -49,7 +72,10 @@ fn recorded_position_changes() {
 fn maker_adjust_and_close_report_margin() {
     let perp = Address::repeat_byte(1);
     let pos_id = U256::from(42);
-    for topic in [Perp::MakerAdjusted::SIGNATURE_HASH, Perp::MakerClosed::SIGNATURE_HASH] {
+    for topic in [
+        Perp::MakerAdjusted::SIGNATURE_HASH,
+        Perp::MakerClosed::SIGNATURE_HASH,
+    ] {
         // Ten static words after the indexed ID and owner, with margin in slot five.
         let mut words = [0_u8; 320];
         words[191] = 19;
@@ -59,9 +85,13 @@ fn maker_adjust_and_close_report_margin() {
                       "data": alloy::hex::encode_prefixed(words)}]
         }));
         let margin = if topic == Perp::MakerClosed::SIGNATURE_HASH {
-            parse_v1_receipt::<Perp::MakerClosed>(&row, perp, Some(pos_id)).unwrap().margin
+            parse_v1_receipt::<Perp::MakerClosed>(&row, perp, Some(pos_id))
+                .unwrap()
+                .margin
         } else {
-            parse_v1_receipt::<Perp::MakerAdjusted>(&row, perp, Some(pos_id)).unwrap().margin
+            parse_v1_receipt::<Perp::MakerAdjusted>(&row, perp, Some(pos_id))
+                .unwrap()
+                .margin
         };
         assert_eq!(margin.unwrap().atoms(), 19);
     }

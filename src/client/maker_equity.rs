@@ -6,9 +6,8 @@
 //! multicall, then per chunk of ids the maker rows, the PoolManager
 //! `extsload` over the V4 fee-growth slots, and the `eth_getProof` /
 //! `eth_getStorageAt` reads of the Perp tick-funding slots. The three
-//! storage reads exist because the deployed contracts expose no settle
-//! preview; the next era's `previewPosition` replaces this file wholesale,
-//! so they stay crate-private.
+//! storage reads serve the two earlier builds. V1 callers use
+//! [`StateAt::preview_positions`] for contract-valued maker positions.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::future::IntoFuture;
@@ -351,7 +350,8 @@ impl StateAt {
         if pos_ids.is_empty() {
             return Ok(Vec::new());
         }
-        self.require_read_era(false, "maker_equities (use previewPosition)").await?;
+        self.require_read_era(false, "maker_equities (use previewPosition)")
+            .await?;
         let pool_id = self.market().immutables().await?.pool_id;
         let market = self.maker_market(mark_override).await?;
 

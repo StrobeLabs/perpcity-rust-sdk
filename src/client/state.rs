@@ -328,7 +328,9 @@ pub struct TvlCap {
 impl TvlCap {
     /// Whether the resulting accounted TVL fits the cap.
     pub fn allows_deposit(&self, amount: U256) -> bool {
-        self.accounted.checked_add(amount).is_some_and(|total| total <= self.cap)
+        self.accounted
+            .checked_add(amount)
+            .is_some_and(|total| total <= self.cap)
     }
 }
 
@@ -594,23 +596,43 @@ impl StateAt {
     pub async fn preview_position(&self, pos_id: U256) -> Result<v1::PositionPreview> {
         self.require_read_era(true, "preview_position").await?;
         v1::Perp::new(self.market.perp, self.market.chain.provider())
-            .previewPosition(pos_id).block(self.id()).call().await.map_err(|e| self.read_error(e))
+            .previewPosition(pos_id)
+            .block(self.id())
+            .call()
+            .await
+            .map_err(|e| self.read_error(e))
     }
 
     /// Read v1 previews in input order. A missing position has no row.
-    pub async fn preview_positions(&self, pos_ids: &[U256]) -> Result<Vec<RowOutcome<v1::PositionPreview>>> {
-        if pos_ids.is_empty() { return Ok(Vec::new()); }
+    pub async fn preview_positions(
+        &self,
+        pos_ids: &[U256],
+    ) -> Result<Vec<RowOutcome<v1::PositionPreview>>> {
+        if pos_ids.is_empty() {
+            return Ok(Vec::new());
+        }
         self.require_read_era(true, "preview_positions").await?;
-        Ok(self.rows(pos_ids, |pos_id| [v1::Perp::previewPositionCall {posId:pos_id}.abi_encode()],
-            |id,[row]| {
-                if !row.success && row.returnData[..] == v1::Perp::PositionDoesNotExist::SELECTOR {return Ok(None);}
-                decode_row::<v1::Perp::previewPositionCall>(id,row,"previewPosition").map(Some)
-            }).await)
+        Ok(self
+            .rows(
+                pos_ids,
+                |pos_id| [v1::Perp::previewPositionCall { posId: pos_id }.abi_encode()],
+                |id, [row]| {
+                    if !row.success
+                        && row.returnData[..] == v1::Perp::PositionDoesNotExist::SELECTOR
+                    {
+                        return Ok(None);
+                    }
+                    decode_row::<v1::Perp::previewPositionCall>(id, row, "previewPosition")
+                        .map(Some)
+                },
+            )
+            .await)
     }
 
     /// Physical long-close and short-close depth at this block, in perp atoms.
     pub async fn physical_close_capacity(&self) -> Result<Capacity> {
-        self.require_read_era(true, "physical_close_capacity").await?;
+        self.require_read_era(true, "physical_close_capacity")
+            .await?;
         let depth = v1::Perp::new(self.market.perp, self.market.chain.provider())
             .physicalCloseCapacity()
             .block(self.id())
@@ -625,10 +647,18 @@ impl StateAt {
 
     /// Read the two collateral totals at this block.
     pub async fn tvl_cap(&self) -> Result<TvlCap> {
-        self.require_read_era(true,"tvl_cap").await?;
+        self.require_read_era(true, "tvl_cap").await?;
         let perp = v1::Perp::new(self.market.perp, self.market.chain.provider());
-        let (cap,accounted) = self.market.chain.multicall_at(self.id()).add(perp.tvlCap()).add(perp.accountedTvl()).aggregate().await.map_err(|e|self.multicall_read_error(e))?;
-        Ok(TvlCap {cap,accounted})
+        let (cap, accounted) = self
+            .market
+            .chain
+            .multicall_at(self.id())
+            .add(perp.tvlCap())
+            .add(perp.accountedTvl())
+            .aggregate()
+            .await
+            .map_err(|e| self.multicall_read_error(e))?;
+        Ok(TvlCap { cap, accounted })
     }
 
     /// The build for a batch over `pos_ids`, or the batch's whole answer

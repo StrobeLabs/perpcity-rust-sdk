@@ -262,6 +262,7 @@ async fn market_reads_match_raw_views() {
         (band.long, band.short)
     );
     let depth = cap.close_capacity.unwrap();
+    assert_eq!(state.physical_close_capacity().await.unwrap(), depth);
     assert_eq!(
         (depth.long.atoms(), depth.short.atoms()),
         (close.longClose, close.shortClose)

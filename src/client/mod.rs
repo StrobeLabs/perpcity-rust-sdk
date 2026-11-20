@@ -60,8 +60,8 @@ pub use queries::{
 };
 pub use state::Books;
 pub use state::{
-    MAX_ROW_BATCH, MarginRatioTriple, MarginRatios, MarketRates, TvlCap, PositionRow, RowOutcome,
-    SolvencyState, StateAt, StoredMarginRatios,
+    MAX_ROW_BATCH, MarginRatioTriple, MarginRatios, MarketRates, PositionRow, RowOutcome,
+    SolvencyState, StateAt, StoredMarginRatios, TvlCap,
 };
 pub use trades::{
     AdjustMakerParams, AdjustMakerResult, AdjustTakerParams, AdjustTakerResult,
