@@ -2312,7 +2312,9 @@ mod tests {
         let rows = state.preview_positions(&[U256::from(1)]).await.unwrap();
         let error = rows[0].row.as_ref().err().unwrap();
         assert!(error.is_transient());
-        assert!(matches!(error, PerpCityError::Transaction(e) if e.is_revert::<v1::Perp::StaleBeaconIndex>()));
+        assert!(
+            matches!(error, PerpCityError::Transaction(e) if e.is_revert::<v1::Perp::StaleBeaconIndex>())
+        );
     }
 
     /// The batch reads each build's row: on `v1.0.0` the three-word row,

@@ -17,8 +17,8 @@
 mod v1_fork;
 
 use alloy::eips::BlockId;
-use alloy::primitives::{Address, Bytes, I256, U256};
-use alloy::providers::DynProvider;
+use alloy::primitives::{Address, B256, Bytes, I256, U256};
+use alloy::providers::{DynProvider, Provider};
 use alloy::sol_types::{SolError, SolValue};
 use perpcity_sdk::contracts::v1::{AdjustMakerParams, AdjustTakerParams, OpenTakerParams};
 use perpcity_sdk::contracts::{Perp as EarlierPerp, v1::Perp};
@@ -27,6 +27,8 @@ use perpcity_sdk::{
     ChainReader, ContractError, Era, HftTransport, LUnits, MakerBand, PerpCityError, PositionRow,
     StateAt, TickRange, TransportConfig,
 };
+
+use serde_json::Value;
 
 use v1_fork::{SepoliaFork, V1Fork};
 
@@ -174,15 +176,31 @@ async fn position_reads_agree_with_the_v1_market() {
         reduceOnly: true,
         deadline: w.deadline().await,
     };
-    raw.adjustTaker(close.clone()).from(w.me).call().await.unwrap();
-    // A reduce-only request beyond long depth also exceeds this position.
-    // Perp checks reduce-only before entering the swap.
-    let outside = AdjustTakerParams {
-        perpDelta: -I256::try_from(depth.longClose).unwrap() - I256::ONE,
-        ..close
+    raw.adjustTaker(close.clone())
+        .from(w.me)
+        .call()
+        .await
+        .unwrap();
+    // In a valid market, long OI fits long depth. To isolate the depth
+    // guard from reduce-only, lower only longCloseX64 on this local fork.
+    // Tagged Perp layout: _s starts at 7, physicalCap starts at offset 14.
+    let slot = U256::from(21);
+    let saved = w.provider.get_storage_at(m.perp, slot).await.unwrap();
+    assert_eq!((saved >> 64_u32).to::<u128>(), depth.longClose);
+    let outside = U256::from(NEW_TAKER_SIZE as u64 - 1) << 64_u32;
+    let set_depth = |word: U256| {
+        w.provider.raw_request::<_, Value>(
+            "anvil_setStorageAt".into(),
+            (m.perp, B256::from(slot), B256::from(word)),
+        )
     };
-    let error = raw.adjustTaker(outside).from(w.me).call().await.unwrap_err();
-    assert_eq!(try_extract_revert(&error.to_string()).unwrap().1, Perp::ReduceOnlyViolated::SELECTOR);
+    set_depth(outside).await.unwrap();
+    let error = raw.adjustTaker(close).from(w.me).call().await.err().unwrap();
+    assert_eq!(
+        try_extract_revert(&error.to_string()).unwrap().1,
+        Perp::LongCloseCapacityExceeded::SELECTOR
+    );
+    set_depth(saved).await.unwrap();
     let maker = raw.makerDetails(m.maker_id).call().await.unwrap();
     let remove = AdjustMakerParams {
         posId: m.maker_id,
@@ -192,8 +210,11 @@ async fn position_reads_agree_with_the_v1_market() {
         amt1Limit: U256::ZERO,
         deadline: w.deadline().await,
     };
-    let error = raw.adjustMaker(remove).from(w.me).call().await.unwrap_err();
-    assert_eq!(try_extract_revert(&error.to_string()).unwrap().1, Perp::LongCloseCapacityExceeded::SELECTOR);
+    let error = raw.adjustMaker(remove).from(w.me).call().await.err().unwrap();
+    assert_eq!(
+        try_extract_revert(&error.to_string()).unwrap().1,
+        Perp::LongCloseCapacityExceeded::SELECTOR
+    );
     println!("new taker {new_taker}");
     assert_eq!(
         market.get_positions_by_owner(w.me).await.unwrap(),

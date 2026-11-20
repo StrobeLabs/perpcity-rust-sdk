@@ -146,6 +146,7 @@ sol! {
     }
 
     /// A maker's funding checkpoints.
+    #[derive(Debug, PartialEq, Eq)]
     struct MakerFunding {
         int256 belowX96;
         int256 withinInventoryX192;
@@ -194,6 +195,7 @@ sol! {
     }
 
     /// A swap's outcome with its fee legs; `feeFundFeeAmt` is new here.
+    #[derive(Debug, PartialEq, Eq)]
     struct SwapResult {
         int256 delta;
         uint256 ammPrice;
@@ -382,6 +384,7 @@ sol! {
     interface Perp {
         // ── Position events ─────────────────────────────────────────
 
+        #[derive(Debug, PartialEq, Eq)]
         event MakerOpened(
             uint256 indexed posId,
             address indexed owner,
@@ -392,6 +395,7 @@ sol! {
             int256 lastCumlFundingX96,
             MakerFunding lastCumlFunding
         );
+        #[derive(Debug, PartialEq, Eq)]
         event MakerAdjusted(
             uint256 indexed posId,
             address indexed owner,
@@ -405,6 +409,7 @@ sol! {
             int256 lastCumlFundingX96,
             MakerFunding lastCumlFunding
         );
+        #[derive(Debug, PartialEq, Eq)]
         event MakerConverted(
             uint256 indexed posId,
             address indexed owner,
@@ -418,6 +423,7 @@ sol! {
             int256 lastCumlFundingX96,
             MakerFunding lastCumlFunding
         );
+        #[derive(Debug, PartialEq, Eq)]
         event MakerClosed(
             uint256 indexed posId,
             address indexed owner,
@@ -457,6 +463,7 @@ sol! {
             MakerFunding lastCumlFunding
         );
         event MakerLiquidated(uint256 indexed posId, address indexed feeRecipient, uint128 liquidityAmount, uint256 liqFee);
+        #[derive(Debug, PartialEq, Eq)]
         event TakerOpened(
             uint256 indexed posId,
             address indexed owner,
@@ -464,6 +471,7 @@ sol! {
             SwapResult sr,
             int256 lastCumlFundingX96
         );
+        #[derive(Debug, PartialEq, Eq)]
         event TakerAdjusted(
             uint256 indexed posId,
             address indexed owner,
@@ -475,6 +483,7 @@ sol! {
             uint128 margin,
             int256 lastCumlFundingX96
         );
+        #[derive(Debug, PartialEq, Eq)]
         event TakerClosed(
             uint256 indexed posId,
             address indexed owner,
@@ -499,6 +508,7 @@ sol! {
         event TakerLiquidated(uint256 indexed posId, address indexed feeRecipient, uint128 perpAmount, uint256 liqFee);
         /// A position's owner set (`oldOwner` zero), moved, or cleared
         /// (`newOwner` zero, on a full close).
+        #[derive(Debug, PartialEq, Eq)]
         event PositionOwnerUpdated(uint256 indexed posId, address indexed oldOwner, address indexed newOwner);
         event QuoteFolded(uint256 indexed posId, int256 amount);
         event UtilizationReserveRealized(

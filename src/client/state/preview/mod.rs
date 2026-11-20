@@ -3,6 +3,7 @@
 use alloy::primitives::U256;
 use alloy::sol_types::{SolCall, SolError};
 
+use crate::client::chain::row_revert;
 use crate::contracts::v1;
 use crate::errors::Result;
 use crate::math::capacity::Capacity;
@@ -61,7 +62,7 @@ impl StateAt {
                         return Ok(None);
                     }
                     if !row.success {
-                        return Err(crate::client::chain::row_revert(&row.returnData));
+                        return Err(row_revert(&row.returnData));
                     }
                     decode_exact_row::<v1::Perp::previewPositionCall>(id, row, "previewPosition")
                         .map(Some)

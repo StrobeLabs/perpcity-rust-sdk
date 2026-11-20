@@ -347,11 +347,11 @@ impl StateAt {
         pos_ids: &[U256],
         mark_override: Option<Price>,
     ) -> Result<Vec<MakerEquityOutcome>> {
+        self.require_read_era(false, "maker_equities (use preview_positions)")
+            .await?;
         if pos_ids.is_empty() {
             return Ok(Vec::new());
         }
-        self.require_read_era(false, "maker_equities (use preview_positions)")
-            .await?;
         let pool_id = self.market().immutables().await?.pool_id;
         let market = self.maker_market(mark_override).await?;
 
