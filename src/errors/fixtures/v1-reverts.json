@@ -1,0 +1,291 @@
+{
+  "description": "Real v1.0.0 revert data from the deployed Arbitrum Sepolia v1.0.0 bytecode on a local anvil fork (W21 F0). Not chain transactions: fork-local only.",
+  "contracts_tag": "v1.0.0",
+  "contracts_commit": "0df42087852ba2447956bbed8ce81ee062863454",
+  "chain_id": 421614,
+  "fork_url": "https://sepolia-rollup.arbitrum.io/rpc",
+  "fork_block": 330900756,
+  "tools": {
+    "anvil": "anvil Version: 1.5.1-stable",
+    "forge": "forge Version: 1.5.1-stable"
+  },
+  "made_utc": "2026-11-20T01:21:25Z",
+  "made_by": "make-fixtures.sh (beside this file)",
+  "market": {
+    "perp": "0x06BEb7Df5434f4cFf7F0bE8625C5c69b8c26c60a",
+    "beacon": "0xB4c3D01539a92af3b08b82d7b7f7dd7e3Eeb882E",
+    "verifier": "0x9bE3580ec655d4efC5079B58E372f72D80bFa147",
+    "maker_pos_id": 1,
+    "taker_pos_id": 2,
+    "built_by": "W11 smoke steps 1-14 (S/w11-smoke.md)",
+    "block_after_14_steps": 330900770,
+    "note": "fork-local addresses; each revert ran from a snapshot of this state"
+  },
+  "not_recorded": [],
+  "reverts": [
+    {
+      "name": "DeadlineExpired",
+      "selector": "0x1ab7da6b",
+      "revert_data": "0x1ab7da6b",
+      "inspect_signature": "DeadlineExpired()",
+      "description": "openTaker with deadline = latest block timestamp - 1",
+      "setup": "W11 market after the 14 steps",
+      "call": {
+        "from": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+        "to": "0x06BEb7Df5434f4cFf7F0bE8625C5c69b8c26c60a",
+        "signature": "openTaker((address,uint128,int256,uint256,uint256,uint64))",
+        "args": [
+          "(0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266,10000000,100000,115792089237316195423570985008687907853269984665640564039457584007913129639935,2000000,1795137756)"
+        ],
+        "calldata": "0x1d920967000000000000000000000000f39fd6e51aad88f6f4ce6ab8827279cfffb92266000000000000000000000000000000000000000000000000000000000098968000000000000000000000000000000000000000000000000000000000000186a0ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff00000000000000000000000000000000000000000000000000000000001e8480000000000000000000000000000000000000000000000000000000006affa0dc"
+      },
+      "eth_call_block": 330900770,
+      "eth_call_error": {
+        "code": 3,
+        "message": "execution reverted: custom error 0x1ab7da6b",
+        "data": "0x1ab7da6b"
+      },
+      "mined": {
+        "fork_tx": "0xb4de758abb534030754deb5c923b3ae1d5b918a9c415fded64ea7839ed4f7a85",
+        "block": 330900771,
+        "status": 0,
+        "gas_used": 27841
+      },
+      "checks": [
+        "eth_call error data == mined tx trace output",
+        "selector == forge inspect at v1.0.0"
+      ]
+    },
+    {
+      "name": "MaxTotalFeeExceeded",
+      "selector": "0xc89df80f",
+      "revert_data": "0xc89df80f",
+      "inspect_signature": "MaxTotalFeeExceeded()",
+      "description": "openTaker of +0.1e6 with maxTotalFee = 1 atom (the fee is larger)",
+      "setup": "W11 market after the 14 steps",
+      "call": {
+        "from": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+        "to": "0x06BEb7Df5434f4cFf7F0bE8625C5c69b8c26c60a",
+        "signature": "openTaker((address,uint128,int256,uint256,uint256,uint64))",
+        "args": [
+          "(0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266,10000000,100000,115792089237316195423570985008687907853269984665640564039457584007913129639935,1,1795141357)"
+        ],
+        "calldata": "0x1d920967000000000000000000000000f39fd6e51aad88f6f4ce6ab8827279cfffb92266000000000000000000000000000000000000000000000000000000000098968000000000000000000000000000000000000000000000000000000000000186a0ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff0000000000000000000000000000000000000000000000000000000000000001000000000000000000000000000000000000000000000000000000006affaeed"
+      },
+      "eth_call_block": 330900770,
+      "eth_call_error": {
+        "code": 3,
+        "message": "execution reverted: custom error 0xc89df80f",
+        "data": "0xc89df80f"
+      },
+      "mined": {
+        "fork_tx": "0xd09f356a0306ecde297daaa887a3f27a6c6f583693900f8dd342ee9bedd94c63",
+        "block": 330900771,
+        "status": 0,
+        "gas_used": 271641
+      },
+      "checks": [
+        "eth_call error data == mined tx trace output",
+        "selector == forge inspect at v1.0.0"
+      ]
+    },
+    {
+      "name": "StaleBeaconIndex",
+      "selector": "0x61200552",
+      "revert_data": "0x61200552",
+      "inspect_signature": "StaleBeaconIndex()",
+      "description": "openTaker when block.timestamp - updatedAt = latency() + 1 + the mined blocks (latency 86400)",
+      "setup": "W11 market; evm_setNextBlockTimestamp to beacon updatedAt + 86401, evm_mine",
+      "call": {
+        "from": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+        "to": "0x06BEb7Df5434f4cFf7F0bE8625C5c69b8c26c60a",
+        "signature": "openTaker((address,uint128,int256,uint256,uint256,uint64))",
+        "args": [
+          "(0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266,10000000,100000,115792089237316195423570985008687907853269984665640564039457584007913129639935,2000000,1795227692)"
+        ],
+        "calldata": "0x1d920967000000000000000000000000f39fd6e51aad88f6f4ce6ab8827279cfffb92266000000000000000000000000000000000000000000000000000000000098968000000000000000000000000000000000000000000000000000000000000186a0ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff00000000000000000000000000000000000000000000000000000000001e8480000000000000000000000000000000000000000000000000000000006b01002c"
+      },
+      "eth_call_block": 330900771,
+      "eth_call_error": {
+        "code": 3,
+        "message": "execution reverted: a \u0005R",
+        "data": "0x61200552"
+      },
+      "mined": {
+        "fork_tx": "0x6299fcfb39d91f598cbbf84c3fd1fbcdeccdb47f7cdd99234e2ca5f05a11effa",
+        "block": 330900772,
+        "status": 0,
+        "gas_used": 50887
+      },
+      "checks": [
+        "eth_call error data == mined tx trace output",
+        "selector == forge inspect at v1.0.0"
+      ]
+    },
+    {
+      "name": "PriceOutsideRange",
+      "selector": "0xe10dffe6",
+      "revert_data": "0xe10dffe6",
+      "inspect_signature": "PriceOutsideRange()",
+      "description": "openTaker after the beacon index is 2e6 * 2^96 (MAX_INDEX_X96 = 1e6 * 2^96)",
+      "setup": "W11 market; signed beacon update(index = 158456325028528675187087900672000000)",
+      "call": {
+        "from": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+        "to": "0x06BEb7Df5434f4cFf7F0bE8625C5c69b8c26c60a",
+        "signature": "openTaker((address,uint128,int256,uint256,uint256,uint64))",
+        "args": [
+          "(0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266,10000000,100000,115792089237316195423570985008687907853269984665640564039457584007913129639935,2000000,1795141359)"
+        ],
+        "calldata": "0x1d920967000000000000000000000000f39fd6e51aad88f6f4ce6ab8827279cfffb92266000000000000000000000000000000000000000000000000000000000098968000000000000000000000000000000000000000000000000000000000000186a0ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff00000000000000000000000000000000000000000000000000000000001e8480000000000000000000000000000000000000000000000000000000006affaeef"
+      },
+      "eth_call_block": 330900771,
+      "eth_call_error": {
+        "code": 3,
+        "message": "execution reverted: custom error 0xe10dffe6",
+        "data": "0xe10dffe6"
+      },
+      "mined": {
+        "fork_tx": "0x6cbfa6084f9ce412c2f084461b741581fa197bbcb8f767f8eac075a2233a9aa2",
+        "block": 330900772,
+        "status": 0,
+        "gas_used": 50970
+      },
+      "checks": [
+        "eth_call error data == mined tx trace output",
+        "selector == forge inspect at v1.0.0"
+      ]
+    },
+    {
+      "name": "BeaconIndexUnreadable",
+      "selector": "0x6c776dda",
+      "revert_data": "0x6c776dda",
+      "inspect_signature": "BeaconIndexUnreadable()",
+      "description": "setBeacon (governor) to 0x000000000000000000000000000000000000bEEF, an address with no code: index() returns 0 bytes",
+      "setup": "W11 market (the dev wallet is the governor)",
+      "call": {
+        "from": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+        "to": "0x06BEb7Df5434f4cFf7F0bE8625C5c69b8c26c60a",
+        "signature": "setBeacon(address)",
+        "args": [
+          "0x000000000000000000000000000000000000bEEF"
+        ],
+        "calldata": "0xd42afb56000000000000000000000000000000000000000000000000000000000000beef"
+      },
+      "eth_call_block": 330900770,
+      "eth_call_error": {
+        "code": 3,
+        "message": "execution reverted: custom error 0x6c776dda",
+        "data": "0x6c776dda"
+      },
+      "mined": {
+        "fork_tx": "0x3f14720e3bbe9963f89858d149952f42a49cbfbe9a7adc0da062b51b1daa912a",
+        "block": 330900771,
+        "status": 0,
+        "gas_used": 34823
+      },
+      "checks": [
+        "eth_call error data == mined tx trace output",
+        "selector == forge inspect at v1.0.0"
+      ]
+    },
+    {
+      "name": "TvlCapExceeded",
+      "selector": "0xb0e52638",
+      "revert_data": "0xb0e52638",
+      "inspect_signature": "TvlCapExceeded()",
+      "description": "openMaker of 100e6 margin after lowerTvlCap(accountedTvl() = 100057843)",
+      "setup": "W11 market; lowerTvlCap(100057843) by the owner",
+      "call": {
+        "from": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+        "to": "0x06BEb7Df5434f4cFf7F0bE8625C5c69b8c26c60a",
+        "signature": "openMaker((address,uint128,int24,int24,uint128,uint256,uint256,uint64))",
+        "args": [
+          "(0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266,100000000,38700,39540,335000000,115792089237316195423570985008687907853269984665640564039457584007913129639935,115792089237316195423570985008687907853269984665640564039457584007913129639935,1795141359)"
+        ],
+        "calldata": "0xdbf66cd6000000000000000000000000f39fd6e51aad88f6f4ce6ab8827279cfffb922660000000000000000000000000000000000000000000000000000000005f5e100000000000000000000000000000000000000000000000000000000000000972c0000000000000000000000000000000000000000000000000000000000009a740000000000000000000000000000000000000000000000000000000013f7b1c0ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff000000000000000000000000000000000000000000000000000000006affaeef"
+      },
+      "eth_call_block": 330900771,
+      "eth_call_error": {
+        "code": 3,
+        "message": "execution reverted: custom error 0xb0e52638",
+        "data": "0xb0e52638"
+      },
+      "mined": {
+        "fork_tx": "0x162d427f75b33a97b817c9a13730e4dce5fe26273486c24ba9e883844c83a409",
+        "block": 330900772,
+        "status": 0,
+        "gas_used": 605767
+      },
+      "checks": [
+        "eth_call error data == mined tx trace output",
+        "selector == forge inspect at v1.0.0"
+      ]
+    },
+    {
+      "name": "LongCloseCapacityExceeded",
+      "selector": "0x84d09fb1",
+      "revert_data": "0x84d09fb1",
+      "inspect_signature": "LongCloseCapacityExceeded()",
+      "description": "adjustMaker(-all liquidity) of the only maker while a +0.1e6 long taker is open",
+      "setup": "W11 market; a new taker opens +0.1e6",
+      "call": {
+        "from": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+        "to": "0x06BEb7Df5434f4cFf7F0bE8625C5c69b8c26c60a",
+        "signature": "adjustMaker((uint256,int128,int128,uint256,uint256,uint64))",
+        "args": [
+          "(1,0,-100000000,0,0,1795141359)"
+        ],
+        "calldata": "0x7bd08a1a00000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000000000fffffffffffffffffffffffffffffffffffffffffffffffffffffffffa0a1f0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000006affaeef"
+      },
+      "eth_call_block": 330900771,
+      "eth_call_error": {
+        "code": 3,
+        "message": "execution reverted: custom error 0x84d09fb1",
+        "data": "0x84d09fb1"
+      },
+      "mined": {
+        "fork_tx": "0x40eff3ba2267dc074925cf6d501cc75e28acb9617d5ba134044e363ba4012f54",
+        "block": 330900772,
+        "status": 0,
+        "gas_used": 291387
+      },
+      "checks": [
+        "eth_call error data == mined tx trace output",
+        "selector == forge inspect at v1.0.0"
+      ]
+    },
+    {
+      "name": "ShortCloseCapacityExceeded",
+      "selector": "0xdeacb1fc",
+      "revert_data": "0xdeacb1fc",
+      "inspect_signature": "ShortCloseCapacityExceeded()",
+      "description": "adjustMaker(-all liquidity) of the only maker with a residual short and no open taker (W11 fact 1)",
+      "setup": "W11 market after the 14 steps",
+      "call": {
+        "from": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+        "to": "0x06BEb7Df5434f4cFf7F0bE8625C5c69b8c26c60a",
+        "signature": "adjustMaker((uint256,int128,int128,uint256,uint256,uint64))",
+        "args": [
+          "(1,0,-100000000,0,0,1795141357)"
+        ],
+        "calldata": "0x7bd08a1a00000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000000000fffffffffffffffffffffffffffffffffffffffffffffffffffffffffa0a1f0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000006affaeed"
+      },
+      "eth_call_block": 330900770,
+      "eth_call_error": {
+        "code": 3,
+        "message": "execution reverted: custom error 0xdeacb1fc",
+        "data": "0xdeacb1fc"
+      },
+      "mined": {
+        "fork_tx": "0x93efb9850a29deab0d45bfc278980bf03884fc5e961304b73aad1051d7dc3e83",
+        "block": 330900771,
+        "status": 0,
+        "gas_used": 320578
+      },
+      "checks": [
+        "eth_call error data == mined tx trace output",
+        "selector == forge inspect at v1.0.0"
+      ]
+    }
+  ]
+}
