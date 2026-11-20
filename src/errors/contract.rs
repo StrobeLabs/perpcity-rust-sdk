@@ -1,6 +1,6 @@
 //! On-chain / protocol state errors.
 
-use alloy::primitives::{Address, U256};
+use alloy::primitives::{Address, Bytes, U256};
 use thiserror::Error;
 
 use crate::client::Era;
@@ -45,6 +45,13 @@ pub enum ContractError {
     EventNotFound {
         /// Name of the missing event.
         event_name: String,
+    },
+
+    /// A contract read reverted with fewer than four bytes. Not transient.
+    #[error("contract read reverted without a selector: {data}")]
+    RevertedWithoutSelector {
+        /// The complete return data, including an empty payload.
+        data: Bytes,
     },
 
     /// A multicall returned unexpected results (wrong count or subcall failure).
