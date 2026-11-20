@@ -50,7 +50,7 @@ use crate::math::BlockContext;
 use crate::math::range::{MakerBand, TickRange};
 use crate::math::swap::amount0_delta;
 use crate::units::fixed_point::{Rounding, mul_div};
-use crate::units::{LUnits, PerSide, PerpAtoms, Side, SqrtPrice};
+use crate::units::{LUnits, PerSide, PerpAtoms, PerpDelta, Side, SqrtPrice};
 
 /// Taker capacity per side, as the contract's `Capacity` struct holds it:
 /// the open interest each side can hold against a band or the market.
@@ -174,6 +174,48 @@ impl MarketCapacity {
         let long = depth_x64.long.saturating_sub(band_x64.short) >> 64;
         let short = depth_x64.short.saturating_sub(band_x64.long) >> 64;
         U256::from(interest.long.atoms()) <= long && U256::from(interest.short.atoms()) <= short
+    }
+
+    /// The side whose close depth a maker removal exceeds, as the contract
+    /// finds it: the open interest at the removal first, then, when the
+    /// removal takes all of the position's liquidity, with the `residual`
+    /// it converts to a taker added on its side (`PerpMakerLogic.sol:226`);
+    /// long before short in each check. The side and the interest checked
+    /// there, or `None` when the removal fits. Each
+    /// check is [`Self::fits_maker_removal`] on one side's interest, with
+    /// its `depth_x64`, `band_x64` and `last`.
+    ///
+    /// `residual` is zero for a partial removal.
+    pub(crate) fn maker_removal_refusal(
+        open_interest: PerSide<PerpAtoms>,
+        residual: PerpDelta,
+        depth_x64: PerSide<U256>,
+        band_x64: PerSide<U256>,
+        last: bool,
+    ) -> Result<Option<(Side, PerpAtoms)>, ValidationError> {
+        let exceeds = |side, amount| {
+            let mut interest = Capacity::default();
+            *interest.on_mut(side) = amount;
+            !Self::fits_maker_removal(interest, depth_x64, band_x64, last)
+        };
+        for side in Side::BOTH {
+            let amount = *open_interest.on(side);
+            if exceeds(side, amount) {
+                return Ok(Some((side, amount)));
+            }
+        }
+        let Some(side) = residual.side() else {
+            return Ok(None);
+        };
+        let total = open_interest
+            .on(side)
+            .atoms()
+            .checked_add(residual.magnitude().atoms())
+            .ok_or_else(|| ValidationError::Overflow {
+                context: "maker conversion open interest exceeds uint128".into(),
+            })?;
+        let total = PerpAtoms::new(total);
+        Ok(exceeds(side, total).then_some((side, total)))
     }
 
     /// Utilization on one side as the Perp passes it to the fees module:
@@ -449,6 +491,78 @@ mod tests {
             band,
             true
         ));
+    }
+
+    /// The contract's check order: the interest at the removal before the
+    /// converted residual, long before short; and the last maker's removal
+    /// refuses any interest left, the W11 one-maker case among them.
+    #[test]
+    fn a_maker_removal_is_refused_on_the_side_the_contract_checks_first() {
+        let pair =
+            |long: u128, short: u128| PerSide::new(PerpAtoms::new(long), PerpAtoms::new(short));
+        let atoms = |n: u64| U256::from(n) << 64;
+        let depth = PerSide::new(atoms(10), atoms(10));
+        let no_band = PerSide::new(U256::ZERO, U256::ZERO);
+        let refuse = |interest, residual: i128, last| {
+            MarketCapacity::maker_removal_refusal(
+                interest,
+                PerpDelta::new(residual),
+                depth,
+                no_band,
+                last,
+            )
+            .unwrap()
+            .map(|(side, _)| side)
+        };
+        assert_eq!(refuse(pair(10, 10), 0, false), None);
+        assert_eq!(refuse(pair(11, 11), 0, false), Some(Side::Long));
+        assert_eq!(refuse(pair(10, 11), 0, false), Some(Side::Short));
+        // The residual is checked after the interest at the removal.
+        assert_eq!(refuse(pair(10, 10), 1, false), Some(Side::Long));
+        assert_eq!(refuse(pair(10, 11), 1, false), Some(Side::Short));
+        assert_eq!(refuse(pair(4, 10), -1, false), Some(Side::Short));
+        assert_eq!(refuse(pair(4, 9), -1, false), None);
+        // The interest named is the one checked: with the residual only
+        // when the interest at the removal fits.
+        assert_eq!(
+            MarketCapacity::maker_removal_refusal(
+                pair(4, 10),
+                PerpDelta::new(-3),
+                depth,
+                no_band,
+                false
+            )
+            .unwrap(),
+            Some((Side::Short, PerpAtoms::new(13)))
+        );
+        assert_eq!(
+            MarketCapacity::maker_removal_refusal(
+                pair(12, 0),
+                PerpDelta::new(5),
+                depth,
+                no_band,
+                false
+            )
+            .unwrap(),
+            Some((Side::Long, PerpAtoms::new(12)))
+        );
+        // The last maker clears both depths.
+        assert_eq!(refuse(pair(0, 0), 0, true), None);
+        assert_eq!(refuse(pair(0, 0), -1, true), Some(Side::Short));
+        assert_eq!(refuse(pair(1, 0), -1, true), Some(Side::Long));
+        assert_eq!(refuse(pair(0, 1), 1, true), Some(Side::Short));
+        // A band's contribution leaves the opposite side's depth.
+        let band = PerSide::new(atoms(0), atoms(3));
+        assert_eq!(
+            MarketCapacity::maker_removal_refusal(pair(8, 0), PerpDelta::ZERO, depth, band, false)
+                .unwrap(),
+            Some((Side::Long, PerpAtoms::new(8)))
+        );
+        assert_eq!(
+            MarketCapacity::maker_removal_refusal(pair(7, 10), PerpDelta::ZERO, depth, band, false)
+                .unwrap(),
+            None
+        );
     }
 
     fn range(lower: i32, upper: i32) -> TickRange {

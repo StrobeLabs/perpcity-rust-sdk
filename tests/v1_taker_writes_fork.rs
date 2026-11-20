@@ -302,6 +302,7 @@ async fn v1_taker_writes_on_a_sepolia_fork() {
     );
     assert_eq!(usd_atoms, quote.usd_delta.atoms(), "cost equals the quote");
     let receipt = client.poll_receipt(opened.tx_hash).await.unwrap();
+    println!("taker-open: gas {} tx {}", receipt.gas_used, opened.tx_hash);
     let event = ticks_crossed_event(&receipt, perp);
     let start: i32 = event.startingTick.as_i32();
     let end: i32 = event.endingTick.as_i32();
@@ -359,6 +360,11 @@ async fn v1_taker_writes_on_a_sepolia_fork() {
         panic!("a partial reduce leaves the position open: {reduced:?}");
     };
     assert_eq!(unpack(reduced.event.delta).0, OPEN_SIZE - REDUCE_SIZE);
+    println!(
+        "taker-adjust: gas {} tx {}",
+        client.poll_receipt(reduced.tx_hash).await.unwrap().gas_used,
+        reduced.tx_hash
+    );
     let sent = Perp::adjustTakerCall::abi_decode(&input_of(&w.provider, reduced.tx_hash).await)
         .unwrap()
         .params;
@@ -462,6 +468,11 @@ async fn v1_taker_writes_on_a_sepolia_fork() {
         .await
         .unwrap();
     assert_eq!(closed.pos_id, taker);
+    println!(
+        "taker-close: gas {} tx {}",
+        client.poll_receipt(closed.tx_hash).await.unwrap().gas_used,
+        closed.tx_hash
+    );
     assert_eq!(closed.margin, Some(UsdcAtoms::ZERO));
     assert_eq!(
         raw_perp.positionOwner(taker).call().await.unwrap(),
