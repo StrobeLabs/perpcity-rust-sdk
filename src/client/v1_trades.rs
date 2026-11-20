@@ -1,7 +1,9 @@
-//! `v1.0.0` taker writes: open, adjust and close with a deadline, a fee
-//! bound and reduce-only, and the replacement of a stuck one. Each returns
-//! the receipt's parsed event, so no `v1.0.0` taker write reports success
-//! without it.
+//! `v1.0.0` writes with deadlines and parsed receipts, and replacement of
+//! pending writes. Taker writes also carry a fee bound.
+
+mod maker;
+
+pub use maker::{V1MakerAdjustment, V1MakerReplacement};
 
 use std::time::Duration;
 

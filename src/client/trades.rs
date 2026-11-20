@@ -898,7 +898,8 @@ impl PerpClient {
     /// to the account that will manage it); the receiving account must be able
     /// to call the Perp, so an EOA or a contract that can.
     ///
-    /// Ownership is checked before sending: the contract's own
+    /// On v1 this returns [`ContractError::UnsupportedEra`] before reading
+    /// ownership. On ERC721 builds ownership is checked before sending: the contract's own
     /// `TransferFromIncorrectOwner` revert costs a broadcast to discover,
     /// and calling this for a position the client does not own is always a
     /// caller bug.
@@ -925,6 +926,13 @@ impl PerpClient {
             .into());
         }
 
+        if self.market.era().await? == Era::V1 {
+            return Err(ContractError::UnsupportedEra {
+                era: Era::V1,
+                operation: "transfer_position",
+            }
+            .into());
+        }
         let contract = Perp::new(self.market.perp(), self.chain().provider());
         let owner = contract.ownerOf(pos_id).call().await?;
         if owner != from {

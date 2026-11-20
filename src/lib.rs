@@ -69,7 +69,8 @@ pub use client::{
     MakerEquityOutcome, MarginRatioTriple, MarginRatios, MarketConfig, MarketRates, MarketReader,
     MarketSnapshot, MaxTotalFee, OpenInterest, OpenMakerParams, OpenResult, OpenTakerParams,
     PerpClient, PositionRow, RowOutcome, SolvencyState, StateAt, StoredMarginRatios, TvlCap,
-    TxBuilder, V1_TRADE_DEADLINE, V1TakerAdjustment, V1TakerReplacement,
+    TxBuilder, V1_TRADE_DEADLINE, V1MakerAdjustment, V1MakerReplacement, V1TakerAdjustment,
+    V1TakerReplacement,
 };
 
 #[doc(inline)]

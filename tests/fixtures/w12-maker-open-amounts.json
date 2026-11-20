@@ -1,0 +1,62 @@
+[
+  {
+    "id": "maker_open_amounts/maker1",
+    "kind": "maker_open_amounts",
+    "inputs": {
+      "liquidity": "335000000",
+      "sqrt_price_x96": "560227709747861399187319382274",
+      "tick_lower": "38700",
+      "tick_upper": "39540"
+    },
+    "expected": {
+      "amount0_in": "979407",
+      "amount1_in": "49477350"
+    },
+    "sources": {
+      "contract.forge_scenario": [
+        "amount0_in",
+        "amount1_in"
+      ],
+      "sdk.ts": [
+        "amount0_in",
+        "amount1_in"
+      ],
+      "w12.python": [
+        "amount0_in",
+        "amount1_in"
+      ]
+    },
+    "agree": true,
+    "note": "openMaker: the pool takes these amounts (rounded up); the position books them as a negative delta. SDK makerLimits at slippage 0 gives the same numbers."
+  },
+  {
+    "id": "maker_open_amounts/maker2",
+    "kind": "maker_open_amounts",
+    "inputs": {
+      "liquidity": "70000000",
+      "sqrt_price_x96": "560227709747861399187319382274",
+      "tick_lower": "36870",
+      "tick_upper": "40950"
+    },
+    "expected": {
+      "amount0_in": "864571",
+      "amount1_in": "52712479"
+    },
+    "sources": {
+      "contract.forge_scenario": [
+        "amount0_in",
+        "amount1_in"
+      ],
+      "sdk.ts": [
+        "amount0_in",
+        "amount1_in"
+      ],
+      "w12.python": [
+        "amount0_in",
+        "amount1_in"
+      ]
+    },
+    "agree": true,
+    "note": "openMaker: the pool takes these amounts (rounded up); the position books them as a negative delta. SDK makerLimits at slippage 0 gives the same numbers."
+  }
+]

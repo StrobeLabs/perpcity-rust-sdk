@@ -999,14 +999,36 @@ impl StateAt {
 
     /// The pool's current tick.
     pub async fn pool_tick(&self) -> Result<i32> {
+        Ok(i24_to_i32(self.pool_state().await?.tick))
+    }
+
+    /// The pool's current sqrt price at this block.
+    pub async fn pool_sqrt_price(&self) -> Result<SqrtPrice> {
+        Ok(SqrtPrice::from_x96(
+            self.pool_state().await?.sqrtPrice.to::<U256>(),
+        ))
+    }
+
+    async fn pool_state(&self) -> Result<Perp::poolStateReturn> {
         let perp = Perp::new(self.market.perp, self.market.chain.provider());
-        let state = perp
-            .poolState()
+        perp.poolState()
+            .block(self.id())
+            .call()
+            .await
+            .map_err(|e| self.read_error(e))
+    }
+
+    pub(super) async fn v1_open_interest(&self) -> Result<PerSide<PerpAtoms>> {
+        let oi = v1::Perp::new(self.market.perp, self.market.chain.provider())
+            .openInterest()
             .block(self.id())
             .call()
             .await
             .map_err(|e| self.read_error(e))?;
-        Ok(i24_to_i32(state.tick))
+        Ok(PerSide::new(
+            PerpAtoms::new(oi.long),
+            PerpAtoms::new(oi.short),
+        ))
     }
 
     /// The USDC the perp holds, which backs its positions' margin and also
@@ -1899,6 +1921,19 @@ mod tests {
         let (state, rpc) = state().await;
         rpc.call::<Perp::poolStateCall>(&mock::pool_state_at_tick(38_340));
         assert_eq!(state.pool_tick().await.unwrap(), 38_340);
+    }
+
+    #[tokio::test]
+    async fn pool_sqrt_price_is_the_slot_price() {
+        let (state, rpc) = state().await;
+        let mut slot = mock::pool_state_at_tick(38_340);
+        slot.sqrtPrice = (U256::from(7u8) << 96usize).to();
+        rpc.call::<Perp::poolStateCall>(&slot);
+        assert_eq!(
+            state.pool_sqrt_price().await.unwrap(),
+            SqrtPrice::from_x96(U256::from(7u8) << 96)
+        );
+        assert!(rpc.is_drained());
     }
 
     #[tokio::test]

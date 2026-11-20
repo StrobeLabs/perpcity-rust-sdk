@@ -13,13 +13,15 @@
 use std::process::{Child, Command};
 use std::time::Duration;
 
+use alloy::consensus::Transaction as _;
 use alloy::eips::BlockId;
 use alloy::primitives::{Address, B256, U256, address, keccak256};
+use alloy::providers::Provider;
 use alloy::sol;
 use alloy::sol_types::{SolCall, SolValue};
 
 use perpcity_sdk::constants::SNAPSHOT_BLOCK_LAG;
-use perpcity_sdk::contracts::{Modules, Perp, PerpFactory};
+use perpcity_sdk::contracts::{AdjustMakerParams, Modules, OpenMakerParams, Perp, PerpFactory};
 use perpcity_sdk::math::liquidity::estimate_liquidity;
 use perpcity_sdk::{
     ARBITRUM_CHAIN_ID, ARBITRUM_USDC, ChainDeployments, ChainReader, Era, ExactOpenMakerParams,
@@ -379,6 +381,82 @@ async fn v022_market_reads_trades_and_liquidation_probes() {
         .unwrap();
     println!("taker closed in {}: {closed:?}", closed.tx_hash);
     assert!(closed.perp_delta.atoms() < 0, "the close sold the long");
+
+    // The maker still uses the v0.2.2 open and adjust calldata, including
+    // the full removal. No v1 deadline appears in either transaction.
+    // A second band covers the first band's rounding residual under the
+    // v0.2.2 utilization check.
+    client.chain().refresh_gas().await.unwrap();
+    client
+        .open_maker_exact(
+            &ExactOpenMakerParams {
+                margin,
+                range,
+                liquidity,
+                max_amt0_in: PerpAtoms::new(u128::MAX),
+                max_amt1_in: UsdcAtoms::new(u128::MAX),
+            },
+            Urgency::Normal,
+        )
+        .await
+        .unwrap();
+    client.chain().refresh_gas().await.unwrap();
+    let removed = client
+        .close_maker(maker.pos_id, liquidity, Urgency::Normal)
+        .await
+        .unwrap();
+    for (hash, expected) in [
+        (
+            maker.tx_hash,
+            Perp::openMakerCall {
+                params: OpenMakerParams {
+                    holder: address,
+                    margin: margin.atoms(),
+                    tickLower: range.lower().try_into().unwrap(),
+                    tickUpper: range.upper().try_into().unwrap(),
+                    liquidity: liquidity.units(),
+                    maxAmt0In: U256::from(u128::MAX),
+                    maxAmt1In: U256::from(u128::MAX),
+                },
+            }
+            .abi_encode(),
+        ),
+        (
+            removed.tx_hash,
+            Perp::adjustMakerCall {
+                params: AdjustMakerParams {
+                    posId: maker.pos_id,
+                    marginDelta: 0,
+                    liquidityDelta: liquidity.negated().unwrap().units(),
+                    amt0Limit: U256::ZERO,
+                    amt1Limit: U256::ZERO,
+                },
+            }
+            .abi_encode(),
+        ),
+    ] {
+        let tx = client
+            .chain()
+            .provider()
+            .get_transaction_by_hash(hash)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(tx.input().as_ref(), expected);
+    }
+    let raw = Perp::new(perp, client.chain().provider());
+    assert_eq!(
+        raw.makerDetails(maker.pos_id)
+            .call()
+            .await
+            .unwrap()
+            .liquidity,
+        0
+    );
+    println!(
+        "v0.2.2 maker open and close calldata match: {}",
+        removed.tx_hash
+    );
 
     println!("\n=== v0.2.2 fork test passed! ===");
 }

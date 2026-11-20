@@ -21,7 +21,7 @@ use std::collections::HashMap;
 use alloy::sol_types::SolCall;
 use serde::{Deserialize, Serialize};
 
-use crate::contracts::{Perp, PerpV022};
+use crate::contracts::{Perp, PerpV022, v1};
 
 /// 4-byte function selector (first 4 bytes of calldata).
 type Selector = [u8; 4];
@@ -55,6 +55,22 @@ impl GasLimits {
     /// liquidations have run out of gas where `eth_estimateGas` passed, so
     /// the liquidation paths pin this bound instead of estimating.
     pub const LIQUIDATE: u64 = 3_000_000;
+    // Arbitrum Sepolia v1 fork receipts, plus 20%, rounded up to 50,000.
+    // Adjust and close share a selector, so use the highest measured cost.
+    /// V1 taker open (659,938 gas across four ticks).
+    pub const V1_OPEN_TAKER: u64 = 800_000;
+    /// V1 taker adjustment or close (446,424 and 649,428 gas).
+    pub const V1_ADJUST_TAKER: u64 = 800_000;
+    /// V1 maker open (714,066 gas for the first W12 band).
+    pub const V1_OPEN_MAKER: u64 = 900_000;
+    /// V1 maker adjustment or close (up to 372,565 gas for conversion).
+    pub const V1_ADJUST_MAKER: u64 = 450_000;
+    /// V1 maker move (630,578 gas for the W11 range change).
+    pub const V1_MOVE_MAKER: u64 = 800_000;
+    /// V1 taker backstop (286,283 gas including the owner change).
+    pub const V1_BACKSTOP_TAKER: u64 = 350_000;
+    /// V1 maker backstop (456,453 gas including the owner change).
+    pub const V1_BACKSTOP_MAKER: u64 = 550_000;
     /// ERC-20 `transfer` call.
     pub const TRANSFER: u64 = 65_000;
 }
@@ -84,6 +100,13 @@ fn estimate_floor(selector: &Selector) -> Option<u64> {
     const LIQUIDATE_MAKER_V022: Selector = PerpV022::liquidateMakerCall::SELECTOR;
 
     match *selector {
+        v1::Perp::openTakerCall::SELECTOR => Some(GasLimits::V1_OPEN_TAKER),
+        v1::Perp::adjustTakerCall::SELECTOR => Some(GasLimits::V1_ADJUST_TAKER),
+        v1::Perp::openMakerCall::SELECTOR => Some(GasLimits::V1_OPEN_MAKER),
+        v1::Perp::adjustMakerCall::SELECTOR => Some(GasLimits::V1_ADJUST_MAKER),
+        v1::Perp::moveMakerCall::SELECTOR => Some(GasLimits::V1_MOVE_MAKER),
+        v1::Perp::backstopTakerCall::SELECTOR => Some(GasLimits::V1_BACKSTOP_TAKER),
+        v1::Perp::backstopMakerCall::SELECTOR => Some(GasLimits::V1_BACKSTOP_MAKER),
         OPEN_TAKER => Some(GasLimits::OPEN_TAKER),
         OPEN_MAKER => Some(GasLimits::OPEN_MAKER),
         ADJUST_TAKER | ADJUST_MAKER => Some(GasLimits::ADJUST_NOTIONAL),
@@ -335,6 +358,37 @@ impl FeeCache {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn v1_selectors_floor_small_estimates_and_keep_larger_ones() {
+        let mut cache = GasLimitCache::new();
+        for (selector, floor) in [
+            (v1::Perp::openTakerCall::SELECTOR, GasLimits::V1_OPEN_TAKER),
+            (
+                v1::Perp::adjustTakerCall::SELECTOR,
+                GasLimits::V1_ADJUST_TAKER,
+            ),
+            (v1::Perp::openMakerCall::SELECTOR, GasLimits::V1_OPEN_MAKER),
+            (
+                v1::Perp::adjustMakerCall::SELECTOR,
+                GasLimits::V1_ADJUST_MAKER,
+            ),
+            (v1::Perp::moveMakerCall::SELECTOR, GasLimits::V1_MOVE_MAKER),
+            (
+                v1::Perp::backstopTakerCall::SELECTOR,
+                GasLimits::V1_BACKSTOP_TAKER,
+            ),
+            (
+                v1::Perp::backstopMakerCall::SELECTOR,
+                GasLimits::V1_BACKSTOP_MAKER,
+            ),
+        ] {
+            cache.put(selector, 1, 0);
+            assert_eq!(cache.get(&selector, 0), Some(floor));
+            cache.put(selector, 1_000_000, 0);
+            assert_eq!(cache.get(&selector, 0), Some(1_200_000));
+        }
+    }
 
     const BASE: u64 = 50_000_000; // 50 Mwei ~ typical Base L2
     const TIP: u64 = 1_000_000_000; // 1 gwei

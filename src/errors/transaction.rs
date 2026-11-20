@@ -128,6 +128,7 @@ pub enum TransactionError {
     /// transaction at the nonce mined, so `original` can still land.
     /// Every failure of
     /// [`PerpClient::replace_v1_taker`](crate::PerpClient::replace_v1_taker)
+    /// or [`PerpClient::replace_v1_maker`](crate::PerpClient::replace_v1_maker)
     /// after the call to it, other than a refusal, a parsed receipt or a
     /// used nonce, is this variant.
     ///
@@ -251,6 +252,7 @@ pub enum TransactionError {
 
     /// A stuck transaction that
     /// [`PerpClient::replace_v1_taker`](crate::PerpClient::replace_v1_taker)
+    /// or [`PerpClient::replace_v1_maker`](crate::PerpClient::replace_v1_maker)
     /// does not sign again, for `reason`. Nothing was signed or sent. Not
     /// transient. When [`NotReplaceableReason::original_can_land`] holds,
     /// `tx_hash` can still land and the error is
@@ -357,10 +359,11 @@ impl TransactionError {
     }
 
     /// Hash of the signed transaction, for every failure from the broadcast
-    /// onward: `BroadcastFailed`, `ReceiptTimeout`, `Reverted`, `OutOfGas`
-    /// and `TakerNotClosed`. A replacement's error gives the replacement's
-    /// hash, else the stuck one's: the stuck one's too when the node
-    /// refused the replacement, which cannot land. [`Self::hash_to_replace`]
+    /// onward: `BroadcastFailed`, `ReceiptTimeout`, `Reverted`, `OutOfGas`,
+    /// `TakerNotClosed` and `MakerNotClosed`. A replacement's error gives
+    /// the replacement's hash, else the stuck one's: the stuck one's too
+    /// when the node refused the replacement, which cannot land.
+    /// [`Self::hash_to_replace`]
     /// gives the hash to replace again. `None` means nothing was sent.
     ///
     /// A `Some` hash may have landed on chain even when the error says the

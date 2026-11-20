@@ -140,6 +140,44 @@ pub enum ValidationError {
         perp_delta: i128,
     },
 
+    /// A maker adjustment asks to remove more liquidity than the position holds.
+    #[error("maker removal of {requested} exceeds the position's {available} liquidity")]
+    ExcessMakerRemoval {
+        /// Liquidity requested for removal.
+        requested: u128,
+        /// Liquidity held by the position.
+        available: u128,
+    },
+
+    /// A `v1.0.0` maker removal that would leave long open interest above
+    /// the long close depth: the contract reverts it as
+    /// `LongCloseCapacityExceeded`. `interest` is the long open interest
+    /// the contract checks, with the residual the removal converts to a
+    /// taker when that is what exceeds; `last_maker` when the removal takes
+    /// the market's last maker liquidity, which clears both depths.
+    #[error(
+        "maker removal leaves long open interest {interest} above the long close depth (last maker: {last_maker})"
+    )]
+    LongCloseCapacityExceeded {
+        /// The long open interest checked, in perp atoms.
+        interest: u128,
+        /// Whether the removal takes the last maker liquidity.
+        last_maker: bool,
+    },
+
+    /// As [`Self::LongCloseCapacityExceeded`], on the short side: the
+    /// contract reverts it as `ShortCloseCapacityExceeded`. A market's only
+    /// maker with a short residual and no taker open fails here.
+    #[error(
+        "maker removal leaves short open interest {interest} above the short close depth (last maker: {last_maker})"
+    )]
+    ShortCloseCapacityExceeded {
+        /// The short open interest checked, in perp atoms.
+        interest: u128,
+        /// Whether the removal takes the last maker liquidity.
+        last_maker: bool,
+    },
+
     /// A configuration value is invalid or missing.
     #[error("invalid config: {reason}")]
     InvalidConfig {
