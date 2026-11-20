@@ -59,6 +59,7 @@ impl StateAt {
         if pos_ids.is_empty() {
             return Ok(Vec::new());
         }
+        self.require_read_era(false, "taker_healths (use previewPosition)").await?;
         let market = self.taker_market().await?;
         let outcomes = self
             .rows(
@@ -189,6 +190,7 @@ mod tests {
         let (client, rpc) = mock::client();
         rpc.block(92, TIMESTAMP);
         let state = client.market().state_at(92).await.unwrap();
+        rpc.immutables(crate::Era::Upgradeable);
         (state, rpc)
     }
 

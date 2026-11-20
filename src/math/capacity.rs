@@ -96,6 +96,18 @@ impl MarketCapacity {
             .saturating_sub(*self.open_interest.on(side))
     }
 
+    /// Additional open interest a buy (Long) or sell (Short) can add
+    /// against physical depth. A buy consumes short-close depth.
+    pub fn physical_headroom(&self, direction: Side) -> Option<PerpAtoms> {
+        let side = direction.opposite();
+        Some(self.close_capacity?.on(side).saturating_sub(*self.open_interest.on(side)))
+    }
+
+    /// Whether the proposed post-change interest fits both post-change depths.
+    pub fn fits_close_capacity(interest: Capacity, depth: Capacity) -> bool {
+        interest.long <= depth.long && interest.short <= depth.short
+    }
+
     /// Utilization on one side as the Perp passes it to the fees module:
     /// `openInterest * 1e6 / capacity`, rounded down.
     ///
@@ -271,6 +283,22 @@ mod tests {
     use super::*;
     use crate::constants::{MAX_TICK, MIN_TICK};
     use crate::math::tick::get_sqrt_ratio_at_tick;
+
+    #[test]
+    fn physical_depth_is_directional() {
+        let pair = |long, short| Capacity::new(PerpAtoms::new(long), PerpAtoms::new(short));
+        let market = MarketCapacity {
+            open_interest: pair(6, 2),
+            close_capacity: Some(pair(9, 12)),
+            ..Default::default()
+        };
+        assert_eq!(market.physical_headroom(Side::Long), Some(PerpAtoms::new(10)));
+        assert_eq!(market.physical_headroom(Side::Short), Some(PerpAtoms::new(3)));
+        // Closing two shorts buys two atoms, moving depth from short to long.
+        assert!(MarketCapacity::fits_close_capacity(pair(6, 0), pair(11, 10)));
+        assert!(!MarketCapacity::fits_close_capacity(pair(6, 2), pair(5, 12)));
+        assert!(!MarketCapacity::fits_close_capacity(pair(6, 2), pair(9, 1)));
+    }
 
     fn range(lower: i32, upper: i32) -> TickRange {
         TickRange::new(lower, upper).unwrap()
