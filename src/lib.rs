@@ -87,7 +87,8 @@ pub use feeds::{
 
 #[doc(inline)]
 pub use errors::{
-    ContractError, PerpCityError, Result, RevertClass, TransactionError, ValidationError,
+    ContractError, NotReplaceableReason, PerpCityError, Result, RevertClass, TransactionError,
+    ValidationError,
 };
 
 #[doc(inline)]

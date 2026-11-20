@@ -1,12 +1,16 @@
 //! Integration test: the `v1.0.0` taker writes on an Anvil fork of Arbitrum
 //! Sepolia (`v1_fork`). A new market gets one wide maker and three makers
-//! on adjacent ranges above the pool price; then the SDK opens a taker
-//! whose swap crosses at least three initialized ticks (its fill equals the
-//! local quote and the receipt has `TicksCrossed`), reduces it with
+//! on adjacent ranges above the pool price, and a protocol fee of 100 set
+//! by the impersonated `ProtocolFeeManager` owner and synced to the
+//! market. Then the SDK opens a taker whose swap crosses at least three
+//! initialized ticks (its fill equals the local quote, the receipt has
+//! `TicksCrossed`, and the protocol fee is charged), reduces it with
 //! `reduceOnly`, refuses a reduce-only flip before the send (the chain
-//! reverts the same call `ReduceOnlyViolated`), and closes it. With
-//! automine off, a stuck open is replaced: same nonce, a new deadline of
-//! now plus 600 s, a new signature, and the replacement mines. Last, an
+//! reverts the same call `ReduceOnlyViolated`), flips it to a short
+//! without `reduceOnly`, and closes the short at the market. A new short
+//! opens and closes at the market. With automine off, a stuck open and a
+//! stuck adjustment are each replaced: same nonce, a new deadline of now
+//! plus 600 s, a new signature, and the replacement mines. Last, an
 //! under-margined taker gets the `v1.0.0` liquidation calldata, which
 //! liquidates it.
 //!
@@ -23,10 +27,12 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use alloy::consensus::Transaction as _;
 use alloy::eips::BlockId;
-use alloy::primitives::{Address, I256, U256};
-use alloy::providers::Provider;
+use alloy::hex;
+use alloy::primitives::{Address, B256, I256, U256};
+use alloy::providers::{Provider, ProviderBuilder};
 use alloy::rpc::types::TransactionReceipt;
 use alloy::signers::local::PrivateKeySigner;
+use alloy::sol;
 use alloy::sol_types::{SolCall, SolError, SolEvent};
 use perpcity_sdk::client::PositionRole;
 use perpcity_sdk::contracts::v1::{AdjustTakerParams, IFees, OpenMakerParams, Perp, SwapResult};
@@ -47,6 +53,18 @@ const ADJACENT: [(i32, i32); 3] = [(39_150, 39_180), (39_180, 39_210), (39_210, 
 const ADJACENT_LIQUIDITY: u128 = 200_000_000;
 const OPEN_SIZE: i128 = 450_000;
 const REDUCE_SIZE: i128 = 150_000;
+const SHORT_SIZE: i128 = 120_000;
+/// The protocol fee the test sets, in millionths.
+const PROTOCOL_FEE: u64 = 100;
+
+sol! {
+    #[sol(rpc)]
+    interface IProtocolFeeManager {
+        function owner() external view returns (address);
+        function protocolFee() external view returns (uint256);
+        function setProtocolFee(uint256 newProtocolFee) external;
+    }
+}
 
 fn wall_secs() -> u64 {
     SystemTime::now()
@@ -63,7 +81,7 @@ fn open_params(margin: u128, size: i128, amt1_limit: UsdcAtoms) -> ExactOpenTake
     }
 }
 
-async fn input_of<P: Provider>(provider: &P, hash: alloy::primitives::B256) -> Vec<u8> {
+async fn input_of<P: Provider>(provider: &P, hash: B256) -> Vec<u8> {
     provider
         .get_transaction_by_hash(hash)
         .await
@@ -110,11 +128,50 @@ fn ticks_crossed_event(receipt: &TransactionReceipt, perp: Address) -> Perp::Tic
 }
 
 async fn raw(fork: &SepoliaFork, method: &str, params: Value) -> Value {
-    let probe = alloy::providers::ProviderBuilder::new().connect_http(fork.url.parse().unwrap());
+    let probe = ProviderBuilder::new().connect_http(fork.url.parse().unwrap());
     probe
         .raw_request::<_, Value>(method.to_string().into(), params)
         .await
         .unwrap()
+}
+
+/// Send `data` to `to` from an impersonated `from` and require it to mine
+/// successfully (automine is on).
+async fn send_as(fork: &SepoliaFork, from: Address, to: Address, data: Vec<u8>) {
+    let probe = ProviderBuilder::new().connect_http(fork.url.parse().unwrap());
+    raw(fork, "anvil_impersonateAccount", serde_json::json!([from])).await;
+    raw(
+        fork,
+        "anvil_setBalance",
+        serde_json::json!([from, "0xDE0B6B3A7640000"]),
+    )
+    .await;
+    let hash: B256 = serde_json::from_value(
+        raw(
+            fork,
+            "eth_sendTransaction",
+            serde_json::json!([{
+                "from": from,
+                "to": to,
+                "data": format!("0x{}", hex::encode(data)),
+                "gas": "0x1E8480",
+            }]),
+        )
+        .await,
+    )
+    .unwrap();
+    raw(
+        fork,
+        "anvil_stopImpersonatingAccount",
+        serde_json::json!([from]),
+    )
+    .await;
+    let receipt = probe
+        .get_transaction_receipt(hash)
+        .await
+        .unwrap()
+        .expect("automine mined it");
+    assert!(receipt.status(), "the impersonated send reverted");
 }
 
 #[tokio::test]
@@ -151,6 +208,31 @@ async fn v1_taker_writes_on_a_sepolia_fork() {
     }
     println!("v1 market {perp}: four makers");
 
+    // ── A nonzero protocol fee: set by the owner, synced to the market ──
+    let fee_manager = raw_perp.protocolFeeManager().call().await.unwrap();
+    let manager = IProtocolFeeManager::new(fee_manager, w.provider.clone());
+    let owner = manager.owner().call().await.unwrap();
+    send_as(
+        &fork,
+        owner,
+        fee_manager,
+        IProtocolFeeManager::setProtocolFeeCall {
+            newProtocolFee: U256::from(PROTOCOL_FEE),
+        }
+        .abi_encode(),
+    )
+    .await;
+    assert_eq!(
+        manager.protocolFee().call().await.unwrap(),
+        U256::from(PROTOCOL_FEE)
+    );
+    w.send("sync-protocol-fee", raw_perp.syncProtocolFee())
+        .await;
+    assert_eq!(
+        raw_perp.protocolFee().call().await.unwrap(),
+        U256::from(PROTOCOL_FEE)
+    );
+
     let transport = HftTransport::new(
         TransportConfig::builder()
             .shared_endpoint(&fork.url)
@@ -166,6 +248,8 @@ async fn v1_taker_writes_on_a_sepolia_fork() {
     let client = PerpClient::new(chain.market(perp), signer);
     client.sync_nonce().await.unwrap();
     assert_eq!(client.market().era().await.unwrap(), Era::V1);
+    let rates = client.market().get_taker_fee_rates().await.unwrap();
+    assert_eq!(u64::from(rates.protocol_fee.e6()), PROTOCOL_FEE);
 
     // ── Open: a swap across three initialized ticks, equal to the quote ──
     let pool = client
@@ -228,6 +312,10 @@ async fn v1_taker_writes_on_a_sepolia_fork() {
     assert!(
         opened.event.sr.feeFundFeeAmt > U256::ZERO,
         "the fixture credits the fee fund"
+    );
+    assert!(
+        opened.event.sr.protocolFeeAmt > U256::ZERO,
+        "the synced protocol fee is charged"
     );
     let charged = u128::try_from(opened.event.sr.totalFeeAmt).unwrap();
     assert_eq!(opened.margin, Some(UsdcAtoms::new(10_000_000 - charged)));
@@ -320,7 +408,32 @@ async fn v1_taker_writes_on_a_sepolia_fork() {
         Perp::ReduceOnlyViolated::SELECTOR
     );
 
-    // ── Close: reduce-only, the whole perp amount ───────────────────
+    // ── A permitted flip: the same change without reduce-only ──────
+    client.chain().refresh_gas().await.unwrap();
+    let flipped = client
+        .adjust_taker_v1(
+            &flip,
+            MaxTotalFee::Exact(UsdcAtoms::new(v1_fork::MAX_TOTAL_FEE.into())),
+            false,
+            Urgency::Normal,
+        )
+        .await
+        .unwrap();
+    let V1TakerAdjustment::Adjusted(flipped) = flipped else {
+        panic!("a flip leaves the position open: {flipped:?}");
+    };
+    assert_eq!(unpack(flipped.event.delta).0, -left, "now a short");
+    let sent = Perp::adjustTakerCall::abi_decode(&input_of(&w.provider, flipped.tx_hash).await)
+        .unwrap()
+        .params;
+    assert!(!sent.reduceOnly);
+    assert_eq!(
+        client.market().get_position(taker).await.unwrap().perp,
+        PerpDelta::new(-left)
+    );
+    println!("taker {taker} flipped to {} in {}", -left, flipped.tx_hash);
+
+    // ── Close the short at the market: a reduce-only buy ────────────
     let buyback = client
         .market()
         .state_at_head()
@@ -329,7 +442,7 @@ async fn v1_taker_writes_on_a_sepolia_fork() {
         .pool()
         .await
         .unwrap()
-        .quote_perp(PerpDelta::new(-left))
+        .quote_perp(PerpDelta::new(left))
         .unwrap();
     let volume = UsdcAtoms::new(buyback.usd_delta.magnitude().atoms() * 101 / 100);
     let expected_cap = expected_fee_cap(&w.provider, perp, volume).await;
@@ -348,10 +461,37 @@ async fn v1_taker_writes_on_a_sepolia_fork() {
         .unwrap()
         .params;
     assert!(sent.reduceOnly);
-    assert_eq!(sent.perpDelta, I256::try_from(-left).unwrap());
+    assert_eq!(sent.perpDelta, I256::try_from(left).unwrap());
+    assert_eq!(sent.amt1Limit, U256::from(u128::MAX), "any cost for a buy");
     assert_eq!(sent.maxTotalFee, expected_cap);
     assert_swap_fees(&closed.event.sr, sent.maxTotalFee);
     println!("taker {taker} closed in {}", closed.tx_hash);
+
+    // ── A new short, opened and closed at the market ────────────────
+    client.chain().refresh_gas().await.unwrap();
+    let fee = MaxTotalFee::Exact(UsdcAtoms::new(v1_fork::MAX_TOTAL_FEE.into()));
+    let short = client
+        .open_taker_v1(
+            &open_params(10_000_000, -SHORT_SIZE, UsdcAtoms::ZERO),
+            fee,
+            Urgency::Normal,
+        )
+        .await
+        .unwrap();
+    assert_eq!(unpack(short.event.sr.delta).0, -SHORT_SIZE);
+    client.chain().refresh_gas().await.unwrap();
+    let closed = client
+        .close_taker_v1(short.pos_id, None, fee, Urgency::Normal)
+        .await
+        .unwrap();
+    assert_eq!(closed.pos_id, short.pos_id);
+    let sent = Perp::adjustTakerCall::abi_decode(&input_of(&w.provider, closed.tx_hash).await)
+        .unwrap()
+        .params;
+    assert!(sent.reduceOnly);
+    assert_eq!(sent.perpDelta, I256::try_from(SHORT_SIZE).unwrap());
+    assert_eq!(sent.amt1Limit, U256::from(u128::MAX));
+    println!("short {} opened and closed at the market", short.pos_id);
 
     // ── The deadline bump: a stuck open, replaced ───────────────────
     raw(&fork, "evm_setAutomine", serde_json::json!([false])).await;
@@ -384,6 +524,9 @@ async fn v1_taker_writes_on_a_sepolia_fork() {
         .unwrap()
         .params;
     sleep(Duration::from_secs(2)).await;
+    // The receipt timeout outlived the gas cache; a replacement, like a
+    // send, needs fresh gas data.
+    client.chain().refresh_gas().await.unwrap();
     let replaced_at = wall_secs();
     let (replaced, _) = tokio::join!(client.replace_v1_taker(stuck, Urgency::High), async {
         sleep(Duration::from_secs(3)).await;
@@ -438,12 +581,70 @@ async fn v1_taker_writes_on_a_sepolia_fork() {
             .is_none(),
         "the stuck transaction did not mine"
     );
-    raw(&fork, "evm_setAutomine", serde_json::json!([true])).await;
     println!(
         "stuck {stuck} replaced by {} (nonce {})",
         replaced.tx_hash,
         replacement_tx.nonce()
     );
+
+    // ── The deadline bump: a stuck reduce-only adjustment, replaced ──
+    client.sync_nonce().await.unwrap();
+    client.chain().refresh_gas().await.unwrap();
+    let err = client
+        .adjust_taker_v1(
+            &ExactAdjustTakerParams {
+                pos_id: replaced.pos_id,
+                margin_delta: UsdcDelta::ZERO,
+                perp_delta: PerpDelta::new(-40_000),
+                amt1_limit: UsdcAtoms::ZERO,
+            },
+            MaxTotalFee::Exact(UsdcAtoms::new(v1_fork::MAX_TOTAL_FEE.into())),
+            true,
+            Urgency::Normal,
+        )
+        .await
+        .unwrap_err();
+    assert!(err.is_unconfirmed(), "{err}");
+    let stuck = err.tx_hash().unwrap();
+    let stuck_tx = w
+        .provider
+        .get_transaction_by_hash(stuck)
+        .await
+        .unwrap()
+        .unwrap();
+    let stuck_call = Perp::adjustTakerCall::abi_decode(stuck_tx.input())
+        .unwrap()
+        .params;
+    sleep(Duration::from_secs(2)).await;
+    client.chain().refresh_gas().await.unwrap();
+    let (replaced_adjustment, _) =
+        tokio::join!(client.replace_v1_taker(stuck, Urgency::High), async {
+            sleep(Duration::from_secs(3)).await;
+            raw(&fork, "evm_mine", serde_json::json!([])).await;
+        });
+    let V1TakerReplacement::Adjustment(V1TakerAdjustment::Adjusted(adjusted)) =
+        replaced_adjustment.unwrap()
+    else {
+        panic!("an adjustment replaced as an adjustment");
+    };
+    assert_ne!(adjusted.tx_hash, stuck, "the replacement mined");
+    assert_eq!(adjusted.pos_id, replaced.pos_id);
+    let replacement_tx = w
+        .provider
+        .get_transaction_by_hash(adjusted.tx_hash)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(replacement_tx.nonce(), stuck_tx.nonce(), "same nonce");
+    let renewed = Perp::adjustTakerCall::abi_decode(replacement_tx.input())
+        .unwrap()
+        .params;
+    assert!(renewed.deadline > stuck_call.deadline);
+    assert!(renewed.reduceOnly);
+    assert_eq!(renewed.perpDelta, stuck_call.perpDelta);
+    assert_eq!(unpack(adjusted.event.delta).0, 100_000 - 40_000);
+    raw(&fork, "evm_setAutomine", serde_json::json!([true])).await;
+    println!("stuck adjustment {stuck} replaced by {}", adjusted.tx_hash);
 
     // ── Liquidation: an under-margined taker ────────────────────────
     client.chain().refresh_gas().await.unwrap();

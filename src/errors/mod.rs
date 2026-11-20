@@ -22,7 +22,7 @@ pub mod validation;
 
 pub use contract::ContractError;
 pub use decode::RevertClass;
-pub use transaction::TransactionError;
+pub use transaction::{NotReplaceableReason, TransactionError};
 pub use validation::ValidationError;
 
 use alloy::primitives::FixedBytes;
@@ -103,7 +103,9 @@ impl PerpCityError {
     /// `GasUnavailable` covers the simulation that got no answer at all.
     ///
     /// `BroadcastFailed` and `ReceiptTimeout` are transient: the
-    /// transaction may still land, and its hash is on the error.
+    /// transaction may still land, and its hash is on the error. A
+    /// `ReplacementUnconfirmed` is as its `source` is, and transient with
+    /// none; `ReplacementNonceUsed` and `NotReplaceable` are not.
     ///
     /// `NonceDesynced` and `TooManyInFlight` are transient by construction:
     /// both clear themselves as in-flight transactions drain, so callers
@@ -141,7 +143,6 @@ impl PerpCityError {
                 | Self::Transaction(TransactionError::GasUnavailable { .. })
                 | Self::Transaction(TransactionError::BroadcastFailed { .. })
                 | Self::Transaction(TransactionError::ReceiptTimeout { .. })
-                | Self::Transaction(TransactionError::ReplacementUnconfirmed { .. })
                 | Self::Transaction(TransactionError::NonceDesynced { .. })
                 | Self::Transaction(TransactionError::TooManyInFlight { .. })
                 | Self::Transaction(TransactionError::TakerNotClosed { .. })
@@ -151,6 +152,8 @@ impl PerpCityError {
                     ..
                 })
         ) || matches!(self, Self::Iris(e) if e.is_transient())
+            || matches!(self, Self::Transaction(TransactionError::ReplacementUnconfirmed { source, .. })
+                if source.as_deref().is_none_or(Self::is_transient))
             || self.revert_class().is_some_and(RevertClass::is_transient)
     }
 
@@ -163,8 +166,8 @@ impl PerpCityError {
         }
     }
 
-    /// A transaction broadcast and not confirmed either way; see
-    /// [`TransactionError::is_unconfirmed`]. Such an error is also
+    /// A trade whose effect is unknown; see
+    /// [`TransactionError::is_unconfirmed`]. Such an error is often also
     /// [transient](Self::is_transient), so a loop that retries transients
     /// must exclude it before resending a change that is not idempotent.
     pub fn is_unconfirmed(&self) -> bool {

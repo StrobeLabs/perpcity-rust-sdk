@@ -129,7 +129,10 @@ pub enum ValidationError {
     /// it through zero: the change must lie between zero and the delta that
     /// closes the position exactly, the `v1.0.0` rule the contract enforces
     /// as `ReduceOnlyViolated`. Both figures are perp atoms.
-    #[error("reduce-only change {perp_delta} is outside [0, {closing}] for position {position}", closing = -position)]
+    #[error(
+        "reduce-only change {perp_delta} is outside {} for position {position}",
+        reduce_only_interval(*position)
+    )]
     ReduceOnlyViolated {
         /// The position's perp amount when it was read.
         position: i128,
@@ -143,4 +146,15 @@ pub enum ValidationError {
         /// What was wrong.
         reason: String,
     },
+}
+
+/// The changes a reduce-only adjustment of `position` may make, lowest
+/// first; the magnitude is unsigned, so `i128::MIN` prints too.
+fn reduce_only_interval(position: i128) -> String {
+    let closing = position.unsigned_abs();
+    if position > 0 {
+        format!("[-{closing}, 0]")
+    } else {
+        format!("[0, {closing}]")
+    }
 }

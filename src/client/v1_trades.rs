@@ -5,19 +5,23 @@
 
 use std::time::Duration;
 
-use alloy::consensus::Transaction as ConsensusTransaction;
+use alloy::consensus::{Transaction as ConsensusTransaction, TxType};
+use alloy::contract::Error as CallError;
 use alloy::network::{TransactionBuilder, TransactionResponse as _};
 use alloy::primitives::{Address, B256, Bytes, I256, U256};
 use alloy::providers::Provider;
 use alloy::rpc::types::{TransactionReceipt, TransactionRequest};
 use alloy::sol_types::SolCall;
+use alloy::transports::TransportError;
 use serde::{Deserialize, Serialize};
 
 use crate::constants::{RECEIPT_POLL_INTERVAL, RECEIPT_TIMEOUT};
 use crate::contracts::v1::{AdjustTakerParams, OpenTakerParams, Perp};
-use crate::errors::{ContractError, PerpCityError, Result, TransactionError, ValidationError};
+use crate::errors::{
+    ContractError, NotReplaceableReason, PerpCityError, Result, TransactionError, ValidationError,
+};
 use crate::events::receipt::{V1TradeResult, parse_v1_receipt, parse_v1_receipt_for};
-use crate::hft::gas::{GasFees, Urgency};
+use crate::hft::gas::{GasFees, Urgency, is_out_of_gas};
 use crate::math::swap::MAX_TOTAL_FEE_SLACK;
 use crate::units::{PerpDelta, UsdcAtoms, UsdcDelta};
 
@@ -38,7 +42,9 @@ pub enum MaxTotalFee {
     /// market's rates read at the send
     /// ([`TakerFeeRates::max_total_fee`](crate::TakerFeeRates::max_total_fee)
     /// with [`MAX_TOTAL_FEE_SLACK`]). A buy's `amt1_limit` is such a
-    /// volume; a sell's volume is its quote.
+    /// volume. A sell's `amt1_limit` is a floor, not a ceiling, so size its
+    /// volume from the quote's proceeds with a margin for the price moving
+    /// up before the block (for example 1%).
     ForVolume(UsdcAtoms),
     /// This bound, as it is.
     Exact(UsdcAtoms),
@@ -67,12 +73,27 @@ pub enum V1TakerReplacement {
     Adjustment(V1TakerAdjustment),
 }
 
-/// The taker call a stuck transaction carries, as its replacement needs
-/// it to parse the receipt.
+/// The fields from a stuck call needed to parse its receipt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum StuckCall {
     Open { holder: Address },
     Adjust { pos_id: U256 },
+}
+
+/// The call a stuck input carries, and its calldata with a renewed
+/// deadline when that can advance.
+type ReplacementCalldata = fn(&[u8], u64) -> Option<(StuckCall, Option<Bytes>)>;
+
+/// What the receipts and the account nonce say about a nonce's
+/// transactions.
+#[derive(Debug)]
+enum Settled {
+    /// One of the hashes mined.
+    Mined(Box<TransactionReceipt>),
+    /// Another transaction at the nonce mined.
+    NonceUsed,
+    /// Nothing at the nonce mined yet.
+    Pending,
 }
 
 /// The deadline of a trade signed at `now_secs`.
@@ -147,20 +168,48 @@ fn closing_delta(position: PerpDelta) -> I256 {
     -I256::try_from(position.atoms()).expect("i128 fits I256")
 }
 
+/// The reduce-only `adjustTaker` that closes `position` of `pos_id`: its
+/// perp amount reversed to the atom, and `amt1_limit` or, for `None`, the
+/// market limit of the closing swap (no proceeds for a sell, any cost for
+/// a buy).
+fn close_call(
+    pos_id: U256,
+    position: PerpDelta,
+    amt1_limit: Option<UsdcAtoms>,
+    max_total_fee: UsdcAtoms,
+    deadline: u64,
+) -> std::result::Result<Perp::adjustTakerCall, ValidationError> {
+    let perp_delta = PerpDelta::new(i128::try_from(closing_delta(position)).map_err(|_| {
+        ValidationError::Overflow {
+            context: format!("closing perp delta for position {pos_id} exceeds int128"),
+        }
+    })?);
+    let market_limit = if perp_delta.atoms() > 0 { u128::MAX } else { 0 };
+    let params = ExactAdjustTakerParams {
+        pos_id,
+        margin_delta: UsdcDelta::ZERO,
+        perp_delta,
+        amt1_limit: amt1_limit.unwrap_or(UsdcAtoms::new(market_limit)),
+    };
+    Ok(adjust_call(&params, max_total_fee, true, deadline))
+}
+
+/// The later of the new deadline and one second after the original one.
+fn renewed_deadline(old: u64, now_secs: u64) -> Option<u64> {
+    old.checked_add(1)
+        .map(|next| deadline_after(now_secs).max(next))
+}
+
 /// Identify the v1 taker call and renew its deadline when it can advance.
 /// A mined call can still be parsed when its deadline cannot be renewed.
 fn replacement_calldata(input: &[u8], now_secs: u64) -> Option<(StuckCall, Option<Bytes>)> {
-    let renewed = |old: u64| {
-        old.checked_add(1)
-            .map(|next| deadline_after(now_secs).max(next))
-    };
     match input.get(..4)?.try_into().ok()? {
         Perp::openTakerCall::SELECTOR => {
             let mut call = Perp::openTakerCall::abi_decode(input).ok()?;
             let kind = StuckCall::Open {
                 holder: call.params.holder,
             };
-            let calldata = renewed(call.params.deadline).map(|deadline| {
+            let calldata = renewed_deadline(call.params.deadline, now_secs).map(|deadline| {
                 call.params.deadline = deadline;
                 call.abi_encode().into()
             });
@@ -171,7 +220,7 @@ fn replacement_calldata(input: &[u8], now_secs: u64) -> Option<(StuckCall, Optio
             let kind = StuckCall::Adjust {
                 pos_id: call.params.posId,
             };
-            let calldata = renewed(call.params.deadline).map(|deadline| {
+            let calldata = renewed_deadline(call.params.deadline, now_secs).map(|deadline| {
                 call.params.deadline = deadline;
                 call.abi_encode().into()
             });
@@ -183,15 +232,20 @@ fn replacement_calldata(input: &[u8], now_secs: u64) -> Option<(StuckCall, Optio
 
 /// A replacement's fees: each at least an eighth above the stuck one's,
 /// which a node needs to replace a pending transaction, and at least what
-/// the urgency asks of the current base fee when the cache has one.
-fn replacement_fees(max_fee: u128, priority: u128, current: Option<GasFees>) -> (u128, u128) {
+/// the urgency asks of the current base fee.
+fn replacement_fees(max_fee: u128, priority: u128, current: GasFees) -> (u128, u128) {
     let bump = |fee: u128| fee.saturating_add(fee / 8).saturating_add(1);
-    let (mut max_fee, mut priority) = (bump(max_fee), bump(priority));
-    if let Some(current) = current {
-        max_fee = max_fee.max(u128::from(current.max_fee_per_gas));
-        priority = priority.max(u128::from(current.max_priority_fee_per_gas));
-    }
+    let max_fee = bump(max_fee).max(u128::from(current.max_fee_per_gas));
+    let priority = bump(priority).max(u128::from(current.max_priority_fee_per_gas));
     (max_fee.max(priority), priority)
+}
+
+/// Whether a broadcast error is the node's refusal of the replacement:
+/// an error response that does not say the node already has it.
+fn is_clear_refusal(error: &TransportError) -> bool {
+    error
+        .as_error_resp()
+        .is_some_and(|resp| !resp.message.to_ascii_lowercase().contains("known"))
 }
 
 /// The adjustment `receipt` mined for `pos_id` on `perp`.
@@ -275,7 +329,7 @@ impl PerpClient {
     /// With `reduce_only`, the position is read first and a change that
     /// would grow it or flip it through zero is refused before anything is
     /// sent; the contract checks the same rule again at the block it mines
-    /// in (`ReduceOnlyViolated`).
+    /// in (`ReduceOnlyViolated`). Without it, the contract permits a flip.
     ///
     /// # Errors
     ///
@@ -294,15 +348,24 @@ impl PerpClient {
             let position = self.market.get_position(params.pos_id).await?;
             check_reduce_only(position.perp, params.perp_delta)?;
         }
-        let receipt = self
-            .send_adjust_taker_v1(params, max_total_fee, reduce_only, urgency)
-            .await?;
+        let max_total_fee = self.resolve_max_total_fee(max_total_fee).await?;
+        let call = adjust_call(
+            params,
+            max_total_fee,
+            reduce_only,
+            deadline_after(now_ms() / 1_000),
+        );
+        let receipt = self.send_adjust_taker_v1(call, urgency).await?;
         taker_adjustment(&receipt, self.market.perp(), params.pos_id)
     }
 
     /// Close a taker on a `v1.0.0` market: its perp amount read now and
-    /// reversed to the atom, `reduce_only` set, so a size that moved before
-    /// the block can shrink the close but never flip the position.
+    /// reversed to the atom, with `reduce_only` set.
+    ///
+    /// The contract checks the delta against the position at the block the
+    /// close mines in, and does not clamp it. A position that shrank after
+    /// the read reverts `ReduceOnlyViolated`. A position that grew is only
+    /// reduced, which gives [`TransactionError::TakerNotClosed`].
     ///
     /// `amt1_limit` is the directional USDC limit of the closing swap; `None`
     /// is a market close (any proceeds for a sell, any cost for a buy).
@@ -311,8 +374,11 @@ impl PerpClient {
     ///
     /// As [`Self::adjust_taker_v1`]; [`ValidationError::Overflow`] when the
     /// closing delta exceeds the signed 128-bit amount range;
+    /// [`TransactionError::SimulationReverted`] with `ReduceOnlyViolated`
+    /// at the preflight when the position shrank after the read (a mined
+    /// revert is [`TransactionError::Reverted`]);
     /// [`TransactionError::TakerNotClosed`], transient, when the close mined
-    /// as an adjustment because the position changed after the read.
+    /// as an adjustment because the position grew after the read.
     pub async fn close_taker_v1(
         &self,
         pos_id: U256,
@@ -322,22 +388,15 @@ impl PerpClient {
     ) -> Result<V1TradeResult<Perp::TakerClosed>> {
         self.require_v1("close_taker_v1").await?;
         let position = self.market.get_position(pos_id).await?;
-        let perp_delta =
-            PerpDelta::new(i128::try_from(closing_delta(position.perp)).map_err(|_| {
-                ValidationError::Overflow {
-                    context: format!("closing perp delta for position {pos_id} exceeds int128"),
-                }
-            })?);
-        let market_limit = if perp_delta.atoms() > 0 { u128::MAX } else { 0 };
-        let params = ExactAdjustTakerParams {
+        let max_total_fee = self.resolve_max_total_fee(max_total_fee).await?;
+        let call = close_call(
             pos_id,
-            margin_delta: UsdcDelta::ZERO,
-            perp_delta,
-            amt1_limit: amt1_limit.unwrap_or(UsdcAtoms::new(market_limit)),
-        };
-        let receipt = self
-            .send_adjust_taker_v1(&params, max_total_fee, true, urgency)
-            .await?;
+            position.perp,
+            amt1_limit,
+            max_total_fee,
+            deadline_after(now_ms() / 1_000),
+        )?;
+        let receipt = self.send_adjust_taker_v1(call, urgency).await?;
         match taker_adjustment(&receipt, self.market.perp(), pos_id)? {
             V1TakerAdjustment::Closed(closed) => Ok(closed),
             V1TakerAdjustment::Adjusted(adjusted) => Err(TransactionError::TakerNotClosed {
@@ -359,24 +418,61 @@ impl PerpClient {
     /// mined already, nothing is signed and its outcome is returned. Else
     /// the replacement is preflighted at the stuck one's gas limit. A
     /// failed preflight checks the original receipt. A broadcast attempt
-    /// checks both hashes and parses the first receipt it finds.
+    /// checks both hashes and the account nonce, and parses the first
+    /// receipt it finds; after a clear refusal by the node it checks once.
+    ///
+    /// Like a send, it needs fresh gas data: a receipt timeout outlives the
+    /// fee cache, so call
+    /// [`ChainReader::refresh_gas`](crate::ChainReader::refresh_gas) first.
+    ///
+    /// The replacement is not recorded in the client's `TxPipeline`: it
+    /// reuses a nonce the pipeline has already counted, and
+    /// `TxPipeline::is_in_flight` does not see it.
     ///
     /// # Errors
     ///
+    /// No error proves that the stuck trade did not happen: until a receipt
+    /// or the account nonce settles it, the original can still land.
+    ///
     /// Earlier and unknown builds are refused as in [`Self::open_taker_v1`].
-    /// [`TransactionError::NotReplaceable`] when the node does not know the
-    /// hash, when it is not this client's `openTaker` or `adjustTaker` on
-    /// this market, when its send still waits for its receipt, or when it
-    /// is not an EIP-1559 transaction or its deadline cannot advance;
-    /// [`TransactionError::ReplacementUnconfirmed`] when receipt checks
-    /// cannot establish the outcome; the signing and parse errors of
+    /// [`TransactionError::NotReplaceable`] with a
+    /// [`NotReplaceableReason`] when the stuck transaction is not signed
+    /// again. [`TransactionError::ReplacementUnconfirmed`], carrying the
+    /// stuck hash, its nonce, any replacement hash and the cause, for an RPC
+    /// failure, a stale fee cache, a failed preflight or signing, or no
+    /// receipt before the timeout.
+    /// [`TransactionError::ReplacementNonceUsed`] when another transaction
+    /// used the nonce. For a mined receipt, [`TransactionError::OutOfGas`],
+    /// [`TransactionError::Reverted`] and the parse errors of
     /// [`Self::open_taker_v1`] and [`Self::adjust_taker_v1`].
     pub async fn replace_v1_taker(
         &self,
         stuck: B256,
         urgency: Urgency,
     ) -> Result<V1TakerReplacement> {
-        self.require_v1("replace_v1_taker").await?;
+        let (call, receipt) = self
+            .replace_v1_trade("replace_v1_taker", stuck, urgency, replacement_calldata)
+            .await?;
+        let perp = self.market.perp();
+        match call {
+            StuckCall::Open { holder } => parse_v1_receipt_for(&receipt, perp, None, Some(holder))
+                .map(V1TakerReplacement::Opened),
+            StuckCall::Adjust { pos_id } => {
+                taker_adjustment(&receipt, perp, pos_id).map(V1TakerReplacement::Adjustment)
+            }
+        }
+    }
+
+    /// Replace the stuck `v1.0.0` trade `stuck` whose call `decode` reads,
+    /// and return the call with the successful receipt of whichever
+    /// transaction at its nonce mined.
+    async fn replace_v1_trade(
+        &self,
+        operation: &'static str,
+        stuck: B256,
+        urgency: Urgency,
+        decode: ReplacementCalldata,
+    ) -> Result<(StuckCall, TransactionReceipt)> {
         let refuse = |reason| -> PerpCityError {
             TransactionError::NotReplaceable {
                 tx_hash: stuck,
@@ -384,94 +480,155 @@ impl PerpClient {
             }
             .into()
         };
+        let unconfirmed = |nonce, source: PerpCityError| -> PerpCityError {
+            TransactionError::ReplacementUnconfirmed {
+                original: stuck,
+                nonce,
+                replacement: None,
+                source: Some(Box::new(source)),
+            }
+            .into()
+        };
+        match self.market.era().await {
+            Ok(Era::V1) => {}
+            Ok(era) => return Err(ContractError::UnsupportedEra { era, operation }.into()),
+            Err(refused @ PerpCityError::Contract(ContractError::UnknownBuild { .. })) => {
+                return Err(refused);
+            }
+            // A transport failure of the era's contract calls is the
+            // node's, and transient.
+            Err(PerpCityError::Abi(CallError::TransportError(error))) => {
+                return Err(unconfirmed(None, error.into()));
+            }
+            Err(error) => return Err(unconfirmed(None, error)),
+        }
         let perp = self.market.perp();
         let provider = self.chain().provider();
-        let tx = provider
-            .get_transaction_by_hash(stuck)
-            .await?
-            .ok_or_else(|| refuse("the node does not know it"))?;
+        let tx = match provider.get_transaction_by_hash(stuck).await {
+            Ok(Some(tx)) => tx,
+            Ok(None) => return Err(refuse(NotReplaceableReason::UnknownToNode)),
+            Err(error) => return Err(unconfirmed(None, error.into())),
+        };
         if tx.from() != self.address || tx.to() != Some(perp) {
-            return Err(refuse("not this client's trade on this market"));
+            return Err(refuse(NotReplaceableReason::NotThisClientsTrade));
         }
-        let (call, calldata) = replacement_calldata(tx.input(), now_ms() / 1_000)
-            .ok_or_else(|| refuse("not a v1.0.0 openTaker or adjustTaker"))?;
+        let (call, calldata) = decode(tx.input(), now_ms() / 1_000)
+            .ok_or_else(|| refuse(NotReplaceableReason::UnsupportedCall))?;
+        let nonce = tx.nonce();
+        let gas_limit = tx.gas_limit();
+        let selector: [u8; 4] = tx.input()[..4]
+            .try_into()
+            .expect("a decoded call has a selector");
         if tx.block_number.is_some() {
-            let receipt = self.poll_receipt(stuck).await?;
-            return self.replacement_outcome(call, &receipt);
+            let receipt = self
+                .poll_receipt(stuck)
+                .await
+                .map_err(|error| unconfirmed(Some(nonce), error))?;
+            return self.mined(call, receipt, gas_limit, selector);
         }
-        let calldata = calldata.ok_or_else(|| refuse("its deadline cannot advance"))?;
         if self.pipeline.lock().unwrap().is_in_flight(&stuck.0) {
-            return Err(refuse("its send still waits for the receipt"));
+            return Err(refuse(NotReplaceableReason::InFlight));
         }
-        let old_priority = tx
-            .max_priority_fee_per_gas()
-            .ok_or_else(|| refuse("not an EIP-1559 transaction"))?;
+        let tx_type = tx.inner.tx_type();
+        let old_priority = match (tx_type, tx.max_priority_fee_per_gas()) {
+            (TxType::Eip1559, Some(priority)) => priority,
+            _ => {
+                return Err(refuse(NotReplaceableReason::NotEip1559 {
+                    tx_type: tx_type as u8,
+                }));
+            }
+        };
+        let calldata =
+            calldata.ok_or_else(|| refuse(NotReplaceableReason::DeadlineCannotAdvance))?;
         let current = self
             .chain()
             .fee_cache()
             .lock()
             .unwrap()
-            .fees_for(urgency, now_ms());
+            .fees_for(urgency, now_ms())
+            .ok_or_else(|| {
+                unconfirmed(
+                    Some(nonce),
+                    TransactionError::GasUnavailable {
+                        reason: "gas cache stale or empty".into(),
+                    }
+                    .into(),
+                )
+            })?;
         let (max_fee, priority) = replacement_fees(
             ConsensusTransaction::max_fee_per_gas(&tx),
             old_priority,
             current,
         );
-        let gas_limit = tx.gas_limit();
         if let Err(source) = self
             .chain()
             .preflight_call(self.address, perp, &calldata, 0, Some(gas_limit))
             .await
         {
-            if let Ok(Some(receipt)) = provider.get_transaction_receipt(stuck).await {
-                return self.replacement_outcome(call, &receipt);
-            }
-            return Err(TransactionError::ReplacementUnconfirmed {
-                original: stuck,
-                replacement: None,
-                source: Some(Box::new(source)),
-            }
-            .into());
+            return match self.settled(&[stuck], nonce).await {
+                Settled::Mined(receipt) => self.mined(call, *receipt, gas_limit, selector),
+                Settled::NonceUsed => Err(TransactionError::ReplacementNonceUsed {
+                    original: stuck,
+                    nonce,
+                    replacement: None,
+                }
+                .into()),
+                Settled::Pending => Err(unconfirmed(Some(nonce), source.into())),
+            };
         }
 
         let request = TransactionRequest::default()
             .with_to(perp)
             .with_input(calldata)
             .with_value(U256::ZERO)
-            .with_nonce(tx.nonce())
+            .with_nonce(nonce)
             .with_gas_limit(gas_limit)
             .with_max_fee_per_gas(max_fee)
             .with_max_priority_fee_per_gas(priority)
             .with_chain_id(self.chain().chain_id());
-        let envelope =
-            request
-                .build(&self.wallet)
-                .await
-                .map_err(|e| TransactionError::SigningFailed {
+        let envelope = request.build(&self.wallet).await.map_err(|e| {
+            unconfirmed(
+                Some(nonce),
+                TransactionError::SigningFailed {
                     reason: format!("{e}"),
-                })?;
+                }
+                .into(),
+            )
+        })?;
         let replacement = *envelope.tx_hash();
         let broadcast_error = provider.send_tx_envelope(envelope).await.err();
+        let refused = broadcast_error.as_ref().is_some_and(is_clear_refusal);
         tracing::debug!(
             %stuck,
             %replacement,
-            nonce = tx.nonce(),
+            nonce,
             max_fee,
             priority,
             ?urgency,
             broadcast_acknowledged = broadcast_error.is_none(),
-            "sent v1 taker replacement"
+            refused,
+            "sent v1 trade replacement"
         );
-        match self.first_receipt(replacement, stuck).await {
-            Some(receipt) => self.replacement_outcome(call, &receipt),
-            None => Err(TransactionError::ReplacementUnconfirmed {
+        match self.first_receipt(replacement, stuck, nonce, refused).await {
+            Settled::Mined(receipt) => self.mined(call, *receipt, gas_limit, selector),
+            Settled::NonceUsed => Err(TransactionError::ReplacementNonceUsed {
                 original: stuck,
+                nonce,
+                replacement: Some(replacement),
+            }
+            .into()),
+            Settled::Pending => Err(TransactionError::ReplacementUnconfirmed {
+                original: stuck,
+                nonce: Some(nonce),
                 replacement: Some(replacement),
                 source: broadcast_error.map(|source| {
-                    Box::new(TransactionError::BroadcastFailed {
-                        tx_hash: replacement,
-                        source,
-                    })
+                    Box::new(
+                        TransactionError::BroadcastFailed {
+                            tx_hash: replacement,
+                            source,
+                        }
+                        .into(),
+                    )
                 }),
             }
             .into()),
@@ -502,25 +659,18 @@ impl PerpClient {
     /// Sign, send and wait for one `adjustTaker`.
     async fn send_adjust_taker_v1(
         &self,
-        params: &ExactAdjustTakerParams,
-        max_total_fee: MaxTotalFee,
-        reduce_only: bool,
+        call: Perp::adjustTakerCall,
         urgency: Urgency,
     ) -> Result<TransactionReceipt> {
-        let max_total_fee = self.resolve_max_total_fee(max_total_fee).await?;
-        let call = adjust_call(
-            params,
-            max_total_fee,
-            reduce_only,
-            deadline_after(now_ms() / 1_000),
-        );
+        let params = &call.params;
         tracing::debug!(
-            pos_id = %params.pos_id,
-            margin_delta_atoms = params.margin_delta.atoms(),
-            perp_delta_atoms = params.perp_delta.atoms(),
-            max_total_fee = max_total_fee.atoms(),
-            reduce_only,
-            deadline = call.params.deadline,
+            pos_id = %params.posId,
+            margin_delta_atoms = params.marginDelta,
+            perp_delta = %params.perpDelta,
+            amt1_limit = %params.amt1Limit,
+            max_total_fee = %params.maxTotalFee,
+            reduce_only = params.reduceOnly,
+            deadline = params.deadline,
             ?urgency,
             "adjusting v1 taker position"
         );
@@ -530,71 +680,116 @@ impl PerpClient {
             .await
     }
 
-    /// The first receipt of either hash, polled until [`RECEIPT_TIMEOUT`].
-    async fn first_receipt(&self, replacement: B256, stuck: B256) -> Option<TransactionReceipt> {
-        let provider = self.chain().provider();
+    /// The first receipt of either hash, or the nonce used by another
+    /// transaction, polled until [`RECEIPT_TIMEOUT`]; checked once when
+    /// `once`.
+    async fn first_receipt(
+        &self,
+        replacement: B256,
+        stuck: B256,
+        nonce: u64,
+        once: bool,
+    ) -> Settled {
         let deadline = tokio::time::Instant::now() + RECEIPT_TIMEOUT;
         loop {
-            for hash in [replacement, stuck] {
-                if let Ok(Some(receipt)) = provider.get_transaction_receipt(hash).await {
-                    return Some(receipt);
-                }
+            let settled = self.settled(&[replacement, stuck], nonce).await;
+            if !matches!(settled, Settled::Pending) || once {
+                return settled;
             }
             if tokio::time::Instant::now() >= deadline {
-                return None;
+                return Settled::Pending;
             }
             tokio::time::sleep(RECEIPT_POLL_INTERVAL).await;
         }
     }
 
-    /// Parse a replaced trade's receipt as the call it carried.
-    fn replacement_outcome(
+    /// One look at the account nonce, then at the receipts of `hashes`. The
+    /// nonce is read first, so a nonce used before the receipt look-ups
+    /// means none of `hashes` mined. A failed RPC counts as no answer.
+    async fn settled(&self, hashes: &[B256], nonce: u64) -> Settled {
+        let provider = self.chain().provider();
+        let used = provider
+            .get_transaction_count(self.address)
+            .latest()
+            .await
+            .is_ok_and(|count| count > nonce);
+        for hash in hashes {
+            if let Ok(Some(receipt)) = provider.get_transaction_receipt(*hash).await {
+                return Settled::Mined(Box::new(receipt));
+            }
+        }
+        if used {
+            Settled::NonceUsed
+        } else {
+            Settled::Pending
+        }
+    }
+
+    /// A replaced trade's mined `receipt`, classified as a send's: out of
+    /// gas at `gas_limit` (the cached estimate for `selector` evicted),
+    /// reverted, or successful.
+    fn mined(
         &self,
         call: StuckCall,
-        receipt: &TransactionReceipt,
-    ) -> Result<V1TakerReplacement> {
-        if !receipt.status() {
-            return Err(TransactionError::Reverted {
-                tx_hash: receipt.transaction_hash,
-                reason: format!("transaction {} reverted", receipt.transaction_hash),
+        receipt: TransactionReceipt,
+        gas_limit: u64,
+        selector: [u8; 4],
+    ) -> Result<(StuckCall, TransactionReceipt)> {
+        let tx_hash = receipt.transaction_hash;
+        if receipt.status() {
+            return Ok((call, receipt));
+        }
+        let gas_used = receipt.gas_used;
+        if is_out_of_gas(gas_used, gas_limit) {
+            self.gas_limit_cache.lock().unwrap().invalidate(&selector);
+            tracing::warn!(%tx_hash, gas_used, gas_limit, "v1 trade replacement out of gas; cached estimate evicted");
+            return Err(TransactionError::OutOfGas {
+                tx_hash,
+                gas_used,
+                gas_limit,
             }
             .into());
         }
-        let perp = self.market.perp();
-        match call {
-            StuckCall::Open { holder } => parse_v1_receipt_for(receipt, perp, None, Some(holder))
-                .map(V1TakerReplacement::Opened),
-            StuckCall::Adjust { pos_id } => {
-                taker_adjustment(receipt, perp, pos_id).map(V1TakerReplacement::Adjustment)
-            }
+        Err(TransactionError::Reverted {
+            tx_hash,
+            reason: format!("transaction {tx_hash} reverted"),
         }
+        .into())
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::time::Instant;
+
     use alloy::consensus::transaction::Recovered;
     use alloy::consensus::{Receipt, ReceiptEnvelope};
     use alloy::eips::BlockId;
     use alloy::network::TransactionBuilder;
     use alloy::primitives::{Address, B256, Bytes, I256, U256};
-    use alloy::rpc::types::{Transaction, TransactionReceipt, TransactionRequest};
-    use alloy::sol_types::{SolCall, SolEvent};
+    use alloy::providers::bindings::IMulticall3 as Multicall;
+    use alloy::rpc::types::{Log, Transaction, TransactionReceipt, TransactionRequest};
+    use alloy::sol_types::{SolCall, SolError, SolEvent};
 
     use super::{
         MaxTotalFee, StuckCall, V1_TRADE_DEADLINE, V1TakerAdjustment, V1TakerReplacement,
-        adjust_call, check_reduce_only, open_call, replacement_calldata, replacement_fees,
+        adjust_call, check_reduce_only, close_call, open_call, replacement_calldata,
+        replacement_fees,
     };
     use crate::client::queries::Era;
     use crate::client::trades::{ExactAdjustTakerParams, ExactOpenTakerParams};
     use crate::client::{
-        ARBITRUM_CHAIN_ID, ARBITRUM_SEPOLIA_CHAIN_ID, ChainDeployments, PerpClient, mock,
+        ARBITRUM_CHAIN_ID, ARBITRUM_SEPOLIA_CHAIN_ID, ChainDeployments, PerpClient, mock, now_ms,
     };
     use crate::constants::{RECEIPT_POLL_INTERVAL, RECEIPT_TIMEOUT};
-    use crate::contracts::{Perp as EarlierPerp, v1};
+    use crate::contracts::{OpenTakerParams as EarlierOpenTakerParams, Perp as EarlierPerp, v1};
     use crate::convert::pack_balance_delta;
-    use crate::errors::{ContractError, PerpCityError, TransactionError, ValidationError};
+    use crate::errors::{
+        ContractError, NotReplaceableReason, PerpCityError, RevertClass, TransactionError,
+        ValidationError,
+    };
     use crate::hft::gas::{GasFees, Urgency};
+    use crate::hft::pipeline::TxRequest;
     use crate::history::test_support::mined_event_log;
     use crate::units::{PerpDelta, UsdcAtoms, UsdcDelta};
 
@@ -681,6 +876,68 @@ mod tests {
         assert!(check_reduce_only(min, PerpDelta::new(i128::MAX)).is_ok());
         assert!(check_reduce_only(min, PerpDelta::new(-1)).is_err());
         assert!(check_reduce_only(PerpDelta::new(i128::MAX), min).is_err());
+
+        let shown = |position, perp_delta| {
+            ValidationError::ReduceOnlyViolated {
+                position,
+                perp_delta,
+            }
+            .to_string()
+        };
+        assert_eq!(
+            shown(400_000, 1),
+            "reduce-only change 1 is outside [-400000, 0] for position 400000"
+        );
+        assert_eq!(
+            shown(-250_000, -1),
+            "reduce-only change -1 is outside [0, 250000] for position -250000"
+        );
+        assert!(shown(i128::MIN, -1).contains("[0, 170141183460469231731687303715884105728]"));
+        assert!(shown(0, 1).contains("[0, 0]"));
+    }
+
+    /// The close of either side: the perp amount reversed to the atom,
+    /// reduce-only, and the market limit of the swap's direction for
+    /// `None` (no proceeds for a long's sell, any cost for a short's buy).
+    #[test]
+    fn a_close_reverses_either_side_with_its_market_limit() {
+        let pos_id = U256::from(2u8);
+        let fee = UsdcAtoms::new(1_000);
+        for (position, delta, market_limit) in [
+            (400_000, -400_000, U256::ZERO),
+            (-250_000, 250_000, U256::from(u128::MAX)),
+        ] {
+            let call = close_call(pos_id, PerpDelta::new(position), None, fee, NOW).unwrap();
+            let params = v1::Perp::adjustTakerCall::abi_decode(&call.abi_encode())
+                .unwrap()
+                .params;
+            assert_eq!(params.posId, pos_id);
+            assert_eq!(
+                params.perpDelta,
+                I256::try_from(delta).unwrap(),
+                "{position}"
+            );
+            assert_eq!(params.amt1Limit, market_limit, "{position}");
+            assert!(params.reduceOnly, "{position}");
+            assert_eq!(params.marginDelta, 0);
+            assert_eq!(params.maxTotalFee, U256::from(1_000u64));
+            assert_eq!(params.deadline, NOW);
+
+            let limited = close_call(
+                pos_id,
+                PerpDelta::new(position),
+                Some(UsdcAtoms::new(7)),
+                fee,
+                NOW,
+            )
+            .unwrap();
+            assert_eq!(limited.params.amt1Limit, U256::from(7u8));
+            assert!(limited.params.reduceOnly);
+        }
+        assert!(matches!(
+            close_call(pos_id, PerpDelta::new(i128::MIN), None, fee, NOW),
+            Err(ValidationError::Overflow { .. })
+        ));
     }
 
     /// A replacement is the same call with a new deadline, now plus 600 s,
@@ -718,7 +975,7 @@ mod tests {
         assert_eq!(renewed.perpDelta, stuck.params.perpDelta);
 
         let earlier = EarlierPerp::openTakerCall {
-            params: crate::contracts::OpenTakerParams {
+            params: EarlierOpenTakerParams {
                 holder: HOLDER,
                 margin: 10_000_000,
                 perpDelta: I256::ONE,
@@ -734,14 +991,20 @@ mod tests {
     /// when those are higher.
     #[test]
     fn replacement_fees_rise_by_an_eighth_or_to_the_current_fees() {
-        assert_eq!(replacement_fees(800, 80, None), (901, 91));
+        let low = GasFees {
+            base_fee: 1,
+            max_priority_fee_per_gas: 1,
+            max_fee_per_gas: 2,
+            updated_at_ms: 0,
+        };
+        assert_eq!(replacement_fees(800, 80, low), (901, 91));
         let current = GasFees {
             base_fee: 1_000,
             max_priority_fee_per_gas: 200,
             max_fee_per_gas: 2_200,
             updated_at_ms: 0,
         };
-        assert_eq!(replacement_fees(800, 80, Some(current)), (2_200, 200));
+        assert_eq!(replacement_fees(800, 80, current), (2_200, 200));
     }
 
     #[tokio::test]
@@ -839,32 +1102,83 @@ mod tests {
         assert_eq!(rates.max_swap_fee.e6(), 8_600);
         assert_eq!(rates.protocol_fee.e6(), 100);
         assert_eq!(rpc.call_blocks()[2..], [BlockId::hash(hash); 2]);
+        let calls = rpc.calls();
+        assert_eq!(calls[2][..4], EarlierPerp::modulesCall::SELECTOR);
+        let batch = Multicall::aggregateCall::abi_decode(&calls[3])
+            .unwrap()
+            .calls;
+        let targets: Vec<_> = batch
+            .iter()
+            .map(|call| (call.target, call.callData[..4].to_vec()))
+            .collect();
+        assert_eq!(
+            targets,
+            [
+                (mock::FEES, v1::IFees::maxSwapFeeCall::SELECTOR.to_vec()),
+                (
+                    client.market().perp(),
+                    v1::Perp::protocolFeeCall::SELECTOR.to_vec()
+                ),
+            ],
+            "the fee module's maxSwapFee and the market's own protocolFee"
+        );
         assert!(rpc.is_drained());
     }
 
-    async fn pending_trade(client: &PerpClient, input: Vec<u8>) -> (B256, Transaction) {
-        let envelope = TransactionRequest::default()
+    const STUCK_NONCE: u64 = 12;
+    const STUCK_GAS: u64 = 200_000;
+
+    /// A signed EIP-1559 trade of `client` on its market, as the request
+    /// for [`as_seen`].
+    fn trade_request(client: &PerpClient, input: Vec<u8>) -> TransactionRequest {
+        TransactionRequest::default()
             .with_to(client.market().perp())
             .with_input(Bytes::from(input))
-            .with_nonce(12)
-            .with_gas_limit(200_000)
+            .with_nonce(STUCK_NONCE)
+            .with_gas_limit(STUCK_GAS)
             .with_max_fee_per_gas(800)
             .with_max_priority_fee_per_gas(80)
             .with_chain_id(client.chain().chain_id())
-            .build(&client.wallet)
-            .await
-            .unwrap();
+    }
+
+    /// `request` signed by the client's wallet, as the node returns it from
+    /// `from`, pending or mined in `block`.
+    async fn as_seen(
+        client: &PerpClient,
+        request: TransactionRequest,
+        from: Address,
+        block: Option<u64>,
+    ) -> (B256, Transaction) {
+        let envelope = request.build(&client.wallet).await.unwrap();
         let hash = *envelope.tx_hash();
         (
             hash,
             Transaction {
-                inner: Recovered::new_unchecked(envelope, client.address()),
-                block_hash: None,
-                block_number: None,
-                transaction_index: None,
+                inner: Recovered::new_unchecked(envelope, from),
+                block_hash: block.map(|_| B256::with_last_byte(1)),
+                block_number: block,
+                transaction_index: block.map(|_| 0),
                 effective_gas_price: None,
             },
         )
+    }
+
+    async fn pending_trade(client: &PerpClient, input: Vec<u8>) -> (B256, Transaction) {
+        as_seen(client, trade_request(client, input), client.address(), None).await
+    }
+
+    fn stuck_open(client: &PerpClient, deadline: u64) -> v1::Perp::openTakerCall {
+        open_call(client.address(), &open(), UsdcAtoms::new(177_076), deadline)
+    }
+
+    fn opened_event(client: &PerpClient) -> v1::Perp::TakerOpened {
+        v1::Perp::TakerOpened {
+            posId: U256::from(2),
+            owner: client.address(),
+            margin: 10_000_000,
+            sr: zero_swap(),
+            lastCumlFundingX96: I256::ZERO,
+        }
     }
 
     fn mined_trade_receipt(
@@ -874,10 +1188,24 @@ mod tests {
     ) -> TransactionReceipt {
         let mut log = mined_event_log(event, client.market().perp(), 92, 0, Some(NOW));
         log.transaction_hash = Some(hash);
+        receipt(client, hash, true, 123_000, vec![log])
+    }
+
+    fn failed_receipt(client: &PerpClient, hash: B256, gas_used: u64) -> TransactionReceipt {
+        receipt(client, hash, false, gas_used, Vec::new())
+    }
+
+    fn receipt(
+        client: &PerpClient,
+        hash: B256,
+        status: bool,
+        gas_used: u64,
+        logs: Vec<Log>,
+    ) -> TransactionReceipt {
         let receipt = Receipt {
-            status: true.into(),
-            cumulative_gas_used: 123_000,
-            logs: vec![log],
+            status: status.into(),
+            cumulative_gas_used: gas_used,
+            logs,
         };
         TransactionReceipt {
             inner: ReceiptEnvelope::Eip1559(receipt.with_bloom()),
@@ -885,7 +1213,7 @@ mod tests {
             transaction_index: Some(0),
             block_hash: Some(B256::with_last_byte(1)),
             block_number: Some(92),
-            gas_used: 123_000,
+            gas_used,
             effective_gas_price: 80,
             blob_gas_used: None,
             blob_gas_price: None,
@@ -895,27 +1223,34 @@ mod tests {
         }
     }
 
+    /// One look at the nonce and the receipts: the account nonce, then no
+    /// receipt for each of `hashes`.
+    fn nothing_settled(rpc: &mock::Rpc, account_nonce: u64, hashes: usize) {
+        rpc.quantity(account_nonce);
+        for _ in 0..hashes {
+            rpc.response(&None::<TransactionReceipt>);
+        }
+    }
+
+    fn refusal(err: &PerpCityError) -> NotReplaceableReason {
+        match err {
+            PerpCityError::Transaction(TransactionError::NotReplaceable { reason, .. }) => *reason,
+            other => panic!("expected a refusal: {other}"),
+        }
+    }
+
     #[tokio::test]
     async fn an_original_open_that_mines_before_broadcast_is_returned() {
         let (client, rpc) = mock::client();
-        let open = open_call(
-            client.address(),
-            &open(),
-            UsdcAtoms::new(177_076),
-            NOW + 600,
-        );
-        let (hash, tx) = pending_trade(&client, open.abi_encode()).await;
-        let event = v1::Perp::TakerOpened {
-            posId: U256::from(2),
-            owner: client.address(),
-            margin: 10_000_000,
-            sr: zero_swap(),
-            lastCumlFundingX96: I256::ZERO,
-        };
+        client.chain().set_base_fee(100);
+        let (hash, tx) = pending_trade(&client, stuck_open(&client, NOW + 600).abi_encode()).await;
+        let event = opened_event(&client);
         rpc.immutables(Era::V1);
         rpc.response(&tx);
         rpc.raw(&[]);
+        // A clear refusal: one look, which finds the original.
         rpc.fails("nonce too low");
+        rpc.quantity(STUCK_NONCE + 1);
         rpc.response(&None::<TransactionReceipt>);
         rpc.response(&mined_trade_receipt(&client, hash, &event));
         let result = client
@@ -933,6 +1268,7 @@ mod tests {
     #[tokio::test]
     async fn an_original_close_that_mines_before_preflight_is_returned() {
         let (client, rpc) = mock::client();
+        client.chain().set_base_fee(100);
         let call = adjust_call(&adjust(-400_000), UsdcAtoms::new(1_000), true, NOW + 600);
         let (hash, tx) = pending_trade(&client, call.abi_encode()).await;
         let event = v1::Perp::TakerClosed {
@@ -949,6 +1285,7 @@ mod tests {
         rpc.immutables(Era::V1);
         rpc.response(&tx);
         rpc.fails("execution reverted");
+        rpc.quantity(STUCK_NONCE + 1);
         rpc.response(&mined_trade_receipt(&client, hash, &event));
         let result = client
             .replace_v1_taker(hash, Urgency::Normal)
@@ -963,22 +1300,17 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn uncertain_broadcast_with_no_receipts_reports_both_hashes() {
+    async fn uncertain_broadcast_with_no_receipts_reports_both_hashes_and_the_nonce() {
         let (client, rpc) = mock::client();
-        let call = open_call(
-            client.address(),
-            &open(),
-            UsdcAtoms::new(177_076),
-            NOW + 600,
-        );
-        let (hash, tx) = pending_trade(&client, call.abi_encode()).await;
+        client.chain().set_base_fee(100);
+        let (hash, tx) = pending_trade(&client, stuck_open(&client, NOW + 600).abi_encode()).await;
         rpc.immutables(Era::V1);
         rpc.response(&tx);
         rpc.raw(&[]);
-        rpc.fails("nonce too low");
+        // Not a refusal: a resent copy can be what the node already has.
+        rpc.fails("already known");
         for _ in 0..=RECEIPT_TIMEOUT.as_secs() / RECEIPT_POLL_INTERVAL.as_secs() {
-            rpc.response(&None::<TransactionReceipt>);
-            rpc.response(&None::<TransactionReceipt>);
+            nothing_settled(&rpc, STUCK_NONCE, 2);
         }
         let err = client
             .replace_v1_taker(hash, Urgency::Normal)
@@ -990,27 +1322,419 @@ mod tests {
         assert_ne!(replacement_hash, hash);
         assert!(
             matches!(err, PerpCityError::Transaction(TransactionError::ReplacementUnconfirmed {
-            original, replacement: Some(replacement), source: Some(_),
+            original, nonce: Some(STUCK_NONCE), replacement: Some(replacement), source: Some(_),
         }) if original == hash && replacement == replacement_hash)
         );
         assert!(rpc.is_drained());
     }
 
+    /// A clear refusal of the replacement is checked once, not polled to
+    /// the timeout.
     #[tokio::test]
-    async fn a_pending_trade_at_the_max_deadline_is_refused() {
+    async fn a_refused_replacement_is_checked_once() {
         let (client, rpc) = mock::client();
-        let call = open_call(client.address(), &open(), UsdcAtoms::new(177_076), u64::MAX);
-        let (hash, tx) = pending_trade(&client, call.abi_encode()).await;
+        client.chain().set_base_fee(100);
+        let (hash, tx) = pending_trade(&client, stuck_open(&client, NOW + 600).abi_encode()).await;
+        rpc.immutables(Era::V1);
+        rpc.response(&tx);
+        rpc.raw(&[]);
+        rpc.fails("replacement transaction underpriced");
+        nothing_settled(&rpc, STUCK_NONCE, 2);
+        let started = Instant::now();
+        let err = client
+            .replace_v1_taker(hash, Urgency::Normal)
+            .await
+            .unwrap_err();
+        assert!(started.elapsed() < RECEIPT_POLL_INTERVAL);
+        assert!(err.is_unconfirmed() && err.is_transient(), "{err}");
+        assert!(matches!(
+            err,
+            PerpCityError::Transaction(TransactionError::ReplacementUnconfirmed {
+                original,
+                replacement: Some(_),
+                source: Some(_),
+                ..
+            }) if original == hash
+        ));
+        assert!(rpc.is_drained());
+    }
+
+    /// S, then R1 replacing it, then R2 replacing R1, and S mines: the
+    /// look-ups of R2 and R1 find nothing, but the account nonce passed
+    /// theirs, so the outcome is the used nonce, not a timeout.
+    #[tokio::test]
+    async fn a_second_replacement_reports_the_nonce_an_earlier_signing_used() {
+        let (client, rpc) = mock::client();
+        client.chain().set_base_fee(100);
+        let (r1, tx) = pending_trade(&client, stuck_open(&client, NOW + 601).abi_encode()).await;
+        rpc.immutables(Era::V1);
+        rpc.response(&tx);
+        rpc.raw(&[]);
+        rpc.fails("already known");
+        nothing_settled(&rpc, STUCK_NONCE + 1, 2);
+        let err = client
+            .replace_v1_taker(r1, Urgency::Normal)
+            .await
+            .unwrap_err();
+        let r2 = err.tx_hash().unwrap();
+        assert_ne!(r2, r1);
+        assert!(
+            matches!(err, PerpCityError::Transaction(TransactionError::ReplacementNonceUsed {
+                original, nonce: STUCK_NONCE, replacement: Some(replacement),
+            }) if original == r1 && replacement == r2),
+            "{err}"
+        );
+        assert!(err.is_unconfirmed(), "the trade's effect is unknown");
+        assert!(!err.is_transient(), "neither hash can land");
+        assert!(rpc.is_drained());
+    }
+
+    /// An RPC failure before the stuck transaction is read keeps its hash
+    /// and is transient; a refusal of the build stays a refusal.
+    #[tokio::test]
+    async fn rpc_failures_before_the_lookup_keep_the_original() {
+        for failing_era in [true, false] {
+            let (client, rpc) = mock::client();
+            let hash = B256::repeat_byte(0x5a);
+            if failing_era {
+                rpc.fails("upstream timeout");
+            } else {
+                rpc.immutables(Era::V1);
+                rpc.fails("upstream timeout");
+            }
+            let err = client
+                .replace_v1_taker(hash, Urgency::Normal)
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(err, PerpCityError::Transaction(TransactionError::ReplacementUnconfirmed {
+                    original, nonce: None, replacement: None, source: Some(_),
+                }) if original == hash),
+                "{err}"
+            );
+            assert!(err.is_transient() && err.is_unconfirmed(), "{err}");
+            assert_eq!(err.tx_hash(), Some(hash));
+            assert!(rpc.is_drained());
+        }
+    }
+
+    /// A preflight revert with no original receipt keeps the original's
+    /// hash and nonce, and the revert's class, selector and transience.
+    #[tokio::test]
+    async fn a_preflight_revert_keeps_its_class_and_the_original() {
+        for (selector, class) in [
+            (v1::Perp::MaxAmtExceeded::SELECTOR, RevertClass::Answer),
+            (v1::Perp::TvlCapExceeded::SELECTOR, RevertClass::Hold),
+            (v1::Perp::DeadlineExpired::SELECTOR, RevertClass::Transient),
+        ] {
+            let (client, rpc) = mock::client();
+            client.chain().set_base_fee(100);
+            let (hash, tx) =
+                pending_trade(&client, stuck_open(&client, NOW + 600).abi_encode()).await;
+            rpc.immutables(Era::V1);
+            rpc.response(&tx);
+            rpc.reverts(&selector);
+            nothing_settled(&rpc, STUCK_NONCE, 1);
+            let err = client
+                .replace_v1_taker(hash, Urgency::Normal)
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(&err, PerpCityError::Transaction(TransactionError::ReplacementUnconfirmed {
+                    original, nonce: Some(STUCK_NONCE), replacement: None, source: Some(source),
+                }) if *original == hash && source.is_simulation_revert()),
+                "{err}"
+            );
+            assert_eq!(err.revert_class(), Some(class), "{err}");
+            assert_eq!(err.is_transient(), class.is_transient(), "{err}");
+            assert!(err.is_unconfirmed());
+            let PerpCityError::Transaction(inner) = &err else {
+                unreachable!()
+            };
+            assert_eq!(
+                inner.is_revert::<v1::Perp::MaxAmtExceeded>(),
+                selector == v1::Perp::MaxAmtExceeded::SELECTOR
+            );
+            assert!(rpc.is_drained());
+        }
+
+        // The same revert after the nonce was used by another transaction.
+        let (client, rpc) = mock::client();
+        client.chain().set_base_fee(100);
+        let (hash, tx) = pending_trade(&client, stuck_open(&client, NOW + 600).abi_encode()).await;
+        rpc.immutables(Era::V1);
+        rpc.response(&tx);
+        rpc.reverts(&v1::Perp::MaxAmtExceeded::SELECTOR);
+        nothing_settled(&rpc, STUCK_NONCE + 1, 1);
+        let err = client
+            .replace_v1_taker(hash, Urgency::Normal)
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            PerpCityError::Transaction(TransactionError::ReplacementNonceUsed {
+                original,
+                nonce: STUCK_NONCE,
+                replacement: None,
+            }) if original == hash
+        ));
+        assert!(rpc.is_drained());
+    }
+
+    /// Every refusal sends nothing: the node's answer to the look-up is
+    /// the last request.
+    #[tokio::test]
+    async fn refusals_sign_nothing_and_say_whether_the_original_can_land() {
+        let (client, _) = mock::client();
+        let input = stuck_open(&client, NOW + 600).abi_encode();
+        let other = Address::repeat_byte(0x44);
+        let earlier = EarlierPerp::openTakerCall {
+            params: EarlierOpenTakerParams {
+                holder: HOLDER,
+                margin: 10_000_000,
+                perpDelta: I256::ONE,
+                amt1Limit: U256::ZERO,
+            },
+        }
+        .abi_encode();
+        let mut type_4 = trade_request(&client, input.clone());
+        type_4.authorization_list = Some(Vec::new());
+        let legacy = TransactionRequest::default()
+            .with_to(client.market().perp())
+            .with_input(Bytes::from(input.clone()))
+            .with_nonce(STUCK_NONCE)
+            .with_gas_limit(STUCK_GAS)
+            .with_gas_price(800)
+            .with_chain_id(client.chain().chain_id());
+        let cases = [
+            (
+                trade_request(&client, input.clone()),
+                other,
+                NotReplaceableReason::NotThisClientsTrade,
+            ),
+            (
+                trade_request(&client, input.clone()).with_to(other),
+                client.address(),
+                NotReplaceableReason::NotThisClientsTrade,
+            ),
+            (
+                trade_request(&client, earlier),
+                client.address(),
+                NotReplaceableReason::UnsupportedCall,
+            ),
+            (
+                type_4,
+                client.address(),
+                NotReplaceableReason::NotEip1559 { tx_type: 4 },
+            ),
+            (
+                legacy,
+                client.address(),
+                NotReplaceableReason::NotEip1559 { tx_type: 0 },
+            ),
+            (
+                trade_request(&client, stuck_open(&client, u64::MAX).abi_encode()),
+                client.address(),
+                NotReplaceableReason::DeadlineCannotAdvance,
+            ),
+        ];
+        for (request, from, expected) in cases {
+            let (client, rpc) = mock::client();
+            client.chain().set_base_fee(100);
+            let (hash, tx) = as_seen(&client, request, from, None).await;
+            rpc.immutables(Era::V1);
+            rpc.response(&tx);
+            let err = client
+                .replace_v1_taker(hash, Urgency::Normal)
+                .await
+                .unwrap_err();
+            assert_eq!(refusal(&err), expected, "{err}");
+            assert_eq!(err.tx_hash(), Some(hash));
+            assert_eq!(err.is_unconfirmed(), expected.original_can_land(), "{err}");
+            assert!(!err.is_transient());
+            assert!(rpc.is_drained(), "{expected}: nothing after the look-up");
+        }
+
+        let (client, rpc) = mock::client();
+        rpc.immutables(Era::V1);
+        rpc.response(&None::<Transaction>);
+        let err = client
+            .replace_v1_taker(B256::repeat_byte(0x5a), Urgency::Normal)
+            .await
+            .unwrap_err();
+        assert_eq!(refusal(&err), NotReplaceableReason::UnknownToNode);
+        assert!(err.is_unconfirmed(), "another node can still mine it");
+        assert!(rpc.is_drained());
+    }
+
+    #[tokio::test]
+    async fn a_trade_whose_send_still_waits_is_refused() {
+        let (client, rpc) = mock::client();
+        client.chain().set_base_fee(100);
+        let input = stuck_open(&client, NOW + 600).abi_encode();
+        let (hash, tx) = pending_trade(&client, input.clone()).await;
+        let prepared = {
+            let pipeline = client.pipeline.lock().unwrap();
+            let fees = client.chain().fee_cache().lock().unwrap();
+            pipeline
+                .prepare(
+                    TxRequest {
+                        to: client.market().perp().into_array(),
+                        calldata: input,
+                        value: 0,
+                        gas_limit: STUCK_GAS,
+                        urgency: Urgency::Normal,
+                    },
+                    &fees,
+                    now_ms(),
+                )
+                .unwrap()
+        };
+        client
+            .pipeline
+            .lock()
+            .unwrap()
+            .record_submission(hash.0, prepared, now_ms());
         rpc.immutables(Era::V1);
         rpc.response(&tx);
         let err = client
             .replace_v1_taker(hash, Urgency::Normal)
             .await
             .unwrap_err();
+        assert_eq!(refusal(&err), NotReplaceableReason::InFlight);
+        assert!(err.is_unconfirmed());
+        assert!(rpc.is_drained());
+    }
+
+    /// The fee cache is stale: refused before the preflight, as a send
+    /// would be, with the original kept.
+    #[tokio::test]
+    async fn a_stale_fee_cache_refuses_before_the_preflight() {
+        let (client, rpc) = mock::client();
+        let (hash, tx) = pending_trade(&client, stuck_open(&client, NOW + 600).abi_encode()).await;
+        rpc.immutables(Era::V1);
+        rpc.response(&tx);
+        let err = client
+            .replace_v1_taker(hash, Urgency::Normal)
+            .await
+            .unwrap_err();
+        let PerpCityError::Transaction(TransactionError::ReplacementUnconfirmed {
+            original,
+            nonce: Some(STUCK_NONCE),
+            replacement: None,
+            source: Some(source),
+        }) = &err
+        else {
+            panic!("expected the original kept: {err}");
+        };
+        assert_eq!(*original, hash);
+        assert!(matches!(
+            source.as_ref(),
+            PerpCityError::Transaction(TransactionError::GasUnavailable { .. })
+        ));
+        assert!(err.is_transient());
+        assert!(rpc.is_drained(), "no preflight, nothing sent");
+    }
+
+    /// A trade that mined before the look-up is parsed, nothing signed,
+    /// even at the deadline that could not advance.
+    #[tokio::test]
+    async fn a_trade_mined_at_the_lookup_is_returned_even_at_the_max_deadline() {
+        let (client, rpc) = mock::client();
+        let input = stuck_open(&client, u64::MAX).abi_encode();
+        let (hash, tx) = as_seen(
+            &client,
+            trade_request(&client, input),
+            client.address(),
+            Some(92),
+        )
+        .await;
+        let event = opened_event(&client);
+        rpc.immutables(Era::V1);
+        rpc.response(&tx);
+        rpc.response(&mined_trade_receipt(&client, hash, &event));
+        let result = client
+            .replace_v1_taker(hash, Urgency::Normal)
+            .await
+            .unwrap();
+        let V1TakerReplacement::Opened(opened) = result else {
+            panic!("expected the mined open: {result:?}");
+        };
+        assert_eq!(opened.tx_hash, hash);
+        assert!(rpc.is_drained());
+    }
+
+    /// A mined failure is a send's: reverted, or out of gas at the stuck
+    /// limit with the cached estimate for the selector evicted.
+    #[tokio::test]
+    async fn a_mined_failure_is_reverted_or_out_of_gas() {
+        let selector = v1::Perp::openTakerCall::SELECTOR;
+        for (gas_used, out_of_gas) in [(50_000, false), (STUCK_GAS, true)] {
+            let (client, rpc) = mock::client();
+            client
+                .gas_limit_cache
+                .lock()
+                .unwrap()
+                .put(selector, 150_000, now_ms());
+            let input = stuck_open(&client, NOW + 600).abi_encode();
+            let (hash, tx) = as_seen(
+                &client,
+                trade_request(&client, input),
+                client.address(),
+                Some(92),
+            )
+            .await;
+            rpc.immutables(Era::V1);
+            rpc.response(&tx);
+            rpc.response(&failed_receipt(&client, hash, gas_used));
+            let err = client
+                .replace_v1_taker(hash, Urgency::Normal)
+                .await
+                .unwrap_err();
+            let cached = client
+                .gas_limit_cache
+                .lock()
+                .unwrap()
+                .get(&selector, now_ms());
+            if out_of_gas {
+                assert!(
+                    matches!(err, PerpCityError::Transaction(TransactionError::OutOfGas {
+                        tx_hash, gas_used: STUCK_GAS, gas_limit: STUCK_GAS,
+                    }) if tx_hash == hash),
+                    "{err}"
+                );
+                assert_eq!(cached, None, "the estimate is evicted");
+            } else {
+                assert!(
+                    matches!(err, PerpCityError::Transaction(TransactionError::Reverted { tx_hash, .. }) if tx_hash == hash),
+                    "{err}"
+                );
+                assert!(cached.is_some(), "a revert keeps the estimate");
+            }
+            assert!(rpc.is_drained());
+        }
+    }
+
+    /// The replacement's own receipt runs out of gas.
+    #[tokio::test]
+    async fn a_replacement_out_of_gas_is_out_of_gas() {
+        let (client, rpc) = mock::client();
+        client.chain().set_base_fee(100);
+        let (hash, tx) = pending_trade(&client, stuck_open(&client, NOW + 600).abi_encode()).await;
+        let winner = B256::repeat_byte(0x7e);
+        rpc.immutables(Era::V1);
+        rpc.response(&tx);
+        rpc.raw(&[]);
+        rpc.fails("already known");
+        rpc.quantity(STUCK_NONCE + 1);
+        rpc.response(&failed_receipt(&client, winner, STUCK_GAS));
+        let err = client
+            .replace_v1_taker(hash, Urgency::Normal)
+            .await
+            .unwrap_err();
         assert!(
-            matches!(err, PerpCityError::Transaction(TransactionError::NotReplaceable {
-            tx_hash, reason: "its deadline cannot advance",
-        }) if tx_hash == hash)
+            matches!(err, PerpCityError::Transaction(TransactionError::OutOfGas { tx_hash, .. }) if tx_hash == winner),
+            "{err}"
         );
         assert!(rpc.is_drained());
     }
