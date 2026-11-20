@@ -20,6 +20,7 @@ fn the_totals_are_the_last_stated_and_the_snapshots_carry_the_callers_block() {
             block: last,
             capacity: per_side(5_000_000, 6_000_000),
             open_interest: per_side(1_000_000, 0),
+            close_capacity: None,
         })
     );
     assert_eq!(
@@ -239,6 +240,7 @@ fn genesis_states_the_zeros_and_leaves_the_creation_log_unknown() {
             block: genesis_block,
             capacity: PerSide::default(),
             open_interest: PerSide::default(),
+            close_capacity: None,
         })
     );
     assert_eq!(empty.pool_price().value(), None);

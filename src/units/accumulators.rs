@@ -14,8 +14,10 @@
 //! ordered accumulators and a plain value on the modular one, so the rule
 //! is not a comment a later reader can miss.
 //!
-//! All four are Q96 but for [`FeeGrowth`], which is Q128 because Uniswap
-//! stores it so.
+//! The earlier builds' four are Q96 but for [`FeeGrowth`], which is Q128
+//! because Uniswap stores it so. `v1.0.0` adds two:
+//! [`FundingPerSqrtPriceX192`], its finer funding-per-sqrt-price word, and
+//! [`FundingCorrection`], Q128.
 
 use alloy::primitives::{I256, U256};
 
@@ -58,7 +60,26 @@ accumulator! {
 }
 
 accumulator! {
-    /// Uniswap's fee growth per unit of liquidity, Q128.
+    /// Cumulative funding per unit of sqrt-price exposure as `v1.0.0`
+    /// keeps it, at `2^192`.
+    ///
+    /// The quantity of [`FundingPerSqrtPrice`] at a finer encoding: the
+    /// two words differ by `2^96`, so one read as the other is wrong by
+    /// that factor, and they are two types.
+    FundingPerSqrtPriceX192(I256), from_x192 / x192
+}
+
+accumulator! {
+    /// `v1.0.0`'s cumulative funding correction per unit of maker
+    /// liquidity, Q128, signed: the funding the inventory leg moved
+    /// between makers, which a band nets against its own checkpoint.
+    FundingCorrection(I256), from_x128 / x128
+}
+
+accumulator! {
+    /// A fee growth per unit of liquidity, Q128: Uniswap's on the two
+    /// earlier builds, and on `v1.0.0` the market's own LP fee growth,
+    /// which wraps by the same rule.
     ///
     /// What a maker has earned in the quote token is its liquidity times
     /// the growth of this inside its band. Unlike the others it is modular

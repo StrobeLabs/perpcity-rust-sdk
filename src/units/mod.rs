@@ -63,7 +63,9 @@ mod rates;
 mod share;
 mod side;
 
-pub use accumulators::{Earnings, FeeGrowth, Funding, FundingPerSqrtPrice};
+pub use accumulators::{
+    Earnings, FeeGrowth, Funding, FundingCorrection, FundingPerSqrtPrice, FundingPerSqrtPriceX192,
+};
 pub use amount::{PerpAtoms, PerpDelta, UsdcAtoms, UsdcDelta};
 pub use factor::Factor;
 pub use liquidity::{LDelta, LUnits};

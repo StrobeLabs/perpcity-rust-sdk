@@ -218,6 +218,7 @@ mod tests {
                 PerpAtoms::new(open_interest[0]),
                 PerpAtoms::new(open_interest[1]),
             ),
+            close_capacity: None,
         }
     }
 

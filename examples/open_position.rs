@@ -114,10 +114,7 @@ async fn main() -> perpcity_sdk::Result<()> {
         "  Creator fee:     {:.4}%",
         config.fees.creator_fee.fraction() * 100.0
     );
-    println!(
-        "  LP fee:          {:.4}%",
-        config.fees.lp_fee.fraction() * 100.0
-    );
+    println!("  LP fee:          {:?}", config.fees.lp_fee);
 
     let funding = client.market().get_funding_rate().await?;
     println!("  Daily funding:   {:.6}%", funding * 100.0);

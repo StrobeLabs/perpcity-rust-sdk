@@ -94,8 +94,7 @@ async fn each_build_reads_as_its_era_on_a_sepolia_fork() {
     assert_eq!(pool_id, keccak256(key.abi_encode()));
     println!("v1: era V1, pool id {pool_id}");
 
-    // Every read that passes the immutables on a v1 market either is
-    // refused by era or fails loudly; none returns a value.
+    // The tape and liquidation paths still refuse v1.
     let unsupported = |err: &PerpCityError, operation: &str| {
         matches!(
             err,
@@ -135,8 +134,7 @@ async fn each_build_reads_as_its_era_on_a_sepolia_fork() {
         !code.is_empty(),
         "the pinned block {pinned} holds the v1 market"
     );
-    // Their multicalls hold the earlier builds' `EMA_WINDOW()`, which v1
-    // lacks (it has `emaWindow()`), so Multicall3 reverts the whole batch.
+    // The earlier maker-equity batch still asks for the old EMA window.
     let multicall_reverted = |err: &PerpCityError| {
         matches!(
             err,
@@ -144,9 +142,14 @@ async fn each_build_reads_as_its_era_on_a_sepolia_fork() {
                 if payload.code == 3 && payload.message.contains("Multicall3: call failed")
         ) && !err.is_transient()
     };
-    let err = v1_market.get_pool_snapshot().await.unwrap_err();
-    assert!(multicall_reverted(&err), "pool snapshot: {err:?}");
-    println!("v1 get_pool_snapshot fails loudly: {err}");
+    let snapshot = v1_market.get_pool_snapshot().await.unwrap();
+    let raw = Perp::new(v1_perp, &w.provider)
+        .poolState()
+        .block(snapshot.block.number.into())
+        .call()
+        .await
+        .unwrap();
+    assert_eq!(snapshot.sqrt_price.x96(), raw.sqrtPrice.to::<U256>());
     let err = v1_market
         .get_maker_equities(&[U256::from(1u8)])
         .await

@@ -1,0 +1,959 @@
+{
+  "storage": [
+    {
+      "astId": 11092,
+      "contract": "src/Perp.sol:Perp",
+      "label": "positionOwner",
+      "offset": 0,
+      "slot": "0",
+      "type": "t_mapping(t_uint256,t_address)"
+    },
+    {
+      "astId": 11097,
+      "contract": "src/Perp.sol:Perp",
+      "label": "abdicated",
+      "offset": 0,
+      "slot": "1",
+      "type": "t_mapping(t_bytes4,t_bool)"
+    },
+    {
+      "astId": 11102,
+      "contract": "src/Perp.sol:Perp",
+      "label": "protocolFeeManager",
+      "offset": 0,
+      "slot": "2",
+      "type": "t_contract(IProtocolFeeManager)14377"
+    },
+    {
+      "astId": 11107,
+      "contract": "src/Perp.sol:Perp",
+      "label": "poolId",
+      "offset": 0,
+      "slot": "3",
+      "type": "t_userDefinedValueType(PoolId)10577"
+    },
+    {
+      "astId": 11112,
+      "contract": "src/Perp.sol:Perp",
+      "label": "currency0",
+      "offset": 0,
+      "slot": "4",
+      "type": "t_userDefinedValueType(Currency)10277"
+    },
+    {
+      "astId": 11117,
+      "contract": "src/Perp.sol:Perp",
+      "label": "currency1",
+      "offset": 0,
+      "slot": "5",
+      "type": "t_userDefinedValueType(Currency)10277"
+    },
+    {
+      "astId": 11122,
+      "contract": "src/Perp.sol:Perp",
+      "label": "hooks",
+      "offset": 0,
+      "slot": "6",
+      "type": "t_contract(IHooks)6850"
+    },
+    {
+      "astId": 11126,
+      "contract": "src/Perp.sol:Perp",
+      "label": "_s",
+      "offset": 0,
+      "slot": "7",
+      "type": "t_struct(PerpStorage)27024_storage"
+    }
+  ],
+  "types": {
+    "t_address": {
+      "encoding": "inplace",
+      "label": "address",
+      "numberOfBytes": "20"
+    },
+    "t_bool": {
+      "encoding": "inplace",
+      "label": "bool",
+      "numberOfBytes": "1"
+    },
+    "t_bytes4": {
+      "encoding": "inplace",
+      "label": "bytes4",
+      "numberOfBytes": "4"
+    },
+    "t_contract(IBeacon)20": {
+      "encoding": "inplace",
+      "label": "contract IBeacon",
+      "numberOfBytes": "20"
+    },
+    "t_contract(IFees)14582": {
+      "encoding": "inplace",
+      "label": "contract IFees",
+      "numberOfBytes": "20"
+    },
+    "t_contract(IFunding)14602": {
+      "encoding": "inplace",
+      "label": "contract IFunding",
+      "numberOfBytes": "20"
+    },
+    "t_contract(IHooks)6850": {
+      "encoding": "inplace",
+      "label": "contract IHooks",
+      "numberOfBytes": "20"
+    },
+    "t_contract(IMarginRatios)14626": {
+      "encoding": "inplace",
+      "label": "contract IMarginRatios",
+      "numberOfBytes": "20"
+    },
+    "t_contract(IPriceImpact)14648": {
+      "encoding": "inplace",
+      "label": "contract IPriceImpact",
+      "numberOfBytes": "20"
+    },
+    "t_contract(IPricing)14666": {
+      "encoding": "inplace",
+      "label": "contract IPricing",
+      "numberOfBytes": "20"
+    },
+    "t_contract(IProtocolFeeManager)14377": {
+      "encoding": "inplace",
+      "label": "contract IProtocolFeeManager",
+      "numberOfBytes": "20"
+    },
+    "t_int24": {
+      "encoding": "inplace",
+      "label": "int24",
+      "numberOfBytes": "3"
+    },
+    "t_int256": {
+      "encoding": "inplace",
+      "label": "int256",
+      "numberOfBytes": "32"
+    },
+    "t_int88": {
+      "encoding": "inplace",
+      "label": "int88",
+      "numberOfBytes": "11"
+    },
+    "t_mapping(t_bytes4,t_bool)": {
+      "encoding": "mapping",
+      "key": "t_bytes4",
+      "label": "mapping(bytes4 => bool)",
+      "numberOfBytes": "32",
+      "value": "t_bool"
+    },
+    "t_mapping(t_int24,t_struct(TickInfo)27158_storage)": {
+      "encoding": "mapping",
+      "key": "t_int24",
+      "label": "mapping(int24 => struct TickInfo)",
+      "numberOfBytes": "32",
+      "value": "t_struct(TickInfo)27158_storage"
+    },
+    "t_mapping(t_uint256,t_address)": {
+      "encoding": "mapping",
+      "key": "t_uint256",
+      "label": "mapping(uint256 => address)",
+      "numberOfBytes": "32",
+      "value": "t_address"
+    },
+    "t_mapping(t_uint256,t_struct(Maker)27041_storage)": {
+      "encoding": "mapping",
+      "key": "t_uint256",
+      "label": "mapping(uint256 => struct Maker)",
+      "numberOfBytes": "32",
+      "value": "t_struct(Maker)27041_storage"
+    },
+    "t_mapping(t_uint256,t_struct(Position)27053_storage)": {
+      "encoding": "mapping",
+      "key": "t_uint256",
+      "label": "mapping(uint256 => struct Position)",
+      "numberOfBytes": "32",
+      "value": "t_struct(Position)27053_storage"
+    },
+    "t_mapping(t_uint256,t_struct(Taker)27059_storage)": {
+      "encoding": "mapping",
+      "key": "t_uint256",
+      "label": "mapping(uint256 => struct Taker)",
+      "numberOfBytes": "32",
+      "value": "t_struct(Taker)27059_storage"
+    },
+    "t_struct(Capacity)27065_storage": {
+      "encoding": "inplace",
+      "label": "struct Capacity",
+      "numberOfBytes": "32",
+      "members": [
+        {
+          "astId": 27062,
+          "contract": "src/Perp.sol:Perp",
+          "label": "long",
+          "offset": 0,
+          "slot": "0",
+          "type": "t_uint128"
+        },
+        {
+          "astId": 27064,
+          "contract": "src/Perp.sol:Perp",
+          "label": "short",
+          "offset": 16,
+          "slot": "0",
+          "type": "t_uint128"
+        }
+      ]
+    },
+    "t_struct(Cumulatives)27125_storage": {
+      "encoding": "inplace",
+      "label": "struct Cumulatives",
+      "numberOfBytes": "256",
+      "members": [
+        {
+          "astId": 27108,
+          "contract": "src/Perp.sol:Perp",
+          "label": "fundingX96",
+          "offset": 0,
+          "slot": "0",
+          "type": "t_int256"
+        },
+        {
+          "astId": 27111,
+          "contract": "src/Perp.sol:Perp",
+          "label": "fundingDivSqrtPX192",
+          "offset": 0,
+          "slot": "1",
+          "type": "t_int256"
+        },
+        {
+          "astId": 27113,
+          "contract": "src/Perp.sol:Perp",
+          "label": "lpFeeGrowthGlobalX128",
+          "offset": 0,
+          "slot": "2",
+          "type": "t_uint256"
+        },
+        {
+          "astId": 27115,
+          "contract": "src/Perp.sol:Perp",
+          "label": "longUtilPaymentsX96",
+          "offset": 0,
+          "slot": "3",
+          "type": "t_uint256"
+        },
+        {
+          "astId": 27117,
+          "contract": "src/Perp.sol:Perp",
+          "label": "shortUtilPaymentsX96",
+          "offset": 0,
+          "slot": "4",
+          "type": "t_uint256"
+        },
+        {
+          "astId": 27119,
+          "contract": "src/Perp.sol:Perp",
+          "label": "longReserveUtilPaymentsX96",
+          "offset": 0,
+          "slot": "5",
+          "type": "t_uint256"
+        },
+        {
+          "astId": 27121,
+          "contract": "src/Perp.sol:Perp",
+          "label": "shortReserveUtilPaymentsX96",
+          "offset": 0,
+          "slot": "6",
+          "type": "t_uint256"
+        },
+        {
+          "astId": 27124,
+          "contract": "src/Perp.sol:Perp",
+          "label": "fundingCorrectionX128",
+          "offset": 0,
+          "slot": "7",
+          "type": "t_int256"
+        }
+      ]
+    },
+    "t_struct(FeeFund)27073_storage": {
+      "encoding": "inplace",
+      "label": "struct FeeFund",
+      "numberOfBytes": "32",
+      "members": [
+        {
+          "astId": 27068,
+          "contract": "src/Perp.sol:Perp",
+          "label": "insurance",
+          "offset": 0,
+          "slot": "0",
+          "type": "t_uint80"
+        },
+        {
+          "astId": 27070,
+          "contract": "src/Perp.sol:Perp",
+          "label": "creatorFees",
+          "offset": 10,
+          "slot": "0",
+          "type": "t_uint80"
+        },
+        {
+          "astId": 27072,
+          "contract": "src/Perp.sol:Perp",
+          "label": "protocolFees",
+          "offset": 20,
+          "slot": "0",
+          "type": "t_uint80"
+        }
+      ]
+    },
+    "t_struct(FundingState)27081_storage": {
+      "encoding": "inplace",
+      "label": "struct FundingState",
+      "numberOfBytes": "96",
+      "members": [
+        {
+          "astId": 27076,
+          "contract": "src/Perp.sol:Perp",
+          "label": "baseX96",
+          "offset": 0,
+          "slot": "0",
+          "type": "t_int256"
+        },
+        {
+          "astId": 27078,
+          "contract": "src/Perp.sol:Perp",
+          "label": "inventoryX96",
+          "offset": 0,
+          "slot": "1",
+          "type": "t_int256"
+        },
+        {
+          "astId": 27080,
+          "contract": "src/Perp.sol:Perp",
+          "label": "makerLiquidity",
+          "offset": 0,
+          "slot": "2",
+          "type": "t_uint256"
+        }
+      ]
+    },
+    "t_struct(Maker)27041_storage": {
+      "encoding": "inplace",
+      "label": "struct Maker",
+      "numberOfBytes": "160",
+      "members": [
+        {
+          "astId": 27027,
+          "contract": "src/Perp.sol:Perp",
+          "label": "tickLower",
+          "offset": 0,
+          "slot": "0",
+          "type": "t_int24"
+        },
+        {
+          "astId": 27029,
+          "contract": "src/Perp.sol:Perp",
+          "label": "tickUpper",
+          "offset": 3,
+          "slot": "0",
+          "type": "t_int24"
+        },
+        {
+          "astId": 27031,
+          "contract": "src/Perp.sol:Perp",
+          "label": "liquidity",
+          "offset": 6,
+          "slot": "0",
+          "type": "t_uint128"
+        },
+        {
+          "astId": 27033,
+          "contract": "src/Perp.sol:Perp",
+          "label": "lastLpFeeGrowthInsideX128",
+          "offset": 0,
+          "slot": "1",
+          "type": "t_uint256"
+        },
+        {
+          "astId": 27037,
+          "contract": "src/Perp.sol:Perp",
+          "label": "lastCumlFunding",
+          "offset": 0,
+          "slot": "2",
+          "type": "t_struct(MakerFunding)27131_storage"
+        },
+        {
+          "astId": 27040,
+          "contract": "src/Perp.sol:Perp",
+          "label": "lastFundingCorrectionX128",
+          "offset": 0,
+          "slot": "4",
+          "type": "t_int256"
+        }
+      ]
+    },
+    "t_struct(MakerFunding)27131_storage": {
+      "encoding": "inplace",
+      "label": "struct MakerFunding",
+      "numberOfBytes": "64",
+      "members": [
+        {
+          "astId": 27128,
+          "contract": "src/Perp.sol:Perp",
+          "label": "belowX96",
+          "offset": 0,
+          "slot": "0",
+          "type": "t_int256"
+        },
+        {
+          "astId": 27130,
+          "contract": "src/Perp.sol:Perp",
+          "label": "withinInventoryX192",
+          "offset": 0,
+          "slot": "1",
+          "type": "t_int256"
+        }
+      ]
+    },
+    "t_struct(Modules)26931_storage": {
+      "encoding": "inplace",
+      "label": "struct Modules",
+      "numberOfBytes": "192",
+      "members": [
+        {
+          "astId": 26915,
+          "contract": "src/Perp.sol:Perp",
+          "label": "beacon",
+          "offset": 0,
+          "slot": "0",
+          "type": "t_contract(IBeacon)20"
+        },
+        {
+          "astId": 26918,
+          "contract": "src/Perp.sol:Perp",
+          "label": "fees",
+          "offset": 0,
+          "slot": "1",
+          "type": "t_contract(IFees)14582"
+        },
+        {
+          "astId": 26921,
+          "contract": "src/Perp.sol:Perp",
+          "label": "funding",
+          "offset": 0,
+          "slot": "2",
+          "type": "t_contract(IFunding)14602"
+        },
+        {
+          "astId": 26924,
+          "contract": "src/Perp.sol:Perp",
+          "label": "marginRatios",
+          "offset": 0,
+          "slot": "3",
+          "type": "t_contract(IMarginRatios)14626"
+        },
+        {
+          "astId": 26927,
+          "contract": "src/Perp.sol:Perp",
+          "label": "priceImpact",
+          "offset": 0,
+          "slot": "4",
+          "type": "t_contract(IPriceImpact)14648"
+        },
+        {
+          "astId": 26930,
+          "contract": "src/Perp.sol:Perp",
+          "label": "pricing",
+          "offset": 0,
+          "slot": "5",
+          "type": "t_contract(IPricing)14666"
+        }
+      ]
+    },
+    "t_struct(OpenInterest)27087_storage": {
+      "encoding": "inplace",
+      "label": "struct OpenInterest",
+      "numberOfBytes": "32",
+      "members": [
+        {
+          "astId": 27084,
+          "contract": "src/Perp.sol:Perp",
+          "label": "long",
+          "offset": 0,
+          "slot": "0",
+          "type": "t_uint128"
+        },
+        {
+          "astId": 27086,
+          "contract": "src/Perp.sol:Perp",
+          "label": "short",
+          "offset": 16,
+          "slot": "0",
+          "type": "t_uint128"
+        }
+      ]
+    },
+    "t_struct(PerpStorage)27024_storage": {
+      "encoding": "inplace",
+      "label": "struct PerpStorage",
+      "numberOfBytes": "1152",
+      "members": [
+        {
+          "astId": 26947,
+          "contract": "src/Perp.sol:Perp",
+          "label": "modules",
+          "offset": 0,
+          "slot": "0",
+          "type": "t_struct(Modules)26931_storage"
+        },
+        {
+          "astId": 26952,
+          "contract": "src/Perp.sol:Perp",
+          "label": "positions",
+          "offset": 0,
+          "slot": "6",
+          "type": "t_mapping(t_uint256,t_struct(Position)27053_storage)"
+        },
+        {
+          "astId": 26957,
+          "contract": "src/Perp.sol:Perp",
+          "label": "makers",
+          "offset": 0,
+          "slot": "7",
+          "type": "t_mapping(t_uint256,t_struct(Maker)27041_storage)"
+        },
+        {
+          "astId": 26962,
+          "contract": "src/Perp.sol:Perp",
+          "label": "takers",
+          "offset": 0,
+          "slot": "8",
+          "type": "t_mapping(t_uint256,t_struct(Taker)27059_storage)"
+        },
+        {
+          "astId": 26967,
+          "contract": "src/Perp.sol:Perp",
+          "label": "ticks",
+          "offset": 0,
+          "slot": "9",
+          "type": "t_mapping(t_int24,t_struct(TickInfo)27158_storage)"
+        },
+        {
+          "astId": 26970,
+          "contract": "src/Perp.sol:Perp",
+          "label": "feeFund",
+          "offset": 0,
+          "slot": "10",
+          "type": "t_struct(FeeFund)27073_storage"
+        },
+        {
+          "astId": 26973,
+          "contract": "src/Perp.sol:Perp",
+          "label": "solvencyState",
+          "offset": 0,
+          "slot": "11",
+          "type": "t_struct(SolvencyState)27099_storage"
+        },
+        {
+          "astId": 26976,
+          "contract": "src/Perp.sol:Perp",
+          "label": "oi",
+          "offset": 0,
+          "slot": "12",
+          "type": "t_struct(OpenInterest)27087_storage"
+        },
+        {
+          "astId": 26979,
+          "contract": "src/Perp.sol:Perp",
+          "label": "cap",
+          "offset": 0,
+          "slot": "13",
+          "type": "t_struct(Capacity)27065_storage"
+        },
+        {
+          "astId": 26982,
+          "contract": "src/Perp.sol:Perp",
+          "label": "physicalCap",
+          "offset": 0,
+          "slot": "14",
+          "type": "t_struct(PhysicalCapacity)27093_storage"
+        },
+        {
+          "astId": 26985,
+          "contract": "src/Perp.sol:Perp",
+          "label": "emas",
+          "offset": 0,
+          "slot": "16",
+          "type": "t_struct(PricePair)27137_storage"
+        },
+        {
+          "astId": 26988,
+          "contract": "src/Perp.sol:Perp",
+          "label": "cumls",
+          "offset": 0,
+          "slot": "17",
+          "type": "t_struct(Cumulatives)27125_storage"
+        },
+        {
+          "astId": 26991,
+          "contract": "src/Perp.sol:Perp",
+          "label": "rates",
+          "offset": 0,
+          "slot": "25",
+          "type": "t_struct(Rates)27150_storage"
+        },
+        {
+          "astId": 26994,
+          "contract": "src/Perp.sol:Perp",
+          "label": "withdrawalController",
+          "offset": 0,
+          "slot": "27",
+          "type": "t_address"
+        },
+        {
+          "astId": 26997,
+          "contract": "src/Perp.sol:Perp",
+          "label": "governor",
+          "offset": 0,
+          "slot": "28",
+          "type": "t_address"
+        },
+        {
+          "astId": 27000,
+          "contract": "src/Perp.sol:Perp",
+          "label": "permissionlessDonationsEnabled",
+          "offset": 20,
+          "slot": "28",
+          "type": "t_bool"
+        },
+        {
+          "astId": 27003,
+          "contract": "src/Perp.sol:Perp",
+          "label": "emaWindow",
+          "offset": 21,
+          "slot": "28",
+          "type": "t_uint24"
+        },
+        {
+          "astId": 27006,
+          "contract": "src/Perp.sol:Perp",
+          "label": "latency",
+          "offset": 24,
+          "slot": "28",
+          "type": "t_uint32"
+        },
+        {
+          "astId": 27009,
+          "contract": "src/Perp.sol:Perp",
+          "label": "nextPosId",
+          "offset": 0,
+          "slot": "29",
+          "type": "t_uint256"
+        },
+        {
+          "astId": 27012,
+          "contract": "src/Perp.sol:Perp",
+          "label": "protocolFee",
+          "offset": 0,
+          "slot": "30",
+          "type": "t_uint256"
+        },
+        {
+          "astId": 27015,
+          "contract": "src/Perp.sol:Perp",
+          "label": "tvlCap",
+          "offset": 0,
+          "slot": "31",
+          "type": "t_uint256"
+        },
+        {
+          "astId": 27019,
+          "contract": "src/Perp.sol:Perp",
+          "label": "fundingState",
+          "offset": 0,
+          "slot": "32",
+          "type": "t_struct(FundingState)27081_storage"
+        },
+        {
+          "astId": 27023,
+          "contract": "src/Perp.sol:Perp",
+          "label": "utilizationBand",
+          "offset": 0,
+          "slot": "35",
+          "type": "t_struct(UtilizationBand)27105_storage"
+        }
+      ]
+    },
+    "t_struct(PhysicalCapacity)27093_storage": {
+      "encoding": "inplace",
+      "label": "struct PhysicalCapacity",
+      "numberOfBytes": "64",
+      "members": [
+        {
+          "astId": 27090,
+          "contract": "src/Perp.sol:Perp",
+          "label": "longCloseX64",
+          "offset": 0,
+          "slot": "0",
+          "type": "t_uint256"
+        },
+        {
+          "astId": 27092,
+          "contract": "src/Perp.sol:Perp",
+          "label": "shortCloseX64",
+          "offset": 0,
+          "slot": "1",
+          "type": "t_uint256"
+        }
+      ]
+    },
+    "t_struct(Position)27053_storage": {
+      "encoding": "inplace",
+      "label": "struct Position",
+      "numberOfBytes": "96",
+      "members": [
+        {
+          "astId": 27046,
+          "contract": "src/Perp.sol:Perp",
+          "label": "delta",
+          "offset": 0,
+          "slot": "0",
+          "type": "t_userDefinedValueType(BalanceDelta)10063"
+        },
+        {
+          "astId": 27049,
+          "contract": "src/Perp.sol:Perp",
+          "label": "margin",
+          "offset": 0,
+          "slot": "1",
+          "type": "t_uint128"
+        },
+        {
+          "astId": 27052,
+          "contract": "src/Perp.sol:Perp",
+          "label": "lastCumlFundingX96",
+          "offset": 0,
+          "slot": "2",
+          "type": "t_int256"
+        }
+      ]
+    },
+    "t_struct(PricePair)27137_storage": {
+      "encoding": "inplace",
+      "label": "struct PricePair",
+      "numberOfBytes": "32",
+      "members": [
+        {
+          "astId": 27134,
+          "contract": "src/Perp.sol:Perp",
+          "label": "ammPrice",
+          "offset": 0,
+          "slot": "0",
+          "type": "t_uint128"
+        },
+        {
+          "astId": 27136,
+          "contract": "src/Perp.sol:Perp",
+          "label": "index",
+          "offset": 16,
+          "slot": "0",
+          "type": "t_uint128"
+        }
+      ]
+    },
+    "t_struct(Rates)27150_storage": {
+      "encoding": "inplace",
+      "label": "struct Rates",
+      "numberOfBytes": "64",
+      "members": [
+        {
+          "astId": 27140,
+          "contract": "src/Perp.sol:Perp",
+          "label": "fundingPerDay",
+          "offset": 0,
+          "slot": "0",
+          "type": "t_int88"
+        },
+        {
+          "astId": 27142,
+          "contract": "src/Perp.sol:Perp",
+          "label": "longUtilFeePerDay",
+          "offset": 11,
+          "slot": "0",
+          "type": "t_uint64"
+        },
+        {
+          "astId": 27144,
+          "contract": "src/Perp.sol:Perp",
+          "label": "shortUtilFeePerDay",
+          "offset": 19,
+          "slot": "0",
+          "type": "t_uint64"
+        },
+        {
+          "astId": 27146,
+          "contract": "src/Perp.sol:Perp",
+          "label": "lastTouch",
+          "offset": 27,
+          "slot": "0",
+          "type": "t_uint40"
+        },
+        {
+          "astId": 27149,
+          "contract": "src/Perp.sol:Perp",
+          "label": "lastMark",
+          "offset": 0,
+          "slot": "1",
+          "type": "t_uint256"
+        }
+      ]
+    },
+    "t_struct(SolvencyState)27099_storage": {
+      "encoding": "inplace",
+      "label": "struct SolvencyState",
+      "numberOfBytes": "32",
+      "members": [
+        {
+          "astId": 27096,
+          "contract": "src/Perp.sol:Perp",
+          "label": "badDebt",
+          "offset": 0,
+          "slot": "0",
+          "type": "t_uint128"
+        },
+        {
+          "astId": 27098,
+          "contract": "src/Perp.sol:Perp",
+          "label": "totalMargin",
+          "offset": 16,
+          "slot": "0",
+          "type": "t_uint128"
+        }
+      ]
+    },
+    "t_struct(Taker)27059_storage": {
+      "encoding": "inplace",
+      "label": "struct Taker",
+      "numberOfBytes": "64",
+      "members": [
+        {
+          "astId": 27056,
+          "contract": "src/Perp.sol:Perp",
+          "label": "lastUtilPaymentsX96",
+          "offset": 0,
+          "slot": "0",
+          "type": "t_uint256"
+        },
+        {
+          "astId": 27058,
+          "contract": "src/Perp.sol:Perp",
+          "label": "lastReserveUtilPaymentsX96",
+          "offset": 0,
+          "slot": "1",
+          "type": "t_uint256"
+        }
+      ]
+    },
+    "t_struct(TickInfo)27158_storage": {
+      "encoding": "inplace",
+      "label": "struct TickInfo",
+      "numberOfBytes": "96",
+      "members": [
+        {
+          "astId": 27153,
+          "contract": "src/Perp.sol:Perp",
+          "label": "cumlFundingOppX96",
+          "offset": 0,
+          "slot": "0",
+          "type": "t_int256"
+        },
+        {
+          "astId": 27155,
+          "contract": "src/Perp.sol:Perp",
+          "label": "cumlFundingDivSqrtPOppX192",
+          "offset": 0,
+          "slot": "1",
+          "type": "t_int256"
+        },
+        {
+          "astId": 27157,
+          "contract": "src/Perp.sol:Perp",
+          "label": "lpFeeGrowthOutsideX128",
+          "offset": 0,
+          "slot": "2",
+          "type": "t_uint256"
+        }
+      ]
+    },
+    "t_struct(UtilizationBand)27105_storage": {
+      "encoding": "inplace",
+      "label": "struct UtilizationBand",
+      "numberOfBytes": "32",
+      "members": [
+        {
+          "astId": 27102,
+          "contract": "src/Perp.sol:Perp",
+          "label": "lower",
+          "offset": 0,
+          "slot": "0",
+          "type": "t_uint128"
+        },
+        {
+          "astId": 27104,
+          "contract": "src/Perp.sol:Perp",
+          "label": "upper",
+          "offset": 16,
+          "slot": "0",
+          "type": "t_uint128"
+        }
+      ]
+    },
+    "t_uint128": {
+      "encoding": "inplace",
+      "label": "uint128",
+      "numberOfBytes": "16"
+    },
+    "t_uint24": {
+      "encoding": "inplace",
+      "label": "uint24",
+      "numberOfBytes": "3"
+    },
+    "t_uint256": {
+      "encoding": "inplace",
+      "label": "uint256",
+      "numberOfBytes": "32"
+    },
+    "t_uint32": {
+      "encoding": "inplace",
+      "label": "uint32",
+      "numberOfBytes": "4"
+    },
+    "t_uint40": {
+      "encoding": "inplace",
+      "label": "uint40",
+      "numberOfBytes": "5"
+    },
+    "t_uint64": {
+      "encoding": "inplace",
+      "label": "uint64",
+      "numberOfBytes": "8"
+    },
+    "t_uint80": {
+      "encoding": "inplace",
+      "label": "uint80",
+      "numberOfBytes": "10"
+    },
+    "t_userDefinedValueType(BalanceDelta)10063": {
+      "encoding": "inplace",
+      "label": "BalanceDelta",
+      "numberOfBytes": "32"
+    },
+    "t_userDefinedValueType(Currency)10277": {
+      "encoding": "inplace",
+      "label": "Currency",
+      "numberOfBytes": "20"
+    },
+    "t_userDefinedValueType(PoolId)10577": {
+      "encoding": "inplace",
+      "label": "PoolId",
+      "numberOfBytes": "32"
+    }
+  }
+}

@@ -1,0 +1,1285 @@
+[
+  {
+    "id": "fair_price/equal_emas",
+    "kind": "fair_price",
+    "inputs": {
+      "index_x96": "3961408125713216879677197516800",
+      "ema_amm_x96": "3961408125713216879677197516800",
+      "ema_index_x96": "3961408125713216879677197516800",
+      "max_premium_ratio_wad": "20000000000000000"
+    },
+    "expected": {
+      "mark_x96": "3961408125713216879677197516800"
+    }
+  },
+  {
+    "id": "fair_price/premium_inside_cap",
+    "kind": "fair_price",
+    "inputs": {
+      "index_x96": "3961408125713216879677197516800",
+      "ema_amm_x96": "3981215166341782964075583504384",
+      "ema_index_x96": "3961408125713216879677197516800",
+      "max_premium_ratio_wad": "20000000000000000"
+    },
+    "expected": {
+      "mark_x96": "3981215166341782964075583504384"
+    }
+  },
+  {
+    "id": "fair_price/premium_at_cap",
+    "kind": "fair_price",
+    "inputs": {
+      "index_x96": "3961408125713216879677197516800",
+      "ema_amm_x96": "4040636288227481217270741467136",
+      "ema_index_x96": "3961408125713216879677197516800",
+      "max_premium_ratio_wad": "20000000000000000"
+    },
+    "expected": {
+      "mark_x96": "4040636288227481217270741467136"
+    }
+  },
+  {
+    "id": "fair_price/premium_above_cap",
+    "kind": "fair_price",
+    "inputs": {
+      "index_x96": "3961408125713216879677197516800",
+      "ema_amm_x96": "4357548938284538567644917268480",
+      "ema_index_x96": "3961408125713216879677197516800",
+      "max_premium_ratio_wad": "20000000000000000"
+    },
+    "expected": {
+      "mark_x96": "4040636288227481217270741467136"
+    }
+  },
+  {
+    "id": "fair_price/discount_inside_cap",
+    "kind": "fair_price",
+    "inputs": {
+      "index_x96": "3961408125713216879677197516800",
+      "ema_amm_x96": "3941601085084650795278811529216",
+      "ema_index_x96": "3961408125713216879677197516800",
+      "max_premium_ratio_wad": "20000000000000000"
+    },
+    "expected": {
+      "mark_x96": "3941601085084650795278811529216"
+    }
+  },
+  {
+    "id": "fair_price/discount_above_cap",
+    "kind": "fair_price",
+    "inputs": {
+      "index_x96": "3961408125713216879677197516800",
+      "ema_amm_x96": "3565267313141895191709477765120",
+      "ema_index_x96": "3961408125713216879677197516800",
+      "max_premium_ratio_wad": "20000000000000000"
+    },
+    "expected": {
+      "mark_x96": "3882179963198952542083653566464"
+    }
+  },
+  {
+    "id": "fair_price/index_moved_emas_lag",
+    "kind": "fair_price",
+    "inputs": {
+      "index_x96": "4357548938284538567644917268480",
+      "ema_amm_x96": "3961408125713216879677197516800",
+      "ema_index_x96": "3961408125713216879677197516800",
+      "max_premium_ratio_wad": "20000000000000000"
+    },
+    "expected": {
+      "mark_x96": "4357548938284538567644917268480"
+    }
+  },
+  {
+    "id": "fair_price/index_down_amm_high",
+    "kind": "fair_price",
+    "inputs": {
+      "index_x96": "3248354663084837841335301963776",
+      "ema_amm_x96": "3961408125713216879677197516800",
+      "ema_index_x96": "3327582825599102178928845914112",
+      "max_premium_ratio_wad": "20000000000000000"
+    },
+    "expected": {
+      "mark_x96": "3313321756346534598162008003051"
+    }
+  },
+  {
+    "id": "fair_price/low_index",
+    "kind": "fair_price",
+    "inputs": {
+      "index_x96": "792281625142643375935439503",
+      "ema_amm_x96": "880312916825159306594932781",
+      "ema_index_x96": "792281625142643375935439503",
+      "max_premium_ratio_wad": "20000000000000000"
+    },
+    "expected": {
+      "mark_x96": "808127257645496243454148293"
+    }
+  },
+  {
+    "id": "fair_price/min_index",
+    "kind": "fair_price",
+    "inputs": {
+      "index_x96": "79228162514264337593543",
+      "ema_amm_x96": "792281625142643375935439",
+      "ema_index_x96": "79228162514264337593543",
+      "max_premium_ratio_wad": "20000000000000000"
+    },
+    "expected": {
+      "mark_x96": "80812725764549624345413"
+    }
+  },
+  {
+    "id": "fair_price/max_index",
+    "kind": "fair_price",
+    "inputs": {
+      "index_x96": "79228162514264337593543950336000000",
+      "ema_amm_x96": "79229162514264337593543950336000000",
+      "ema_index_x96": "79228162514264337593543950336000000",
+      "max_premium_ratio_wad": "20000000000000000"
+    },
+    "expected": {
+      "mark_x96": "79229162514264337593543950336000000"
+    }
+  },
+  {
+    "id": "fair_price/odd_values",
+    "kind": "fair_price",
+    "inputs": {
+      "index_x96": "3962018765432109876543210987654",
+      "ema_amm_x96": "3970000000000000000000000000001",
+      "ema_index_x96": "3950000000000000000000000000003",
+      "max_premium_ratio_wad": "20000000000000000"
+    },
+    "expected": {
+      "mark_x96": "3982018765432109876543210987652"
+    }
+  },
+  {
+    "id": "fair_price/scenario_s06_touch",
+    "kind": "fair_price",
+    "inputs": {
+      "index_x96": "3961408125713216879677197516800",
+      "ema_amm_x96": "4024252804958513262236191785897",
+      "ema_index_x96": "3961408125713216879677197516800",
+      "max_premium_ratio_wad": "20000000000000000"
+    },
+    "expected": {
+      "mark_x96": "4024252804958513262236191785897"
+    }
+  },
+  {
+    "id": "fair_price/scenario_s10_touch",
+    "kind": "fair_price",
+    "inputs": {
+      "index_x96": "4357548938284538567644917268480",
+      "ema_amm_x96": "4024397004186097606281750657442",
+      "ema_index_x96": "4357548938284538567644917268480",
+      "max_premium_ratio_wad": "20000000000000000"
+    },
+    "expected": {
+      "mark_x96": "4270397959518847796292018923111"
+    }
+  },
+  {
+    "id": "fair_price/scenario_s13_touch",
+    "kind": "fair_price",
+    "inputs": {
+      "index_x96": "3248354663084837841335301963776",
+      "ema_amm_x96": "3964868586950142450686128169967",
+      "ema_index_x96": "3248354663084837841335301963776",
+      "max_premium_ratio_wad": "20000000000000000"
+    },
+    "expected": {
+      "mark_x96": "3313321756346534598162008003051"
+    }
+  },
+  {
+    "id": "ema_step/dt_0",
+    "kind": "ema_step",
+    "inputs": {
+      "prev_ema_amm_x96": "3961408125713216879677197516800",
+      "prev_ema_index_x96": "3961408125713216879677197516800",
+      "sqrt_price_x96": "564664130142489818548599515289",
+      "index_x96": "4357548938284538567644917268480",
+      "ema_window_s": "600",
+      "dt_s": "0"
+    },
+    "expected": {
+      "amm_price_x96": "4024397004186097606281750657442",
+      "alpha_wad": "1000000000000000000",
+      "ema_amm_x96": "3961408125713216879677197516800",
+      "ema_index_x96": "3961408125713216879677197516800"
+    }
+  },
+  {
+    "id": "ema_step/dt_1",
+    "kind": "ema_step",
+    "inputs": {
+      "prev_ema_amm_x96": "3961408125713216879677197516800",
+      "prev_ema_index_x96": "3961408125713216879677197516800",
+      "sqrt_price_x96": "564664130142489818548599515289",
+      "index_x96": "4357548938284538567644917268480",
+      "ema_window_s": "600",
+      "dt_s": "1"
+    },
+    "expected": {
+      "amm_price_x96": "4024397004186097606281750657442",
+      "alpha_wad": "998334721450938679",
+      "ema_amm_x96": "3961513019741367198370464448269",
+      "ema_index_x96": "3962067810510799622967516317924"
+    }
+  },
+  {
+    "id": "ema_step/dt_60",
+    "kind": "ema_step",
+    "inputs": {
+      "prev_ema_amm_x96": "3961408125713216879677197516800",
+      "prev_ema_index_x96": "3961408125713216879677197516800",
+      "sqrt_price_x96": "564664130142489818548599515289",
+      "index_x96": "4357548938284538567644917268480",
+      "ema_window_s": "600",
+      "dt_s": "60"
+    },
+    "expected": {
+      "amm_price_x96": "4024397004186097606281750657442",
+      "alpha_wad": "904837418035959573",
+      "ema_amm_x96": "3967402310023715373425289203611",
+      "ema_index_x96": "3999105908258836856188866301077"
+    }
+  },
+  {
+    "id": "ema_step/dt_600",
+    "kind": "ema_step",
+    "inputs": {
+      "prev_ema_amm_x96": "3961408125713216879677197516800",
+      "prev_ema_index_x96": "3961408125713216879677197516800",
+      "sqrt_price_x96": "564664130142489818548599515289",
+      "index_x96": "4357548938284538567644917268480",
+      "ema_window_s": "600",
+      "dt_s": "600"
+    },
+    "expected": {
+      "amm_price_x96": "4024397004186097606281750657442",
+      "alpha_wad": "367879441171442321",
+      "ema_amm_x96": "4001224690773478351396216212682",
+      "ema_index_x96": "4211816877530599672094122731964"
+    }
+  },
+  {
+    "id": "ema_step/dt_3600",
+    "kind": "ema_step",
+    "inputs": {
+      "prev_ema_amm_x96": "3961408125713216879677197516800",
+      "prev_ema_index_x96": "3961408125713216879677197516800",
+      "sqrt_price_x96": "564664130142489818548599515289",
+      "index_x96": "4357548938284538567644917268480",
+      "ema_window_s": "600",
+      "dt_s": "3600"
+    },
+    "expected": {
+      "amm_price_x96": "4024397004186097606281750657442",
+      "alpha_wad": "2478752176666358",
+      "ema_amm_x96": "4024240870366477180480609728397",
+      "ema_index_x96": "4356567003383111024256087889350"
+    }
+  },
+  {
+    "id": "ema_step/dt_24867",
+    "kind": "ema_step",
+    "inputs": {
+      "prev_ema_amm_x96": "3961408125713216879677197516800",
+      "prev_ema_index_x96": "3961408125713216879677197516800",
+      "sqrt_price_x96": "564664130142489818548599515289",
+      "index_x96": "4357548938284538567644917268480",
+      "ema_window_s": "600",
+      "dt_s": "24867"
+    },
+    "expected": {
+      "amm_price_x96": "4024397004186097606281750657442",
+      "alpha_wad": "1",
+      "ema_amm_x96": "4024397004186097606218761778969",
+      "ema_index_x96": "4357548938284538567248776455908"
+    }
+  },
+  {
+    "id": "ema_step/dt_24868",
+    "kind": "ema_step",
+    "inputs": {
+      "prev_ema_amm_x96": "3961408125713216879677197516800",
+      "prev_ema_index_x96": "3961408125713216879677197516800",
+      "sqrt_price_x96": "564664130142489818548599515289",
+      "index_x96": "4357548938284538567644917268480",
+      "ema_window_s": "600",
+      "dt_s": "24868"
+    },
+    "expected": {
+      "amm_price_x96": "4024397004186097606281750657442",
+      "alpha_wad": "0",
+      "ema_amm_x96": "4024397004186097606281750657442",
+      "ema_index_x96": "4357548938284538567644917268480"
+    }
+  },
+  {
+    "id": "ema_step/dt_86400",
+    "kind": "ema_step",
+    "inputs": {
+      "prev_ema_amm_x96": "3961408125713216879677197516800",
+      "prev_ema_index_x96": "3961408125713216879677197516800",
+      "sqrt_price_x96": "564664130142489818548599515289",
+      "index_x96": "4357548938284538567644917268480",
+      "ema_window_s": "600",
+      "dt_s": "86400"
+    },
+    "expected": {
+      "amm_price_x96": "4024397004186097606281750657442",
+      "alpha_wad": "0",
+      "ema_amm_x96": "4024397004186097606281750657442",
+      "ema_index_x96": "4357548938284538567644917268480"
+    }
+  },
+  {
+    "id": "ema_step/dt_10000000",
+    "kind": "ema_step",
+    "inputs": {
+      "prev_ema_amm_x96": "3961408125713216879677197516800",
+      "prev_ema_index_x96": "3961408125713216879677197516800",
+      "sqrt_price_x96": "564664130142489818548599515289",
+      "index_x96": "4357548938284538567644917268480",
+      "ema_window_s": "600",
+      "dt_s": "10000000"
+    },
+    "expected": {
+      "amm_price_x96": "4024397004186097606281750657442",
+      "alpha_wad": "0",
+      "ema_amm_x96": "4024397004186097606281750657442",
+      "ema_index_x96": "4357548938284538567644917268480"
+    }
+  },
+  {
+    "id": "ema_step/window_1h_dt_10m",
+    "kind": "ema_step",
+    "inputs": {
+      "prev_ema_amm_x96": "3962408125713216879677197516800",
+      "prev_ema_index_x96": "3960408125713216879677197516800",
+      "sqrt_price_x96": "564664130142489818548599515289",
+      "index_x96": "3248354663084837841335301963776",
+      "ema_window_s": "3600",
+      "dt_s": "600"
+    },
+    "expected": {
+      "amm_price_x96": "4024397004186097606281750657442",
+      "alpha_wad": "846481724890614074",
+      "ema_amm_x96": "3971924551412338873979732646264",
+      "ema_index_x96": "3851094906344842536293679216281"
+    }
+  },
+  {
+    "id": "ema_step/window_1_dt_1",
+    "kind": "ema_step",
+    "inputs": {
+      "prev_ema_amm_x96": "3961408125713216879677197516800",
+      "prev_ema_index_x96": "3961408125713216879677197516800",
+      "sqrt_price_x96": "564664130142489818548599515289",
+      "index_x96": "3248354663084837841335301963776",
+      "ema_window_s": "1",
+      "dt_s": "1"
+    },
+    "expected": {
+      "amm_price_x96": "4024397004186097606281750657442",
+      "alpha_wad": "367879441171442321",
+      "ema_amm_x96": "4001224690773478351396216212682",
+      "ema_index_x96": "3510672372441927853326732129503"
+    }
+  },
+  {
+    "id": "mark_from_state/s01_makers",
+    "kind": "mark_from_state",
+    "inputs": {
+      "now": "1000000",
+      "last_touch": "1000000",
+      "index_x96": "3961408125713216879677197516800",
+      "sqrt_price_x96": "560227709747861399187319382274",
+      "stored_ema_amm_x96": "3961408125713216879677197516800",
+      "stored_ema_index_x96": "3961408125713216879677197516800",
+      "ema_window_s": "600",
+      "max_premium_ratio_wad": "20000000000000000"
+    },
+    "expected": {
+      "mark_x96": "3961408125713216879677197516800"
+    },
+    "intermediate": {
+      "ema_amm_x96": "3961408125713216879677197516800",
+      "ema_index_x96": "3961408125713216879677197516800"
+    }
+  },
+  {
+    "id": "mark_from_state/s02_open_long",
+    "kind": "mark_from_state",
+    "inputs": {
+      "now": "1000060",
+      "last_touch": "1000060",
+      "index_x96": "3961408125713216879677197516800",
+      "sqrt_price_x96": "564167727782842675675129819929",
+      "stored_ema_amm_x96": "3961408125713216879677197516799",
+      "stored_ema_index_x96": "3961408125713216879677197516800",
+      "ema_window_s": "600",
+      "max_premium_ratio_wad": "20000000000000000"
+    },
+    "expected": {
+      "mark_x96": "3961408125713216879677197516799"
+    },
+    "intermediate": {
+      "ema_amm_x96": "3961408125713216879677197516799",
+      "ema_index_x96": "3961408125713216879677197516800"
+    }
+  },
+  {
+    "id": "mark_from_state/s03_open_short",
+    "kind": "mark_from_state",
+    "inputs": {
+      "now": "1000120",
+      "last_touch": "1000120",
+      "index_x96": "3961408125713216879677197516800",
+      "sqrt_price_x96": "560227709747861399187319382275",
+      "stored_ema_amm_x96": "3966729256305268857584825220270",
+      "stored_ema_index_x96": "3961408125713216879677197516800",
+      "ema_window_s": "600",
+      "max_premium_ratio_wad": "20000000000000000"
+    },
+    "expected": {
+      "mark_x96": "3966729256305268857584825220270"
+    },
+    "intermediate": {
+      "ema_amm_x96": "3966729256305268857584825220270",
+      "ema_index_x96": "3961408125713216879677197516800"
+    }
+  },
+  {
+    "id": "mark_from_state/s04_open_long_lev",
+    "kind": "mark_from_state",
+    "inputs": {
+      "now": "1000180",
+      "last_touch": "1000180",
+      "index_x96": "3961408125713216879677197516800",
+      "sqrt_price_x96": "564664130142489818548599515289",
+      "stored_ema_amm_x96": "3966222883779161348272895836832",
+      "stored_ema_index_x96": "3961408125713216879677197516800",
+      "ema_window_s": "600",
+      "max_premium_ratio_wad": "20000000000000000"
+    },
+    "expected": {
+      "mark_x96": "3966222883779161348272895836832"
+    },
+    "intermediate": {
+      "ema_amm_x96": "3966222883779161348272895836832",
+      "ema_index_x96": "3961408125713216879677197516800"
+    }
+  },
+  {
+    "id": "mark_from_state/s05_lazy_1h",
+    "kind": "mark_from_state",
+    "inputs": {
+      "now": "1003780",
+      "last_touch": "1000180",
+      "index_x96": "3961408125713216879677197516800",
+      "sqrt_price_x96": "564664130142489818548599515289",
+      "stored_ema_amm_x96": "3966222883779161348272895836832",
+      "stored_ema_index_x96": "3961408125713216879677197516800",
+      "ema_window_s": "600",
+      "max_premium_ratio_wad": "20000000000000000"
+    },
+    "expected": {
+      "mark_x96": "4024252804958513262236191785897"
+    },
+    "intermediate": {
+      "ema_amm_x96": "4024252804958513262236191785897",
+      "ema_index_x96": "3961408125713216879677197516800"
+    }
+  },
+  {
+    "id": "mark_from_state/s06_touch",
+    "kind": "mark_from_state",
+    "inputs": {
+      "now": "1003780",
+      "last_touch": "1003780",
+      "index_x96": "3961408125713216879677197516800",
+      "sqrt_price_x96": "564664130142489818548599515289",
+      "stored_ema_amm_x96": "4024252804958513262236191785897",
+      "stored_ema_index_x96": "3961408125713216879677197516800",
+      "ema_window_s": "600",
+      "max_premium_ratio_wad": "20000000000000000"
+    },
+    "expected": {
+      "mark_x96": "4024252804958513262236191785897"
+    },
+    "intermediate": {
+      "ema_amm_x96": "4024252804958513262236191785897",
+      "ema_index_x96": "3961408125713216879677197516800"
+    }
+  },
+  {
+    "id": "mark_from_state/s07_index_up_lazy_30m",
+    "kind": "mark_from_state",
+    "inputs": {
+      "now": "1005580",
+      "last_touch": "1003780",
+      "index_x96": "4357548938284538567644917268480",
+      "sqrt_price_x96": "564664130142489818548599515289",
+      "stored_ema_amm_x96": "4024252804958513262236191785897",
+      "stored_ema_index_x96": "3961408125713216879677197516800",
+      "ema_window_s": "600",
+      "max_premium_ratio_wad": "20000000000000000"
+    },
+    "expected": {
+      "mark_x96": "4270397959518847796292018923111"
+    },
+    "intermediate": {
+      "ema_amm_x96": "4024389824929295271372726490868",
+      "ema_index_x96": "4337826248565748999016624071112"
+    }
+  },
+  {
+    "id": "mark_from_state/s08_touch",
+    "kind": "mark_from_state",
+    "inputs": {
+      "now": "1005580",
+      "last_touch": "1005580",
+      "index_x96": "4357548938284538567644917268480",
+      "sqrt_price_x96": "564664130142489818548599515289",
+      "stored_ema_amm_x96": "4024389824929295271372726490868",
+      "stored_ema_index_x96": "4337826248565748999016624071112",
+      "ema_window_s": "600",
+      "max_premium_ratio_wad": "20000000000000000"
+    },
+    "expected": {
+      "mark_x96": "4270397959518847796292018923111"
+    },
+    "intermediate": {
+      "ema_amm_x96": "4024389824929295271372726490868",
+      "ema_index_x96": "4337826248565748999016624071112"
+    }
+  },
+  {
+    "id": "mark_from_state/s09_lazy_1d",
+    "kind": "mark_from_state",
+    "inputs": {
+      "now": "1091980",
+      "last_touch": "1005580",
+      "index_x96": "4357548938284538567644917268480",
+      "sqrt_price_x96": "564664130142489818548599515289",
+      "stored_ema_amm_x96": "4024389824929295271372726490868",
+      "stored_ema_index_x96": "4337826248565748999016624071112",
+      "ema_window_s": "600",
+      "max_premium_ratio_wad": "20000000000000000"
+    },
+    "expected": {
+      "mark_x96": "4270397959518847796292018923111"
+    },
+    "intermediate": {
+      "ema_amm_x96": "4024397004186097606281750657442",
+      "ema_index_x96": "4357548938284538567644917268480"
+    }
+  },
+  {
+    "id": "mark_from_state/s10_touch",
+    "kind": "mark_from_state",
+    "inputs": {
+      "now": "1091980",
+      "last_touch": "1091980",
+      "index_x96": "4357548938284538567644917268480",
+      "sqrt_price_x96": "564664130142489818548599515289",
+      "stored_ema_amm_x96": "4024397004186097606281750657442",
+      "stored_ema_index_x96": "4357548938284538567644917268480",
+      "ema_window_s": "600",
+      "max_premium_ratio_wad": "20000000000000000"
+    },
+    "expected": {
+      "mark_x96": "4270397959518847796292018923111"
+    },
+    "intermediate": {
+      "ema_amm_x96": "4024397004186097606281750657442",
+      "ema_index_x96": "4357548938284538567644917268480"
+    }
+  },
+  {
+    "id": "mark_from_state/s10b_reduce_short_half",
+    "kind": "mark_from_state",
+    "inputs": {
+      "now": "1092040",
+      "last_touch": "1092040",
+      "index_x96": "4357548938284538567644917268480",
+      "sqrt_price_x96": "566658505968148437622434737741",
+      "stored_ema_amm_x96": "4024397004186097606281750657442",
+      "stored_ema_index_x96": "4357548938284538567644917268480",
+      "ema_window_s": "600",
+      "max_premium_ratio_wad": "20000000000000000"
+    },
+    "expected": {
+      "mark_x96": "4270397959518847796292018923111"
+    },
+    "intermediate": {
+      "ema_amm_x96": "4024397004186097606281750657442",
+      "ema_index_x96": "4357548938284538567644917268480"
+    }
+  },
+  {
+    "id": "mark_from_state/s11_index_down_2h",
+    "kind": "mark_from_state",
+    "inputs": {
+      "now": "1099240",
+      "last_touch": "1099240",
+      "index_x96": "3248354663084837841335301963776",
+      "sqrt_price_x96": "566658505968148437622434737741",
+      "stored_ema_amm_x96": "4052875118303590964094669410219",
+      "stored_ema_index_x96": "3248361478210005764033768723888",
+      "ema_window_s": "600",
+      "max_premium_ratio_wad": "20000000000000000"
+    },
+    "expected": {
+      "mark_x96": "3313321756346534598162008003051"
+    },
+    "intermediate": {
+      "ema_amm_x96": "4052875118303590964094669410219",
+      "ema_index_x96": "3248361478210005764033768723888"
+    }
+  },
+  {
+    "id": "mark_from_state/s11a_partial_liquidation",
+    "kind": "mark_from_state",
+    "inputs": {
+      "now": "1099300",
+      "last_touch": "1099300",
+      "index_x96": "3248354663084837841335301963776",
+      "sqrt_price_x96": "564415819816516210145632537993",
+      "stored_ema_amm_x96": "4052875134954821299554168214533",
+      "stored_ema_index_x96": "3248360829665098376395197199608",
+      "ema_window_s": "600",
+      "max_premium_ratio_wad": "20000000000000000"
+    },
+    "expected": {
+      "mark_x96": "3313321756346534598162008003051"
+    },
+    "intermediate": {
+      "ema_amm_x96": "4052875134954821299554168214533",
+      "ema_index_x96": "3248360829665098376395197199608"
+    }
+  },
+  {
+    "id": "mark_from_state/s11b_close_long",
+    "kind": "mark_from_state",
+    "inputs": {
+      "now": "1099360",
+      "last_touch": "1099360",
+      "index_x96": "3248354663084837841335301963776",
+      "sqrt_price_x96": "560472347894690955840263150806",
+      "stored_ema_amm_x96": "4049828333661269859610693435432",
+      "stored_ema_index_x96": "3248360242837398895393789083386",
+      "ema_window_s": "600",
+      "max_premium_ratio_wad": "20000000000000000"
+    },
+    "expected": {
+      "mark_x96": "3313321756346534598162008003051"
+    },
+    "intermediate": {
+      "ema_amm_x96": "4049828333661269859610693435432",
+      "ema_index_x96": "3248360242837398895393789083386"
+    }
+  },
+  {
+    "id": "mark_from_state/s12_lazy_3d",
+    "kind": "mark_from_state",
+    "inputs": {
+      "now": "1358560",
+      "last_touch": "1099360",
+      "index_x96": "3248354663084837841335301963776",
+      "sqrt_price_x96": "560472347894690955840263150806",
+      "stored_ema_amm_x96": "4049828333661269859610693435432",
+      "stored_ema_index_x96": "3248360242837398895393789083386",
+      "ema_window_s": "600",
+      "max_premium_ratio_wad": "20000000000000000"
+    },
+    "expected": {
+      "mark_x96": "3313321756346534598162008003051"
+    },
+    "intermediate": {
+      "ema_amm_x96": "3964868586950142450686128169967",
+      "ema_index_x96": "3248354663084837841335301963776"
+    }
+  },
+  {
+    "id": "mark_from_state/s13_touch",
+    "kind": "mark_from_state",
+    "inputs": {
+      "now": "1358560",
+      "last_touch": "1358560",
+      "index_x96": "3248354663084837841335301963776",
+      "sqrt_price_x96": "560472347894690955840263150806",
+      "stored_ema_amm_x96": "3964868586950142450686128169967",
+      "stored_ema_index_x96": "3248354663084837841335301963776",
+      "ema_window_s": "600",
+      "max_premium_ratio_wad": "20000000000000000"
+    },
+    "expected": {
+      "mark_x96": "3313321756346534598162008003051"
+    },
+    "intermediate": {
+      "ema_amm_x96": "3964868586950142450686128169967",
+      "ema_index_x96": "3248354663084837841335301963776"
+    }
+  },
+  {
+    "id": "mark_from_state/s14_liquidate_lev_long",
+    "kind": "mark_from_state",
+    "inputs": {
+      "now": "1358620",
+      "last_touch": "1358620",
+      "index_x96": "3248354663084837841335301963776",
+      "sqrt_price_x96": "558278266055432442001708349921",
+      "stored_ema_amm_x96": "3964868586950142450686128169967",
+      "stored_ema_index_x96": "3248354663084837841335301963776",
+      "ema_window_s": "600",
+      "max_premium_ratio_wad": "20000000000000000"
+    },
+    "expected": {
+      "mark_x96": "3313321756346534598162008003051"
+    },
+    "intermediate": {
+      "ema_amm_x96": "3964868586950142450686128169967",
+      "ema_index_x96": "3248354663084837841335301963776"
+    }
+  },
+  {
+    "id": "mark_from_state/s15_lazy_7d",
+    "kind": "mark_from_state",
+    "inputs": {
+      "now": "1963420",
+      "last_touch": "1358620",
+      "index_x96": "3248354663084837841335301963776",
+      "sqrt_price_x96": "558278266055432442001708349921",
+      "stored_ema_amm_x96": "3964868586950142450686128169967",
+      "stored_ema_index_x96": "3248354663084837841335301963776",
+      "ema_window_s": "600",
+      "max_premium_ratio_wad": "20000000000000000"
+    },
+    "expected": {
+      "mark_x96": "3313321756346534598162008003051"
+    },
+    "intermediate": {
+      "ema_amm_x96": "3933886795541243581137026423513",
+      "ema_index_x96": "3248354663084837841335301963776"
+    }
+  },
+  {
+    "id": "fees_module/liq_0_no_vol",
+    "kind": "fees_module_rates",
+    "inputs": {
+      "liquidity": "0",
+      "spot_amm_price_x96": "3961408125713216879677197516800",
+      "ema_amm_price_x96": "3961408125713216879677197516800"
+    },
+    "expected": {
+      "creator_fee_e6": "100",
+      "insurance_fee_e6": "1000",
+      "lp_fee_e6": "5000"
+    }
+  },
+  {
+    "id": "fees_module/liq_1_no_vol",
+    "kind": "fees_module_rates",
+    "inputs": {
+      "liquidity": "1",
+      "spot_amm_price_x96": "3961408125713216879677197516800",
+      "ema_amm_price_x96": "3961408125713216879677197516800"
+    },
+    "expected": {
+      "creator_fee_e6": "100",
+      "insurance_fee_e6": "1000",
+      "lp_fee_e6": "4999"
+    }
+  },
+  {
+    "id": "fees_module/liq_15000000_no_vol",
+    "kind": "fees_module_rates",
+    "inputs": {
+      "liquidity": "15000000",
+      "spot_amm_price_x96": "3961408125713216879677197516800",
+      "ema_amm_price_x96": "3961408125713216879677197516800"
+    },
+    "expected": {
+      "creator_fee_e6": "100",
+      "insurance_fee_e6": "1000",
+      "lp_fee_e6": "2550"
+    }
+  },
+  {
+    "id": "fees_module/liq_405000000_no_vol",
+    "kind": "fees_module_rates",
+    "inputs": {
+      "liquidity": "405000000",
+      "spot_amm_price_x96": "3961408125713216879677197516800",
+      "ema_amm_price_x96": "3961408125713216879677197516800"
+    },
+    "expected": {
+      "creator_fee_e6": "100",
+      "insurance_fee_e6": "1000",
+      "lp_fee_e6": "275"
+    }
+  },
+  {
+    "id": "fees_module/liq_1000000000000_no_vol",
+    "kind": "fees_module_rates",
+    "inputs": {
+      "liquidity": "1000000000000",
+      "spot_amm_price_x96": "3961408125713216879677197516800",
+      "ema_amm_price_x96": "3961408125713216879677197516800"
+    },
+    "expected": {
+      "creator_fee_e6": "100",
+      "insurance_fee_e6": "1000",
+      "lp_fee_e6": "100"
+    }
+  },
+  {
+    "id": "fees_module/vol_1pct",
+    "kind": "fees_module_rates",
+    "inputs": {
+      "liquidity": "405000000",
+      "spot_amm_price_x96": "4001022206970349048473969491968",
+      "ema_amm_price_x96": "3961408125713216879677197516800"
+    },
+    "expected": {
+      "creator_fee_e6": "100",
+      "insurance_fee_e6": "1000",
+      "lp_fee_e6": "294"
+    }
+  },
+  {
+    "id": "fees_module/vol_10pct",
+    "kind": "fees_module_rates",
+    "inputs": {
+      "liquidity": "405000000",
+      "spot_amm_price_x96": "4357548938284538567644917268480",
+      "ema_amm_price_x96": "3961408125713216879677197516800"
+    },
+    "expected": {
+      "creator_fee_e6": "100",
+      "insurance_fee_e6": "1000",
+      "lp_fee_e6": "412"
+    }
+  },
+  {
+    "id": "fees_module/vol_down_30pct",
+    "kind": "fees_module_rates",
+    "inputs": {
+      "liquidity": "405000000",
+      "spot_amm_price_x96": "2772985687999251815774038261760",
+      "ema_amm_price_x96": "3961408125713216879677197516800"
+    },
+    "expected": {
+      "creator_fee_e6": "100",
+      "insurance_fee_e6": "1000",
+      "lp_fee_e6": "412"
+    }
+  },
+  {
+    "id": "fees_module/vol_capped",
+    "kind": "fees_module_rates",
+    "inputs": {
+      "liquidity": "15000000",
+      "spot_amm_price_x96": "11884224377139650639031592550400",
+      "ema_amm_price_x96": "3961408125713216879677197516800"
+    },
+    "expected": {
+      "creator_fee_e6": "100",
+      "insurance_fee_e6": "1000",
+      "lp_fee_e6": "3825"
+    }
+  },
+  {
+    "id": "util_fees/0",
+    "kind": "util_fee_rate",
+    "inputs": {
+      "long_utilization_e6": "0",
+      "short_utilization_e6": "0"
+    },
+    "expected": {
+      "long_fee_per_day": "0",
+      "short_fee_per_day": "0"
+    }
+  },
+  {
+    "id": "util_fees/1",
+    "kind": "util_fee_rate",
+    "inputs": {
+      "long_utilization_e6": "1",
+      "short_utilization_e6": "1"
+    },
+    "expected": {
+      "long_fee_per_day": "1250000000",
+      "short_fee_per_day": "1250000000"
+    }
+  },
+  {
+    "id": "util_fees/400000",
+    "kind": "util_fee_rate",
+    "inputs": {
+      "long_utilization_e6": "400000",
+      "short_utilization_e6": "400000"
+    },
+    "expected": {
+      "long_fee_per_day": "500000000000000",
+      "short_fee_per_day": "500000000000000"
+    }
+  },
+  {
+    "id": "util_fees/799999",
+    "kind": "util_fee_rate",
+    "inputs": {
+      "long_utilization_e6": "799999",
+      "short_utilization_e6": "799999"
+    },
+    "expected": {
+      "long_fee_per_day": "999998750000000",
+      "short_fee_per_day": "999998750000000"
+    }
+  },
+  {
+    "id": "util_fees/800000",
+    "kind": "util_fee_rate",
+    "inputs": {
+      "long_utilization_e6": "800000",
+      "short_utilization_e6": "800000"
+    },
+    "expected": {
+      "long_fee_per_day": "1000000000000000",
+      "short_fee_per_day": "1000000000000000"
+    }
+  },
+  {
+    "id": "util_fees/800001",
+    "kind": "util_fee_rate",
+    "inputs": {
+      "long_utilization_e6": "800001",
+      "short_utilization_e6": "800001"
+    },
+    "expected": {
+      "long_fee_per_day": "1000450000000000",
+      "short_fee_per_day": "1000450000000000"
+    }
+  },
+  {
+    "id": "util_fees/900000",
+    "kind": "util_fee_rate",
+    "inputs": {
+      "long_utilization_e6": "900000",
+      "short_utilization_e6": "900000"
+    },
+    "expected": {
+      "long_fee_per_day": "46000000000000000",
+      "short_fee_per_day": "46000000000000000"
+    }
+  },
+  {
+    "id": "util_fees/1000000",
+    "kind": "util_fee_rate",
+    "inputs": {
+      "long_utilization_e6": "1000000",
+      "short_utilization_e6": "1000000"
+    },
+    "expected": {
+      "long_fee_per_day": "91000000000000000",
+      "short_fee_per_day": "91000000000000000"
+    }
+  },
+  {
+    "id": "util_fees/2000000",
+    "kind": "util_fee_rate",
+    "inputs": {
+      "long_utilization_e6": "2000000",
+      "short_utilization_e6": "2000000"
+    },
+    "expected": {
+      "long_fee_per_day": "91000000000000000",
+      "short_fee_per_day": "91000000000000000"
+    }
+  },
+  {
+    "id": "max_swap_fee/deployed",
+    "kind": "max_swap_fee",
+    "inputs": {},
+    "expected": {
+      "max_swap_fee_e6": "8600"
+    }
+  },
+  {
+    "id": "price_impact_bounds/3961408125713216879677197516800",
+    "kind": "price_impact_bounds",
+    "inputs": {
+      "mark_x96": "3961408125713216879677197516800",
+      "price_impact_bound_wad": "20000000000000000"
+    },
+    "expected": {
+      "sqrt_min_x96": "554597137599850363154807652352",
+      "sqrt_max_x96": "565802252120580303859488394988"
+    }
+  },
+  {
+    "id": "price_impact_bounds/4357548938284538567644917268480",
+    "kind": "price_impact_bounds",
+    "inputs": {
+      "mark_x96": "4357548938284538567644917268480",
+      "price_impact_bound_wad": "20000000000000000"
+    },
+    "expected": {
+      "sqrt_min_x96": "581666385084562105272422008934",
+      "sqrt_max_x96": "593418408338663514071925125449"
+    }
+  },
+  {
+    "id": "price_impact_bounds/3248354663084837841335301963776",
+    "kind": "price_impact_bounds",
+    "inputs": {
+      "mark_x96": "3248354663084837841335301963776",
+      "price_impact_bound_wad": "20000000000000000"
+    },
+    "expected": {
+      "sqrt_min_x96": "502209067747523683729240955030",
+      "sqrt_max_x96": "512355730497738250429900869594"
+    }
+  },
+  {
+    "id": "price_impact_bounds/79228162514264337593543",
+    "kind": "price_impact_bounds",
+    "inputs": {
+      "mark_x96": "79228162514264337593543",
+      "price_impact_bound_wad": "20000000000000000"
+    },
+    "expected": {
+      "sqrt_min_x96": "78431879364700595886224172",
+      "sqrt_max_x96": "80016521857016594389519366"
+    }
+  },
+  {
+    "id": "price_impact_bounds/79228162514264337593543950336000000",
+    "kind": "price_impact_bounds",
+    "inputs": {
+      "mark_x96": "79228162514264337593543950336000000",
+      "price_impact_bound_wad": "20000000000000000"
+    },
+    "expected": {
+      "sqrt_min_x96": "78431879364700595886224713518441",
+      "sqrt_max_x96": "80016521857016594389520272648821"
+    }
+  },
+  {
+    "id": "price_impact_bounds/3313321756346534598162008003051",
+    "kind": "price_impact_bounds",
+    "inputs": {
+      "mark_x96": "3313321756346534598162008003051",
+      "price_impact_bound_wad": "20000000000000000"
+    },
+    "expected": {
+      "sqrt_min_x96": "507206295980633081250597667919",
+      "sqrt_max_x96": "517453923036001737234088804915"
+    }
+  },
+  {
+    "id": "util_rates_after/s06_touch",
+    "kind": "util_fee_rates_after_refresh",
+    "inputs": {
+      "oi_long": "850000",
+      "cap_long": "577953",
+      "oi_short": "400000",
+      "cap_short": "558864"
+    },
+    "expected": {
+      "long_util_fee_per_day": "91000000000000000",
+      "short_util_fee_per_day": "894671250000000"
+    },
+    "intermediate": {
+      "utilization_long_e6": "1000000",
+      "utilization_short_e6": "715737"
+    }
+  },
+  {
+    "id": "util_rates_after/s08_touch",
+    "kind": "util_fee_rates_after_refresh",
+    "inputs": {
+      "oi_long": "850000",
+      "cap_long": "0",
+      "oi_short": "400000",
+      "cap_short": "0"
+    },
+    "expected": {
+      "long_util_fee_per_day": "91000000000000000",
+      "short_util_fee_per_day": "91000000000000000"
+    },
+    "intermediate": {
+      "utilization_long_e6": "1000000",
+      "utilization_short_e6": "1000000"
+    }
+  },
+  {
+    "id": "util_rates_after/s10_touch",
+    "kind": "util_fee_rates_after_refresh",
+    "inputs": {
+      "oi_long": "850000",
+      "cap_long": "0",
+      "oi_short": "400000",
+      "cap_short": "0"
+    },
+    "expected": {
+      "long_util_fee_per_day": "91000000000000000",
+      "short_util_fee_per_day": "91000000000000000"
+    },
+    "intermediate": {
+      "utilization_long_e6": "1000000",
+      "utilization_short_e6": "1000000"
+    }
+  },
+  {
+    "id": "util_rates_after/s13_touch",
+    "kind": "util_fee_rates_after_refresh",
+    "inputs": {
+      "oi_long": "225000",
+      "cap_long": "0",
+      "oi_short": "200000",
+      "cap_short": "0"
+    },
+    "expected": {
+      "long_util_fee_per_day": "91000000000000000",
+      "short_util_fee_per_day": "91000000000000000"
+    },
+    "intermediate": {
+      "utilization_long_e6": "1000000",
+      "utilization_short_e6": "1000000"
+    }
+  },
+  {
+    "id": "util_rates_after/s02_open_long",
+    "kind": "util_fee_rates_after_refresh",
+    "inputs": {
+      "oi_long": "400000",
+      "cap_long": "981493",
+      "oi_short": "0",
+      "cap_short": "164305"
+    },
+    "expected": {
+      "long_util_fee_per_day": "509427500000000",
+      "short_util_fee_per_day": "0"
+    },
+    "intermediate": {
+      "utilization_long_e6": "407542",
+      "utilization_short_e6": "0"
+    }
+  },
+  {
+    "id": "util_rates_after/s03_open_short",
+    "kind": "util_fee_rates_after_refresh",
+    "inputs": {
+      "oi_long": "400000",
+      "cap_long": "542674",
+      "oi_short": "400000",
+      "cap_short": "602356"
+    },
+    "expected": {
+      "long_util_fee_per_day": "921362500000000",
+      "short_util_fee_per_day": "830073750000000"
+    },
+    "intermediate": {
+      "utilization_long_e6": "737090",
+      "utilization_short_e6": "664059"
+    }
+  },
+  {
+    "id": "util_rates_after/s04_open_long_lev",
+    "kind": "util_fee_rates_after_refresh",
+    "inputs": {
+      "oi_long": "850000",
+      "cap_long": "996365",
+      "oi_short": "400000",
+      "cap_short": "148738"
+    },
+    "expected": {
+      "long_util_fee_per_day": "24895450000000000",
+      "short_util_fee_per_day": "91000000000000000"
+    },
+    "intermediate": {
+      "utilization_long_e6": "853101",
+      "utilization_short_e6": "1000000"
+    }
+  },
+  {
+    "id": "util_rates_after/s10b_reduce_short_half",
+    "kind": "util_fee_rates_after_refresh",
+    "inputs": {
+      "oi_long": "850000",
+      "cap_long": "0",
+      "oi_short": "200000",
+      "cap_short": "0"
+    },
+    "expected": {
+      "long_util_fee_per_day": "91000000000000000",
+      "short_util_fee_per_day": "91000000000000000"
+    },
+    "intermediate": {
+      "utilization_long_e6": "1000000",
+      "utilization_short_e6": "1000000"
+    }
+  },
+  {
+    "id": "util_rates_after/s11a_partial_liquidation",
+    "kind": "util_fee_rates_after_refresh",
+    "inputs": {
+      "oi_long": "625000",
+      "cap_long": "0",
+      "oi_short": "200000",
+      "cap_short": "0"
+    },
+    "expected": {
+      "long_util_fee_per_day": "91000000000000000",
+      "short_util_fee_per_day": "91000000000000000"
+    },
+    "intermediate": {
+      "utilization_long_e6": "1000000",
+      "utilization_short_e6": "1000000"
+    }
+  },
+  {
+    "id": "util_rates_after/s11b_close_long",
+    "kind": "util_fee_rates_after_refresh",
+    "inputs": {
+      "oi_long": "225000",
+      "cap_long": "0",
+      "oi_short": "200000",
+      "cap_short": "0"
+    },
+    "expected": {
+      "long_util_fee_per_day": "91000000000000000",
+      "short_util_fee_per_day": "91000000000000000"
+    },
+    "intermediate": {
+      "utilization_long_e6": "1000000",
+      "utilization_short_e6": "1000000"
+    }
+  },
+  {
+    "id": "util_rates_after/s14_liquidate_lev_long",
+    "kind": "util_fee_rates_after_refresh",
+    "inputs": {
+      "oi_long": "0",
+      "cap_long": "0",
+      "oi_short": "200000",
+      "cap_short": "0"
+    },
+    "expected": {
+      "long_util_fee_per_day": "91000000000000000",
+      "short_util_fee_per_day": "91000000000000000"
+    },
+    "intermediate": {
+      "utilization_long_e6": "1000000",
+      "utilization_short_e6": "1000000"
+    }
+  }
+]

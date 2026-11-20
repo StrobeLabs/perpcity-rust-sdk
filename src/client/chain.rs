@@ -14,7 +14,7 @@ use alloy::transports::{BoxTransport, RpcError, TransportError};
 use serde::{Deserialize, Serialize};
 
 use crate::constants::{MULTICALL3, SNAPSHOT_BLOCK_LAG};
-use crate::contracts::{IBeacon, IERC20, IMulticall3};
+use crate::contracts::{IBeacon, IERC20, IMulticall3, v1};
 use crate::convert::price_x96_to_f64;
 use crate::errors::{ContractError, PerpCityError, Result, TransactionError, ValidationError};
 use crate::hft::gas::FeeCache;
@@ -22,7 +22,7 @@ use crate::hft::state_cache::{BalanceKey, StateCache, StateCacheConfig};
 use crate::history::History;
 use crate::math::BlockContext;
 use crate::math::pricing::PricePair;
-use crate::storage::{perp_emas_slot, stored_emas};
+use crate::storage::{perp_emas_slot, stored_emas, v1_perp_emas_slot};
 use crate::transport::provider::HftTransport;
 use crate::units::UsdcAtoms;
 
@@ -509,21 +509,57 @@ impl ChainReader {
     }
 
     /// The market's stored EMA pair at `block`, from its storage slot: the
-    /// one read both contract builds answer, since `v0.2.2` has no `emas()`.
+    /// one read both earlier builds answer, since `v0.2.2` has no `emas()`.
     ///
     /// A transport failure is a typed, transient
     /// [`ContractError::StorageReadFailed`]; the node's own answer stays a
     /// response error so the caller's pinned-read mapping can name the
     /// block it is about.
     pub(super) async fn stored_emas_at(&self, perp: Address, block: BlockId) -> Result<PricePair> {
+        self.emas_word_at(perp, perp_emas_slot(), block).await
+    }
+
+    /// [`Self::stored_emas_at`] on a `v1.0.0` market, whose pair is at
+    /// slot 23 and which has no `emas()` view either.
+    pub(super) async fn v1_stored_emas_at(
+        &self,
+        perp: Address,
+        block: BlockId,
+    ) -> Result<PricePair> {
+        self.emas_word_at(perp, v1_perp_emas_slot(), block).await
+    }
+
+    async fn emas_word_at(&self, perp: Address, slot: U256, block: BlockId) -> Result<PricePair> {
         let word = self
             .inner
             .provider
-            .get_storage_at(perp, perp_emas_slot())
+            .get_storage_at(perp, slot)
             .block_id(block)
             .await
             .map_err(storage_read_error)?;
         Ok(stored_emas(word))
+    }
+
+    /// A `v1.0.0` beacon's `index()` at `block`: the value, exact in X96,
+    /// and the unix time it was set. A zero index is a broken beacon, as
+    /// in [`Self::index_x96_at`].
+    pub(super) async fn v1_index_at(&self, beacon: Address, block: BlockId) -> Result<(U256, u64)> {
+        let reading = v1::IBeacon::new(beacon, &self.inner.provider)
+            .index()
+            .block(block)
+            .call()
+            .await?;
+        if reading.index.is_zero() {
+            return Err(ValidationError::InvalidPrice {
+                reason: "beacon returned zero index".into(),
+            }
+            .into());
+        }
+        let updated_at =
+            u64::try_from(reading.updatedAt).map_err(|_| ValidationError::Overflow {
+                context: "beacon updatedAt exceeds u64".into(),
+            })?;
+        Ok((reading.index, updated_at))
     }
 
     /// [`Self::get_index_price`] at `block`.

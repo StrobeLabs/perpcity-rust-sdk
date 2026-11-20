@@ -14,7 +14,7 @@ use perpcity_sdk::hft::nonce::NonceManager;
 use perpcity_sdk::hft::pipeline::{PipelineConfig, TxPipeline, TxRequest};
 use perpcity_sdk::hft::position_manager::{ManagedPosition, PositionManager};
 use perpcity_sdk::hft::state_cache::{BalanceKey, CachedFees, StateCache, StateCacheConfig};
-use perpcity_sdk::{Ratio, UsdcAtoms};
+use perpcity_sdk::{LpFee, Ratio, UsdcAtoms};
 
 // ---------------------------------------------------------------------------
 // Nonce benchmarks
@@ -162,7 +162,7 @@ fn bench_state_cache(c: &mut Criterion) {
             CachedFees {
                 creator_fee: Ratio::from_e6(1_000).unwrap(),
                 insurance_fee: Ratio::from_e6(500).unwrap(),
-                lp_fee: Ratio::from_e6(3_000).unwrap(),
+                lp_fee: LpFee::Fixed(Ratio::from_e6(3_000).unwrap()),
                 liquidation_fee: Ratio::from_e6(10_000).unwrap(),
             },
             1000,

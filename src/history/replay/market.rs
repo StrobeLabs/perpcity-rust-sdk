@@ -187,6 +187,7 @@ impl Utilization {
             block,
             capacity: self.capacity.value()?,
             open_interest: self.open_interest.value()?,
+            close_capacity: None,
         })
     }
 }

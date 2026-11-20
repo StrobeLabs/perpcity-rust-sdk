@@ -26,10 +26,19 @@
 //! market total can drift from the sum of the live bands' stored
 //! `makerDetails(id).capacity`.
 //!
-//! A taker trade or a liquidity removal that would leave a side's open
-//! interest above its capacity reverts with `LongUtilizationExceeded` /
-//! `ShortUtilizationExceeded`. [`MarketCapacity`] holds both totals and
-//! derives each side's headroom and utilization.
+//! On the two earlier builds a taker trade or a liquidity removal that
+//! would leave a side's open interest above its capacity reverts with
+//! `LongUtilizationExceeded` / `ShortUtilizationExceeded`. [`MarketCapacity`]
+//! holds both totals and derives each side's headroom and utilization.
+//!
+//! On `v1.0.0` `capacity()` keeps its shape and loses that role: it is the
+//! utilization band, the backing the fees module prices utilization from,
+//! and it gates nothing. It can fall to zero after the index moves, and
+//! open interest can then exceed it. What gates a `v1.0.0` trade is the
+//! physical close capacity, `physicalCloseCapacity()`: the depth the whole
+//! book holds for each side's closes, which every swap rotates (a buy
+//! takes short-close depth and gives long-close depth). [`MarketCapacity`]
+//! carries it there as [`MarketCapacity::close_capacity`].
 
 use alloy::primitives::{U256, U512};
 use serde::{Deserialize, Serialize};
@@ -57,19 +66,30 @@ impl From<contracts::Capacity> for Capacity {
 /// one block by [`MarketReader::get_capacity`](crate::MarketReader::get_capacity).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MarketCapacity {
-    /// The block both totals were read at.
+    /// The block every total was read at.
     pub block: BlockContext,
-    /// `capacity()`: the sum of every band's capacity snapshot.
+    /// `capacity()`: on the earlier builds the sum of every band's
+    /// capacity snapshot; on `v1.0.0` the utilization band.
     pub capacity: Capacity,
     /// `openInterest()`: the draw on it.
     pub open_interest: PerSide<PerpAtoms>,
+    /// `physicalCloseCapacity()` on a `v1.0.0` market: each side's close
+    /// depth, in whole perp atoms, a long close's on the long side. `None`
+    /// on the earlier builds, which have no such view and gate on
+    /// [`Self::capacity`]; so `Some` exactly when the market is `v1.0.0`,
+    /// and the utilization rule follows it.
+    pub close_capacity: Option<Capacity>,
 }
 
 impl MarketCapacity {
-    /// Open interest `side` can still add before a trade reverts with
-    /// `LongUtilizationExceeded` / `ShortUtilizationExceeded`. The contract
-    /// reverts only when open interest exceeds capacity, so a trade can
-    /// fill the headroom exactly.
+    /// Open interest `side` can still add before a trade on an earlier
+    /// build reverts with `LongUtilizationExceeded` /
+    /// `ShortUtilizationExceeded`. The contract reverts only when open
+    /// interest exceeds capacity, so a trade can fill the headroom exactly.
+    ///
+    /// On `v1.0.0` the band gates nothing, so this is the band's slack and
+    /// no limit; a trade's limit there is the close depth in
+    /// [`Self::close_capacity`] with the side rule the swap applies to it.
     pub fn headroom(&self, side: Side) -> PerpAtoms {
         self.capacity
             .on(side)
@@ -77,15 +97,24 @@ impl MarketCapacity {
     }
 
     /// Utilization on one side as the Perp passes it to the fees module:
-    /// `openInterest * 1e6 / capacity`, rounded down. `None` when the side
-    /// has no capacity, where the contract passes `type(uint24).max`
-    /// instead of a ratio.
+    /// `openInterest * 1e6 / capacity`, rounded down.
     ///
-    /// Chain state is at most [`SCALE_1E6`] (100%): the contract reverts
-    /// any change that leaves open interest above capacity, and allows open
-    /// interest equal to it. A hand-built value above `u32::MAX`
-    /// saturates.
+    /// On the earlier builds, `None` when the side has no capacity, where
+    /// the contract passes `type(uint24).max` instead of a ratio; chain
+    /// state is at most [`SCALE_1E6`] (100%), since the contract reverts
+    /// any change that leaves open interest above capacity, and a
+    /// hand-built value above `u32::MAX` saturates.
+    ///
+    /// On `v1.0.0` (`PerpLogic._utilization`) always `Some`: a side with
+    /// no capacity is at [`SCALE_1E6`], and the ratio is capped there,
+    /// because the band can fall below the open interest it prices.
     pub fn utilization_e6(&self, side: Side) -> Option<u32> {
+        if self.close_capacity.is_some() {
+            return Some(v1_utilization_e6(
+                *self.open_interest.on(side),
+                *self.capacity.on(side),
+            ));
+        }
         // `mul_div` fails only on a zero divisor, which is the same
         // condition the contract answers with `type(uint24).max` instead of
         // a ratio — so the guard and the error are one thing, and `ok()`
@@ -101,6 +130,17 @@ impl MarketCapacity {
         .ok()
         .map(|utilization| utilization.saturating_to())
     }
+}
+
+/// `v1.0.0`'s `_utilization`: `min(floor(openInterest · 1e6 / capacity),
+/// 1e6)`, and `1e6` for no capacity.
+fn v1_utilization_e6(open_interest: PerpAtoms, capacity: PerpAtoms) -> u32 {
+    if capacity.is_zero() {
+        return SCALE_1E6;
+    }
+    let utilization =
+        U512::from(open_interest.atoms()) * U512::from(SCALE_1E6) / U512::from(capacity.atoms());
+    utilization.min(U512::from(SCALE_1E6)).to::<u32>()
 }
 
 /// The capacity a maker `band` adds at `sqrt_price`, exact to the contract
@@ -360,6 +400,7 @@ mod tests {
             short: PerpAtoms::new(51_603_209),
         },
         open_interest: PerSide::new(PerpAtoms::new(37_772_806), PerpAtoms::new(42_582_564)),
+        close_capacity: None,
     };
 
     #[test]
@@ -394,11 +435,55 @@ mod tests {
                 short: PerpAtoms::new(1),
             },
             open_interest: PerSide::uniform(PerpAtoms::new(u128::MAX)),
+            close_capacity: None,
         };
         assert_eq!(full.utilization_e6(Side::Long), Some(SCALE_1E6));
         assert_eq!(full.headroom(Side::Long), PerpAtoms::ZERO);
         assert_eq!(full.utilization_e6(Side::Short), Some(u32::MAX));
         assert_eq!(full.headroom(Side::Short), PerpAtoms::ZERO);
+    }
+
+    /// `v1.0.0`'s rule, which a market with a close capacity follows: a
+    /// side with no band is full, a ratio is floored, and open interest
+    /// past the band is capped at 100% rather than reported above it.
+    #[test]
+    fn v1_utilization_is_full_at_no_capacity_and_capped() {
+        let v1 = |capacity: [u128; 2], open_interest: [u128; 2]| MarketCapacity {
+            block: BlockContext::default(),
+            capacity: Capacity::new(PerpAtoms::new(capacity[0]), PerpAtoms::new(capacity[1])),
+            open_interest: PerSide::new(
+                PerpAtoms::new(open_interest[0]),
+                PerpAtoms::new(open_interest[1]),
+            ),
+            close_capacity: Some(Capacity::default()),
+        };
+        let empty = v1([0, 0], [0, 0]);
+        assert_eq!(empty.utilization_e6(Side::Long), Some(SCALE_1E6));
+        assert_eq!(empty.utilization_e6(Side::Short), Some(SCALE_1E6));
+
+        // The W12 scenario after its first touch: floor(400000e6 / 558864).
+        let touched = v1([577_953, 558_864], [850_000, 400_000]);
+        assert_eq!(touched.utilization_e6(Side::Long), Some(SCALE_1E6));
+        assert_eq!(touched.utilization_e6(Side::Short), Some(715_737));
+
+        let huge = v1([1, u128::MAX], [u128::MAX, u128::MAX]);
+        assert_eq!(huge.utilization_e6(Side::Long), Some(SCALE_1E6));
+        assert_eq!(huge.utilization_e6(Side::Short), Some(SCALE_1E6));
+
+        // The same totals on an earlier build keep that build's rule.
+        let earlier = MarketCapacity {
+            close_capacity: None,
+            ..touched
+        };
+        assert_eq!(earlier.utilization_e6(Side::Long), Some(1_470_707));
+        assert_eq!(
+            MarketCapacity {
+                close_capacity: None,
+                ..empty
+            }
+            .utilization_e6(Side::Long),
+            None
+        );
     }
 
     /// The range is valid by construction; the price is the one input

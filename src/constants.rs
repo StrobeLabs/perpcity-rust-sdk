@@ -57,6 +57,24 @@ pub const MIN_SWAP_SQRT_PRICE_X96: U256 = uint!(4295128740_U256);
 pub const MAX_SWAP_SQRT_PRICE_X96: U256 =
     uint!(1461446703485210103287273052203988822378723970341_U256);
 
+/// `v1.0.0`'s minimum swap limit (`MIN_SWAP_SQRT_PRICE`): the sqrt price
+/// of [`MIN_TICK`], the lowest a maker band may reach, so a swap cannot
+/// leave every band inactive.
+pub const V1_MIN_SWAP_SQRT_PRICE_X96: U256 = uint!(79156945126914824732836954_U256);
+
+/// `v1.0.0`'s maximum swap limit (`MAX_SWAP_SQRT_PRICE`): one below the
+/// sqrt price of [`MAX_TICK`].
+pub const V1_MAX_SWAP_SQRT_PRICE_X96: U256 = uint!(79299443975792720780679863727830_U256);
+
+/// `v1.0.0`'s lowest index a market accepts from its beacon
+/// (`MIN_INDEX_X96`, `1e-6` at `2^96`, floored); below it every action
+/// reverts `PriceOutsideRange`.
+pub const V1_MIN_INDEX_X96: U256 = uint!(79228162514264337593543_U256);
+
+/// `v1.0.0`'s highest index a market accepts from its beacon
+/// (`MAX_INDEX_X96`, `1e6` at `2^96`).
+pub const V1_MAX_INDEX_X96: U256 = uint!(79228162514264337593543950336000000_U256);
+
 /// Minimum allowed maker tick, slightly below the factory's minimum starting price.
 pub const MIN_TICK: i32 = -138_180;
 
@@ -66,8 +84,14 @@ pub const MAX_TICK: i32 = 138_180;
 /// Total supply of the internal accounting token: type(uint120).max.
 pub const ACCOUNTING_TOKEN_SUPPLY: U256 = U256::from_limbs([u64::MAX, u64::MAX >> 8, 0, 0]); // 2^120 - 1
 
-/// Maximum protocol fee: 5% scaled by 1e6 (50_000).
+/// Maximum protocol fee of the two earlier builds: 5% scaled by 1e6
+/// (50_000), the `ProtocolFeeManager`'s bound there.
 pub const MAX_PROTOCOL_FEE: u32 = 50_000;
+
+/// `v1.0.0`'s maximum protocol fee (`MAX_PROTOCOL_FEE`): 1% scaled by 1e6.
+/// The fee module keeps the other 99% for its own rates, and the close
+/// reserve of a liquidation adds it to the module's `maxSwapFee()`.
+pub const V1_MAX_PROTOCOL_FEE: u32 = 10_000;
 
 /// Maximum absolute error when decoding a Q96 fixed-point value to f64.
 ///
@@ -115,6 +139,7 @@ pub const RECEIPT_POLL_INTERVAL: Duration = Duration::from_secs(2);
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::math::tick::get_sqrt_ratio_at_tick;
 
     // Verify hand-crafted `from_limbs` constants match computed values.
 
@@ -173,6 +198,31 @@ mod tests {
     fn max_sqrt_price_x96_matches_contract() {
         let expected = U256::from_str_radix("79228162514264337593543950336000", 10).unwrap();
         assert_eq!(MAX_SQRT_PRICE_X96, expected);
+    }
+
+    /// `v1.0.0`'s `Constants.sol`: the swap limits are the maker tick
+    /// band's edges, the lower inclusive and the upper one below.
+    #[test]
+    fn v1_swap_limits_are_the_maker_tick_band() {
+        assert_eq!(
+            V1_MIN_SWAP_SQRT_PRICE_X96,
+            U256::from_str_radix("79156945126914824732836954", 10).unwrap()
+        );
+        assert_eq!(
+            V1_MAX_SWAP_SQRT_PRICE_X96,
+            U256::from_str_radix("79299443975792720780679863727830", 10).unwrap()
+        );
+        assert_eq!(
+            V1_MIN_SWAP_SQRT_PRICE_X96,
+            get_sqrt_ratio_at_tick(MIN_TICK).unwrap().x96()
+        );
+        assert_eq!(
+            V1_MAX_SWAP_SQRT_PRICE_X96,
+            get_sqrt_ratio_at_tick(MAX_TICK).unwrap().x96() - U256::from(1u8)
+        );
+        assert_eq!(V1_MIN_INDEX_X96, Q96 / U256::from(SCALE_1E6));
+        assert_eq!(V1_MAX_INDEX_X96, Q96 * U256::from(SCALE_1E6));
+        assert_eq!(V1_MAX_PROTOCOL_FEE, 10_000);
     }
 
     #[test]

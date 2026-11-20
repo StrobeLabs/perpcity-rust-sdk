@@ -65,10 +65,10 @@ pub use client::{
     ARBITRUM_V1_WITHDRAWAL_CONTROLLER_IMPL, ARBITRUM_V022_PERP_GUARD_HOOK, AdjustMakerParams,
     AdjustMakerResult, AdjustTakerParams, AdjustTakerResult, Balances, Bounds, ChainDeployments,
     ChainReader, Era, ExactAdjustMakerParams, ExactAdjustTakerParams, ExactOpenMakerParams,
-    ExactOpenTakerParams, Fees, MAX_ROW_BATCH, MakerEquityKind, MakerEquityOutcome,
-    MarginRatioTriple, MarginRatios, MarketConfig, MarketRates, MarketReader, MarketSnapshot,
-    OpenInterest, OpenMakerParams, OpenResult, OpenTakerParams, PerpClient, PositionRow,
-    RowOutcome, SolvencyState, StateAt, StoredMarginRatios, TxBuilder,
+    ExactOpenTakerParams, Fees, LpFee, LpFeeCurve, MAX_ROW_BATCH, MakerEquityKind,
+    MakerEquityOutcome, MarginRatioTriple, MarginRatios, MarketConfig, MarketRates, MarketReader,
+    MarketSnapshot, OpenInterest, OpenMakerParams, OpenResult, OpenTakerParams, PerpClient,
+    PositionRow, RowOutcome, SolvencyState, StateAt, StoredMarginRatios, TxBuilder,
 };
 
 #[doc(inline)]
@@ -97,16 +97,18 @@ pub use transport::{config::TransportConfig, provider::HftTransport};
 
 #[doc(inline)]
 pub use units::{
-    Earnings, Factor, FeeGrowth, Funding, FundingPerSqrtPrice, FundingRate, LDelta, LUnits,
-    PerSide, PerpAtoms, PerpDelta, Price, Ratio, Share, Side, SqrtPrice, UsdcAtoms, UsdcDelta,
-    UtilizationRate,
+    Earnings, Factor, FeeGrowth, Funding, FundingCorrection, FundingPerSqrtPrice,
+    FundingPerSqrtPriceX192, FundingRate, LDelta, LUnits, PerSide, PerpAtoms, PerpDelta, Price,
+    Ratio, Share, Side, SqrtPrice, UsdcAtoms, UsdcDelta, UtilizationRate,
 };
 
 #[doc(inline)]
 pub use math::{BlockContext, LiquidationPrices};
 
 #[doc(inline)]
-pub use math::pricing::{Emas, Mark, PricePair, calculate_emas, fair_price, fair_price_f64};
+pub use math::pricing::{
+    BeaconIndex, Emas, Mark, PricePair, calculate_emas, fair_price, fair_price_f64,
+};
 
 #[doc(inline)]
 pub use math::maker_equity::{
