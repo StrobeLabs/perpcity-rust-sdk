@@ -4,7 +4,7 @@ use alloy::primitives::{Address, Bytes, U256};
 use alloy::sol_types::SolCall;
 use serde::{Deserialize, Serialize};
 
-use crate::contracts::{Perp, PerpV022};
+use crate::contracts::{Perp, PerpV022, v1};
 use crate::convert::unpack_balance_delta;
 use crate::errors::{ContractError, Result, ValidationError};
 use crate::hft::gas::GasLimits;
@@ -167,7 +167,9 @@ impl MarketReader {
     /// the perp amount from `positions` for a taker, the liquidity from
     /// `makerDetails` for a maker. A size the chain moves between this read
     /// and the send reverts `MaxAmtExceeded`, one block wide at most; a zero
-    /// size is a position that is gone or not of this role.
+    /// size is a position that is gone or not of this role. `v1.0.0` takes
+    /// the same three arguments under the same selectors, and its size is
+    /// read from its own `positions` and `makerDetails` rows.
     pub async fn liquidation_calldata(
         &self,
         role: PositionRole,
@@ -181,12 +183,30 @@ impl MarketReader {
                 let amount = self.liquidation_size(role, pos_id).await?;
                 Ok(role.amount_calldata(pos_id, fee_recipient, amount))
             }
-            era @ Era::V1 => Err(ContractError::UnsupportedEra {
-                era,
-                operation: "liquidation_calldata",
+            Era::V1 => {
+                let amount = self.v1_liquidation_size(role, pos_id).await?;
+                Ok(role.v1_amount_calldata(pos_id, fee_recipient, amount))
             }
-            .into()),
         }
+    }
+
+    /// The whole size of a `v1.0.0` position: the perp amount of its
+    /// three-word `positions` row for a taker, the liquidity of its
+    /// `makerDetails` row for a maker.
+    async fn v1_liquidation_size(&self, role: PositionRole, pos_id: U256) -> Result<u128> {
+        let perp = v1::Perp::new(self.perp, self.chain.provider());
+        let size = match role {
+            PositionRole::Taker => {
+                let position = perp.positions(pos_id).call().await?;
+                let (perp_atoms, _usd) = unpack_balance_delta(position.delta);
+                perp_atoms.unsigned_abs()
+            }
+            PositionRole::Maker => perp.makerDetails(pos_id).call().await?.liquidity,
+        };
+        if size == 0 {
+            return Err(ContractError::PositionNotFound { pos_id }.into());
+        }
+        Ok(size)
     }
 
     /// The whole size of `pos_id` in the units the era's liquidation takes.
@@ -257,6 +277,26 @@ impl PositionRole {
         }
     }
 
+    /// `v1.0.0`'s call, the same shape as `v0.2.2`'s.
+    fn v1_amount_calldata(self, pos_id: U256, fee_recipient: Address, amount: u128) -> Bytes {
+        match self {
+            Self::Maker => v1::Perp::liquidateMakerCall {
+                posId: pos_id,
+                liquidationFeeRecipient: fee_recipient,
+                liquidityAmount: amount,
+            }
+            .abi_encode()
+            .into(),
+            Self::Taker => v1::Perp::liquidateTakerCall {
+                posId: pos_id,
+                liquidationFeeRecipient: fee_recipient,
+                perpAmount: amount,
+            }
+            .abi_encode()
+            .into(),
+        }
+    }
+
     pub(super) fn label(self) -> &'static str {
         match self {
             Self::Maker => "maker",
@@ -283,7 +323,7 @@ pub(super) fn validate_fee_recipient(
 
 #[cfg(test)]
 mod tests {
-    use alloy::primitives::{Address, B256, U256, address, keccak256};
+    use alloy::primitives::{Address, B256, I256, Signed, U256, address, keccak256};
     use alloy::sol_types::{SolCall, SolValue};
 
     use super::*;
@@ -447,30 +487,110 @@ mod tests {
         assert_eq!(cached.tick_spacing, key.tickSpacing.as_i32());
     }
 
-    /// No liquidation call is sent to a `v1.0.0` market on another era's
-    /// shape: it is refused after the immutables, with no size read.
+    /// A `v1.0.0` taker: the size from its three-word row, then the
+    /// 3-arg call, the same selector as `v0.2.2`'s.
     #[tokio::test]
-    async fn a_v1_market_refuses_the_liquidation_calldata() {
+    async fn v1_market_reads_the_taker_size_then_liquidates_by_amount() {
         let (client, rpc) = mock::client();
-        rpc.call::<Perp::poolKeyCall>(&mock::pool_key_with_hook(30, mock::V1_HOOK));
-        rpc.call::<v1::Perp::poolIdCall>(&POOL_ID);
-        let err = client
+        rpc.immutables(Era::V1);
+        rpc.call::<v1::Perp::positionsCall>(&v1::Position {
+            delta: pack_balance_delta(-2_500_000, 3_000_000),
+            margin: 1_000_000,
+            lastCumlFundingX96: I256::ZERO,
+        });
+        let calldata = client
             .market()
             .liquidation_calldata(PositionRole::Taker, U256::from(7u8), RECIPIENT)
+            .await
+            .unwrap();
+        assert_eq!(
+            calldata,
+            Bytes::from(
+                v1::Perp::liquidateTakerCall {
+                    posId: U256::from(7u8),
+                    liquidationFeeRecipient: RECIPIENT,
+                    perpAmount: 2_500_000,
+                }
+                .abi_encode()
+            )
+        );
+        assert_eq!(
+            v1::Perp::liquidateTakerCall::SELECTOR,
+            PerpV022::liquidateTakerCall::SELECTOR
+        );
+        assert_eq!(
+            rpc.selectors(),
+            [
+                Perp::poolKeyCall::SELECTOR,
+                v1::Perp::poolIdCall::SELECTOR,
+                v1::Perp::positionsCall::SELECTOR
+            ]
+        );
+        assert!(rpc.is_drained());
+    }
+
+    /// A `v1.0.0` maker: the liquidity from its seven-word `makerDetails`.
+    #[tokio::test]
+    async fn v1_market_reads_the_maker_liquidity_then_liquidates_by_amount() {
+        let (client, rpc) = mock::client();
+        rpc.immutables(Era::V1);
+        rpc.call::<v1::Perp::makerDetailsCall>(&v1::Maker {
+            tickLower: Signed::try_from(38_700).unwrap(),
+            tickUpper: Signed::try_from(39_540).unwrap(),
+            liquidity: 335_000_000,
+            lastLpFeeGrowthInsideX128: U256::ZERO,
+            lastCumlFunding: v1::MakerFunding {
+                belowX96: I256::ZERO,
+                withinInventoryX192: I256::ZERO,
+            },
+            lastFundingCorrectionX128: I256::ZERO,
+        });
+        let calldata = client
+            .market()
+            .liquidation_calldata(PositionRole::Maker, U256::from(1u8), RECIPIENT)
+            .await
+            .unwrap();
+        assert_eq!(
+            calldata,
+            Bytes::from(
+                v1::Perp::liquidateMakerCall {
+                    posId: U256::from(1u8),
+                    liquidationFeeRecipient: RECIPIENT,
+                    liquidityAmount: 335_000_000,
+                }
+                .abi_encode()
+            )
+        );
+        assert_eq!(
+            v1::Perp::liquidateMakerCall::SELECTOR,
+            PerpV022::liquidateMakerCall::SELECTOR
+        );
+        assert!(rpc.is_drained());
+    }
+
+    /// A closed `v1.0.0` taker has a zero row: no call is built.
+    #[tokio::test]
+    async fn v1_market_refuses_a_zero_size_liquidation() {
+        let (client, rpc) = mock::client();
+        rpc.immutables(Era::V1);
+        rpc.call::<v1::Perp::positionsCall>(&v1::Position {
+            delta: I256::ZERO,
+            margin: 0,
+            lastCumlFundingX96: I256::ZERO,
+        });
+        let err = client
+            .market()
+            .liquidation_calldata(PositionRole::Taker, U256::from(2u8), RECIPIENT)
             .await
             .unwrap_err();
         assert!(
             matches!(
                 err,
-                PerpCityError::Contract(ContractError::UnsupportedEra {
-                    era: Era::V1,
-                    operation: "liquidation_calldata",
-                })
+                PerpCityError::Contract(ContractError::PositionNotFound { .. })
             ),
             "{err}"
         );
-        assert!(!err.is_transient());
-        assert!(rpc.is_drained(), "poolKey, poolId");
+        assert!(rpc.is_drained());
     }
 
     /// A build `58b42b7` market: the whole-position call, and no read

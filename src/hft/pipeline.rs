@@ -327,6 +327,12 @@ impl TxPipeline {
         })
     }
 
+    /// Whether the pipeline still tracks `tx_hash`: its send has not yet
+    /// seen a receipt, a timeout or a failure.
+    pub fn is_in_flight(&self, tx_hash: &[u8; 32]) -> bool {
+        self.in_flight.contains_key(tx_hash)
+    }
+
     /// Number of in-flight transactions.
     pub fn in_flight_count(&self) -> usize {
         self.in_flight.len()
@@ -627,6 +633,18 @@ mod tests {
         assert_eq!(bump.new_max_priority_fee, original_priority * 2);
         assert_eq!(bump.new_max_fee, original_max * 2);
         assert_eq!(bump.original_tx_hash, hash);
+    }
+
+    #[test]
+    fn a_transaction_is_in_flight_from_submission_to_resolution() {
+        let mut pipe = TxPipeline::new(0, PipelineConfig::default());
+        let p = pipe.prepare(test_request(), &test_fee_cache(0), 0).unwrap();
+        let hash = [0xDD; 32];
+        assert!(!pipe.is_in_flight(&hash));
+        pipe.record_submission(hash, p, 0);
+        assert!(pipe.is_in_flight(&hash));
+        pipe.resolve(&hash);
+        assert!(!pipe.is_in_flight(&hash));
     }
 
     #[test]

@@ -18,7 +18,7 @@ use crate::math::tick::{
     UNISWAP_MAX_TICK, UNISWAP_MIN_TICK, get_sqrt_ratio_at_tick, get_tick_at_sqrt_ratio,
 };
 use crate::units::fixed_point::{Rounding, mul_div, u512_to_u256};
-use crate::units::{LDelta, LUnits, PerpAtoms, PerpDelta, SqrtPrice, UsdcAtoms, UsdcDelta};
+use crate::units::{LDelta, LUnits, PerpAtoms, PerpDelta, Ratio, SqrtPrice, UsdcAtoms, UsdcDelta};
 
 /// Liquidity stored at an initialized tick.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -164,6 +164,45 @@ impl TakerQuote {
         (!self.perp_delta.is_zero()).then(|| {
             self.usd_delta.magnitude().atoms() as f64 / self.perp_delta.magnitude().atoms() as f64
         })
+    }
+}
+
+/// The rounding slack a `v1.0.0` trade's fee bound adds for the per-segment
+/// round-ups: 100 atoms, the TS SDK's `maxTotalFeeFor` default.
+pub const MAX_TOTAL_FEE_SLACK: UsdcAtoms = UsdcAtoms::new(100);
+
+/// The two rates a `v1.0.0` taker trade's `maxTotalFee` is sized from: the
+/// fees module's `maxSwapFee()`, the most LP, creator and insurance rate a
+/// segment pays together, and the perp's cached `protocolFee()`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TakerFeeRates {
+    /// `maxSwapFee()` of the market's fees module.
+    pub max_swap_fee: Ratio,
+    /// `protocolFee()` of the perp.
+    pub protocol_fee: Ratio,
+}
+
+impl TakerFeeRates {
+    /// The bound for a swap that moves `volume` USDC, either way:
+    /// `⌈volume · (maxSwapFee + protocolFee) / 1e6⌉ + slack`. The contract
+    /// compares the swap's total of LP, protocol, creator and insurance fees
+    /// to it and reverts `MaxTotalFeeExceeded` above it.
+    pub fn max_total_fee(
+        self,
+        volume: UsdcAtoms,
+        slack: UsdcAtoms,
+    ) -> Result<UsdcAtoms, ValidationError> {
+        let rate = u128::from(self.max_swap_fee.e6()) + u128::from(self.protocol_fee.e6());
+        volume
+            .atoms()
+            .checked_mul(rate)
+            .and_then(|scaled| scaled.checked_add(999_999))
+            .map(|scaled| scaled / 1_000_000)
+            .and_then(|fee| fee.checked_add(slack.atoms()))
+            .map(UsdcAtoms::new)
+            .ok_or_else(|| ValidationError::Overflow {
+                context: format!("maxTotalFee for a volume of {volume} USDC"),
+            })
     }
 }
 
@@ -601,6 +640,32 @@ fn u256_to_i128(value: U256) -> Result<i128, ValidationError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// W12 `max_total_fee/s02_open_long`: the volume at 0.86% plus 0.01%,
+    /// rounded up, plus the slack; a zero volume is the slack alone.
+    #[test]
+    fn the_fee_bound_rounds_the_volume_up_and_adds_the_slack() {
+        let rates = TakerFeeRates {
+            max_swap_fee: Ratio::from_e6(8_600).unwrap(),
+            protocol_fee: Ratio::from_e6(100).unwrap(),
+        };
+        assert_eq!(
+            rates
+                .max_total_fee(UsdcAtoms::new(20_140_658), MAX_TOTAL_FEE_SLACK)
+                .unwrap(),
+            UsdcAtoms::new(175_324)
+        );
+        assert_eq!(
+            rates
+                .max_total_fee(UsdcAtoms::ZERO, MAX_TOTAL_FEE_SLACK)
+                .unwrap(),
+            MAX_TOTAL_FEE_SLACK
+        );
+        assert!(matches!(
+            rates.max_total_fee(UsdcAtoms::new(u128::MAX), MAX_TOTAL_FEE_SLACK),
+            Err(ValidationError::Overflow { .. })
+        ));
+    }
 
     /// Liquidity standing at a tick, gross then net.
     fn tick_liquidity(gross: u128, net: i128) -> TickLiquidity {

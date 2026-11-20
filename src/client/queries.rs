@@ -32,6 +32,7 @@ use crate::hft::state_cache::{CachedBounds, CachedFees};
 use crate::history::TapeAddresses;
 use crate::math::BlockContext;
 use crate::math::pricing::{Emas, Mark};
+use crate::math::swap::TakerFeeRates;
 use crate::units::{LUnits, PerSide, PerpAtoms, Price, Ratio, SqrtPrice, UsdcAtoms};
 
 use super::market::MarketReader;
@@ -456,6 +457,54 @@ impl MarketReader {
             beacon: modules.beacon,
             bounds,
             fees,
+        })
+    }
+
+    /// The rates a `v1.0.0` taker trade's fee bound is sized from, read now:
+    /// the fees module's `maxSwapFee()` and the perp's `protocolFee()`, in
+    /// one multicall after `modules()`. Not cached: governance can change
+    /// the module and the perp syncs its protocol fee.
+    ///
+    /// # Errors
+    ///
+    /// [`ContractError::UnsupportedEra`] for an earlier build, which has no
+    /// fee bound, and [`ContractError::UnknownBuild`] for an unknown one,
+    /// before any view is read; [`ContractError::ModuleNotRegistered`] for a
+    /// missing fees module; [`ValidationError::Overflow`] for a rate past
+    /// 100%; the transport error from any read.
+    pub async fn get_taker_fee_rates(&self) -> Result<TakerFeeRates> {
+        let era = self.immutables().await?.era;
+        if era != Era::V1 {
+            return Err(ContractError::UnsupportedEra {
+                era,
+                operation: "get_taker_fee_rates",
+            }
+            .into());
+        }
+        let perp = v1::Perp::new(self.perp, self.chain.provider());
+        let modules = perp.modules().call().await?;
+        let fees = v1::IFees::new(
+            registered_module(modules.fees, "IFees")?,
+            self.chain.provider(),
+        );
+        let (max_swap_fee, protocol_fee) = self
+            .chain
+            .multicall_at(BlockId::latest())
+            .add(fees.maxSwapFee())
+            .add(perp.protocolFee())
+            .aggregate()
+            .await
+            .map_err(multicall_error)?;
+        let ratio = |e6: U256, name: &str| {
+            u32::try_from(e6)
+                .map_err(|_| ValidationError::Overflow {
+                    context: format!("{name} {e6} exceeds uint32"),
+                })
+                .and_then(Ratio::from_e6)
+        };
+        Ok(TakerFeeRates {
+            max_swap_fee: ratio(max_swap_fee, "maxSwapFee")?,
+            protocol_fee: ratio(protocol_fee, "protocolFee")?,
         })
     }
 

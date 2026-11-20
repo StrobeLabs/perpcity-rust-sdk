@@ -51,6 +51,7 @@ mod trades;
 mod transactions;
 #[cfg(test)]
 mod v1_market_tests;
+mod v1_trades;
 
 pub use chain::{Balances, ChainDeployments, ChainReader};
 pub use maker_equity::{MakerEquityKind, MakerEquityOutcome};
@@ -69,6 +70,7 @@ pub use trades::{
     OpenMakerParams, OpenResult, OpenTakerParams,
 };
 pub use transactions::TxBuilder;
+pub use v1_trades::{MaxTotalFee, V1_TRADE_DEADLINE, V1TakerAdjustment, V1TakerReplacement};
 
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};

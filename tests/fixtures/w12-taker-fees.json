@@ -1,0 +1,1366 @@
+[
+  {
+    "id": "max_total_fee/s02_open_long",
+    "kind": "max_total_fee_cap",
+    "inputs": {
+      "usd_volume": "-20140658",
+      "max_swap_fee_e6": "8600",
+      "protocol_fee_e6": "100",
+      "rounding_slack": "100",
+      "actual_total_fee_of_trade": "29710"
+    },
+    "expected": {
+      "max_total_fee": "175324"
+    },
+    "intermediate": {
+      "cap_holds": true
+    }
+  },
+  {
+    "id": "max_total_fee/s02_open_long_slip100bps",
+    "kind": "max_total_fee_cap",
+    "inputs": {
+      "usd_volume": "20342064",
+      "max_swap_fee_e6": "8600",
+      "protocol_fee_e6": "100",
+      "rounding_slack": "100",
+      "actual_total_fee_of_trade": "29710"
+    },
+    "expected": {
+      "max_total_fee": "177076"
+    },
+    "intermediate": {
+      "cap_holds": true
+    }
+  },
+  {
+    "id": "max_total_fee/s03_open_short",
+    "kind": "max_total_fee_cap",
+    "inputs": {
+      "usd_volume": "20140657",
+      "max_swap_fee_e6": "8600",
+      "protocol_fee_e6": "100",
+      "rounding_slack": "100",
+      "actual_total_fee_of_trade": "30355"
+    },
+    "expected": {
+      "max_total_fee": "175324"
+    },
+    "intermediate": {
+      "cap_holds": true
+    }
+  },
+  {
+    "id": "max_total_fee/s03_open_short_slip100bps",
+    "kind": "max_total_fee_cap",
+    "inputs": {
+      "usd_volume": "19939250",
+      "max_swap_fee_e6": "8600",
+      "protocol_fee_e6": "100",
+      "rounding_slack": "100",
+      "actual_total_fee_of_trade": "30355"
+    },
+    "expected": {
+      "max_total_fee": "173572"
+    },
+    "intermediate": {
+      "cap_holds": true
+    }
+  },
+  {
+    "id": "max_total_fee/s04_open_long_lev",
+    "kind": "max_total_fee_cap",
+    "inputs": {
+      "usd_volume": "-22678177",
+      "max_swap_fee_e6": "8600",
+      "protocol_fee_e6": "100",
+      "rounding_slack": "100",
+      "actual_total_fee_of_trade": "33452"
+    },
+    "expected": {
+      "max_total_fee": "197401"
+    },
+    "intermediate": {
+      "cap_holds": true
+    }
+  },
+  {
+    "id": "max_total_fee/s04_open_long_lev_slip100bps",
+    "kind": "max_total_fee_cap",
+    "inputs": {
+      "usd_volume": "22904958",
+      "max_swap_fee_e6": "8600",
+      "protocol_fee_e6": "100",
+      "rounding_slack": "100",
+      "actual_total_fee_of_trade": "33452"
+    },
+    "expected": {
+      "max_total_fee": "199374"
+    },
+    "intermediate": {
+      "cap_holds": true
+    }
+  },
+  {
+    "id": "max_total_fee/s10b_reduce_short_half",
+    "kind": "max_total_fee_cap",
+    "inputs": {
+      "usd_volume": "-10194888",
+      "max_swap_fee_e6": "8600",
+      "protocol_fee_e6": "100",
+      "rounding_slack": "100",
+      "actual_total_fee_of_trade": "15039"
+    },
+    "expected": {
+      "max_total_fee": "88796"
+    },
+    "intermediate": {
+      "cap_holds": true
+    }
+  },
+  {
+    "id": "max_total_fee/s10b_reduce_short_half_slip100bps",
+    "kind": "max_total_fee_cap",
+    "inputs": {
+      "usd_volume": "10296836",
+      "max_swap_fee_e6": "8600",
+      "protocol_fee_e6": "100",
+      "rounding_slack": "100",
+      "actual_total_fee_of_trade": "15039"
+    },
+    "expected": {
+      "max_total_fee": "89683"
+    },
+    "intermediate": {
+      "cap_holds": true
+    }
+  },
+  {
+    "id": "max_total_fee/s11a_partial_liquidation",
+    "kind": "max_total_fee_cap",
+    "inputs": {
+      "usd_volume": "11464204",
+      "max_swap_fee_e6": "8600",
+      "protocol_fee_e6": "100",
+      "rounding_slack": "100",
+      "actual_total_fee_of_trade": "16912"
+    },
+    "expected": {
+      "max_total_fee": "99839"
+    },
+    "intermediate": {
+      "cap_holds": true
+    }
+  },
+  {
+    "id": "max_total_fee/s11a_partial_liquidation_slip100bps",
+    "kind": "max_total_fee_cap",
+    "inputs": {
+      "usd_volume": "11349561",
+      "max_swap_fee_e6": "8600",
+      "protocol_fee_e6": "100",
+      "rounding_slack": "100",
+      "actual_total_fee_of_trade": "16912"
+    },
+    "expected": {
+      "max_total_fee": "98842"
+    },
+    "intermediate": {
+      "cap_holds": true
+    }
+  },
+  {
+    "id": "max_total_fee/s11b_close_long",
+    "kind": "max_total_fee_cap",
+    "inputs": {
+      "usd_volume": "20158313",
+      "max_swap_fee_e6": "8600",
+      "protocol_fee_e6": "100",
+      "rounding_slack": "100",
+      "actual_total_fee_of_trade": "29937"
+    },
+    "expected": {
+      "max_total_fee": "175478"
+    },
+    "intermediate": {
+      "cap_holds": true
+    }
+  },
+  {
+    "id": "max_total_fee/s11b_close_long_slip100bps",
+    "kind": "max_total_fee_cap",
+    "inputs": {
+      "usd_volume": "19956729",
+      "max_swap_fee_e6": "8600",
+      "protocol_fee_e6": "100",
+      "rounding_slack": "100",
+      "actual_total_fee_of_trade": "29937"
+    },
+    "expected": {
+      "max_total_fee": "173724"
+    },
+    "intermediate": {
+      "cap_holds": true
+    }
+  },
+  {
+    "id": "max_total_fee/s14_liquidate_lev_long",
+    "kind": "max_total_fee_cap",
+    "inputs": {
+      "usd_volume": "11215748",
+      "max_swap_fee_e6": "8600",
+      "protocol_fee_e6": "100",
+      "rounding_slack": "100",
+      "actual_total_fee_of_trade": "16545"
+    },
+    "expected": {
+      "max_total_fee": "97678"
+    },
+    "intermediate": {
+      "cap_holds": true
+    }
+  },
+  {
+    "id": "max_total_fee/s14_liquidate_lev_long_slip100bps",
+    "kind": "max_total_fee_cap",
+    "inputs": {
+      "usd_volume": "11103590",
+      "max_swap_fee_e6": "8600",
+      "protocol_fee_e6": "100",
+      "rounding_slack": "100",
+      "actual_total_fee_of_trade": "16545"
+    },
+    "expected": {
+      "max_total_fee": "96702"
+    },
+    "intermediate": {
+      "cap_holds": true
+    }
+  },
+  {
+    "id": "max_total_fee/grid_0",
+    "kind": "max_total_fee_cap",
+    "inputs": {
+      "usd_volume": "0",
+      "max_swap_fee_e6": "8600",
+      "protocol_fee_e6": "0",
+      "rounding_slack": "100"
+    },
+    "expected": {
+      "max_total_fee": "100"
+    }
+  },
+  {
+    "id": "max_total_fee/grid_1",
+    "kind": "max_total_fee_cap",
+    "inputs": {
+      "usd_volume": "0",
+      "max_swap_fee_e6": "8600",
+      "protocol_fee_e6": "100",
+      "rounding_slack": "100"
+    },
+    "expected": {
+      "max_total_fee": "100"
+    }
+  },
+  {
+    "id": "max_total_fee/grid_2",
+    "kind": "max_total_fee_cap",
+    "inputs": {
+      "usd_volume": "0",
+      "max_swap_fee_e6": "8600",
+      "protocol_fee_e6": "10000",
+      "rounding_slack": "100"
+    },
+    "expected": {
+      "max_total_fee": "100"
+    }
+  },
+  {
+    "id": "max_total_fee/grid_3",
+    "kind": "max_total_fee_cap",
+    "inputs": {
+      "usd_volume": "1",
+      "max_swap_fee_e6": "8600",
+      "protocol_fee_e6": "0",
+      "rounding_slack": "100"
+    },
+    "expected": {
+      "max_total_fee": "101"
+    }
+  },
+  {
+    "id": "max_total_fee/grid_4",
+    "kind": "max_total_fee_cap",
+    "inputs": {
+      "usd_volume": "1",
+      "max_swap_fee_e6": "8600",
+      "protocol_fee_e6": "100",
+      "rounding_slack": "100"
+    },
+    "expected": {
+      "max_total_fee": "101"
+    }
+  },
+  {
+    "id": "max_total_fee/grid_5",
+    "kind": "max_total_fee_cap",
+    "inputs": {
+      "usd_volume": "1",
+      "max_swap_fee_e6": "8600",
+      "protocol_fee_e6": "10000",
+      "rounding_slack": "100"
+    },
+    "expected": {
+      "max_total_fee": "101"
+    }
+  },
+  {
+    "id": "max_total_fee/grid_6",
+    "kind": "max_total_fee_cap",
+    "inputs": {
+      "usd_volume": "999999",
+      "max_swap_fee_e6": "8600",
+      "protocol_fee_e6": "0",
+      "rounding_slack": "100"
+    },
+    "expected": {
+      "max_total_fee": "8700"
+    }
+  },
+  {
+    "id": "max_total_fee/grid_7",
+    "kind": "max_total_fee_cap",
+    "inputs": {
+      "usd_volume": "999999",
+      "max_swap_fee_e6": "8600",
+      "protocol_fee_e6": "100",
+      "rounding_slack": "100"
+    },
+    "expected": {
+      "max_total_fee": "8800"
+    }
+  },
+  {
+    "id": "max_total_fee/grid_8",
+    "kind": "max_total_fee_cap",
+    "inputs": {
+      "usd_volume": "999999",
+      "max_swap_fee_e6": "8600",
+      "protocol_fee_e6": "10000",
+      "rounding_slack": "100"
+    },
+    "expected": {
+      "max_total_fee": "18700"
+    }
+  },
+  {
+    "id": "max_total_fee/grid_9",
+    "kind": "max_total_fee_cap",
+    "inputs": {
+      "usd_volume": "20000000",
+      "max_swap_fee_e6": "8600",
+      "protocol_fee_e6": "0",
+      "rounding_slack": "100"
+    },
+    "expected": {
+      "max_total_fee": "172100"
+    }
+  },
+  {
+    "id": "max_total_fee/grid_10",
+    "kind": "max_total_fee_cap",
+    "inputs": {
+      "usd_volume": "20000000",
+      "max_swap_fee_e6": "8600",
+      "protocol_fee_e6": "100",
+      "rounding_slack": "100"
+    },
+    "expected": {
+      "max_total_fee": "174100"
+    }
+  },
+  {
+    "id": "max_total_fee/grid_11",
+    "kind": "max_total_fee_cap",
+    "inputs": {
+      "usd_volume": "20000000",
+      "max_swap_fee_e6": "8600",
+      "protocol_fee_e6": "10000",
+      "rounding_slack": "100"
+    },
+    "expected": {
+      "max_total_fee": "372100"
+    }
+  },
+  {
+    "id": "max_total_fee/grid_12",
+    "kind": "max_total_fee_cap",
+    "inputs": {
+      "usd_volume": "-20123456",
+      "max_swap_fee_e6": "8600",
+      "protocol_fee_e6": "0",
+      "rounding_slack": "100"
+    },
+    "expected": {
+      "max_total_fee": "173162"
+    }
+  },
+  {
+    "id": "max_total_fee/grid_13",
+    "kind": "max_total_fee_cap",
+    "inputs": {
+      "usd_volume": "-20123456",
+      "max_swap_fee_e6": "8600",
+      "protocol_fee_e6": "100",
+      "rounding_slack": "100"
+    },
+    "expected": {
+      "max_total_fee": "175175"
+    }
+  },
+  {
+    "id": "max_total_fee/grid_14",
+    "kind": "max_total_fee_cap",
+    "inputs": {
+      "usd_volume": "-20123456",
+      "max_swap_fee_e6": "8600",
+      "protocol_fee_e6": "10000",
+      "rounding_slack": "100"
+    },
+    "expected": {
+      "max_total_fee": "374397"
+    }
+  },
+  {
+    "id": "max_total_fee/grid_15",
+    "kind": "max_total_fee_cap",
+    "inputs": {
+      "usd_volume": "1000000000000",
+      "max_swap_fee_e6": "8600",
+      "protocol_fee_e6": "0",
+      "rounding_slack": "100"
+    },
+    "expected": {
+      "max_total_fee": "8600000100"
+    }
+  },
+  {
+    "id": "max_total_fee/grid_16",
+    "kind": "max_total_fee_cap",
+    "inputs": {
+      "usd_volume": "1000000000000",
+      "max_swap_fee_e6": "8600",
+      "protocol_fee_e6": "100",
+      "rounding_slack": "100"
+    },
+    "expected": {
+      "max_total_fee": "8700000100"
+    }
+  },
+  {
+    "id": "max_total_fee/grid_17",
+    "kind": "max_total_fee_cap",
+    "inputs": {
+      "usd_volume": "1000000000000",
+      "max_swap_fee_e6": "8600",
+      "protocol_fee_e6": "10000",
+      "rounding_slack": "100"
+    },
+    "expected": {
+      "max_total_fee": "18600000100"
+    }
+  },
+  {
+    "id": "slippage_limit/0",
+    "kind": "taker_slippage_limit",
+    "inputs": {
+      "usd_delta": "-20123456",
+      "is_long": true,
+      "slippage_bps": "0"
+    },
+    "expected": {
+      "amt1_limit": "20123456"
+    }
+  },
+  {
+    "id": "slippage_limit/1",
+    "kind": "taker_slippage_limit",
+    "inputs": {
+      "usd_delta": "-20123456",
+      "is_long": true,
+      "slippage_bps": "50"
+    },
+    "expected": {
+      "amt1_limit": "20224073"
+    }
+  },
+  {
+    "id": "slippage_limit/2",
+    "kind": "taker_slippage_limit",
+    "inputs": {
+      "usd_delta": "-20123456",
+      "is_long": true,
+      "slippage_bps": "100"
+    },
+    "expected": {
+      "amt1_limit": "20324690"
+    }
+  },
+  {
+    "id": "slippage_limit/3",
+    "kind": "taker_slippage_limit",
+    "inputs": {
+      "usd_delta": "-20123456",
+      "is_long": true,
+      "slippage_bps": "150"
+    },
+    "expected": {
+      "amt1_limit": "20425307"
+    }
+  },
+  {
+    "id": "slippage_limit/4",
+    "kind": "taker_slippage_limit",
+    "inputs": {
+      "usd_delta": "-20123456",
+      "is_long": true,
+      "slippage_bps": "9999"
+    },
+    "expected": {
+      "amt1_limit": "40244899"
+    }
+  },
+  {
+    "id": "slippage_limit/5",
+    "kind": "taker_slippage_limit",
+    "inputs": {
+      "usd_delta": "-20123456",
+      "is_long": false,
+      "slippage_bps": "0"
+    },
+    "expected": {
+      "amt1_limit": "20123456"
+    }
+  },
+  {
+    "id": "slippage_limit/6",
+    "kind": "taker_slippage_limit",
+    "inputs": {
+      "usd_delta": "-20123456",
+      "is_long": false,
+      "slippage_bps": "50"
+    },
+    "expected": {
+      "amt1_limit": "20022838"
+    }
+  },
+  {
+    "id": "slippage_limit/7",
+    "kind": "taker_slippage_limit",
+    "inputs": {
+      "usd_delta": "-20123456",
+      "is_long": false,
+      "slippage_bps": "100"
+    },
+    "expected": {
+      "amt1_limit": "19922221"
+    }
+  },
+  {
+    "id": "slippage_limit/8",
+    "kind": "taker_slippage_limit",
+    "inputs": {
+      "usd_delta": "-20123456",
+      "is_long": false,
+      "slippage_bps": "150"
+    },
+    "expected": {
+      "amt1_limit": "19821604"
+    }
+  },
+  {
+    "id": "slippage_limit/9",
+    "kind": "taker_slippage_limit",
+    "inputs": {
+      "usd_delta": "-20123456",
+      "is_long": false,
+      "slippage_bps": "9999"
+    },
+    "expected": {
+      "amt1_limit": "2012"
+    }
+  },
+  {
+    "id": "slippage_limit/10",
+    "kind": "taker_slippage_limit",
+    "inputs": {
+      "usd_delta": "8000000",
+      "is_long": true,
+      "slippage_bps": "0"
+    },
+    "expected": {
+      "amt1_limit": "8000000"
+    }
+  },
+  {
+    "id": "slippage_limit/11",
+    "kind": "taker_slippage_limit",
+    "inputs": {
+      "usd_delta": "8000000",
+      "is_long": true,
+      "slippage_bps": "50"
+    },
+    "expected": {
+      "amt1_limit": "8040000"
+    }
+  },
+  {
+    "id": "slippage_limit/12",
+    "kind": "taker_slippage_limit",
+    "inputs": {
+      "usd_delta": "8000000",
+      "is_long": true,
+      "slippage_bps": "100"
+    },
+    "expected": {
+      "amt1_limit": "8080000"
+    }
+  },
+  {
+    "id": "slippage_limit/13",
+    "kind": "taker_slippage_limit",
+    "inputs": {
+      "usd_delta": "8000000",
+      "is_long": true,
+      "slippage_bps": "150"
+    },
+    "expected": {
+      "amt1_limit": "8120000"
+    }
+  },
+  {
+    "id": "slippage_limit/14",
+    "kind": "taker_slippage_limit",
+    "inputs": {
+      "usd_delta": "8000000",
+      "is_long": true,
+      "slippage_bps": "9999"
+    },
+    "expected": {
+      "amt1_limit": "15999200"
+    }
+  },
+  {
+    "id": "slippage_limit/15",
+    "kind": "taker_slippage_limit",
+    "inputs": {
+      "usd_delta": "8000000",
+      "is_long": false,
+      "slippage_bps": "0"
+    },
+    "expected": {
+      "amt1_limit": "8000000"
+    }
+  },
+  {
+    "id": "slippage_limit/16",
+    "kind": "taker_slippage_limit",
+    "inputs": {
+      "usd_delta": "8000000",
+      "is_long": false,
+      "slippage_bps": "50"
+    },
+    "expected": {
+      "amt1_limit": "7960000"
+    }
+  },
+  {
+    "id": "slippage_limit/17",
+    "kind": "taker_slippage_limit",
+    "inputs": {
+      "usd_delta": "8000000",
+      "is_long": false,
+      "slippage_bps": "100"
+    },
+    "expected": {
+      "amt1_limit": "7920000"
+    }
+  },
+  {
+    "id": "slippage_limit/18",
+    "kind": "taker_slippage_limit",
+    "inputs": {
+      "usd_delta": "8000000",
+      "is_long": false,
+      "slippage_bps": "150"
+    },
+    "expected": {
+      "amt1_limit": "7880000"
+    }
+  },
+  {
+    "id": "slippage_limit/19",
+    "kind": "taker_slippage_limit",
+    "inputs": {
+      "usd_delta": "8000000",
+      "is_long": false,
+      "slippage_bps": "9999"
+    },
+    "expected": {
+      "amt1_limit": "800"
+    }
+  },
+  {
+    "id": "slippage_limit/20",
+    "kind": "taker_slippage_limit",
+    "inputs": {
+      "usd_delta": "1",
+      "is_long": true,
+      "slippage_bps": "0"
+    },
+    "expected": {
+      "amt1_limit": "1"
+    }
+  },
+  {
+    "id": "slippage_limit/21",
+    "kind": "taker_slippage_limit",
+    "inputs": {
+      "usd_delta": "1",
+      "is_long": true,
+      "slippage_bps": "50"
+    },
+    "expected": {
+      "amt1_limit": "1"
+    }
+  },
+  {
+    "id": "slippage_limit/22",
+    "kind": "taker_slippage_limit",
+    "inputs": {
+      "usd_delta": "1",
+      "is_long": true,
+      "slippage_bps": "100"
+    },
+    "expected": {
+      "amt1_limit": "1"
+    }
+  },
+  {
+    "id": "slippage_limit/23",
+    "kind": "taker_slippage_limit",
+    "inputs": {
+      "usd_delta": "1",
+      "is_long": true,
+      "slippage_bps": "150"
+    },
+    "expected": {
+      "amt1_limit": "1"
+    }
+  },
+  {
+    "id": "slippage_limit/24",
+    "kind": "taker_slippage_limit",
+    "inputs": {
+      "usd_delta": "1",
+      "is_long": true,
+      "slippage_bps": "9999"
+    },
+    "expected": {
+      "amt1_limit": "1"
+    }
+  },
+  {
+    "id": "slippage_limit/25",
+    "kind": "taker_slippage_limit",
+    "inputs": {
+      "usd_delta": "1",
+      "is_long": false,
+      "slippage_bps": "0"
+    },
+    "expected": {
+      "amt1_limit": "1"
+    }
+  },
+  {
+    "id": "slippage_limit/26",
+    "kind": "taker_slippage_limit",
+    "inputs": {
+      "usd_delta": "1",
+      "is_long": false,
+      "slippage_bps": "50"
+    },
+    "expected": {
+      "amt1_limit": "0"
+    }
+  },
+  {
+    "id": "slippage_limit/27",
+    "kind": "taker_slippage_limit",
+    "inputs": {
+      "usd_delta": "1",
+      "is_long": false,
+      "slippage_bps": "100"
+    },
+    "expected": {
+      "amt1_limit": "0"
+    }
+  },
+  {
+    "id": "slippage_limit/28",
+    "kind": "taker_slippage_limit",
+    "inputs": {
+      "usd_delta": "1",
+      "is_long": false,
+      "slippage_bps": "150"
+    },
+    "expected": {
+      "amt1_limit": "0"
+    }
+  },
+  {
+    "id": "slippage_limit/29",
+    "kind": "taker_slippage_limit",
+    "inputs": {
+      "usd_delta": "1",
+      "is_long": false,
+      "slippage_bps": "9999"
+    },
+    "expected": {
+      "amt1_limit": "0"
+    }
+  },
+  {
+    "id": "swap_fill/s02_open_long",
+    "kind": "swap_fill",
+    "inputs": {
+      "sqrt_price_x96": "560227709747861399187319382274",
+      "liquidity": "405000000",
+      "tick": "39122",
+      "perp_delta": "400000",
+      "tick_map": {
+        "tickSpacing": "30",
+        "ticks": [
+          [
+            "36870",
+            "70000000"
+          ],
+          [
+            "38700",
+            "335000000"
+          ],
+          [
+            "39540",
+            "-335000000"
+          ],
+          [
+            "40950",
+            "-70000000"
+          ]
+        ]
+      }
+    },
+    "expected": {
+      "amount0": "400000",
+      "amount1": "-20140658",
+      "sqrt_price_after_x96": "564167727782842675675129819929"
+    },
+    "intermediate": {
+      "ticks_crossed": "0"
+    }
+  },
+  {
+    "id": "swap_fill/s03_open_short",
+    "kind": "swap_fill",
+    "inputs": {
+      "sqrt_price_x96": "564167727782842675675129819929",
+      "liquidity": "405000000",
+      "tick": "39262",
+      "perp_delta": "-400000",
+      "tick_map": {
+        "tickSpacing": "30",
+        "ticks": [
+          [
+            "36870",
+            "70000000"
+          ],
+          [
+            "38700",
+            "335000000"
+          ],
+          [
+            "39540",
+            "-335000000"
+          ],
+          [
+            "40950",
+            "-70000000"
+          ]
+        ]
+      }
+    },
+    "expected": {
+      "amount0": "-400000",
+      "amount1": "20140657",
+      "sqrt_price_after_x96": "560227709747861399187319382275"
+    },
+    "intermediate": {
+      "ticks_crossed": "0"
+    }
+  },
+  {
+    "id": "swap_fill/s04_open_long_lev",
+    "kind": "swap_fill",
+    "inputs": {
+      "sqrt_price_x96": "560227709747861399187319382275",
+      "liquidity": "405000000",
+      "tick": "39122",
+      "perp_delta": "450000",
+      "tick_map": {
+        "tickSpacing": "30",
+        "ticks": [
+          [
+            "36870",
+            "70000000"
+          ],
+          [
+            "38700",
+            "335000000"
+          ],
+          [
+            "39540",
+            "-335000000"
+          ],
+          [
+            "40950",
+            "-70000000"
+          ]
+        ]
+      }
+    },
+    "expected": {
+      "amount0": "450000",
+      "amount1": "-22678177",
+      "sqrt_price_after_x96": "564664130142489818548599515289"
+    },
+    "intermediate": {
+      "ticks_crossed": "0"
+    }
+  },
+  {
+    "id": "swap_fill/s10b_reduce_short_half",
+    "kind": "swap_fill",
+    "inputs": {
+      "sqrt_price_x96": "564664130142489818548599515289",
+      "liquidity": "405000000",
+      "tick": "39279",
+      "perp_delta": "200000",
+      "tick_map": {
+        "tickSpacing": "30",
+        "ticks": [
+          [
+            "36870",
+            "70000000"
+          ],
+          [
+            "38700",
+            "335000000"
+          ],
+          [
+            "39540",
+            "-335000000"
+          ],
+          [
+            "40950",
+            "-70000000"
+          ]
+        ]
+      }
+    },
+    "expected": {
+      "amount0": "200000",
+      "amount1": "-10194888",
+      "sqrt_price_after_x96": "566658505968148437622434737741"
+    },
+    "intermediate": {
+      "ticks_crossed": "0"
+    }
+  },
+  {
+    "id": "swap_fill/s11a_partial_liquidation",
+    "kind": "swap_fill",
+    "inputs": {
+      "sqrt_price_x96": "566658505968148437622434737741",
+      "liquidity": "405000000",
+      "tick": "39350",
+      "perp_delta": "-225000",
+      "tick_map": {
+        "tickSpacing": "30",
+        "ticks": [
+          [
+            "36870",
+            "70000000"
+          ],
+          [
+            "38700",
+            "335000000"
+          ],
+          [
+            "39540",
+            "-335000000"
+          ],
+          [
+            "40950",
+            "-70000000"
+          ]
+        ]
+      }
+    },
+    "expected": {
+      "amount0": "-225000",
+      "amount1": "11464204",
+      "sqrt_price_after_x96": "564415819816516210145632537993"
+    },
+    "intermediate": {
+      "ticks_crossed": "0"
+    }
+  },
+  {
+    "id": "swap_fill/s11b_close_long",
+    "kind": "swap_fill",
+    "inputs": {
+      "sqrt_price_x96": "564415819816516210145632537993",
+      "liquidity": "405000000",
+      "tick": "39271",
+      "perp_delta": "-400000",
+      "tick_map": {
+        "tickSpacing": "30",
+        "ticks": [
+          [
+            "36870",
+            "70000000"
+          ],
+          [
+            "38700",
+            "335000000"
+          ],
+          [
+            "39540",
+            "-335000000"
+          ],
+          [
+            "40950",
+            "-70000000"
+          ]
+        ]
+      }
+    },
+    "expected": {
+      "amount0": "-400000",
+      "amount1": "20158313",
+      "sqrt_price_after_x96": "560472347894690955840263150806"
+    },
+    "intermediate": {
+      "ticks_crossed": "0"
+    }
+  },
+  {
+    "id": "swap_fill/s14_liquidate_lev_long",
+    "kind": "swap_fill",
+    "inputs": {
+      "sqrt_price_x96": "560472347894690955840263150806",
+      "liquidity": "405000000",
+      "tick": "39130",
+      "perp_delta": "-225000",
+      "tick_map": {
+        "tickSpacing": "30",
+        "ticks": [
+          [
+            "36870",
+            "70000000"
+          ],
+          [
+            "38700",
+            "335000000"
+          ],
+          [
+            "39540",
+            "-335000000"
+          ],
+          [
+            "40950",
+            "-70000000"
+          ]
+        ]
+      }
+    },
+    "expected": {
+      "amount0": "-225000",
+      "amount1": "11215748",
+      "sqrt_price_after_x96": "558278266055432442001708349921"
+    },
+    "intermediate": {
+      "ticks_crossed": "0"
+    }
+  },
+  {
+    "id": "swap_fees/s02_open_long",
+    "kind": "swap_fees",
+    "inputs": {
+      "sqrt_price_before_x96": "560227709747861399187319382274",
+      "sqrt_price_after_x96": "564167727782842675675129819929",
+      "liquidity": "405000000",
+      "spot_amm_price_x96": "3961408125713216879677197516791",
+      "ema_amm_price_x96": "3961408125713216879677197516799",
+      "abs_amount1": "20140658",
+      "protocol_fee_e6": "100",
+      "fees_config": {
+        "c_fee": "100",
+        "ins_fee": "1000",
+        "start_fee": "5000",
+        "target_fee": "100",
+        "liquidity_decay": "15000000",
+        "volatility_scaler": "200000",
+        "max_fee_multiplier": "1500000",
+        "target_utilization": "800000000000000000",
+        "slope_before_target": "1250000000000000",
+        "slope_after_target": "450000000000000000",
+        "liq_fee": "5000"
+      }
+    },
+    "expected": {
+      "lp_fee": "5539",
+      "protocol_fee": "2015",
+      "creator_fee": "2015",
+      "insurance_fee": "20141",
+      "total_fee": "29710"
+    },
+    "intermediate": {
+      "segment_volume": "20140658",
+      "lp_fee_rate_e6": "275"
+    }
+  },
+  {
+    "id": "swap_fees/s03_open_short",
+    "kind": "swap_fees",
+    "inputs": {
+      "sqrt_price_before_x96": "564167727782842675675129819929",
+      "sqrt_price_after_x96": "560227709747861399187319382275",
+      "liquidity": "405000000",
+      "spot_amm_price_x96": "4017324332295996451800663503025",
+      "ema_amm_price_x96": "3966729256305268857584825220270",
+      "abs_amount1": "20140657",
+      "protocol_fee_e6": "100",
+      "fees_config": {
+        "c_fee": "100",
+        "ins_fee": "1000",
+        "start_fee": "5000",
+        "target_fee": "100",
+        "liquidity_decay": "15000000",
+        "volatility_scaler": "200000",
+        "max_fee_multiplier": "1500000",
+        "target_utilization": "800000000000000000",
+        "slope_before_target": "1250000000000000",
+        "slope_after_target": "450000000000000000",
+        "liq_fee": "5000"
+      }
+    },
+    "expected": {
+      "lp_fee": "6184",
+      "protocol_fee": "2015",
+      "creator_fee": "2015",
+      "insurance_fee": "20141",
+      "total_fee": "30355"
+    },
+    "intermediate": {
+      "segment_volume": "20140657",
+      "lp_fee_rate_e6": "307"
+    }
+  },
+  {
+    "id": "swap_fees/s04_open_long_lev",
+    "kind": "swap_fees",
+    "inputs": {
+      "sqrt_price_before_x96": "560227709747861399187319382275",
+      "sqrt_price_after_x96": "564664130142489818548599515289",
+      "liquidity": "405000000",
+      "spot_amm_price_x96": "3961408125713216879677197516805",
+      "ema_amm_price_x96": "3966222883779161348272895836832",
+      "abs_amount1": "22678177",
+      "protocol_fee_e6": "100",
+      "fees_config": {
+        "c_fee": "100",
+        "ins_fee": "1000",
+        "start_fee": "5000",
+        "target_fee": "100",
+        "liquidity_decay": "15000000",
+        "volatility_scaler": "200000",
+        "max_fee_multiplier": "1500000",
+        "target_utilization": "800000000000000000",
+        "slope_before_target": "1250000000000000",
+        "slope_after_target": "450000000000000000",
+        "liq_fee": "5000"
+      }
+    },
+    "expected": {
+      "lp_fee": "6237",
+      "protocol_fee": "2268",
+      "creator_fee": "2268",
+      "insurance_fee": "22679",
+      "total_fee": "33452"
+    },
+    "intermediate": {
+      "segment_volume": "22678177",
+      "lp_fee_rate_e6": "275"
+    }
+  },
+  {
+    "id": "swap_fees/s10b_reduce_short_half",
+    "kind": "swap_fees",
+    "inputs": {
+      "sqrt_price_before_x96": "564664130142489818548599515289",
+      "sqrt_price_after_x96": "566658505968148437622434737741",
+      "liquidity": "405000000",
+      "spot_amm_price_x96": "4024397004186097606281750657442",
+      "ema_amm_price_x96": "4024397004186097606281750657442",
+      "abs_amount1": "10194888",
+      "protocol_fee_e6": "100",
+      "fees_config": {
+        "c_fee": "100",
+        "ins_fee": "1000",
+        "start_fee": "5000",
+        "target_fee": "100",
+        "liquidity_decay": "15000000",
+        "volatility_scaler": "200000",
+        "max_fee_multiplier": "1500000",
+        "target_utilization": "800000000000000000",
+        "slope_before_target": "1250000000000000",
+        "slope_after_target": "450000000000000000",
+        "liq_fee": "5000"
+      }
+    },
+    "expected": {
+      "lp_fee": "2804",
+      "protocol_fee": "1020",
+      "creator_fee": "1020",
+      "insurance_fee": "10195",
+      "total_fee": "15039"
+    },
+    "intermediate": {
+      "segment_volume": "10194888",
+      "lp_fee_rate_e6": "275"
+    }
+  },
+  {
+    "id": "swap_fees/s11a_partial_liquidation",
+    "kind": "swap_fees",
+    "inputs": {
+      "sqrt_price_before_x96": "566658505968148437622434737741",
+      "sqrt_price_after_x96": "564415819816516210145632537993",
+      "liquidity": "405000000",
+      "spot_amm_price_x96": "4052875293280246618011086123225",
+      "ema_amm_price_x96": "4052875134954821299554168214533",
+      "abs_amount1": "11464204",
+      "protocol_fee_e6": "100",
+      "fees_config": {
+        "c_fee": "100",
+        "ins_fee": "1000",
+        "start_fee": "5000",
+        "target_fee": "100",
+        "liquidity_decay": "15000000",
+        "volatility_scaler": "200000",
+        "max_fee_multiplier": "1500000",
+        "target_utilization": "800000000000000000",
+        "slope_before_target": "1250000000000000",
+        "slope_after_target": "450000000000000000",
+        "liq_fee": "5000"
+      }
+    },
+    "expected": {
+      "lp_fee": "3153",
+      "protocol_fee": "1147",
+      "creator_fee": "1147",
+      "insurance_fee": "11465",
+      "total_fee": "16912"
+    },
+    "intermediate": {
+      "segment_volume": "11464204",
+      "lp_fee_rate_e6": "275"
+    }
+  },
+  {
+    "id": "swap_fees/s11b_close_long",
+    "kind": "swap_fees",
+    "inputs": {
+      "sqrt_price_before_x96": "564415819816516210145632537993",
+      "sqrt_price_after_x96": "560472347894690955840263150806",
+      "liquidity": "405000000",
+      "spot_amm_price_x96": "4020858335592412759847104965242",
+      "ema_amm_price_x96": "4049828333661269859610693435432",
+      "abs_amount1": "20158313",
+      "protocol_fee_e6": "100",
+      "fees_config": {
+        "c_fee": "100",
+        "ins_fee": "1000",
+        "start_fee": "5000",
+        "target_fee": "100",
+        "liquidity_decay": "15000000",
+        "volatility_scaler": "200000",
+        "max_fee_multiplier": "1500000",
+        "target_utilization": "800000000000000000",
+        "slope_before_target": "1250000000000000",
+        "slope_after_target": "450000000000000000",
+        "liq_fee": "5000"
+      }
+    },
+    "expected": {
+      "lp_fee": "5746",
+      "protocol_fee": "2016",
+      "creator_fee": "2016",
+      "insurance_fee": "20159",
+      "total_fee": "29937"
+    },
+    "intermediate": {
+      "segment_volume": "20158313",
+      "lp_fee_rate_e6": "285"
+    }
+  },
+  {
+    "id": "swap_fees/s14_liquidate_lev_long",
+    "kind": "swap_fees",
+    "inputs": {
+      "sqrt_price_before_x96": "560472347894690955840263150806",
+      "sqrt_price_after_x96": "558278266055432442001708349921",
+      "liquidity": "405000000",
+      "spot_amm_price_x96": "3964868586950142450686128169967",
+      "ema_amm_price_x96": "3964868586950142450686128169967",
+      "abs_amount1": "11215748",
+      "protocol_fee_e6": "100",
+      "fees_config": {
+        "c_fee": "100",
+        "ins_fee": "1000",
+        "start_fee": "5000",
+        "target_fee": "100",
+        "liquidity_decay": "15000000",
+        "volatility_scaler": "200000",
+        "max_fee_multiplier": "1500000",
+        "target_utilization": "800000000000000000",
+        "slope_before_target": "1250000000000000",
+        "slope_after_target": "450000000000000000",
+        "liq_fee": "5000"
+      }
+    },
+    "expected": {
+      "lp_fee": "3085",
+      "protocol_fee": "1122",
+      "creator_fee": "1122",
+      "insurance_fee": "11216",
+      "total_fee": "16545"
+    },
+    "intermediate": {
+      "segment_volume": "11215748",
+      "lp_fee_rate_e6": "275"
+    }
+  }
+]

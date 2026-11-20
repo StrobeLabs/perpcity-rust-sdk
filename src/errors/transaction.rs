@@ -176,6 +176,20 @@ pub enum TransactionError {
         /// Transactions still awaiting receipts, which block the resync.
         in_flight: usize,
     },
+
+    /// A stuck transaction that
+    /// [`PerpClient::replace_v1_taker`](crate::PerpClient::replace_v1_taker)
+    /// does not sign again: the node does not know it, it is not this
+    /// client's `v1.0.0` taker trade on this market, or its own send still
+    /// waits for its receipt. Nothing was signed or sent. Not transient:
+    /// `tx_hash` may still land, so look up its receipt before a new send.
+    #[error("cannot replace {tx_hash}: {reason}")]
+    NotReplaceable {
+        /// Hash of the stuck transaction.
+        tx_hash: FixedBytes<32>,
+        /// Why it is not replaced.
+        reason: &'static str,
+    },
 }
 
 impl TransactionError {
@@ -204,7 +218,8 @@ impl TransactionError {
             | Self::ReceiptTimeout { tx_hash, .. }
             | Self::Reverted { tx_hash, .. }
             | Self::OutOfGas { tx_hash, .. }
-            | Self::TakerNotClosed { tx_hash, .. } => Some(*tx_hash),
+            | Self::TakerNotClosed { tx_hash, .. }
+            | Self::NotReplaceable { tx_hash, .. } => Some(*tx_hash),
             _ => None,
         }
     }

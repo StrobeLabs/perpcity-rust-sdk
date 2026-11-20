@@ -125,6 +125,18 @@ pub enum ValidationError {
         reason: &'static str,
     },
 
+    /// A reduce-only taker adjustment that would grow the position or flip
+    /// it through zero: the change must lie between zero and the delta that
+    /// closes the position exactly, the `v1.0.0` rule the contract enforces
+    /// as `ReduceOnlyViolated`. Both figures are perp atoms.
+    #[error("reduce-only change {perp_delta} is outside [0, {closing}] for position {position}", closing = -position)]
+    ReduceOnlyViolated {
+        /// The position's perp amount when it was read.
+        position: i128,
+        /// The change that was refused.
+        perp_delta: i128,
+    },
+
     /// A configuration value is invalid or missing.
     #[error("invalid config: {reason}")]
     InvalidConfig {

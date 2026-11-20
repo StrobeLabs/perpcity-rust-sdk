@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- V1 taker writes: `PerpClient::open_taker_v1`, `adjust_taker_v1` and `close_taker_v1` send the `v1.0.0` calls with a deadline of now plus `V1_TRADE_DEADLINE` (600 s) and a `maxTotalFee` from `MaxTotalFee` (a volume at the market's rates plus `MAX_TOTAL_FEE_SLACK`, or an exact bound). Each returns the receipt's parsed event: `V1TradeResult<TakerOpened>`, `V1TakerAdjustment`, or `V1TradeResult<TakerClosed>`. The close reverses the whole perp amount with `reduceOnly`. A reduce-only adjustment that would grow or flip the position is refused before the send with `ValidationError::ReduceOnlyViolated`. Each refuses an earlier build with `UnsupportedEra` before any other read. `MarketReader::get_taker_fee_rates` reads `maxSwapFee()` and `protocolFee()` into `TakerFeeRates`, whose `max_total_fee` is the TS `maxTotalFeeFor`.
+
+- `PerpClient::replace_v1_taker` signs a stuck v1 taker trade again with the same nonce, a new deadline and fees at least an eighth higher, and returns the outcome of whichever hash mines (`V1TakerReplacement`). It refuses with the new `TransactionError::NotReplaceable` when the node does not know the hash, when it is not this client's v1 taker trade on this market, or when its send still waits for the receipt. `TxPipeline::is_in_flight` answers the last check.
+
+- `MarketReader::liquidation_calldata` (and so `liquidate_taker` and `liquidate_maker`) serves a v1 market: the size from the v1 `positions` or `makerDetails` row and the 3-arg call, where before it returned `UnsupportedEra`.
+
 - V1 trade receipts expose the position ID, emitted margin and full trade event. A missing event reports the mined transaction hash and tells callers to avoid a second send.
 
 - V1 pinned reads expose position previews and the collateral cap. Legacy valuation batches on v1 direct callers to the preview. Physical capacity checks account for terminal partial fills and fractional maker removals.
