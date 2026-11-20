@@ -237,7 +237,7 @@ async fn reads_agree_with_raw_calls(
 /// The earlier builds' `get_positions_by_owner` walk, as it was before
 /// `v1.0.0`: `ownerOf` for each id in `1..next_pos_id`; a revert with
 /// revert data is a burned token and skipped, an error with none is
-/// propagated.
+/// propagated. Keep it in step with `nft_owner` in `src/client/queries.rs`.
 async fn earlier_owner_of_walk(
     earlier: &EarlierPerp::PerpInstance<&DynProvider>,
     next_pos_id: u64,
