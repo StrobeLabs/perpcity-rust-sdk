@@ -505,8 +505,9 @@ fn bench_struct_sizes(c: &mut Criterion) {
                 "LatencyStats exceeds cache line: {latency_stats_size}"
             );
             assert!(
-                cached_fees_size <= 64,
-                "CachedFees exceeds cache line: {cached_fees_size}"
+                // The inline v1 LP fee curve brings CachedFees to 80 bytes on x86_64.
+                cached_fees_size <= 80,
+                "CachedFees exceeds its v1 size budget: {cached_fees_size}"
             );
 
             black_box((

@@ -757,7 +757,7 @@ impl MarketReader {
         let perp = v1::Perp::new(self.perp, self.chain.provider());
         let state = self.state().await?;
         let block = state.block();
-        let (modules, pool_key, pool_state, rates, oi, ema_window, latency) = self
+        let (modules, pool_key, pool_state, rates, oi, ema_window) = self
             .chain
             .multicall_at(state.id())
             .add(perp.modules())
@@ -766,7 +766,6 @@ impl MarketReader {
             .add(perp.rates())
             .add(perp.openInterest())
             .add(perp.emaWindow())
-            .add(perp.latency())
             .aggregate()
             .await
             .map_err(|e| pinned_read_error(multicall_error(e), block.number))?;
@@ -774,7 +773,6 @@ impl MarketReader {
         let pool_price = read_price(pool_state.ammPrice, "pool price")?;
         let funding_rate_daily = funding_per_day_to_f64(rates.fundingPerDay);
         let views = V1Views {
-            latency,
             modules,
             pool_state,
             last_touch: rates.lastTouch.to::<u64>(),

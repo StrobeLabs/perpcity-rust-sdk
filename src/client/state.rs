@@ -17,13 +17,13 @@ use alloy::transports::{RpcError, TransportError};
 use futures_util::stream::{self, StreamExt};
 use serde::{Deserialize, Serialize};
 
-use crate::constants::{MAX_TICK, MIN_TICK, MULTICALL3, V1_MAX_INDEX_X96, V1_MIN_INDEX_X96};
+use crate::constants::{MAX_TICK, MIN_TICK, MULTICALL3};
 use crate::contracts::{
     IERC20, IMarginRatios, IMulticall3, IPoolManagerState, IPriceImpact, Modules, Perp, Position,
     v1,
 };
 use crate::convert::unpack_balance_delta;
-use crate::errors::{ContractError, PerpCityError, Result, TransactionError, ValidationError};
+use crate::errors::{ContractError, PerpCityError, Result, ValidationError};
 use crate::events::{CumulativesInfo, V1Cumulatives};
 use crate::math::BlockContext;
 use crate::math::capacity::{Capacity, MarketCapacity};
@@ -1059,13 +1059,10 @@ impl StateAt {
 
     /// What the contract marks from at this block: the pool price, the
     /// beacon index, and the stored EMAs advanced to the block timestamp,
-    /// with the mark the market's pricing module makes of them. One
-    /// multicall for the `Perp` views, then the beacon's `index()` and the
-    /// EMAs' storage word, all pinned here; on a `v1.0.0` market then the
-    /// module's `fairPrice` by `eth_call` at the block.
-    ///
-    /// A `v1.0.0` market marks only an index it accepts: past its latency
-    /// or outside the domain, the mark read fails.
+    /// with the mark the market's pricing module makes of them.
+    /// The views, index and stored EMAs are pinned to this block. On v1,
+    /// the market reads and checks the index through `readBeaconIndex`.
+    /// Its pricing module prices the accepted index and advanced EMAs.
     ///
     /// # Errors
     ///
@@ -1081,10 +1078,9 @@ impl StateAt {
         self.mark_from(&views).await
     }
 
-    /// The beacon's index on a `v1.0.0` market at this block, with its
-    /// update time and the market's `latency()`: what decides whether the
-    /// market takes it ([`BeaconIndex::is_stale_at`],
-    /// [`BeaconIndex::is_in_domain`]). One multicall for `modules()` and
+    /// The raw beacon observation and the v1 market's latency at this block.
+    /// A caller-sensitive beacon can return a different index to the market.
+    /// One multicall for `modules()` and
     /// `latency()`, then the beacon's `index()`, both pinned here.
     ///
     /// # Errors
@@ -1269,7 +1265,7 @@ impl StateAt {
     /// `modules()`, `poolState()`, `rates()` and `emaWindow()`.
     pub(super) async fn v1_views(&self) -> Result<V1Views> {
         let perp = v1::Perp::new(self.market.perp, self.market.chain.provider());
-        let (modules, pool_state, rates, ema_window, latency) = self
+        let (modules, pool_state, rates, ema_window) = self
             .market
             .chain
             .multicall_at(self.id())
@@ -1277,12 +1273,10 @@ impl StateAt {
             .add(perp.poolState())
             .add(perp.rates())
             .add(perp.emaWindow())
-            .add(perp.latency())
             .aggregate()
             .await
             .map_err(|e| self.multicall_read_error(e))?;
         Ok(V1Views {
-            latency,
             modules,
             pool_state,
             last_touch: rates.lastTouch.to::<u64>(),
@@ -1299,28 +1293,11 @@ impl StateAt {
         let beacon = registered_module(views.modules.beacon, "IBeacon")?;
         let pricing = registered_module(views.modules.pricing, "IPricing")?;
         let chain = &self.market.chain;
-        let ((index, updated_at), stored) = tokio::try_join!(
-            chain.v1_index_at(beacon, self.id()),
+        let (index, stored) = tokio::try_join!(
+            chain.v1_market_index_at(self.market.perp, beacon, self.id()),
             chain.v1_stored_emas_at(self.market.perp, self.id()),
         )
         .map_err(|e| pinned_read_error(e, self.block.number))?;
-        let timestamp = U256::from(self.block.timestamp);
-        let refusal =
-            if updated_at > timestamp || timestamp - updated_at > U256::from(views.latency) {
-                Some((v1::Perp::StaleBeaconIndex::SELECTOR, "StaleBeaconIndex"))
-            } else if !(V1_MIN_INDEX_X96..=V1_MAX_INDEX_X96).contains(&index) {
-                Some((v1::Perp::PriceOutsideRange::SELECTOR, "PriceOutsideRange"))
-            } else {
-                None
-            };
-        if let Some((selector, name)) = refusal {
-            return Err(TransactionError::SimulationReverted {
-                selector: selector.into(),
-                error_name: name.into(),
-                revert_data: None,
-            }
-            .into());
-        }
         let pool_price = Price::from_x96(views.pool_state.ammPrice);
         let index = Price::from_x96(index);
         let spot = PricePair::try_from_x96(pool_price.x96(), index.x96())?;
@@ -1589,7 +1566,6 @@ pub(super) struct PerpViews {
 /// A `v1.0.0` market's views a mark and the pool are built from, read
 /// together at one block: [`PerpViews`] in that build's shapes.
 pub(super) struct V1Views {
-    pub(super) latency: u32,
     /// `modules()`.
     pub(super) modules: v1::Modules,
     /// `poolState()`.

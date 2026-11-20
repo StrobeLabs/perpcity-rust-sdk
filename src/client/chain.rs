@@ -9,13 +9,14 @@ use alloy::network::Ethereum;
 use alloy::primitives::{Address, Bytes, U256};
 use alloy::providers::{Empty, MulticallBuilder, Provider, RootProvider};
 use alloy::rpc::client::RpcClient;
-use alloy::sol_types::{SolCall, SolError, SolValue};
+use alloy::sol_types::{SolCall, SolValue};
 use alloy::transports::{BoxTransport, RpcError, TransportError};
 use serde::{Deserialize, Serialize};
 
 use crate::constants::{MULTICALL3, SNAPSHOT_BLOCK_LAG};
 use crate::contracts::{IBeacon, IERC20, IMulticall3, v1};
 use crate::convert::price_x96_to_f64;
+use crate::errors::decode::decode_revert;
 use crate::errors::{ContractError, PerpCityError, Result, TransactionError, ValidationError};
 use crate::hft::gas::FeeCache;
 use crate::hft::state_cache::{BalanceKey, StateCache, StateCacheConfig};
@@ -547,34 +548,53 @@ impl ChainReader {
         beacon: Address,
         block: BlockId,
     ) -> Result<(U256, U256)> {
-        let unreadable = || TransactionError::SimulationReverted {
-            selector: v1::Perp::BeaconIndexUnreadable::SELECTOR.into(),
-            error_name: "BeaconIndexUnreadable".into(),
-            revert_data: None,
-        };
-        let data = v1::IBeacon::new(beacon, &self.inner.provider)
+        let observation = v1::IBeacon::new(beacon, &self.inner.provider)
             .index()
             .block(block)
-            .call_raw()
-            .await
-            .map_err(|err| match &err {
-                alloy::contract::Error::TransportError(RpcError::ErrorResp(resp))
-                    if resp.code == 3
-                        || resp
-                            .message
-                            .to_ascii_lowercase()
-                            .contains("execution reverted") =>
-                {
-                    PerpCityError::from(unreadable())
-                }
-                _ => err.into(),
-            })?;
-        if data.len() < 64 {
-            return Err(unreadable().into());
+            .call()
+            .await?;
+        Ok((observation.index, observation.updatedAt))
+    }
+
+    /// The index the market accepts at this block, with the market as the beacon's caller.
+    pub(super) async fn v1_market_index_at(
+        &self,
+        perp: Address,
+        beacon: Address,
+        block: BlockId,
+    ) -> Result<U256> {
+        let call = IMulticall3::Call3 {
+            target: perp,
+            allowFailure: true,
+            callData: v1::Perp::readBeaconIndexCall { beacon }.abi_encode().into(),
+        };
+        let rows = IMulticall3::new(MULTICALL3, &self.inner.provider)
+            .aggregate3(vec![call])
+            .block(block)
+            .call()
+            .await?;
+        let [row] = rows.as_slice() else {
+            return Err(ContractError::MulticallFailed {
+                reason: format!("expected one beacon result, got {}", rows.len()),
+            }
+            .into());
+        };
+        if !row.success {
+            let data = row.returnData.to_string();
+            let (error_name, selector) =
+                decode_revert(&data).ok_or_else(|| ContractError::MulticallFailed {
+                    reason: format!("readBeaconIndex reverted without a selector ({data})"),
+                })?;
+            return Err(TransactionError::SimulationReverted {
+                selector: selector.into(),
+                error_name,
+                revert_data: Some(data),
+            }
+            .into());
         }
-        Ok((
-            U256::from_be_slice(&data[..32]),
-            U256::from_be_slice(&data[32..64]),
+        Ok(U256::from(
+            v1::Perp::readBeaconIndexCall::abi_decode_returns_validate(&row.returnData)
+                .map_err(alloy::contract::Error::from)?,
         ))
     }
 
@@ -696,17 +716,32 @@ mod tests {
     #[tokio::test]
     async fn beacon_read_preserves_node_errors() {
         let (chain, rpc) = mock::chain();
-        rpc.fails("header not found");
+        let data = Bytes::from_static(&[0xde, 0xad, 0xbe, 0xef, 0x42]);
+        rpc.aggregate3(vec![IMulticall3::Result {
+            success: false,
+            returnData: data.clone(),
+        }]);
         let err = chain
-            .v1_index_at(Address::ZERO, BlockId::latest())
+            .v1_market_index_at(Address::ZERO, Address::ZERO, BlockId::latest())
             .await
             .unwrap_err();
         assert!(
-            matches!(err, PerpCityError::Abi(alloy::contract::Error::TransportError(RpcError::ErrorResp(resp))) if resp.message == "header not found")
+            matches!(err, PerpCityError::Transaction(TransactionError::SimulationReverted {
+            selector, revert_data: Some(payload), ..
+        }) if selector.0 == [0xde, 0xad, 0xbe, 0xef] && payload == data.to_string())
+        );
+
+        rpc.fails("execution reverted");
+        let err = chain
+            .v1_market_index_at(Address::ZERO, Address::ZERO, BlockId::latest())
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, PerpCityError::Abi(alloy::contract::Error::TransportError(RpcError::ErrorResp(resp))) if resp.message == "execution reverted")
         );
         // An exhausted mock transport cannot deliver an RPC response.
         let err = chain
-            .v1_index_at(Address::ZERO, BlockId::latest())
+            .v1_market_index_at(Address::ZERO, Address::ZERO, BlockId::latest())
             .await
             .unwrap_err();
         assert!(

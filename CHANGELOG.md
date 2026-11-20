@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-- V1 beacon reads report `BeaconIndexUnreadable` when the beacon reverts or returns fewer than 64 bytes.
+- V1 marks and snapshots call the pinned market’s `readBeaconIndex` and preserve its revert data. Outer RPC errors propagate. The timestamp API reads the beacon directly.
 
 ### Breaking
 
