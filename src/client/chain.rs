@@ -532,13 +532,28 @@ impl ChainReader {
 
     async fn emas_word_at(&self, perp: Address, slot: U256, block: BlockId) -> Result<PricePair> {
         let word = self
-            .inner
+            .storage_word_at(perp, slot, block, "stored EMAs at the market's slot")
+            .await?;
+        Ok(stored_emas(word))
+    }
+
+    /// One storage word of `account` at `block`. A transport failure is a
+    /// typed, transient [`ContractError::StorageReadFailed`] naming
+    /// `context`; the node's own answer stays a response error so the
+    /// caller's pinned-read mapping can name the block it is about.
+    pub(super) async fn storage_word_at(
+        &self,
+        account: Address,
+        slot: U256,
+        block: BlockId,
+        context: &str,
+    ) -> Result<U256> {
+        self.inner
             .provider
-            .get_storage_at(perp, slot)
+            .get_storage_at(account, slot)
             .block_id(block)
             .await
-            .map_err(storage_read_error)?;
-        Ok(stored_emas(word))
+            .map_err(|e| storage_read_error(e, context))
     }
 
     /// A `v1.0.0` beacon's `index()` at `block`: the value, exact in X96,
@@ -683,11 +698,11 @@ impl ChainReader {
 /// error is kept as the response it was, so the caller can read a pruned
 /// or missing block out of its message; anything else is the transport
 /// failing, retryable, and typed as the storage read it interrupted.
-fn storage_read_error(error: TransportError) -> PerpCityError {
+fn storage_read_error(error: TransportError, context: &str) -> PerpCityError {
     match error {
         RpcError::ErrorResp(_) => alloy::contract::Error::TransportError(error).into(),
         other => ContractError::StorageReadFailed {
-            context: "stored EMAs at the market's slot".into(),
+            context: context.into(),
             source: Some(Arc::new(other)),
         }
         .into(),
@@ -776,7 +791,7 @@ mod tests {
     /// answer is left for the pinned-read mapping to classify.
     #[test]
     fn a_storage_read_cut_off_by_the_transport_is_transient() {
-        let cut = storage_read_error(TransportErrorKind::custom_str("connection reset"));
+        let cut = storage_read_error(TransportErrorKind::custom_str("connection reset"), "slot");
         assert!(
             matches!(
                 cut,
@@ -789,11 +804,14 @@ mod tests {
         );
         assert!(cut.is_transient());
 
-        let answered = storage_read_error(RpcError::ErrorResp(ErrorPayload {
-            code: -32000,
-            message: "header not found".into(),
-            data: None,
-        }));
+        let answered = storage_read_error(
+            RpcError::ErrorResp(ErrorPayload {
+                code: -32000,
+                message: "header not found".into(),
+                data: None,
+            }),
+            "slot",
+        );
         assert!(
             matches!(
                 answered,

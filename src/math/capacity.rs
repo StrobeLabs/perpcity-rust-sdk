@@ -116,6 +116,11 @@ impl MarketCapacity {
     /// then check both sides against the proposed post-swap interest.
     /// A buy debits the requested size even on a terminal partial fill.
     /// A sell debits the fill. Both directions credit only the fill.
+    ///
+    /// The contract keeps depth in X64 `uint256`, and its view caps each
+    /// side at `u128::MAX`. The credit saturates there, which is exact,
+    /// because no interest exceeds `u128::MAX`. A capped debit side is a
+    /// lower limit of the real depth, so the answer is then conservative.
     pub fn fits_swap(
         interest: Capacity,
         depth: Capacity,
@@ -134,9 +139,7 @@ impl MarketCapacity {
         else {
             return false;
         };
-        let Some(gained) = depth.on(direction).atoms().checked_add(filled.atoms()) else {
-            return false;
-        };
+        let gained = depth.on(direction).atoms().saturating_add(filled.atoms());
         let (long, short) = match direction {
             Side::Long => (gained, remaining),
             Side::Short => (remaining, gained),
@@ -149,6 +152,16 @@ impl MarketCapacity {
 
     /// Subtract the removed band's X64 contribution from the opposite close
     /// depth before rounding down. The last removal clears both depths.
+    ///
+    /// `interest` is the open interest after the removal, including a
+    /// residual the removal converts to a taker position. The contract
+    /// checks the depth at the removal and again when it adds the residual
+    /// (`PerpMakerLogic.sol:226`); the second check implies the first.
+    /// `depth_x64` is
+    /// [`StateAt::physical_close_capacity_x64`](crate::StateAt::physical_close_capacity_x64);
+    /// the whole-atom view shifted left 64 bits is a conservative lower
+    /// limit. `last` is a removal of all of
+    /// [`StateAt::maker_liquidity`](crate::StateAt::maker_liquidity).
     pub fn fits_maker_removal(
         interest: Capacity,
         depth_x64: PerSide<U256>,
@@ -510,6 +523,61 @@ mod tests {
                 g.tick_upper
             );
         }
+    }
+
+    /// The X64 contribution rounds down to the whole-atom capacity on every
+    /// mainnet open, and keeps the fraction the whole atoms drop.
+    #[test]
+    fn band_capacity_x64_floors_to_band_capacity() {
+        for g in &GOLDEN {
+            let band = band(g.tick_lower, g.tick_upper, g.liquidity);
+            let x64 = band_capacity_x64(g.sqrt_price, &band).unwrap();
+            let whole = band_capacity(g.sqrt_price, &band).unwrap();
+            assert_eq!(x64.long >> 64, U256::from(whole.long.atoms()));
+            assert_eq!(x64.short >> 64, U256::from(whole.short.atoms()));
+        }
+        let g = &GOLDEN[0];
+        let x64 = band_capacity_x64(g.sqrt_price, &band(g.tick_lower, g.tick_upper, g.liquidity))
+            .unwrap();
+        assert_eq!(x64.long, uint!(1088234644780566792212735_U256));
+        assert_eq!(x64.short, uint!(2454817776925076759524045_U256));
+        assert_eq!(
+            x64.long & U256::from(u64::MAX),
+            U256::from(5871640219213730047_u64)
+        );
+        assert_eq!(
+            x64.short & U256::from(u64::MAX),
+            U256::from(17309316178178224845_u64)
+        );
+    }
+
+    /// A side at the view's `u128::MAX` cap still takes a credit: the
+    /// contract holds that depth in X64 `uint256`, past the cap.
+    #[test]
+    fn swap_credit_saturates_at_the_view_cap() {
+        let pair = |long, short| Capacity::new(PerpAtoms::new(long), PerpAtoms::new(short));
+        let one = PerpAtoms::new(1);
+        assert!(MarketCapacity::fits_swap(
+            pair(u128::MAX, 0),
+            pair(u128::MAX, 1),
+            Side::Long,
+            one,
+            one
+        ));
+        assert!(MarketCapacity::fits_swap(
+            pair(0, u128::MAX),
+            pair(1, u128::MAX),
+            Side::Short,
+            one,
+            one
+        ));
+        assert!(!MarketCapacity::fits_swap(
+            pair(u128::MAX, 0),
+            pair(u128::MAX, 0),
+            Side::Long,
+            one,
+            one
+        ));
     }
 
     /// The contract's branch edges: a price exactly on the lower bound is

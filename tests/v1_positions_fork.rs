@@ -26,7 +26,7 @@ use perpcity_sdk::errors::decode::try_extract_revert;
 use perpcity_sdk::{
     Capacity, ChainReader, ContractError, Era, HftTransport, LUnits, MakerBand, MarketCapacity,
     PerSide, PerpAtoms, PerpCityError, PositionRow, Side, StateAt, TickRange, TransportConfig,
-    band_capacity_x64,
+    UsdcAtoms, band_capacity_x64,
 };
 use serde_json::Value;
 
@@ -143,8 +143,8 @@ async fn position_reads_agree_with_the_v1_market() {
         .await
         .unwrap();
     assert_eq!(capped.cap, limit);
-    assert!(capped.allows_deposit(U256::from(margin)));
-    assert!(!capped.allows_deposit(U256::from(margin + 1)));
+    assert!(capped.allows_deposit(UsdcAtoms::new(margin)));
+    assert!(!capped.allows_deposit(UsdcAtoms::new(margin + 1)));
     let oversized = OpenTakerParams {
         holder: w.me,
         margin: margin + 1,
@@ -199,8 +199,21 @@ async fn position_reads_agree_with_the_v1_market() {
     // guard from reduce-only, lower only longCloseX64 on this local fork.
     // Tagged Perp layout: _s starts at 7, physicalCap starts at offset 14.
     let slot = U256::from(21);
-    let saved = w.provider.get_storage_at(m.perp, slot).await.unwrap();
+    let saved_x64 = state.physical_close_capacity_x64().await.unwrap();
+    let saved = saved_x64.long;
+    assert_eq!(
+        saved,
+        w.provider.get_storage_at(m.perp, slot).await.unwrap()
+    );
+    assert_eq!(
+        saved_x64.short,
+        w.provider
+            .get_storage_at(m.perp, slot + U256::ONE)
+            .await
+            .unwrap()
+    );
     assert_eq!((saved >> 64_u32).to::<u128>(), depth.longClose);
+    assert_eq!((saved_x64.short >> 64_u32).to::<u128>(), depth.shortClose);
     let outside = U256::from(NEW_TAKER_SIZE as u64 - 1) << 64_u32;
     let set_depth = |word: U256| {
         w.provider.raw_request::<_, Value>(
@@ -239,52 +252,81 @@ async fn position_reads_agree_with_the_v1_market() {
         amt1Limit: U256::ZERO,
         deadline: w.deadline().await,
     };
-    let short_depth = w
-        .provider
-        .get_storage_at(m.perp, slot + U256::ONE)
-        .await
-        .unwrap();
     let band = state.maker_band(m.maker_id).await.unwrap().unwrap();
     let price = state.pool().await.unwrap().sqrt_price;
     let partial = MakerBand::new(band.range, LUnits::new(1));
     let contribution = band_capacity_x64(price, &partial).unwrap();
     let interest = capacity.open_interest;
-    // Set the long depth one X64 unit below the exact removal boundary.
-    assert_ne!(contribution.short & U256::from(u64::MAX), U256::ZERO);
-    let boundary = (U256::from(interest.long.atoms()) << 64) + contribution.short;
-    let below = boundary - U256::ONE;
-    set_depth(below).await.unwrap();
-    assert!(!MarketCapacity::fits_maker_removal(
-        interest,
-        PerSide::new(below, short_depth),
-        contribution,
-        false
-    ));
     let partial_remove = AdjustMakerParams {
         liquidityDelta: -1,
         ..remove.clone()
     };
-    let error = raw
-        .adjustMaker(partial_remove)
-        .from(w.me)
+    // The exact removal boundary, with a fraction, accepts; one X64 unit
+    // below it reverts.
+    assert_ne!(contribution.short & U256::from(u64::MAX), U256::ZERO);
+    let boundary = (U256::from(interest.long.atoms()) << 64) + contribution.short;
+    for (long, fits) in [(boundary, true), (boundary - U256::ONE, false)] {
+        set_depth(long).await.unwrap();
+        let _: Value = w.provider.raw_request("evm_mine".into(), ()).await.unwrap();
+        let at = market.state_at_head().await.unwrap();
+        let depth_x64 = at.physical_close_capacity_x64().await.unwrap();
+        assert_eq!(depth_x64, PerSide::new(long, saved_x64.short));
+        assert_eq!(at.maker_band(m.maker_id).await.unwrap(), Some(band));
+        assert_eq!(at.pool().await.unwrap().sqrt_price, price);
+        assert_eq!(
+            MarketCapacity::fits_maker_removal(interest, depth_x64, contribution, false),
+            fits,
+            "depth {long}"
+        );
+        let result = raw
+            .adjustMaker(partial_remove.clone())
+            .from(w.me)
+            .block(BlockId::hash(at.block().hash))
+            .call()
+            .await;
+        if fits {
+            result.unwrap();
+        } else {
+            assert_eq!(
+                try_extract_revert(&result.err().unwrap().to_string())
+                    .unwrap()
+                    .1,
+                Perp::LongCloseCapacityExceeded::SELECTOR
+            );
+        }
+    }
+    set_depth(saved).await.unwrap();
+    let _: Value = w.provider.raw_request("evm_mine".into(), ()).await.unwrap();
+    // The last maker: its liquidity is the whole book, so the removal
+    // clears both depths. It fits only with no open interest.
+    let at = market.state_at_head().await.unwrap();
+    let book = raw
+        .fundingState()
+        .block(BlockId::hash(at.block().hash))
         .call()
         .await
-        .err()
-        .unwrap();
-    assert_eq!(
-        try_extract_revert(&error.to_string()).unwrap().1,
-        Perp::LongCloseCapacityExceeded::SELECTOR
-    );
-    set_depth(saved).await.unwrap();
+        .unwrap()
+        .makerLiquidity;
+    assert_eq!(book, U256::from(maker.liquidity));
+    assert_eq!(at.maker_liquidity().await.unwrap(), book);
+    let last = at.maker_liquidity().await.unwrap() == U256::from(band.liquidity.units());
+    assert!(last, "the W11 market has one maker");
+    let depth_x64 = at.physical_close_capacity_x64().await.unwrap();
+    assert_eq!(depth_x64, saved_x64);
+    let whole_band = band_capacity_x64(price, &band).unwrap();
+    assert!(MarketCapacity::fits_maker_removal(
+        Capacity::default(),
+        depth_x64,
+        whole_band,
+        last
+    ));
     assert!(!MarketCapacity::fits_maker_removal(
-        interest,
-        PerSide::new(saved, short_depth),
-        band_capacity_x64(price, &band).unwrap(),
-        true
+        interest, depth_x64, whole_band, last
     ));
     let error = raw
         .adjustMaker(remove)
         .from(w.me)
+        .block(BlockId::hash(at.block().hash))
         .call()
         .await
         .err()
@@ -312,24 +354,37 @@ async fn position_reads_agree_with_the_v1_market() {
 
     let state = market.state_at_head().await.unwrap();
     let minted: u64 = raw.nextPosId().call().await.unwrap().try_into().unwrap();
-    let previews = state
-        .preview_positions(&[m.maker_id, m.taker_id, new_taker])
-        .await
-        .unwrap();
-    for preview in previews {
+    let requested = [m.maker_id, m.taker_id, new_taker];
+    let previews = state.preview_positions(&requested).await.unwrap();
+    assert_eq!(
+        previews.iter().map(|p| p.pos_id).collect::<Vec<_>>(),
+        requested,
+        "one row per requested id, in order"
+    );
+    let at = BlockId::hash(state.block().hash);
+    for (&pos_id, preview) in requested.iter().zip(previews) {
         let row = preview.row.unwrap();
-        if preview.pos_id == m.taker_id {
-            assert!(row.is_none());
+        let single = state.preview_position(pos_id).await.unwrap();
+        let raw_call = raw.previewPosition(pos_id).block(at).call().await;
+        if pos_id == m.taker_id {
+            assert!(row.is_none(), "{pos_id}: the closed taker");
+            assert!(single.is_none(), "{pos_id}: the closed taker");
+            assert_eq!(
+                try_extract_revert(&raw_call.err().unwrap().to_string())
+                    .unwrap()
+                    .1,
+                Perp::PositionDoesNotExist::SELECTOR
+            );
         } else {
             let value = row.unwrap();
-            assert_eq!(value.isMaker, preview.pos_id == m.maker_id);
-            let raw_value = raw
-                .previewPosition(preview.pos_id)
-                .block(state.block().hash.into())
-                .call()
-                .await
-                .unwrap();
-            assert_eq!(value.abi_encode(), raw_value.abi_encode());
+            let raw_value = raw_call.unwrap();
+            assert_eq!(value.isMaker, pos_id == m.maker_id, "{pos_id}");
+            assert_eq!(value.abi_encode(), raw_value.abi_encode(), "{pos_id}");
+            assert_eq!(
+                single.unwrap().abi_encode(),
+                raw_value.abi_encode(),
+                "{pos_id}"
+            );
         }
     }
     assert_eq!(minted, 4, "ids 1 to 3");

@@ -13,7 +13,9 @@
 //!
 //! The stored EMA pair is the one slot whose place differs by build: slot
 //! 11 on the two earlier builds and 23 on `v1.0.0`, whose layout file the
-//! `v1.0.0` slot is tested against.
+//! `v1.0.0` slot is tested against. The `v1.0.0` close depth in X64
+//! (`physicalCap`, slots 21 and 22) is read raw too, because its view
+//! rounds down to whole atoms.
 //!
 //! The offsets encode the deployed contract layouts, the same on build
 //! `58b42b7` and `v0.2.2-upgradeable` for everything read here, and are
@@ -38,6 +40,10 @@ const PERP_EMAS_SLOT: u64 = 11;
 /// The same packing as [`PERP_EMAS_SLOT`]; on `v1.0.0` slot 11 is
 /// `modules.priceImpact`, an address.
 const V1_PERP_EMAS_SLOT: u64 = 23;
+
+/// `v1.0.0`'s `physicalCap`: `_s` at 7, field `physicalCap` at 14, two
+/// whole words, `longCloseX64` then `shortCloseX64`.
+const V1_PERP_PHYSICAL_CAP_SLOT: u64 = 21;
 
 /// Offset of `cumlFundingDivSqrtPOppX96` — the second word of the Perp's
 /// two-word `TickInfo` struct — from the struct's base slot.
@@ -95,6 +101,14 @@ pub(crate) fn perp_emas_slot() -> U256 {
 /// Slot of the stored EMA pair on a `v1.0.0` market.
 pub(crate) fn v1_perp_emas_slot() -> U256 {
     U256::from(V1_PERP_EMAS_SLOT)
+}
+
+/// Slots of `longCloseX64` and `shortCloseX64` on a `v1.0.0` market.
+pub(crate) fn v1_perp_physical_cap_slots() -> [U256; 2] {
+    [
+        U256::from(V1_PERP_PHYSICAL_CAP_SLOT),
+        U256::from(V1_PERP_PHYSICAL_CAP_SLOT + 1),
+    ]
 }
 
 /// The stored EMA pair from its storage word: `(ammPrice, index)`, each a
@@ -240,6 +254,52 @@ mod tests {
             .collect();
         assert_eq!(fields, [("ammPrice", 0, 0), ("index", 0, 16)]);
         assert_eq!(types[emas["type"].as_str().unwrap()]["numberOfBytes"], "32");
+    }
+
+    /// `physicalCap` is field 14 of `_s` at slot 7: two whole words,
+    /// long-close depth first.
+    #[test]
+    fn the_v1_physical_cap_slots_are_the_tagged_layout() {
+        let layout: serde_json::Value =
+            serde_json::from_str(include_str!("contracts/v1/storage-layout/Perp.json")).unwrap();
+        let slot =
+            |entry: &serde_json::Value| -> u64 { entry["slot"].as_str().unwrap().parse().unwrap() };
+        let storage = layout["storage"].as_array().unwrap();
+        let perp_storage = storage.iter().find(|e| e["label"] == "_s").unwrap();
+        let types = &layout["types"];
+        let physical = types[perp_storage["type"].as_str().unwrap()]["members"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["label"] == "physicalCap")
+            .unwrap();
+        assert_eq!(
+            slot(perp_storage) + slot(physical),
+            V1_PERP_PHYSICAL_CAP_SLOT
+        );
+        let fields: Vec<(&str, u64, &str)> = types[physical["type"].as_str().unwrap()]["members"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| {
+                (
+                    m["label"].as_str().unwrap(),
+                    slot(m),
+                    m["type"].as_str().unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            fields,
+            [
+                ("longCloseX64", 0, "t_uint256"),
+                ("shortCloseX64", 1, "t_uint256")
+            ]
+        );
+        assert_eq!(
+            v1_perp_physical_cap_slots(),
+            [U256::from(21u8), U256::from(22u8)]
+        );
     }
 
     #[test]

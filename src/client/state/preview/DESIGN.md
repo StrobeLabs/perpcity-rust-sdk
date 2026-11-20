@@ -1,10 +1,10 @@
 # V1 pinned reads
 
-The [client](../../DESIGN.md) pins each read to the snapshot block. A position preview returns the fifteen contract fields. Batch previews preserve input order and map the missing-position revert to an empty row. Other reverts retain their bytes and selector classification. Both preview paths require exactly fifteen words. Physical close capacity reports long and short depth in perp atoms.
+The [client](../../DESIGN.md) pins each read to the snapshot block. A position preview returns the fifteen contract fields. The single and batch previews read a revert the same way: the missing-position revert is an empty row, and other reverts retain their bytes and selector classification. Batch previews preserve input order, and an empty batch checks the era. Both preview paths require exactly fifteen words. Physical close capacity reports long and short depth in perp atoms. The X64 depth comes from the two `physicalCap` storage words, because the view rounds down and caps at `u128::MAX`; with `fundingState().makerLiquidity` it supplies the inputs of [`MarketCapacity::fits_maker_removal`](../../../math/DESIGN.md).
 
 | Type | Invariant | Produced by | Consumed by |
 |---|---|---|---|
-| [`TvlCap`](mod.rs#L15) | V1 collateral cap and accounted TVL in USDC atoms | [`StateAt::tvl_cap`](mod.rs#L91) reads both at one block | [`TvlCap::allows_deposit`](mod.rs#L24) checks the inclusive limit for the strategy layer. |
+| [`TvlCap`](mod.rs#L19) | V1 collateral cap and accounted TVL in USDC atoms | [`StateAt::tvl_cap`](../../DESIGN.md) reads both at one block | [`TvlCap::allows_deposit`](mod.rs#L28) checks the inclusive limit for the strategy layer. |
 
 ## Accepted structure
 

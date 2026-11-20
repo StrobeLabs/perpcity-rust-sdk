@@ -2334,6 +2334,72 @@ mod tests {
         );
     }
 
+    /// The single preview reads a revert as a batch row does: a stale
+    /// beacon keeps its selector and is transient, a missing position is
+    /// `None`, and a fifteen-word answer decodes.
+    #[tokio::test]
+    async fn single_preview_matches_the_batch_row() {
+        let (state, rpc) = state().await;
+        rpc.immutables(Era::V1);
+        rpc.reverts(&v1::Perp::StaleBeaconIndex::SELECTOR);
+        let error = state.preview_position(U256::ONE).await.err().unwrap();
+        assert!(error.is_transient(), "{error}");
+        assert!(
+            matches!(&error, PerpCityError::Transaction(e) if e.is_revert::<v1::Perp::StaleBeaconIndex>()),
+            "{error}"
+        );
+        rpc.reverts(&v1::Perp::PositionDoesNotExist::SELECTOR);
+        assert!(state.preview_position(U256::ONE).await.unwrap().is_none());
+        let mut words = vec![0u8; 15 * 32];
+        words[31] = 1;
+        rpc.raw(&words);
+        let preview = state.preview_position(U256::ONE).await.unwrap().unwrap();
+        assert!(preview.isMaker);
+        assert_eq!(
+            rpc.selectors()[2..].to_vec(),
+            vec![v1::Perp::previewPositionCall::SELECTOR; 3]
+        );
+        assert!(rpc.is_drained());
+    }
+
+    /// The X64 close depth comes from the two `physicalCap` words at the
+    /// handle's block, and the maker total from `fundingState()`.
+    #[tokio::test]
+    async fn removal_inputs_read_the_v1_market() {
+        let (state, rpc) = state().await;
+        rpc.immutables(Era::V1);
+        let long = (U256::from(9u8) << 64) + U256::from(3u8);
+        let short = U256::from(7u8) << 64;
+        rpc.storage(long);
+        rpc.storage(short);
+        assert_eq!(
+            state.physical_close_capacity_x64().await.unwrap(),
+            PerSide::new(long, short)
+        );
+        assert_eq!(rpc.slots(), [U256::from(21u8), U256::from(22u8)]);
+        rpc.call::<v1::Perp::fundingStateCall>(&v1::FundingState {
+            baseX96: I256::ZERO,
+            inventoryX96: I256::ZERO,
+            makerLiquidity: U256::from(42u8),
+        });
+        assert_eq!(state.maker_liquidity().await.unwrap(), U256::from(42u8));
+        assert!(rpc.is_drained());
+    }
+
+    /// An empty preview batch checks the era first, as the other batches do.
+    #[tokio::test]
+    async fn empty_preview_batch_refuses_an_earlier_build() {
+        let (state, rpc) = state().await;
+        rpc.immutables(Era::Upgradeable);
+        let error = state.preview_positions(&[]).await.unwrap_err();
+        assert!(matches!(
+            error,
+            PerpCityError::Contract(ContractError::UnsupportedEra { operation, .. })
+                if operation == "preview_positions"
+        ));
+        assert!(rpc.is_drained());
+    }
+
     /// The batch reads each build's row: on `v1.0.0` the three-word row,
     /// and a closed taker's deleted row is `None`.
     #[tokio::test]
