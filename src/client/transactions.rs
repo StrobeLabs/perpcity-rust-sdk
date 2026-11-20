@@ -553,10 +553,14 @@ pub(super) fn classify_simulation_failure(
 #[cfg(test)]
 mod tests {
     use alloy::providers::ProviderBuilder;
+    use alloy::sol_types::SolError;
     use alloy::transports::mock::Asserter;
+    use serde_json::Value;
+    use serde_json::value::RawValue;
 
     use super::*;
-    use crate::errors::PerpCityError;
+    use crate::contracts::v1;
+    use crate::errors::{PerpCityError, RevertClass};
 
     /// The explicit-limit path exists for operations (liquidations) where
     /// `eth_estimateGas` has passed while the real execution ran out of gas.
@@ -625,64 +629,57 @@ mod tests {
         })
     }
 
-    /// The F0 fixtures: the node's answers to eight `v1.0.0` reverts, each
-    /// triggered on the deployed Sepolia bytecode on an Anvil fork and
-    /// checked against `forge inspect` at the tag
-    /// (`src/errors/fixtures/v1-reverts.json`; its `fork_block` and the
-    /// script that made it are named in the file). Each answer, sent through
+    /// The node's answers to eight `v1.0.0` reverts, each triggered on the
+    /// deployed Sepolia bytecode on an Anvil fork and checked against
+    /// `forge inspect` at the tag (`src/errors/fixtures/v1-reverts.json`,
+    /// which records its fork block and each call; the script that made it
+    /// is not in this repository). Each answer, sent through
     /// the simulation classifier as the node sent it, is a typed revert with
     /// the error's name, its binding's selector, and its class.
     #[test]
     fn v1_fork_reverts_are_typed_with_their_class() {
-        use alloy::sol_types::SolError;
-        use serde_json::Value;
-        use serde_json::value::RawValue;
-
-        use crate::contracts::v1::Perp;
-        use crate::errors::RevertClass;
-
         let fixtures: Value =
             serde_json::from_str(include_str!("../errors/fixtures/v1-reverts.json")).unwrap();
         assert_eq!(fixtures["contracts_tag"], "v1.0.0");
         assert_eq!(fixtures["chain_id"], 421_614);
         let expected = [
             (
-                Perp::DeadlineExpired::SELECTOR,
+                v1::Perp::DeadlineExpired::SELECTOR,
                 "DeadlineExpired",
                 RevertClass::Transient,
             ),
             (
-                Perp::StaleBeaconIndex::SELECTOR,
+                v1::Perp::StaleBeaconIndex::SELECTOR,
                 "StaleBeaconIndex",
                 RevertClass::Transient,
             ),
             (
-                Perp::PriceOutsideRange::SELECTOR,
+                v1::Perp::PriceOutsideRange::SELECTOR,
                 "PriceOutsideRange",
                 RevertClass::BeaconFault,
             ),
             (
-                Perp::BeaconIndexUnreadable::SELECTOR,
+                v1::Perp::BeaconIndexUnreadable::SELECTOR,
                 "BeaconIndexUnreadable",
                 RevertClass::BeaconFault,
             ),
             (
-                Perp::TvlCapExceeded::SELECTOR,
+                v1::Perp::TvlCapExceeded::SELECTOR,
                 "TvlCapExceeded",
                 RevertClass::Hold,
             ),
             (
-                Perp::MaxTotalFeeExceeded::SELECTOR,
+                v1::Perp::MaxTotalFeeExceeded::SELECTOR,
                 "MaxTotalFeeExceeded",
                 RevertClass::Answer,
             ),
             (
-                Perp::LongCloseCapacityExceeded::SELECTOR,
+                v1::Perp::LongCloseCapacityExceeded::SELECTOR,
                 "LongCloseCapacityExceeded",
                 RevertClass::Answer,
             ),
             (
-                Perp::ShortCloseCapacityExceeded::SELECTOR,
+                v1::Perp::ShortCloseCapacityExceeded::SELECTOR,
                 "ShortCloseCapacityExceeded",
                 RevertClass::Answer,
             ),

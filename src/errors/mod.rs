@@ -97,7 +97,9 @@ impl PerpCityError {
     ///
     /// A pre-flight simulation that the node answered — a decoded
     /// `SimulationReverted`, or a `SimulationFailed` (empty revert, out of
-    /// gas inside the pinned limit) — is deterministic and never transient;
+    /// gas inside the pinned limit) — is deterministic and not transient,
+    /// except a `SimulationReverted` whose [`RevertClass`] is
+    /// [`Transient`](RevertClass::Transient) (below);
     /// `GasUnavailable` covers the simulation that got no answer at all.
     ///
     /// `BroadcastFailed` and `ReceiptTimeout` are transient: the
@@ -124,7 +126,9 @@ impl PerpCityError {
     ///
     /// A `SimulationReverted` is transient only when its
     /// [`RevertClass`] is [`Transient`](RevertClass::Transient): the
-    /// `v1.0.0` `StaleBeaconIndex` and `DeadlineExpired`. A
+    /// `v1.0.0` `StaleBeaconIndex` (retry after a beacon update) and
+    /// `DeadlineExpired` (retry with the call built again with a new
+    /// deadline; the same calldata fails again). A
     /// [`BeaconFault`](RevertClass::BeaconFault) or a
     /// [`Hold`](RevertClass::Hold) is not: the same call fails until the
     /// beacon or the cap changes; [`revert_class`](Self::revert_class)
@@ -186,9 +190,11 @@ pub type Result<T> = std::result::Result<T, PerpCityError>;
 #[cfg(test)]
 mod tests {
     use alloy::primitives::U256;
+    use alloy::sol_types::SolError;
     use alloy::transports::TransportErrorKind;
 
     use super::*;
+    use crate::contracts::v1;
 
     /// Consumers key retry behaviour off this classification (backoff loops
     /// treat transients as "retry politely"), so it is API surface, not an
@@ -407,10 +413,6 @@ mod tests {
     /// revert has no class.
     #[test]
     fn v1_revert_classes_set_transience() {
-        use alloy::sol_types::SolError;
-
-        use crate::contracts::v1::Perp;
-
         fn reverted<E: SolError>(name: &str) -> PerpCityError {
             TransactionError::SimulationReverted {
                 error_name: name.into(),
@@ -421,37 +423,37 @@ mod tests {
         }
         let cases = [
             (
-                reverted::<Perp::StaleBeaconIndex>("StaleBeaconIndex"),
+                reverted::<v1::Perp::StaleBeaconIndex>("StaleBeaconIndex"),
                 RevertClass::Transient,
                 true,
             ),
             (
-                reverted::<Perp::DeadlineExpired>("DeadlineExpired"),
+                reverted::<v1::Perp::DeadlineExpired>("DeadlineExpired"),
                 RevertClass::Transient,
                 true,
             ),
             (
-                reverted::<Perp::BeaconIndexUnreadable>("BeaconIndexUnreadable"),
+                reverted::<v1::Perp::BeaconIndexUnreadable>("BeaconIndexUnreadable"),
                 RevertClass::BeaconFault,
                 false,
             ),
             (
-                reverted::<Perp::PriceOutsideRange>("PriceOutsideRange"),
+                reverted::<v1::Perp::PriceOutsideRange>("PriceOutsideRange"),
                 RevertClass::BeaconFault,
                 false,
             ),
             (
-                reverted::<Perp::TvlCapExceeded>("TvlCapExceeded"),
+                reverted::<v1::Perp::TvlCapExceeded>("TvlCapExceeded"),
                 RevertClass::Hold,
                 false,
             ),
             (
-                reverted::<Perp::MaxTotalFeeExceeded>("MaxTotalFeeExceeded"),
+                reverted::<v1::Perp::MaxTotalFeeExceeded>("MaxTotalFeeExceeded"),
                 RevertClass::Answer,
                 false,
             ),
             (
-                reverted::<Perp::NotLiquidatable>("NotLiquidatable"),
+                reverted::<v1::Perp::NotLiquidatable>("NotLiquidatable"),
                 RevertClass::Answer,
                 false,
             ),
@@ -464,8 +466,8 @@ mod tests {
         let PerpCityError::Transaction(stale) = &cases[0].0 else {
             unreachable!()
         };
-        assert!(stale.is_revert::<Perp::StaleBeaconIndex>());
-        assert!(!stale.is_revert::<Perp::DeadlineExpired>());
+        assert!(stale.is_revert::<v1::Perp::StaleBeaconIndex>());
+        assert!(!stale.is_revert::<v1::Perp::DeadlineExpired>());
 
         let mined: PerpCityError = TransactionError::Reverted {
             tx_hash: [0x66; 32].into(),
