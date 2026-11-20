@@ -114,20 +114,27 @@ impl MarketCapacity {
 
     /// Rotate whole-atom close depth for a buy (Long) or sell (Short),
     /// then check both sides against the proposed post-swap interest.
+    /// A buy debits the requested size even on a terminal partial fill.
+    /// A sell debits the fill. Both directions credit only the fill.
     pub fn fits_swap(
         interest: Capacity,
         depth: Capacity,
         direction: Side,
-        size: PerpAtoms,
+        requested: PerpAtoms,
+        filled: PerpAtoms,
     ) -> bool {
+        let debit = match direction {
+            Side::Long => requested,
+            Side::Short => filled,
+        };
         let Some(remaining) = depth
             .on(direction.opposite())
             .atoms()
-            .checked_sub(size.atoms())
+            .checked_sub(debit.atoms())
         else {
             return false;
         };
-        let Some(gained) = depth.on(direction).atoms().checked_add(size.atoms()) else {
+        let Some(gained) = depth.on(direction).atoms().checked_add(filled.atoms()) else {
             return false;
         };
         let (long, short) = match direction {
@@ -140,23 +147,20 @@ impl MarketCapacity {
         )
     }
 
-    /// Remove a band's whole-atom contribution. Its short side backs long
-    /// closes. Removing the last maker clears both depths.
+    /// Subtract the removed band's X64 contribution from the opposite close
+    /// depth before rounding down. The last removal clears both depths.
     pub fn fits_maker_removal(
         interest: Capacity,
-        depth: Capacity,
-        band: Capacity,
+        depth_x64: PerSide<U256>,
+        band_x64: PerSide<U256>,
         last: bool,
     ) -> bool {
-        let after = if last {
-            Capacity::default()
-        } else {
-            Capacity::new(
-                depth.long.saturating_sub(band.short),
-                depth.short.saturating_sub(band.long),
-            )
-        };
-        Self::fits_close_capacity(interest, after)
+        if last {
+            return interest == Capacity::default();
+        }
+        let long = depth_x64.long.saturating_sub(band_x64.short) >> 64;
+        let short = depth_x64.short.saturating_sub(band_x64.long) >> 64;
+        U256::from(interest.long.atoms()) <= long && U256::from(interest.short.atoms()) <= short
     }
 
     /// Utilization on one side as the Perp passes it to the fees module:
@@ -220,6 +224,25 @@ fn v1_utilization_e6(open_interest: PerpAtoms, capacity: PerpAtoms) -> u32 {
 ///   contract's `toUint128` accepts
 pub fn band_capacity(sqrt_price: SqrtPrice, band: &MakerBand) -> Result<Capacity, ValidationError> {
     PricedRange::new(sqrt_price, &band.range)?.capacity(band.liquidity)
+}
+
+/// A removed band's contribution in X64 perp atoms, at the current pool price.
+pub fn band_capacity_x64(
+    sqrt_price: SqrtPrice,
+    band: &MakerBand,
+) -> Result<PerSide<U256>, ValidationError> {
+    let range = PricedRange::new(sqrt_price, &band.range)?;
+    let amount = |side| {
+        let (lo, hi) = range.span(side);
+        let numerator = mul_div(
+            U256::from(band.liquidity.units()) << 96,
+            hi - lo,
+            hi,
+            Rounding::TowardZero,
+        )?;
+        mul_div(numerator, U256::ONE << 64, lo, Rounding::TowardZero)
+    };
+    Ok(PerSide::new(amount(Side::Long)?, amount(Side::Short)?))
 }
 
 /// The least liquidity over `range` whose capacity on `side` at
@@ -358,12 +381,14 @@ mod tests {
                 pair(6, 2 - size),
                 depth,
                 Side::Long,
+                PerpAtoms::new(size),
                 PerpAtoms::new(size)
             ));
             assert!(MarketCapacity::fits_swap(
                 pair(2 - size, 6),
                 pair(2, 6),
                 Side::Short,
+                PerpAtoms::new(size),
                 PerpAtoms::new(size)
             ));
         }
@@ -371,26 +396,23 @@ mod tests {
             pair(6, 0),
             depth,
             Side::Long,
+            PerpAtoms::new(3),
             PerpAtoms::new(3)
         ));
-        assert!(!MarketCapacity::fits_maker_removal(
-            pair(6, 1),
-            depth,
-            pair(0, 1),
-            false
+        // A terminal buy requests three and fills one.
+        assert!(!MarketCapacity::fits_swap(
+            pair(7, 0), depth, Side::Long, PerpAtoms::new(3), PerpAtoms::new(1)
         ));
-        assert!(MarketCapacity::fits_maker_removal(
-            pair(6, 1),
-            depth,
-            pair(1, 0),
-            false
+        assert!(!MarketCapacity::fits_swap(
+            pair(8, 0), pair(6, 3), Side::Long, PerpAtoms::new(3), PerpAtoms::new(1)
         ));
-        assert!(!MarketCapacity::fits_maker_removal(
-            pair(1, 0),
-            depth,
-            pair(0, 0),
-            true
-        ));
+        let quarter = U256::ONE << 62;
+        let depth = PerSide::new(quarter * U256::from(41), U256::ZERO);
+        let band = PerSide::new(U256::ZERO, quarter * U256::from(3));
+        // 10.25 - 0.75 leaves 9.5 atoms for long closes.
+        assert!(!MarketCapacity::fits_maker_removal(pair(10, 0), depth, band, false));
+        assert!(MarketCapacity::fits_maker_removal(pair(9, 0), depth, band, false));
+        assert!(!MarketCapacity::fits_maker_removal(pair(1, 0), depth, band, true));
     }
 
     fn range(lower: i32, upper: i32) -> TickRange {
