@@ -12,6 +12,7 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
 use alloy::consensus::Header as ConsensusHeader;
+use alloy::hex;
 use alloy::network::Ethereum;
 use alloy::primitives::{Address, B256, Bytes, I256, Signed, U64, U256, Uint};
 use alloy::providers::RootProvider;
@@ -32,6 +33,7 @@ use crate::contracts::{
     Capacity, IMulticall3, Maker, MakerFunding, Modules, OpenInterest, Perp, PoolKey, Position,
     Rates, SolvencyState, v1,
 };
+use crate::convert::pack_balance_delta;
 use crate::{HftTransport, TransportConfig};
 
 use super::chain::ChainReader;
@@ -116,7 +118,7 @@ impl Service<RequestPacket> for Recorder {
             let call = &params[0];
             let input = call["input"].as_str().or_else(|| call["data"].as_str());
             if let Some(input) = input {
-                let calldata = alloy::hex::decode(input).expect("calldata is hex");
+                let calldata = hex::decode(input).expect("calldata is hex");
                 self.calls.lock().unwrap().push(calldata.into());
             }
         }
@@ -505,7 +507,7 @@ fn word(value: u128) -> [u8; 32] {
 /// `lastCumlFundingX96`.
 pub(super) fn v1_position_words(perp: i128, usd: i128, margin: u128, funding: i128) -> Vec<u8> {
     [
-        crate::convert::pack_balance_delta(perp, usd).to_be_bytes::<32>(),
+        pack_balance_delta(perp, usd).to_be_bytes::<32>(),
         word(margin),
         signed_word(funding),
     ]

@@ -1317,6 +1317,7 @@ mod tests {
     };
     use crate::constants::SNAPSHOT_BLOCK_LAG;
     use crate::contracts::{IBeacon, Modules, Rates};
+    use crate::convert::pack_balance_delta;
     use crate::math::capacity::Capacity;
     use crate::math::pricing::PricePair;
     use crate::units::{PerSide, PerpAtoms};
@@ -1700,7 +1701,7 @@ mod tests {
     #[test]
     fn an_earlier_build_s_row_keeps_its_stored_ratios() {
         let position = Position {
-            delta: crate::convert::pack_balance_delta(400_000, -1_000_000),
+            delta: pack_balance_delta(400_000, -1_000_000),
             margin: 10_000_000,
             liqMarginRatio: e6(50_000),
             backstopMarginRatio: e6(20_000),
@@ -1878,12 +1879,14 @@ mod tests {
         assert!(decode_failed(&state.position(U256::ONE).await));
         rpc.raw(&earlier_maker);
         assert!(decode_failed(&state.maker_band(U256::ONE).await));
-        rpc.aggregate3(vec![mock::ok_row(earlier_position)]);
+        rpc.aggregate3(vec![mock::ok_row(earlier_position.clone())]);
         let rows = state.positions(&[U256::ONE]).await;
         assert!(decode_failed(&rows[0].row), "{:?}", rows[0].row);
         rpc.aggregate3(vec![mock::ok_row(earlier_maker)]);
         let rows = state.maker_bands(&[U256::ONE]).await;
         assert!(decode_failed(&rows[0].row), "{:?}", rows[0].row);
+        rpc.raw(&earlier_position);
+        assert!(decode_failed(&state.market().get_position(U256::ONE).await));
         assert!(rpc.is_drained());
     }
 

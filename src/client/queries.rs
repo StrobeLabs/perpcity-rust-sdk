@@ -430,17 +430,8 @@ impl MarketReader {
     pub async fn get_positions_by_owner(&self, owner: Address) -> Result<Vec<U256>> {
         let era = self.immutables().await?.era;
         let provider = self.chain.provider();
-        let next_pos_id: U256 = match era {
-            Era::Legacy | Era::Upgradeable => {
-                Perp::new(self.perp, provider).nextPosId().call().await?
-            }
-            Era::V1 => {
-                v1::Perp::new(self.perp, provider)
-                    .nextPosId()
-                    .call()
-                    .await?
-            }
-        };
+        // `nextPosId()` has one selector and one return on every build.
+        let next_pos_id: U256 = Perp::new(self.perp, provider).nextPosId().call().await?;
 
         let total: u64 = next_pos_id
             .try_into()
@@ -775,6 +766,7 @@ mod tests {
     use crate::client::mock::{self, BEACON, Rpc, e6, failed_row, ok_row, returns, x96};
     use crate::constants::SNAPSHOT_BLOCK_LAG;
     use crate::contracts::{IBeacon, IERC20, IMulticall3, Modules, Rates};
+    use crate::convert::pack_balance_delta;
     use crate::errors::PerpCityError;
     use crate::math::BlockContext;
     use crate::math::pricing::PricePair;
@@ -1146,7 +1138,7 @@ mod tests {
         let (client, rpc) = mock::client();
         rpc.immutables(Era::V1);
         rpc.call::<v1::Perp::positionsCall>(&v1::Position {
-            delta: crate::convert::pack_balance_delta(-400_000, 9_000_000),
+            delta: pack_balance_delta(-400_000, 9_000_000),
             margin: 10_000_000,
             lastCumlFundingX96: alloy::primitives::I256::ZERO,
         });
