@@ -30,6 +30,8 @@ use perpcity_sdk::contracts::v1::{
     IPricing, OpenTakerParams, Perp, PerpFactory, PricePair, WithdrawalController,
 };
 
+use perpcity_sdk::events::receipt::parse_v1_receipt;
+
 use v1_fork::{
     BLOCK_INTERVAL, FACTORY, FEES, FUNDING, HOOK, MARGIN_RATIOS, PERP_IMPLEMENTATION, PRICE_IMPACT,
     PRICING, SepoliaFork, V1Fork, V1Market,
@@ -113,6 +115,23 @@ async fn v1_bindings_decode_a_w11_market() {
         market.perp, market.controller, market.beacon, market.maker_id, market.taker_id
     );
     check_clock(&w);
+
+    for step in &w.steps {
+        let receipt = &step.receipt;
+        let id = match step.label {
+            "open-maker" => parse_v1_receipt::<Perp::MakerOpened>(receipt, market.perp, None).unwrap().pos_id,
+            "open-taker" => parse_v1_receipt::<Perp::TakerOpened>(receipt, market.perp, None).unwrap().pos_id,
+            "close-taker" => parse_v1_receipt::<Perp::TakerClosed>(receipt, market.perp, Some(market.taker_id)).unwrap().pos_id,
+            "reduce-maker" => {
+                let trade = parse_v1_receipt::<Perp::MakerAdjusted>(receipt, market.perp, Some(market.maker_id)).unwrap();
+                assert_eq!(trade.margin.unwrap().atoms(), trade.event.margin);
+                continue;
+            }
+            _ => continue,
+        };
+        let owner = parse_v1_receipt::<Perp::PositionOwnerUpdated>(receipt, market.perp, Some(id)).unwrap();
+        assert_eq!(owner.pos_id, id);
+    }
 
     let per_step = decode_logs(&w, &market);
     for (step, expected) in STEP_EVENTS {

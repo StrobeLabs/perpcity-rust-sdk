@@ -1,6 +1,6 @@
 //! On-chain / protocol state errors.
 
-use alloy::primitives::{Address, Bytes, U256};
+use alloy::primitives::{Address, B256, Bytes, U256};
 use thiserror::Error;
 
 use crate::client::Era;
@@ -45,6 +45,15 @@ pub enum ContractError {
     EventNotFound {
         /// Name of the missing event.
         event_name: String,
+    },
+
+    /// A mined v1 transaction lacks its expected event. Never transient.
+    #[error("transaction {tx_hash} mined without {event}; do not retry")]
+    MinedEventMissing {
+        /// Final transaction hash.
+        tx_hash: B256,
+        /// Expected event signature.
+        event: &'static str,
     },
 
     /// A contract read reverted with fewer than four bytes. Not transient.

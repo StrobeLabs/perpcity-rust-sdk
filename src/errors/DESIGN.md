@@ -162,3 +162,5 @@ would branch on it, and existing callers with a wildcard keep compiling.
 - **`Rpc` and `Abi` are the raw layers showing through.** Every failure
   that reaches a caller should be one of the three families; the raw
   variants exist because some paths do not yet classify.
+
+A v1 receipt without the expected trade event returns `MinedEventMissing`. Its transaction hash identifies the final receipt. This error is permanent.
