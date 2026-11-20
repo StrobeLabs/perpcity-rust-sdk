@@ -13,6 +13,7 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
 use alloy::consensus::Header as ConsensusHeader;
+use alloy::eips::BlockId;
 use alloy::hex;
 use alloy::network::Ethereum;
 use alloy::primitives::{Address, B256, Bytes, I256, Signed, U64, U256, Uint};
@@ -84,22 +85,26 @@ fn mocked() -> (RootProvider<Ethereum>, Rpc) {
         mock: MockTransport::new(Asserter::new()),
         calls: Arc::default(),
         slots: Arc::default(),
+        storage_blocks: Arc::default(),
     };
     let rpc = Rpc {
         asserter: recorder.mock.asserter().clone(),
         calls: Arc::clone(&recorder.calls),
         slots: Arc::clone(&recorder.slots),
+        storage_blocks: Arc::clone(&recorder.storage_blocks),
     };
     (RootProvider::new(RpcClient::new(recorder, true)), rpc)
 }
 
 /// The mock transport, keeping the calldata of every `eth_call` and the
-/// slot of every `eth_getStorageAt` it is asked, in arrival order.
+/// slot and block of every `eth_getStorageAt` it is asked, in arrival
+/// order.
 #[derive(Clone)]
 struct Recorder {
     mock: MockTransport,
     calls: Arc<Mutex<Vec<Bytes>>>,
     slots: Arc<Mutex<Vec<U256>>>,
+    storage_blocks: Arc<Mutex<Vec<BlockId>>>,
 }
 
 impl Service<RequestPacket> for Recorder {
@@ -122,6 +127,9 @@ impl Service<RequestPacket> for Recorder {
                     .lock()
                     .unwrap()
                     .push(slot.parse().expect("a slot parses as a U256"));
+                self.storage_blocks.lock().unwrap().push(
+                    serde_json::from_value(params[2].clone()).expect("a block parses as a BlockId"),
+                );
                 continue;
             }
             if req.method() != "eth_call" {
@@ -201,6 +209,7 @@ pub(super) struct Rpc {
     asserter: Asserter,
     calls: Arc<Mutex<Vec<Bytes>>>,
     slots: Arc<Mutex<Vec<U256>>>,
+    storage_blocks: Arc<Mutex<Vec<BlockId>>>,
 }
 
 impl Rpc {
@@ -244,6 +253,11 @@ impl Rpc {
     /// The slot of every `eth_getStorageAt` asked so far, in order.
     pub(super) fn slots(&self) -> Vec<U256> {
         self.slots.lock().unwrap().clone()
+    }
+
+    /// The block of every `eth_getStorageAt` asked so far, in order.
+    pub(super) fn storage_blocks(&self) -> Vec<BlockId> {
+        self.storage_blocks.lock().unwrap().clone()
     }
 
     /// The selector of every `eth_call` asked so far, and of every call

@@ -20,7 +20,9 @@ use alloy::eips::BlockId;
 use alloy::primitives::{Address, B256, Bytes, I256, U256};
 use alloy::providers::{DynProvider, Provider};
 use alloy::sol_types::{SolError, SolValue};
-use perpcity_sdk::contracts::v1::{AdjustMakerParams, AdjustTakerParams, OpenTakerParams};
+use perpcity_sdk::contracts::v1::{
+    AdjustMakerParams, AdjustTakerParams, OpenTakerParams, Position,
+};
 use perpcity_sdk::contracts::{Perp as EarlierPerp, v1::Perp};
 use perpcity_sdk::errors::decode::try_extract_revert;
 use perpcity_sdk::{
@@ -94,9 +96,10 @@ async fn position_reads_agree_with_the_v1_market() {
 
     // The now-read against the raw row.
     let row = market.get_position(m.maker_id).await.unwrap();
-    assert_eq!(
-        row,
-        PositionRow::from(raw.positions(m.maker_id).call().await.unwrap())
+    assert_row_is_raw(
+        &row,
+        &raw.positions(m.maker_id).call().await.unwrap(),
+        "maker",
     );
     assert!(row.stored_margin_ratios.is_none());
     let err = market.get_position(m.taker_id).await.unwrap_err();
@@ -265,10 +268,12 @@ async fn position_reads_agree_with_the_v1_market() {
     // below it reverts.
     assert_ne!(contribution.short & U256::from(u64::MAX), U256::ZERO);
     let boundary = (U256::from(interest.long.atoms()) << 64) + contribution.short;
+    let mut handles = Vec::new();
     for (long, fits) in [(boundary, true), (boundary - U256::ONE, false)] {
         set_depth(long).await.unwrap();
         let _: Value = w.provider.raw_request("evm_mine".into(), ()).await.unwrap();
         let at = market.state_at_head().await.unwrap();
+        handles.push(at.clone());
         let depth_x64 = at.physical_close_capacity_x64().await.unwrap();
         assert_eq!(depth_x64, PerSide::new(long, saved_x64.short));
         assert_eq!(at.maker_band(m.maker_id).await.unwrap(), Some(band));
@@ -295,6 +300,44 @@ async fn position_reads_agree_with_the_v1_market() {
             );
         }
     }
+    // Both handles read again at a head one unit below the boundary: each
+    // answers at its own block, so pinning, not a fresh head, is checked.
+    let [at_boundary, below] = <[StateAt; 2]>::try_from(handles).unwrap();
+    let (at_boundary, below) = tokio::try_join!(
+        at_boundary.physical_close_capacity_x64(),
+        below.physical_close_capacity_x64()
+    )
+    .unwrap();
+    assert_eq!(at_boundary.long, boundary);
+    assert_eq!(below.long, boundary - U256::ONE);
+    // The last maker at a depth where the subtraction rule fits the whole
+    // band exactly: only the clear-both-depths rule refuses it, and so does
+    // the contract.
+    let whole_band = band_capacity_x64(price, &band).unwrap();
+    set_depth((U256::from(interest.long.atoms()) << 64) + whole_band.short)
+        .await
+        .unwrap();
+    let _: Value = w.provider.raw_request("evm_mine".into(), ()).await.unwrap();
+    let at = market.state_at_head().await.unwrap();
+    let depth_x64 = at.physical_close_capacity_x64().await.unwrap();
+    assert!(MarketCapacity::fits_maker_removal(
+        interest, depth_x64, whole_band, false
+    ));
+    assert!(!MarketCapacity::fits_maker_removal(
+        interest, depth_x64, whole_band, true
+    ));
+    let error = raw
+        .adjustMaker(remove.clone())
+        .from(w.me)
+        .block(BlockId::hash(at.block().hash))
+        .call()
+        .await
+        .err()
+        .unwrap();
+    assert_eq!(
+        try_extract_revert(&error.to_string()).unwrap().1,
+        Perp::LongCloseCapacityExceeded::SELECTOR
+    );
     set_depth(saved).await.unwrap();
     let _: Value = w.provider.raw_request("evm_mine".into(), ()).await.unwrap();
     // The last maker: its liquidity is the whole book, so the removal
@@ -313,7 +356,6 @@ async fn position_reads_agree_with_the_v1_market() {
     assert!(last, "the W11 market has one maker");
     let depth_x64 = at.physical_close_capacity_x64().await.unwrap();
     assert_eq!(depth_x64, saved_x64);
-    let whole_band = band_capacity_x64(price, &band).unwrap();
     assert!(MarketCapacity::fits_maker_removal(
         Capacity::default(),
         depth_x64,
@@ -341,9 +383,10 @@ async fn position_reads_agree_with_the_v1_market() {
         vec![m.maker_id, new_taker]
     );
     let row = market.get_position(new_taker).await.unwrap();
-    assert_eq!(
-        row,
-        PositionRow::from(raw.positions(new_taker).call().await.unwrap())
+    assert_row_is_raw(
+        &row,
+        &raw.positions(new_taker).call().await.unwrap(),
+        "new taker",
     );
     assert_eq!(row.perp.atoms(), i128::from(NEW_TAKER_SIZE));
     assert!(row.stored_margin_ratios.is_none());
@@ -428,6 +471,23 @@ async fn position_reads_agree_with_the_v1_market() {
 /// `TAKER_SIZE` open reverts `PriceImpactTooHigh` on the thin band.
 const NEW_TAKER_SIZE: i64 = 100_000;
 
+/// A decoded `v1` row against its raw words, without the SDK's decoder:
+/// margin and funding word for word, and the two legs packed back into the
+/// `BalanceDelta` word (`amount0` high, `amount1` low, each two's
+/// complement in 128 bits).
+fn assert_row_is_raw(row: &PositionRow, raw: &Position, what: &str) {
+    assert_eq!(row.margin.atoms(), raw.margin, "{what}: margin");
+    assert_eq!(
+        row.last_cuml_funding.x96(),
+        raw.lastCumlFundingX96,
+        "{what}: funding"
+    );
+    let packed =
+        (U256::from(row.perp.atoms() as u128) << 128) | U256::from(row.usd.atoms() as u128);
+    assert_eq!(packed, raw.delta.into_raw(), "{what}: delta");
+    assert!(row.stored_margin_ratios.is_none(), "{what}: ratios");
+}
+
 /// Every pinned read of `ids` on `state` against the raw `v1` call at the
 /// same block.
 async fn reads_agree_with_raw_calls(
@@ -445,13 +505,13 @@ async fn reads_agree_with_raw_calls(
         let position = raw.positions(pos_id).block(at).call().await.unwrap();
         let holder = raw.positionOwner(pos_id).block(at).call().await.unwrap();
         let expected_owner = (holder != Address::ZERO).then_some(holder);
-        let expected_row = expected_owner.map(|_| PositionRow::from(position));
-        assert_eq!(row.row.unwrap(), expected_row, "{pos_id}: positions");
-        assert_eq!(
-            state.position(pos_id).await.unwrap(),
-            expected_row,
-            "{pos_id}: position"
-        );
+        let (batched, single) = (row.row.unwrap(), state.position(pos_id).await.unwrap());
+        assert_eq!(batched, single, "{pos_id}: positions and position");
+        match (expected_owner, batched) {
+            (Some(_), Some(row)) => assert_row_is_raw(&row, &position, &format!("{pos_id}")),
+            (None, None) => {}
+            (owner, row) => panic!("{pos_id}: owner {owner:?}, row {row:?}"),
+        }
 
         assert_eq!(owner.row.unwrap(), expected_owner, "{pos_id}: owners");
 
@@ -468,9 +528,7 @@ async fn reads_agree_with_raw_calls(
             expected_band,
             "{pos_id}: maker_band"
         );
-        println!(
-            "{pos_id}: row {expected_row:?}, owner {expected_owner:?}, band {expected_band:?}"
-        );
+        println!("{pos_id}: row {single:?}, owner {expected_owner:?}, band {expected_band:?}");
     }
 }
 

@@ -52,15 +52,23 @@ impl StateAt {
             .block(self.id())
             .call_raw()
             .await;
-        let bytes = match call {
-            Ok(bytes) => bytes,
-            Err(alloy::contract::Error::TransportError(RpcError::ErrorResp(payload)))
-                if payload.as_revert_data().is_some() =>
-            {
-                return preview_revert(&payload.as_revert_data().unwrap_or_default());
+        // A node answers a revert without data as a bare `execution
+        // reverted`; that is the empty row a batch reads, not a read error.
+        let revert = match &call {
+            Err(alloy::contract::Error::TransportError(RpcError::ErrorResp(payload))) => {
+                payload.as_revert_data().or_else(|| {
+                    payload
+                        .message
+                        .contains("execution reverted")
+                        .then(Bytes::new)
+                })
             }
-            Err(e) => return Err(self.read_error(e)),
+            _ => None,
         };
+        if let Some(data) = revert {
+            return preview_revert(&data);
+        }
+        let bytes = call.map_err(|e| self.read_error(e))?;
         decode_exact::<v1::Perp::previewPositionCall>(pos_id, &bytes, "previewPosition").map(Some)
     }
 
@@ -119,14 +127,11 @@ impl StateAt {
         let context = "physical close capacity at the market's slots";
         let (perp, block) = (self.market.perp, self.id());
         let pinned = |e| pinned_read_error(e, self.block.number);
-        let long = chain
-            .storage_word_at(perp, long, block, context)
-            .await
-            .map_err(pinned)?;
-        let short = chain
-            .storage_word_at(perp, short, block, context)
-            .await
-            .map_err(pinned)?;
+        let (long, short) = tokio::try_join!(
+            chain.storage_word_at(perp, long, block, context),
+            chain.storage_word_at(perp, short, block, context)
+        )
+        .map_err(pinned)?;
         Ok(PerSide::new(long, short))
     }
 

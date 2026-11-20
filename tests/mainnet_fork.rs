@@ -13,6 +13,7 @@
 use std::process::{Child, Command};
 use std::time::Duration;
 
+use alloy::eips::BlockId;
 use alloy::primitives::{Address, B256, U256, address, keccak256};
 use alloy::sol;
 use alloy::sol_types::{SolCall, SolValue};
@@ -288,7 +289,14 @@ async fn v022_market_reads_trades_and_liquidation_probes() {
     assert_eq!(config.perp, perp);
     assert!(snapshot.index_price.x96() > U256::ZERO);
     assert!(snapshot.emas.amm_price.x96() > U256::ZERO && snapshot.emas.index.x96() > U256::ZERO);
-    assert_eq!(snapshot.pool_price, config.pool_price);
+    let raw_pool = Perp::new(perp, client.chain().provider())
+        .poolState()
+        .block(BlockId::hash(snapshot.block.hash))
+        .call()
+        .await
+        .unwrap();
+    assert_eq!(snapshot.pool_price.x96(), raw_pool.ammPrice);
+    assert_eq!(config.pool_price.x96(), raw_pool.ammPrice);
 
     // 3. The pool reads through the hook: `extsload` sees the guarded pool.
     let pool = client.market().state().await.unwrap().pool().await.unwrap();

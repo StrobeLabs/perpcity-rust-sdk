@@ -160,6 +160,19 @@ async fn each_build_reads_as_its_era_on_a_sepolia_fork() {
         ));
     }
     println!("v1 get_maker_equities fails loudly: {err}");
+    // Empty batches still check the era: v1 previews, the earlier builds
+    // value takers.
+    let v1_state = v1_market.state().await.unwrap();
+    assert!(v1_state.preview_positions(&[]).await.unwrap().is_empty());
+    let err = v1_market.get_taker_healths(&[]).await.unwrap_err();
+    assert!(
+        matches!(
+            &err,
+            PerpCityError::Contract(ContractError::UnsupportedEra { era: Era::V1, operation })
+                if operation.starts_with("taker_healths")
+        ),
+        "{err}"
+    );
 
     for (perp, era) in [(V022_PERP, Era::Upgradeable), (LEGACY_PERP, Era::Legacy)] {
         let market = chain.market(perp);
@@ -169,6 +182,23 @@ async fn each_build_reads_as_its_era_on_a_sepolia_fork() {
             era == Era::Upgradeable
         );
         assert!(market.get_maker_equities(&[]).await.unwrap().is_empty());
+        assert!(market.get_taker_healths(&[]).await.unwrap().is_empty());
+        let err = market
+            .state()
+            .await
+            .unwrap()
+            .preview_positions(&[])
+            .await
+            .err()
+            .unwrap();
+        assert!(
+            matches!(
+                &err,
+                PerpCityError::Contract(ContractError::UnsupportedEra { era: e, operation })
+                    if *e == era && *operation == "preview_positions"
+            ),
+            "{perp}: {err}"
+        );
         assert!(
             market
                 .get_maker_equities_at_mark(&[], mark)
