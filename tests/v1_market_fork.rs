@@ -263,9 +263,18 @@ async fn market_reads_match_raw_views() {
     );
     let depth = cap.close_capacity.unwrap();
     assert_eq!(state.physical_close_capacity().await.unwrap(), depth);
+    assert_ne!(
+        close.longClose, close.shortClose,
+        "equal sides would hide a swapped field"
+    );
     assert_eq!(
         (depth.long.atoms(), depth.short.atoms()),
         (close.longClose, close.shortClose)
+    );
+    let depth_x64 = state.physical_close_capacity_x64().await.unwrap();
+    assert_eq!(
+        (depth_x64.long >> 64_u32, depth_x64.short >> 64_u32),
+        (U256::from(close.longClose), U256::from(close.shortClose))
     );
     // Change only cFee in the first packed word of the local Fees instance.
     let old_fee = config.fees.creator_fee.e6();

@@ -19,6 +19,7 @@ mod v1_fork;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 
+use alloy::eips::BlockId;
 use alloy::json_abi::{JsonAbi, StateMutability};
 use alloy::primitives::{Address, B256, Bytes, I256, IntoLogData, U256, b256, keccak256};
 use alloy::providers::Provider;
@@ -30,7 +31,7 @@ use perpcity_sdk::contracts::v1::{
     IPricing, OpenTakerParams, Perp, PerpFactory, PricePair, WithdrawalController,
 };
 
-use perpcity_sdk::events::receipt::parse_v1_receipt;
+use perpcity_sdk::events::receipt::{minted_position_id, parse_v1_receipt};
 
 use v1_fork::{
     BLOCK_INTERVAL, FACTORY, FEES, FUNDING, HOOK, MARGIN_RATIOS, PERP_IMPLEMENTATION, PRICE_IMPACT,
@@ -116,40 +117,7 @@ async fn v1_bindings_decode_a_w11_market() {
     );
     check_clock(&w);
 
-    for step in &w.steps {
-        let receipt = &step.receipt;
-        let id = match step.label {
-            "open-maker" => {
-                parse_v1_receipt::<Perp::MakerOpened>(receipt, market.perp, None)
-                    .unwrap()
-                    .pos_id
-            }
-            "open-taker" => {
-                parse_v1_receipt::<Perp::TakerOpened>(receipt, market.perp, None)
-                    .unwrap()
-                    .pos_id
-            }
-            "close-taker" => {
-                parse_v1_receipt::<Perp::TakerClosed>(receipt, market.perp, Some(market.taker_id))
-                    .unwrap()
-                    .pos_id
-            }
-            "reduce-maker" => {
-                let trade = parse_v1_receipt::<Perp::MakerAdjusted>(
-                    receipt,
-                    market.perp,
-                    Some(market.maker_id),
-                )
-                .unwrap();
-                assert_eq!(trade.margin.unwrap().atoms(), trade.event.margin);
-                continue;
-            }
-            _ => continue,
-        };
-        let owner =
-            parse_v1_receipt::<Perp::PositionOwnerUpdated>(receipt, market.perp, Some(id)).unwrap();
-        assert_eq!(owner.pos_id, id);
-    }
+    check_trade_receipts(&w, &market).await;
 
     let per_step = decode_logs(&w, &market);
     for (step, expected) in STEP_EVENTS {
@@ -171,6 +139,102 @@ async fn v1_bindings_decode_a_w11_market() {
     check_views(&views).await;
     check_reverts(&views).await;
     views.check_all_called();
+}
+
+/// Each trade receipt against the chain: an open's id is `nextPosId()` the
+/// block before it and the id the step recorded, each logged margin is the
+/// raw `positions(id).margin` at the receipt's block, and the close burns.
+async fn check_trade_receipts(w: &V1Fork, market: &V1Market) {
+    let raw = Perp::new(market.perp, &w.provider);
+    for step in &w.steps {
+        let receipt = &step.receipt;
+        let block = receipt.block_number.unwrap();
+        let before = BlockId::number(block - 1);
+        let at = BlockId::number(block);
+        match step.label {
+            "open-maker" | "open-taker" => {
+                let next = raw.nextPosId().block(before).call().await.unwrap();
+                let recorded = if step.label == "open-maker" {
+                    market.maker_id
+                } else {
+                    market.taker_id
+                };
+                assert_eq!(next, recorded, "{}: nextPosId before the open", step.label);
+                assert_eq!(
+                    minted_position_id(receipt, market.perp, None).unwrap(),
+                    next,
+                    "{}: minted id",
+                    step.label
+                );
+                if step.label == "open-maker" {
+                    let trade =
+                        parse_v1_receipt::<Perp::MakerOpened>(receipt, market.perp, None).unwrap();
+                    assert_eq!(trade.pos_id, next);
+                    assert!(trade.margin.is_none());
+                } else {
+                    let trade =
+                        parse_v1_receipt::<Perp::TakerOpened>(receipt, market.perp, None).unwrap();
+                    assert_eq!(trade.pos_id, next);
+                    assert_eq!(
+                        trade.margin.unwrap().atoms(),
+                        raw.positions(next).block(at).call().await.unwrap().margin
+                    );
+                }
+                assert_eq!(
+                    raw.positionOwner(next).block(at).call().await.unwrap(),
+                    w.me
+                );
+            }
+            "close-taker" => {
+                let trade = parse_v1_receipt::<Perp::TakerClosed>(
+                    receipt,
+                    market.perp,
+                    Some(market.taker_id),
+                )
+                .unwrap();
+                assert_eq!(trade.pos_id, market.taker_id);
+                assert_eq!(trade.margin.unwrap().atoms(), 0);
+                let burn = parse_v1_receipt::<Perp::PositionOwnerUpdated>(
+                    receipt,
+                    market.perp,
+                    Some(market.taker_id),
+                )
+                .unwrap();
+                assert_eq!(
+                    (burn.event.oldOwner, burn.event.newOwner),
+                    (w.me, Address::ZERO)
+                );
+                assert_eq!(
+                    raw.positionOwner(market.taker_id)
+                        .block(at)
+                        .call()
+                        .await
+                        .unwrap(),
+                    Address::ZERO
+                );
+                assert!(minted_position_id(receipt, market.perp, None).is_err());
+            }
+            "reduce-maker" => {
+                let trade = parse_v1_receipt::<Perp::MakerAdjusted>(
+                    receipt,
+                    market.perp,
+                    Some(market.maker_id),
+                )
+                .unwrap();
+                assert_eq!(trade.pos_id, market.maker_id);
+                assert_eq!(
+                    trade.margin.unwrap().atoms(),
+                    raw.positions(market.maker_id)
+                        .block(at)
+                        .call()
+                        .await
+                        .unwrap()
+                        .margin
+                );
+            }
+            _ => {}
+        }
+    }
 }
 
 /// Each step mines later than the one before it, and the touch a minute

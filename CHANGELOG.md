@@ -11,11 +11,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - V1 pinned reads expose position previews and the collateral cap. Legacy valuation batches on v1 direct callers to the preview. Physical capacity checks account for terminal partial fills and fractional maker removals.
 
+- `StateAt::preview_position` returns `None` for a position that is not open, and a revert keeps its selector and transience, as a `preview_positions` row does. `StateAt::physical_close_capacity_x64` reads the close depth in X64 from storage, and `StateAt::maker_liquidity` reads the total maker liquidity. These are the inputs of `MarketCapacity::fits_maker_removal`. `MarketCapacity::fits_swap` accepts a credit to a side at `u128::MAX`. `TvlCap::allows_deposit` takes `UsdcAtoms`.
+
 - V1 marks and snapshots call the pinned market’s `readBeaconIndex` and preserve its revert data. For a revert shorter than four bytes, `ContractError::RevertedWithoutSelector` carries the complete payload. Outer RPC errors propagate. The timestamp API reads the beacon directly.
 
 ### Breaking
 
 - On v1, `taker_healths` and `maker_equities` return `UnsupportedEra`. Use `preview_positions`.
+
+- On every build, an empty batch now checks the era. `get_maker_equities(&[])` and `get_taker_healths(&[])` read the snapshot block and the era, so they can fail with an RPC error. `preview_positions(&[])` returns `UnsupportedEra` on an earlier build. `maker_equities_at_mark(&[], mark)` with a zero mark returns `Ok(vec![])` on an earlier build, not `InvalidPrice`.
 
 - Market reads use the deployed build. Match `Fees::lp_fee` on `LpFee::Fixed` or `LpFee::Curve`. On v1, snapshots and pinned marks advance the slot 23 EMAs and ask the pricing module for the mark. V1 marks reject stale, future-dated and out-of-range beacon observations. Snapshot fees use the same block as the mark. Capacity includes physical close depth. Use `StateAt::v1_cumulatives` for the eight v1 accumulator words and `StateAt::beacon_index` for the timestamp and latency.
 
