@@ -55,32 +55,53 @@ impl GasLimits {
     /// liquidations have run out of gas where `eth_estimateGas` passed, so
     /// the liquidation paths pin this bound instead of estimating.
     pub const LIQUIDATE: u64 = 3_000_000;
-    // Empirical lower bounds from an Arbitrum Sepolia v1 fork: at least
-    // 120% of the largest of each measured call's gas used and its
-    // `eth_estimateGas` at the block before it, run with that block's time
-    // and with the mined block's (a trade in a new second accrues; see
-    // `measure_gas` in the fork tests), rounded up to 50,000. Anvil's
-    // estimates and receipts exclude Arbitrum's L1 data gas. Adjust and
-    // close share a selector.
-    /// V1 taker open (674,995 estimated across three ticks).
-    pub const V1_OPEN_TAKER: u64 = 850_000;
-    /// V1 taker adjustment or close (741,869 estimated and 715,398 used
-    /// for a flip, a sell across three ticks).
-    pub const V1_ADJUST_TAKER: u64 = 900_000;
+    // Lower bounds on a `v1.0.0` trade's limit, not limits: the limit sent
+    // is the larger of this and 120% of an `eth_estimateGas` run with the
+    // head's state at the next second (see `PerpClient::simulate`). A v1
+    // trade's gas grows with the initialized ticks in the utilization band
+    // (about 26,000 a tick for a flip) and with the time since the market's
+    // last touch, since a trade in a new second accrues and walks those
+    // ticks; no fixed number covers every market. Each bound is at least
+    // 120% of the largest gas used or estimated (at the mined block's time)
+    // on an Arbitrum Sepolia v1 fork, rounded up to 50,000, for the
+    // endpoints that refuse block overrides. Anvil's estimates and receipts
+    // exclude Arbitrum's L1 data gas. Adjust and close share a selector.
+    /// V1 taker open (724,179 estimated for a buy across three ticks with
+    /// 13 initialized ticks in the utilization band).
+    pub const V1_OPEN_TAKER: u64 = 900_000;
+    /// V1 taker adjustment or close (1,261,870 estimated for a flip
+    /// across eight thin bands 300 s after the last touch).
+    pub const V1_ADJUST_TAKER: u64 = 1_550_000;
     /// V1 maker open (756,117 estimated for a W12 band).
     pub const V1_OPEN_MAKER: u64 = 950_000;
     /// V1 maker adjustment or close (522,302 estimated for a last-maker
     /// close whose payout becomes a withdrawal claim).
     pub const V1_ADJUST_MAKER: u64 = 650_000;
-    /// V1 maker move (664,356 estimated for the W11 range change; one step
-    /// above the rounding, which would leave 0.3%).
-    pub const V1_MOVE_MAKER: u64 = 850_000;
+    /// V1 maker move (741,535 estimated to move a band to ticks 33,000 to
+    /// 45,000 300 s after the last touch, and 860,205 used by the same move
+    /// in a review run).
+    pub const V1_MOVE_MAKER: u64 = 1_050_000;
     /// V1 taker backstop (295,253 estimated with the owner change).
     pub const V1_BACKSTOP_TAKER: u64 = 400_000;
     /// V1 maker backstop (464,596 estimated with the owner change).
     pub const V1_BACKSTOP_MAKER: u64 = 600_000;
     /// ERC-20 `transfer` call.
     pub const TRANSFER: u64 = 65_000;
+}
+
+/// Whether `selector` is a `v1.0.0` trade, whose gas is simulated in the
+/// next second (see [`GasLimits::V1_OPEN_TAKER`]).
+pub(crate) fn is_v1_trade(selector: &Selector) -> bool {
+    matches!(
+        *selector,
+        v1::Perp::openTakerCall::SELECTOR
+            | v1::Perp::adjustTakerCall::SELECTOR
+            | v1::Perp::openMakerCall::SELECTOR
+            | v1::Perp::adjustMakerCall::SELECTOR
+            | v1::Perp::moveMakerCall::SELECTOR
+            | v1::Perp::backstopTakerCall::SELECTOR
+            | v1::Perp::backstopMakerCall::SELECTOR
+    )
 }
 
 /// Lower bound on a cached estimate for the known Perp entrypoints.
@@ -212,11 +233,16 @@ impl GasLimitCache {
     }
 
     /// The gas a cache hit's preflight runs with: `limit` without the
-    /// buffer. A call that fits it keeps the buffer for what `eth_call`
-    /// does not charge, Arbitrum's L1 data gas and work a later block's
-    /// timestamp adds; one that does not is re-estimated.
+    /// buffer, rounded up. A call that fits it keeps the buffer for what
+    /// the simulation does not see: Arbitrum's L1 data gas, and the state
+    /// that changes before the trade mines (more ticks in the band, more
+    /// time since the last touch). A v1 trade's accrual in a new second is
+    /// in the simulation, not the buffer. A call that does not fit is
+    /// re-estimated.
     pub(crate) fn preflight_limit(&self, limit: u64) -> u64 {
-        (limit as f64 / self.buffer) as u64
+        let buffer_ppm = ((self.buffer * 1e6).round() as u128).max(1);
+        let unbuffered = (u128::from(limit) * 1_000_000).div_ceil(buffer_ppm);
+        u64::try_from(unbuffered).unwrap_or(u64::MAX)
     }
 
     /// Drop a cached estimate so the next send re-estimates. Used when a
@@ -379,7 +405,8 @@ mod tests {
     fn a_cache_hit_preflights_without_the_buffer() {
         let cache = GasLimitCache::new();
         assert_eq!(cache.preflight_limit(1_200_000), 1_000_000);
-        assert_eq!(cache.preflight_limit(GasLimits::V1_ADJUST_TAKER), 750_000);
+        assert_eq!(cache.preflight_limit(GasLimits::V1_ADJUST_TAKER), 1_291_667);
+        assert_eq!(cache.preflight_limit(1_000_001), 833_335, "rounded up");
         let unbuffered = GasLimitCache::with_config(DEFAULT_ESTIMATE_TTL_MS, 1.0);
         assert_eq!(unbuffered.preflight_limit(900_000), 900_000);
     }
@@ -410,8 +437,17 @@ mod tests {
         ] {
             cache.put(selector, 1, 0);
             assert_eq!(cache.get(&selector, 0), Some(floor));
-            cache.put(selector, 1_000_000, 0);
-            assert_eq!(cache.get(&selector, 0), Some(1_200_000));
+            cache.put(selector, 2_000_000, 0);
+            assert_eq!(cache.get(&selector, 0), Some(2_400_000));
+            assert!(is_v1_trade(&selector));
+        }
+        for selector in [
+            Perp::openTakerCall::SELECTOR,
+            Perp::adjustMakerCall::SELECTOR,
+            PerpV022::liquidateTakerCall::SELECTOR,
+            [0xaa, 0xbb, 0xcc, 0xdd],
+        ] {
+            assert!(!is_v1_trade(&selector));
         }
     }
 

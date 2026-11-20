@@ -1317,7 +1317,7 @@ mod tests {
     }
 
     /// Another account's key.
-    fn other_signer() -> PrivateKeySigner {
+    pub(super) fn other_signer() -> PrivateKeySigner {
         PrivateKeySigner::from_bytes(&B256::repeat_byte(0x44)).unwrap()
     }
 

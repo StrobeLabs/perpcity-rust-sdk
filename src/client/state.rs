@@ -1652,7 +1652,7 @@ pub(super) fn pinned_read_error(error: PerpCityError, number: u64) -> PerpCityEr
 
 /// The failure a node's error `message` names about block `number`
 /// itself, as [`pinned_read_error`] types it, or `None` for any other.
-fn pinned_block_failure(message: &str, number: u64) -> Option<ContractError> {
+pub(super) fn pinned_block_failure(message: &str, number: u64) -> Option<ContractError> {
     let message = message.to_ascii_lowercase();
     if state_pruned(&message) {
         Some(ContractError::StateUnavailable { number })

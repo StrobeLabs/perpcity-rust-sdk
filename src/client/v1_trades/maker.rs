@@ -485,8 +485,16 @@ mod tests {
     use crate::errors::decode::revert_class;
     use crate::math::range::TickRange;
     use crate::units::LDelta;
+    use std::sync::{Arc, Mutex};
+
+    use alloy::consensus::Transaction as _;
+    use alloy::consensus::transaction::Recovered;
     use alloy::eips::BlockId;
     use alloy::primitives::{I256, U160};
+    use tracing::field::{Field, Visit};
+    use tracing::instrument::WithSubscriber;
+    use tracing::span::{Attributes, Id, Record};
+    use tracing::{Event, Level, Metadata, Subscriber};
 
     fn open() -> ExactOpenMakerParams {
         ExactOpenMakerParams {
@@ -738,6 +746,15 @@ mod tests {
         (x64(u64::MAX.into()), x64(u64::MAX.into()))
     }
 
+    /// Depths the W12 band's removal of `removed` with interest `(7, 5)`
+    /// fits exactly, and any larger removal exceeds on the long side.
+    fn fitting(removed: u128) -> (U256, U256) {
+        let (price, band) = w12_band();
+        let part =
+            band_capacity_x64(price, &MakerBand::new(band.range, LUnits::new(removed))).unwrap();
+        (x64(7) + part.short, x64(u64::MAX.into()))
+    }
+
     /// The removal reads after the head, answered in order: the band, the
     /// position row and owner, the open interest `(7, 5)`, both depth
     /// words, the market's maker liquidity `book` and the pool. `owner`
@@ -902,11 +919,14 @@ mod tests {
     }
 
     /// A refused close is confirmed by the contract at the block its reads
-    /// were pinned to, with the close's own calldata, and nothing is sent.
+    /// were pinned to, from the client to its market with the close's own
+    /// calldata, and nothing is sent. The depths fit all of the band but
+    /// one unit, so the check is of the whole band.
     #[tokio::test]
     async fn a_refused_close_is_confirmed_at_the_pinned_block() {
         let (client, rpc) = mock::client();
-        let hash = answer_removal(&rpc, &client, shallow());
+        let all_but_one = fitting(335_000_000 - 1);
+        let hash = answer_removal(&rpc, &client, all_but_one);
         rpc.reverts(&Perp::LongCloseCapacityExceeded::SELECTOR);
         let err = client
             .close_maker_v1(U256::ONE, Urgency::Normal)
@@ -928,6 +948,10 @@ mod tests {
         assert_eq!(call.liquidityDelta, -335_000_000);
         assert_eq!((call.amt0Limit, call.amt1Limit), (U256::ZERO, U256::ZERO));
         assert_eq!(rpc.call_blocks().pop(), Some(BlockId::hash(hash)));
+        assert_eq!(
+            rpc.call_routes().pop(),
+            Some((Some(client.address()), Some(mock::PERP)))
+        );
         assert!(rpc.is_drained());
     }
 
@@ -1033,14 +1057,15 @@ mod tests {
             now_ms(),
         );
         answer_removal(&rpc, &client, deep());
+        rpc.block(101, 1_795_141_002);
         rpc.response(&Bytes::new());
-        let hash = B256::repeat_byte(0x7c);
-        rpc.response(&hash);
-        rpc.response(&adjusted_receipt(&client, hash, 20_000_000));
+        rpc.response(&mock::SENT);
+        rpc.response(&adjusted_receipt(&client, mock::SENT, 20_000_000));
         let err = client
             .close_maker_v1(U256::ONE, Urgency::Normal)
             .await
             .unwrap_err();
+        let hash = rpc.sent()[0];
         assert!(
             matches!(err, PerpCityError::Transaction(TransactionError::MakerNotClosed {
                 tx_hash, pos_id,
@@ -1049,35 +1074,161 @@ mod tests {
         );
         assert!(err.is_transient());
         assert_eq!(err.tx_hash(), Some(hash));
+        assert_eq!(err.hash_to_replace(), None, "it mined");
         let preflight = rpc.calls().pop().unwrap();
         assert_eq!(removal_call(&preflight).liquidityDelta, -335_000_000);
-        assert_eq!(rpc.call_blocks().pop(), Some(BlockId::pending()));
+        assert_eq!(rpc.call_blocks().pop(), Some(BlockId::number(101)));
         assert_eq!(rpc.call_gas().pop(), Some(Some(750_000)));
+        let sent = rpc.sent_txs();
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].gas_limit(), 900_000, "the cached limit is sent");
+        assert_eq!(sent[0].input(), &preflight);
         assert!(rpc.is_drained());
     }
 
     /// A removal the check refuses and the contract accepts at the pinned
-    /// block is sent: the contract is the authority on its own depth.
+    /// block is sent: the contract is the authority on its own depth. The
+    /// signed transaction carries the calldata the contract accepted, its
+    /// deadline and nonzero limits included, and one warning names the
+    /// overruled refusal.
     #[tokio::test(start_paused = true)]
     async fn a_refusal_the_contract_accepts_is_sent() {
         let (client, rpc) = mock::client();
         client.chain().set_base_fee(100);
         let hash = answer_removal(&rpc, &client, shallow());
         rpc.response(&Bytes::new());
+        rpc.block(101, 1_795_141_002);
         rpc.quantity(400_000);
-        let sent = B256::repeat_byte(0x7d);
-        rpc.response(&sent);
-        rpc.response(&adjusted_receipt(&client, sent, 285_000_000));
+        rpc.response(&mock::SENT);
+        rpc.response(&adjusted_receipt(&client, mock::SENT, 285_000_000));
+        let warnings = Warnings::default();
         let adjusted = client
             .adjust_maker_v1(&adjust(), Urgency::Normal)
+            .with_subscriber(warnings.clone())
             .await
             .unwrap();
         assert!(
-            matches!(&adjusted, V1MakerAdjustment::Adjusted(result) if result.tx_hash == sent),
+            matches!(&adjusted, V1MakerAdjustment::Adjusted(result) if result.tx_hash == rpc.sent()[0]),
             "{adjusted:?}"
         );
+        let confirmation = rpc.calls().pop().unwrap();
         assert_eq!(rpc.call_blocks().pop(), Some(BlockId::hash(hash)));
+        assert_eq!(
+            rpc.call_routes().pop(),
+            Some((Some(client.address()), Some(mock::PERP)))
+        );
+        let confirmed = removal_call(&confirmation);
+        assert_eq!(
+            (confirmed.amt0Limit, confirmed.amt1Limit),
+            (U256::from(100u8), U256::from(1_000u16))
+        );
+        let signed = rpc.sent_txs();
+        assert_eq!(signed.len(), 1);
+        assert_eq!(signed[0].input(), &confirmation, "the confirmed calldata");
+        assert_eq!(signed[0].to(), Some(mock::PERP));
+        assert_eq!(
+            warnings.events(),
+            [vec![
+                (
+                    "message".to_owned(),
+                    "the contract accepts a maker removal the close-depth check refused".to_owned()
+                ),
+                ("pos_id".to_owned(), "1".to_owned()),
+                ("liquidity_delta".to_owned(), "-50000000".to_owned()),
+                ("block".to_owned(), "100".to_owned()),
+                ("side".to_owned(), "Long".to_owned()),
+                ("interest".to_owned(), "7".to_owned()),
+                ("last_maker".to_owned(), "false".to_owned()),
+            ]]
+        );
         assert!(rpc.is_drained());
+    }
+
+    /// A partial removal is checked for its own amount: with depths that
+    /// fit it and not the whole band, it is sent with no confirmation.
+    #[tokio::test(start_paused = true)]
+    async fn a_partial_removal_is_checked_for_its_own_amount() {
+        let (client, rpc) = mock::client();
+        client.chain().set_base_fee(100);
+        answer_removal(&rpc, &client, fitting(50_000_000));
+        rpc.block(101, 1_795_141_002);
+        rpc.quantity(400_000);
+        rpc.response(&mock::SENT);
+        rpc.response(&adjusted_receipt(&client, mock::SENT, 285_000_000));
+        client
+            .adjust_maker_v1(&adjust(), Urgency::Normal)
+            .await
+            .unwrap();
+        assert_eq!(
+            rpc.methods(),
+            [
+                "eth_call",
+                "eth_call",
+                "eth_blockNumber",
+                "eth_getBlockByNumber",
+                "eth_call",
+                "eth_call",
+                "eth_call",
+                "eth_getStorageAt",
+                "eth_getStorageAt",
+                "eth_call",
+                "eth_call",
+                "eth_getBlockByNumber",
+                "eth_estimateGas",
+                "eth_sendRawTransaction",
+                "eth_getTransactionReceipt"
+            ]
+        );
+        assert!(rpc.is_drained());
+    }
+
+    /// An event's fields, by name and value, in order.
+    type EventFields = Vec<(String, String)>;
+
+    /// The warnings logged under it, each as its fields in order.
+    #[derive(Clone, Default)]
+    struct Warnings(Arc<Mutex<Vec<EventFields>>>);
+
+    impl Warnings {
+        fn events(&self) -> Vec<EventFields> {
+            self.0.lock().unwrap().clone()
+        }
+    }
+
+    struct Fields(EventFields);
+
+    impl Visit for Fields {
+        fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+            self.0.push((field.name().to_owned(), format!("{value:?}")));
+        }
+
+        fn record_str(&mut self, field: &Field, value: &str) {
+            self.0.push((field.name().to_owned(), value.to_owned()));
+        }
+    }
+
+    impl Subscriber for Warnings {
+        fn enabled(&self, metadata: &Metadata<'_>) -> bool {
+            *metadata.level() <= Level::WARN
+        }
+
+        fn new_span(&self, _: &Attributes<'_>) -> Id {
+            Id::from_u64(1)
+        }
+
+        fn record(&self, _: &Id, _: &Record<'_>) {}
+
+        fn record_follows_from(&self, _: &Id, _: &Id) {}
+
+        fn event(&self, event: &Event<'_>) {
+            let mut fields = Fields(Vec::new());
+            event.record(&mut fields);
+            self.0.lock().unwrap().push(fields.0);
+        }
+
+        fn enter(&self, _: &Id) {}
+
+        fn exit(&self, _: &Id) {}
     }
 
     #[test]
@@ -1166,6 +1317,39 @@ mod tests {
         };
         assert!(inner.is_revert::<Perp::ShortCloseCapacityExceeded>());
         assert!(rpc.is_drained());
+    }
+
+    /// A maker write's look-up answer is checked as a taker trade's: one
+    /// signed by another key with the client's address as `from` is
+    /// `WrongSender`, and one of the client's that hashes to another hash
+    /// is `UnknownToNode`. Nothing is signed or sent after either.
+    #[tokio::test]
+    async fn a_maker_lookup_answer_is_checked_against_the_signature_and_the_hash() {
+        let (client, _) = mock::client();
+        let forged = taker::trade_request(&client, stuck_removal(taker::NOW + 600));
+        let (forged_hash, forged) =
+            taker::as_seen(&client, forged, taker::other_signer().address(), None).await;
+        let mut forged = forged;
+        forged.inner = Recovered::new_unchecked(forged.inner.into_inner(), client.address());
+        let (_, own) = taker::pending_trade(&client, stuck_removal(taker::NOW + 600)).await;
+        for (asked, answer, expected) in [
+            (forged_hash, forged, NotReplaceableReason::WrongSender),
+            (STUCK, own, NotReplaceableReason::UnknownToNode),
+        ] {
+            let (client, rpc) = mock::client();
+            client.chain().set_base_fee(100);
+            rpc.immutables(Era::V1);
+            rpc.response(&answer);
+            let err = client
+                .replace_v1_maker(asked, Urgency::Normal)
+                .await
+                .unwrap_err();
+            assert_eq!(taker::refusal(&err), expected, "{err}");
+            assert_eq!(err.tx_hash(), Some(asked));
+            assert_eq!(err.hash_to_replace(), None);
+            assert!(rpc.sent().is_empty(), "{expected}: nothing signed or sent");
+            assert!(rpc.is_drained(), "{expected}: nothing after the look-up");
+        }
     }
 
     /// The node failing the look-up leaves the original pending: its hash,
@@ -1258,7 +1442,12 @@ mod tests {
     /// the given hash, unresolved.
     fn kept_cause(err: PerpCityError) -> PerpCityError {
         assert!(err.is_unconfirmed() && !err.is_transient(), "{err}");
-        assert_eq!(err.hash_to_replace(), Some(STUCK));
+        assert_eq!(err.tx_hash(), Some(STUCK));
+        assert_eq!(
+            err.hash_to_replace(),
+            None,
+            "nothing to replace on this build"
+        );
         match err {
             PerpCityError::Transaction(TransactionError::ReplacementUnconfirmed {
                 original,

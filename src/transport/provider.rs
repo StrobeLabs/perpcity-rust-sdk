@@ -587,6 +587,9 @@ struct Router {
     /// Set once any endpoint has answered `eth_getProof` with "method not
     /// found"; see [`HftTransport::supports_get_proof`].
     get_proof_unsupported: AtomicBool,
+    /// Set once an endpoint has refused a simulation's block overrides;
+    /// see [`HftTransport::supports_block_overrides`].
+    block_overrides_unsupported: AtomicBool,
 }
 
 /// Multi-endpoint RPC transport with health-aware routing.
@@ -620,6 +623,7 @@ impl HftTransport {
                 strategy: config.strategy,
                 config,
                 get_proof_unsupported: AtomicBool::new(false),
+                block_overrides_unsupported: AtomicBool::new(false),
             }),
         })
     }
@@ -668,6 +672,25 @@ impl HftTransport {
     pub(crate) fn note_get_proof_unsupported(&self) {
         self.router
             .get_proof_unsupported
+            .store(true, Ordering::Relaxed);
+    }
+
+    /// Whether `eth_call` and `eth_estimateGas` are still worth sending
+    /// with block overrides over this transport: false once an endpoint
+    /// has refused them as invalid params (JSON-RPC `-32602`) where the
+    /// same call without them was not. One latch for the endpoint set, as
+    /// [`Self::supports_get_proof`] is.
+    pub(crate) fn supports_block_overrides(&self) -> bool {
+        !self
+            .router
+            .block_overrides_unsupported
+            .load(Ordering::Relaxed)
+    }
+
+    /// Remember that an endpoint refused block overrides.
+    pub(crate) fn note_block_overrides_unsupported(&self) {
+        self.router
+            .block_overrides_unsupported
             .store(true, Ordering::Relaxed);
     }
 }

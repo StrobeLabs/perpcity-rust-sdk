@@ -15,8 +15,9 @@
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
-use alloy::consensus::Header as ConsensusHeader;
+use alloy::consensus::{Header as ConsensusHeader, TxEnvelope};
 use alloy::eips::BlockId;
+use alloy::eips::eip2718::Decodable2718;
 use alloy::hex;
 use alloy::network::Ethereum;
 use alloy::primitives::{Address, B256, Bytes, I256, Signed, U64, U256, Uint, keccak256};
@@ -98,6 +99,7 @@ fn mocked() -> (RootProvider<Ethereum>, Rpc) {
         storage_blocks: Arc::default(),
         receipts: Arc::default(),
         sent: Arc::default(),
+        requests: Arc::default(),
     };
     let rpc = Rpc {
         asserter: recorder.mock.asserter().clone(),
@@ -107,14 +109,15 @@ fn mocked() -> (RootProvider<Ethereum>, Rpc) {
         storage_blocks: Arc::clone(&recorder.storage_blocks),
         receipts: Arc::clone(&recorder.receipts),
         sent: Arc::clone(&recorder.sent),
+        requests: Arc::clone(&recorder.requests),
     };
     (RootProvider::new(RpcClient::new(recorder, true)), rpc)
 }
 
 /// The mock transport, keeping the calldata, block and gas of every
 /// `eth_call`, the slot and block of every `eth_getStorageAt`, the hash of
-/// every `eth_getTransactionReceipt` and of every transaction sent, in
-/// arrival order.
+/// every `eth_getTransactionReceipt` and of every transaction sent, and
+/// the method and params of every request it is asked, in arrival order.
 #[derive(Clone)]
 struct Recorder {
     mock: MockTransport,
@@ -124,6 +127,7 @@ struct Recorder {
     storage_blocks: Arc<Mutex<Vec<BlockId>>>,
     receipts: Arc<Mutex<Vec<B256>>>,
     sent: Arc<Mutex<Vec<B256>>>,
+    requests: Arc<Mutex<Vec<(String, serde_json::Value)>>>,
 }
 
 impl Service<RequestPacket> for Recorder {
@@ -141,6 +145,10 @@ impl Service<RequestPacket> for Recorder {
             let params: serde_json::Value =
                 serde_json::from_str(req.params().map_or("null", RawValue::get))
                     .expect("a request's params are JSON");
+            self.requests
+                .lock()
+                .unwrap()
+                .push((req.method().to_owned(), params.clone()));
             if req.method() == "eth_getTransactionReceipt" {
                 let hash: B256 =
                     serde_json::from_value(params[0].clone()).expect("a receipt read names a hash");
@@ -302,6 +310,7 @@ pub(super) struct Rpc {
     storage_blocks: Arc<Mutex<Vec<BlockId>>>,
     receipts: Arc<Mutex<Vec<B256>>>,
     sent: Arc<Mutex<Vec<B256>>>,
+    requests: Arc<Mutex<Vec<(String, serde_json::Value)>>>,
 }
 
 impl Rpc {
@@ -377,6 +386,54 @@ impl Rpc {
     /// call that set none.
     pub(super) fn call_gas(&self) -> Vec<Option<u64>> {
         self.call_gas.lock().unwrap().clone()
+    }
+
+    /// The params of every `method` request asked so far, in order.
+    pub(super) fn params(&self, method: &str) -> Vec<serde_json::Value> {
+        self.requests
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(asked, _)| asked == method)
+            .map(|(_, params)| params.clone())
+            .collect()
+    }
+
+    /// The method of every request asked so far, in order.
+    pub(super) fn methods(&self) -> Vec<String> {
+        self.requests
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(method, _)| method.clone())
+            .collect()
+    }
+
+    /// The sender and recipient of every `eth_call`, in arrival order.
+    pub(super) fn call_routes(&self) -> Vec<(Option<Address>, Option<Address>)> {
+        self.params("eth_call")
+            .iter()
+            .map(|params| {
+                let field = |name: &str| {
+                    params[0][name]
+                        .as_str()
+                        .map(|a| a.parse().expect("an address parses"))
+                };
+                (field("from"), field("to"))
+            })
+            .collect()
+    }
+
+    /// Every transaction sent with `eth_sendRawTransaction`, decoded.
+    pub(super) fn sent_txs(&self) -> Vec<TxEnvelope> {
+        self.params("eth_sendRawTransaction")
+            .iter()
+            .map(|params| {
+                let raw = hex::decode(params[0].as_str().expect("a raw transaction is hex"))
+                    .expect("a raw transaction is hex");
+                TxEnvelope::decode_2718(&mut raw.as_slice()).expect("a signed envelope decodes")
+            })
+            .collect()
     }
 
     /// The slot of every `eth_getStorageAt` asked so far, in order.
