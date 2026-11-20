@@ -27,7 +27,6 @@ use perpcity_sdk::{
     ChainReader, ContractError, Era, HftTransport, LUnits, MakerBand, PerpCityError, PositionRow,
     StateAt, TickRange, TransportConfig,
 };
-
 use serde_json::Value;
 
 use v1_fork::{SepoliaFork, V1Fork};
@@ -195,7 +194,13 @@ async fn position_reads_agree_with_the_v1_market() {
         )
     };
     set_depth(outside).await.unwrap();
-    let error = raw.adjustTaker(close).from(w.me).call().await.err().unwrap();
+    let error = raw
+        .adjustTaker(close)
+        .from(w.me)
+        .call()
+        .await
+        .err()
+        .unwrap();
     assert_eq!(
         try_extract_revert(&error.to_string()).unwrap().1,
         Perp::LongCloseCapacityExceeded::SELECTOR
@@ -210,7 +215,13 @@ async fn position_reads_agree_with_the_v1_market() {
         amt1Limit: U256::ZERO,
         deadline: w.deadline().await,
     };
-    let error = raw.adjustMaker(remove).from(w.me).call().await.err().unwrap();
+    let error = raw
+        .adjustMaker(remove)
+        .from(w.me)
+        .call()
+        .await
+        .err()
+        .unwrap();
     assert_eq!(
         try_extract_revert(&error.to_string()).unwrap().1,
         Perp::LongCloseCapacityExceeded::SELECTOR

@@ -2303,6 +2303,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn empty_v1_valuation_batches_require_previews() {
+        let (state, rpc) = state().await;
+        rpc.immutables(Era::V1);
+        for error in [
+            state.taker_healths(&[]).await.err().unwrap(),
+            state.maker_equities(&[]).await.err().unwrap(),
+        ] {
+            assert!(matches!(
+                error,
+                PerpCityError::Contract(ContractError::UnsupportedEra { operation, .. })
+                    if operation.contains("preview_positions")
+            ));
+        }
+        assert!(rpc.is_drained());
+    }
+
+    #[tokio::test]
     async fn stale_preview_row_keeps_its_selector() {
         let (state, rpc) = state().await;
         rpc.immutables(Era::V1);

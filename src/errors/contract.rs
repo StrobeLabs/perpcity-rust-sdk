@@ -56,7 +56,7 @@ pub enum ContractError {
         event: &'static str,
     },
 
-    /// A matching event in a successful receipt has invalid data.
+    /// A matching event in a successful receipt has invalid data. Not transient.
     #[error("invalid event in transaction {tx_hash}: {reason}")]
     MinedEventInvalid {
         /// Final transaction hash.
