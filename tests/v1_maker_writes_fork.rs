@@ -22,6 +22,7 @@ use perpcity_sdk::{
 };
 use serde_json::Value;
 use tokio::time::sleep;
+use tracing::instrument::WithSubscriber;
 
 use v1_fork::{SepoliaFork, V1Fork};
 
@@ -594,13 +595,20 @@ async fn v1_maker_close_depth_on_a_sepolia_fork() {
     assert_eq!(nonce().await, before, "nothing sent");
     set_depth(&w, perp, PerSide::new(boundary, saved.short)).await;
     chain.refresh_gas().await.unwrap();
+    let warnings = v1_fork::MakerWarnings::default();
     let V1MakerAdjustment::Adjusted(adjusted) = client
         .adjust_maker_v1(&partial, Urgency::Normal)
+        .with_subscriber(warnings.clone())
         .await
         .unwrap()
     else {
         panic!("a partial removal stays a maker");
     };
+    assert_eq!(
+        warnings.count(),
+        0,
+        "the SDK's own check accepts the boundary; the contract did not overrule it"
+    );
     observe(&w, adjusted.tx_hash, "maker-partial-removal-with-oi").await;
     let depth = raw.physicalCloseCapacity().call().await.unwrap();
     assert_eq!(
@@ -702,13 +710,20 @@ async fn v1_maker_close_depth_on_a_sepolia_fork() {
     assert_eq!(nonce().await, before, "nothing sent");
     set_depth(&w, perp, PerSide::new(long_fits, short_boundary)).await;
     chain.refresh_gas().await.unwrap();
+    let warnings = v1_fork::MakerWarnings::default();
     let MakerExit::Converted(conversion) = client
         .close_maker_v1(maker_a, Urgency::Normal)
+        .with_subscriber(warnings.clone())
         .await
         .unwrap()
     else {
         panic!("maker A converts its residual");
     };
+    assert_eq!(
+        warnings.count(),
+        0,
+        "the SDK's own check accepts the boundary; the contract did not overrule it"
+    );
     observe(&w, conversion.tx_hash, "maker-convert-with-oi").await;
     let oi = raw.openInterest().call().await.unwrap();
     assert_eq!(oi.short, converted);

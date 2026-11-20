@@ -425,7 +425,8 @@ impl PerpClient {
     /// On cache miss: `eth_estimateGas` provides both the gas estimate and
     /// simulation (reverts are detected as a side effect).
     /// On cache hit: returns the cached gas limit after verifying the
-    /// transaction via `preflight_call()`.
+    /// transaction via `preflight_call()` capped at the limit without the
+    /// cache's buffer.
     ///
     /// Every code path guarantees the transaction has been simulated.
     async fn simulate(&self, to: Address, calldata: &Bytes, value: u128, now: u64) -> Result<u64> {
@@ -444,18 +445,21 @@ impl PerpClient {
 
         // Check cache — if hit, simulate via eth_call to verify still valid.
         // Drop the guard before the async preflight call.
-        let cached_limit = {
+        let cached = {
             let cache = self.gas_limit_cache.lock().unwrap();
-            cache.get(&selector, now)
+            cache
+                .get(&selector, now)
+                .map(|limit| (limit, cache.preflight_limit(limit)))
         };
-        if let Some(limit) = cached_limit {
-            tracing::trace!(selector = %alloy::primitives::hex::encode(selector), limit, "gas estimate cache hit");
-            // Cap the preflight at the cached limit the transaction will be
-            // sent with, so a stale (too-small) cached estimate surfaces as
-            // a failed preflight rather than an on-chain out-of-gas.
+        if let Some((limit, preflight_limit)) = cached {
+            tracing::trace!(selector = %alloy::primitives::hex::encode(selector), limit, preflight_limit, "gas estimate cache hit");
+            // Cap the preflight below the cached limit by the cache's
+            // buffer, so a stale (too-small) cached estimate surfaces as a
+            // failed preflight rather than an on-chain out-of-gas, and the
+            // buffer stays for the gas `eth_call` does not charge.
             match self
                 .chain()
-                .preflight_call(self.address, to, calldata, value, Some(limit))
+                .preflight_call(self.address, to, calldata, value, Some(preflight_limit))
                 .await
             {
                 Ok(()) => return Ok(limit),

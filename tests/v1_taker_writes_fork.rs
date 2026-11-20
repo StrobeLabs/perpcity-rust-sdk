@@ -435,6 +435,7 @@ async fn v1_taker_writes_on_a_sepolia_fork() {
         panic!("a flip leaves the position open: {flipped:?}");
     };
     assert_eq!(unpack(flipped.event.delta).0, -left, "now a short");
+    v1_fork::measure_gas(&w.provider, flipped.tx_hash, "taker-flip").await;
     let sent = Perp::adjustTakerCall::abi_decode(&input_of(&w.provider, flipped.tx_hash).await)
         .unwrap()
         .params;
@@ -492,12 +493,14 @@ async fn v1_taker_writes_on_a_sepolia_fork() {
         .await
         .unwrap();
     assert_eq!(unpack(short.event.sr.delta).0, -SHORT_SIZE);
+    v1_fork::measure_gas(&w.provider, short.tx_hash, "taker-open-short").await;
     client.chain().refresh_gas().await.unwrap();
     let closed = client
         .close_taker_v1(short.pos_id, None, fee, Urgency::Normal)
         .await
         .unwrap();
     assert_eq!(closed.pos_id, short.pos_id);
+    v1_fork::measure_gas(&w.provider, closed.tx_hash, "taker-close-short").await;
     let sent = Perp::adjustTakerCall::abi_decode(&input_of(&w.provider, closed.tx_hash).await)
         .unwrap()
         .params;
@@ -505,6 +508,79 @@ async fn v1_taker_writes_on_a_sepolia_fork() {
     assert_eq!(sent.perpDelta, I256::try_from(SHORT_SIZE).unwrap());
     assert_eq!(sent.amt1Limit, U256::from(u128::MAX));
     println!("short {} opened and closed at the market", short.pos_id);
+
+    // ── A long sold back across the ticks it bought through, right after
+    // a reduce: a multi-tick close in the block after the last touch ──
+    let pool = client
+        .market()
+        .state_at_head()
+        .await
+        .unwrap()
+        .pool()
+        .await
+        .unwrap();
+    let quote = pool.quote_perp(PerpDelta::new(OPEN_SIZE)).unwrap();
+    assert!(quote.ticks_crossed.len() >= 3, "{:?}", quote.ticks_crossed);
+    client.chain().refresh_gas().await.unwrap();
+    let long = client
+        .open_taker_v1(
+            &open_params(10_000_000, OPEN_SIZE, quote.amt1_limit(100)),
+            fee,
+            Urgency::Normal,
+        )
+        .await
+        .unwrap();
+    v1_fork::measure_gas(&w.provider, long.tx_hash, "taker-open-long").await;
+    client.chain().refresh_gas().await.unwrap();
+    let reduced = client
+        .adjust_taker_v1(
+            &ExactAdjustTakerParams {
+                pos_id: long.pos_id,
+                margin_delta: UsdcDelta::ZERO,
+                perp_delta: PerpDelta::new(-REDUCE_SIZE),
+                amt1_limit: UsdcAtoms::ZERO,
+            },
+            fee,
+            true,
+            Urgency::Normal,
+        )
+        .await
+        .unwrap();
+    let V1TakerAdjustment::Adjusted(reduced) = reduced else {
+        panic!("a partial reduce leaves the position open: {reduced:?}");
+    };
+    v1_fork::measure_gas(&w.provider, reduced.tx_hash, "taker-reduce-long").await;
+    let sell = client
+        .market()
+        .state_at_head()
+        .await
+        .unwrap()
+        .pool()
+        .await
+        .unwrap()
+        .quote_perp(PerpDelta::new(REDUCE_SIZE - OPEN_SIZE))
+        .unwrap();
+    println!(
+        "long {} sells {} perp back across ticks {:?}",
+        long.pos_id,
+        OPEN_SIZE - REDUCE_SIZE,
+        sell.ticks_crossed
+    );
+    assert!(sell.ticks_crossed.len() >= 3, "{:?}", sell.ticks_crossed);
+    client.chain().refresh_gas().await.unwrap();
+    let closed = client
+        .close_taker_v1(long.pos_id, None, fee, Urgency::Normal)
+        .await
+        .unwrap();
+    assert_eq!(closed.pos_id, long.pos_id);
+    let sent = Perp::adjustTakerCall::abi_decode(&input_of(&w.provider, closed.tx_hash).await)
+        .unwrap()
+        .params;
+    assert_eq!(
+        sent.perpDelta,
+        I256::try_from(REDUCE_SIZE - OPEN_SIZE).unwrap()
+    );
+    v1_fork::measure_gas(&w.provider, closed.tx_hash, "taker-close-long").await;
 
     // ── The deadline bump: a stuck open, replaced ───────────────────
     raw(&fork, "evm_setAutomine", serde_json::json!([false])).await;
@@ -549,6 +625,7 @@ async fn v1_taker_writes_on_a_sepolia_fork() {
         panic!("an open replaced as an open");
     };
     assert_ne!(replaced.tx_hash, stuck, "the replacement mined");
+    v1_fork::measure_gas(&w.provider, replaced.tx_hash, "taker-open-replacement").await;
     let replacement_tx = w
         .provider
         .get_transaction_by_hash(replaced.tx_hash)
@@ -641,6 +718,7 @@ async fn v1_taker_writes_on_a_sepolia_fork() {
         panic!("an adjustment replaced as an adjustment");
     };
     assert_ne!(adjusted.tx_hash, stuck, "the replacement mined");
+    v1_fork::measure_gas(&w.provider, adjusted.tx_hash, "taker-adjust-replacement").await;
     assert_eq!(adjusted.pos_id, replaced.pos_id);
     let replacement_tx = w
         .provider

@@ -93,6 +93,7 @@ fn mocked() -> (RootProvider<Ethereum>, Rpc) {
     let recorder = Recorder {
         mock: MockTransport::new(Asserter::new()),
         calls: Arc::default(),
+        call_gas: Arc::default(),
         slots: Arc::default(),
         storage_blocks: Arc::default(),
         receipts: Arc::default(),
@@ -101,6 +102,7 @@ fn mocked() -> (RootProvider<Ethereum>, Rpc) {
     let rpc = Rpc {
         asserter: recorder.mock.asserter().clone(),
         calls: Arc::clone(&recorder.calls),
+        call_gas: Arc::clone(&recorder.call_gas),
         slots: Arc::clone(&recorder.slots),
         storage_blocks: Arc::clone(&recorder.storage_blocks),
         receipts: Arc::clone(&recorder.receipts),
@@ -109,14 +111,15 @@ fn mocked() -> (RootProvider<Ethereum>, Rpc) {
     (RootProvider::new(RpcClient::new(recorder, true)), rpc)
 }
 
-/// The mock transport, keeping the calldata of every `eth_call`, the
-/// slot and block of every `eth_getStorageAt`, the hash of every
-/// `eth_getTransactionReceipt` and of every transaction sent, in arrival
-/// order.
+/// The mock transport, keeping the calldata, block and gas of every
+/// `eth_call`, the slot and block of every `eth_getStorageAt`, the hash of
+/// every `eth_getTransactionReceipt` and of every transaction sent, in
+/// arrival order.
 #[derive(Clone)]
 struct Recorder {
     mock: MockTransport,
     calls: Arc<Mutex<Vec<(Bytes, BlockId)>>>,
+    call_gas: Arc<Mutex<Vec<Option<u64>>>>,
     slots: Arc<Mutex<Vec<U256>>>,
     storage_blocks: Arc<Mutex<Vec<BlockId>>>,
     receipts: Arc<Mutex<Vec<B256>>>,
@@ -176,6 +179,11 @@ impl Service<RequestPacket> for Recorder {
                         .expect("an eth_call block parses as a BlockId")
                 };
                 self.calls.lock().unwrap().push((calldata.into(), block));
+                let gas = call["gas"].as_str().map(|gas| {
+                    u64::from_str_radix(gas.trim_start_matches("0x"), 16)
+                        .expect("a call's gas is a hex quantity")
+                });
+                self.call_gas.lock().unwrap().push(gas);
             }
         }
         let answer = self.mock.call(req);
@@ -289,6 +297,7 @@ pub(super) fn signer() -> PrivateKeySigner {
 pub(super) struct Rpc {
     asserter: Asserter,
     calls: Arc<Mutex<Vec<(Bytes, BlockId)>>>,
+    call_gas: Arc<Mutex<Vec<Option<u64>>>>,
     slots: Arc<Mutex<Vec<U256>>>,
     storage_blocks: Arc<Mutex<Vec<BlockId>>>,
     receipts: Arc<Mutex<Vec<B256>>>,
@@ -362,6 +371,12 @@ impl Rpc {
     /// The hash of every transaction sent so far, in order.
     pub(super) fn sent(&self) -> Vec<B256> {
         self.sent.lock().unwrap().clone()
+    }
+
+    /// The gas limit of every `eth_call`, in arrival order; `None` for a
+    /// call that set none.
+    pub(super) fn call_gas(&self) -> Vec<Option<u64>> {
+        self.call_gas.lock().unwrap().clone()
     }
 
     /// The slot of every `eth_getStorageAt` asked so far, in order.
@@ -490,6 +505,12 @@ impl Rpc {
         let mut value = serde_json::to_value(receipt).expect("a receipt serializes");
         value[FOREIGN] = true.into();
         self.asserter.push_success(&value);
+    }
+
+    /// The next request fails as the node's error response `code` with
+    /// `message` and no data.
+    pub(super) fn node_error(&self, code: i64, message: &'static str) {
+        self.answers_error(code, message, None);
     }
 
     /// The next `eth_call` reverts, carrying `data` the way a node reports

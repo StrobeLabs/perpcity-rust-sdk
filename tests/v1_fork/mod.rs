@@ -14,6 +14,8 @@ use std::env;
 use std::io::Read;
 use std::net::TcpListener;
 use std::process::{Child, Command, Stdio};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use alloy::consensus::Transaction;
@@ -22,7 +24,7 @@ use alloy::eips::BlockNumberOrTag;
 use alloy::hex;
 use alloy::network::{EthereumWallet, TransactionBuilder};
 use alloy::primitives::aliases::{U24, U48};
-use alloy::primitives::{Address, B256, I256, U256, address, keccak256};
+use alloy::primitives::{Address, B256, I256, U64, U256, address, keccak256};
 use alloy::providers::{DynProvider, Provider, ProviderBuilder};
 use alloy::rpc::types::{TransactionReceipt, TransactionRequest};
 use alloy::signers::SignerSync;
@@ -31,6 +33,8 @@ use alloy::sol;
 use alloy::sol_types::SolValue;
 use serde_json::Value;
 use tokio::time::sleep;
+use tracing::span::{Attributes, Id, Record};
+use tracing::{Event, Level, Metadata, Subscriber};
 
 use perpcity_sdk::contracts::v1::{
     AdjustMakerParams, AdjustTakerParams, Modules, MoveMakerParams, OpenMakerParams,
@@ -600,8 +604,9 @@ impl V1Fork {
 }
 
 /// A mined trade's gas: the receipt's `gasUsed`, `eth_estimateGas` for the
-/// same call from the same sender at the block before it, and the cache
-/// floor for its selector.
+/// same call from the same sender at the block before it, with that
+/// block's own time and with the mined block's time, and the cache floor
+/// for its selector.
 pub struct GasMeasure {
     pub used: u64,
     pub estimate: u64,
@@ -609,8 +614,14 @@ pub struct GasMeasure {
 }
 
 /// Measure `hash` and check that its selector's floor is at least 120% of
-/// the estimate and of the gas used, the margin the floors are set with. Anvil's receipts and
-/// estimates exclude Arbitrum's L1 data gas; the floors cover L2
+/// each estimate and of the gas used, the margin the floors are set with.
+///
+/// A `v1.0.0` trade accrues the rates, a cumulatives write and a walk of
+/// the ticks, only in a block whose timestamp differs from the market's
+/// last touch, so an estimate at block N-1 in the second of the trade
+/// before it misses that work. The second estimate runs at block N-1 with
+/// block N's number and timestamp, as the mined call ran. Anvil's receipts
+/// and estimates exclude Arbitrum's L1 data gas; the floors cover L2
 /// execution only.
 pub async fn measure_gas(provider: &impl Provider, hash: B256, label: &str) -> GasMeasure {
     let receipt = provider
@@ -628,24 +639,46 @@ pub async fn measure_gas(provider: &impl Provider, hash: B256, label: &str) -> G
         .with_from(tx.inner.signer())
         .with_to(tx.to().unwrap())
         .with_input(tx.input().clone());
-    let estimate = provider
-        .estimate_gas(request)
+    let at_parent = provider
+        .estimate_gas(request.clone())
         .block((block - 1).into())
         .await
         .unwrap_or_else(|e| panic!("{label}: no estimate at block {}: {e}", block - 1));
+    let mined = provider
+        .get_block_by_number(block.into())
+        .await
+        .unwrap()
+        .unwrap();
+    let at_mined_time: U64 = provider
+        .raw_request(
+            "eth_estimateGas".into(),
+            (
+                request,
+                BlockNumberOrTag::Number(block - 1),
+                Value::Null,
+                serde_json::json!({
+                    "number": U64::from(block),
+                    "time": U64::from(mined.header.timestamp),
+                }),
+            ),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("{label}: no estimate at block {block}'s time: {e}"));
+    let at_mined_time = at_mined_time.to::<u64>();
     let selector: [u8; 4] = tx.input()[..4].try_into().unwrap();
     let mut limits = GasLimitCache::new();
     limits.put(selector, 1, 0);
     let floor = limits.get(&selector, 0).unwrap();
     println!(
-        "gas {label}: used {} estimate {estimate} at block {} floor {floor} tx {hash}",
+        "gas {label}: used {} estimate {at_parent} at block {}, {at_mined_time} at block {block}'s time, floor {floor} tx {hash}",
         receipt.gas_used,
         block - 1
     );
+    let estimate = at_parent.max(at_mined_time);
     let need = estimate.max(receipt.gas_used);
     assert!(
         floor >= (need * 6).div_ceil(5),
-        "{label}: floor {floor} below 120% of {need} (estimate {estimate}, used {})",
+        "{label}: floor {floor} below 120% of {need} (estimates {at_parent} and {at_mined_time}, used {})",
         receipt.gas_used
     );
     GasMeasure {
@@ -653,4 +686,43 @@ pub async fn measure_gas(provider: &impl Provider, hash: B256, label: &str) -> G
         estimate,
         floor,
     }
+}
+
+/// Counts the warnings the SDK's maker writes log, for a future run with
+/// `tracing::instrument::WithSubscriber::with_subscriber`: a removal the
+/// close-depth check refused and the contract accepted logs one.
+#[derive(Clone, Default)]
+pub struct MakerWarnings(Arc<AtomicUsize>);
+
+impl MakerWarnings {
+    pub fn count(&self) -> usize {
+        self.0.load(Ordering::SeqCst)
+    }
+}
+
+impl Subscriber for MakerWarnings {
+    fn enabled(&self, metadata: &Metadata<'_>) -> bool {
+        *metadata.level() == Level::WARN
+            && metadata
+                .target()
+                .starts_with("perpcity_sdk::client::v1_trades::maker")
+    }
+
+    fn new_span(&self, _: &Attributes<'_>) -> Id {
+        Id::from_u64(1)
+    }
+
+    fn record(&self, _: &Id, _: &Record<'_>) {}
+
+    fn record_follows_from(&self, _: &Id, _: &Id) {}
+
+    fn event(&self, event: &Event<'_>) {
+        if self.enabled(event.metadata()) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    fn enter(&self, _: &Id) {}
+
+    fn exit(&self, _: &Id) {}
 }

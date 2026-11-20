@@ -166,15 +166,28 @@ fn check_removal(
     })
 }
 
+/// The side, the open interest and `last_maker` of a close-depth refusal.
+fn refused_side(refusal: &ValidationError) -> Option<(Side, u128, bool)> {
+    match *refusal {
+        ValidationError::LongCloseCapacityExceeded {
+            interest,
+            last_maker,
+        } => Some((Side::Long, interest, last_maker)),
+        ValidationError::ShortCloseCapacityExceeded {
+            interest,
+            last_maker,
+        } => Some((Side::Short, interest, last_maker)),
+        _ => None,
+    }
+}
+
 /// The answer to a removal [`check_removal`] refused, given the contract's
 /// answer to the same call at the same block: the refusal when the contract
 /// reverts with the same capacity error, the contract's revert when an
 /// earlier check fails first (`MarginTooLow` before the converted
-/// residual's depth, for one), and `None`, to send, when it accepts.
-fn confirmed_refusal(
-    refusal: ValidationError,
-    simulated: std::result::Result<(), TransactionError>,
-) -> Option<PerpCityError> {
+/// residual's depth, for one), the call's own failure when the contract
+/// gave no answer, and `None`, to send, when it accepts.
+fn confirmed_refusal(refusal: ValidationError, simulated: Result<()>) -> Option<PerpCityError> {
     let expected = match refusal {
         ValidationError::LongCloseCapacityExceeded { .. } => {
             Perp::LongCloseCapacityExceeded::SELECTOR
@@ -186,10 +199,10 @@ fn confirmed_refusal(
     };
     match simulated {
         Ok(()) => None,
-        Err(TransactionError::SimulationReverted { selector, .. }) if selector.0 == expected => {
-            Some(refusal.into())
-        }
-        Err(error) => Some(error.into()),
+        Err(PerpCityError::Transaction(TransactionError::SimulationReverted {
+            selector, ..
+        })) if selector.0 == expected => Some(refusal.into()),
+        Err(error) => Some(error),
     }
 }
 
@@ -245,10 +258,13 @@ impl PerpClient {
     /// band's liquidity exits the position: [`V1MakerAdjustment::Exit`].
     ///
     /// A removal the check refuses is sent as an `eth_call` at the same
-    /// block before the refusal is returned. The contract checks the open
-    /// interest at the removal, then the margin, then the conversion's
-    /// margin and health, then the converted residual against the depth:
-    /// when an earlier check fails, its revert is returned instead.
+    /// block, with the calldata the send would sign, before the refusal is
+    /// returned. The contract checks the amount limits, then the open
+    /// interest at the removal against the depth, then the margin, then
+    /// the conversion's margin and health, then the converted residual
+    /// against the depth: when an earlier check fails, its revert is
+    /// returned instead. When the contract accepts, the removal is sent
+    /// and a warning is logged.
     ///
     /// # Errors
     ///
@@ -267,13 +283,18 @@ impl PerpClient {
         urgency: Urgency,
     ) -> Result<V1MakerAdjustment> {
         self.require_v1("adjust_maker_v1").await?;
-        if params.liquidity_delta.units() < 0 {
-            let (at, state) = self.removal_state(params.pos_id).await?;
-            if let Err(refusal) = check_removal(&state, params.liquidity_delta.magnitude()) {
-                self.confirm_refusal(&at, params, refusal).await?;
-            }
+        let removal = if params.liquidity_delta.units() < 0 {
+            Some(self.removal_state(params.pos_id).await?)
+        } else {
+            None
+        };
+        let call = adjust_call(params, deadline_after(now_ms() / 1_000));
+        if let Some((at, state)) = removal
+            && let Err(refusal) = check_removal(&state, params.liquidity_delta.magnitude())
+        {
+            self.confirm_refusal(&at, &call, refusal).await?;
         }
-        let receipt = self.send_adjust_maker_v1(params, urgency).await?;
+        let receipt = self.send_adjust_maker_v1(&call, urgency).await?;
         maker_adjustment(&receipt, self.market.perp(), params.pos_id)
     }
 
@@ -308,10 +329,11 @@ impl PerpClient {
             amt0_limit: PerpAtoms::ZERO,
             amt1_limit: UsdcAtoms::ZERO,
         };
+        let call = adjust_call(&params, deadline_after(now_ms() / 1_000));
         if let Err(refusal) = check_removal(&state, state.band.liquidity) {
-            self.confirm_refusal(&at, &params, refusal).await?;
+            self.confirm_refusal(&at, &call, refusal).await?;
         }
-        let receipt = self.send_adjust_maker_v1(&params, urgency).await?;
+        let receipt = self.send_adjust_maker_v1(&call, urgency).await?;
         match maker_adjustment(&receipt, self.market.perp(), pos_id)? {
             V1MakerAdjustment::Exit(exit) => Ok(exit),
             V1MakerAdjustment::Adjusted(adjusted) => Err(TransactionError::MakerNotClosed {
@@ -349,28 +371,30 @@ impl PerpClient {
     }
 
     /// Return `refusal`, or the contract's earlier revert, unless the
-    /// contract accepts the removal at the block `refusal` was found at.
+    /// contract accepts `call`, the removal that will be sent, at the
+    /// block `refusal` was found at.
     async fn confirm_refusal(
         &self,
         at: &StateAt,
-        params: &ExactAdjustMakerParams,
+        call: &Perp::adjustMakerCall,
         refusal: ValidationError,
     ) -> Result<()> {
-        let simulated = match refusal {
-            ValidationError::LongCloseCapacityExceeded { .. }
-            | ValidationError::ShortCloseCapacityExceeded { .. } => {
-                let call = adjust_call(params, deadline_after(now_ms() / 1_000));
-                at.simulate_from(self.address, &call.abi_encode().into())
-                    .await
-            }
-            _ => Ok(()),
+        let Some((side, interest, last_maker)) = refused_side(&refusal) else {
+            return Err(refusal.into());
         };
+        let simulated = at
+            .simulate_from(self.address, &call.abi_encode().into())
+            .await;
         match confirmed_refusal(refusal, simulated) {
             Some(error) => Err(error),
             None => {
                 tracing::warn!(
-                    pos_id = %params.pos_id,
+                    pos_id = %call.params.posId,
+                    liquidity_delta = call.params.liquidityDelta,
                     block = at.block().number,
+                    ?side,
+                    interest,
+                    last_maker,
                     "the contract accepts a maker removal the close-depth check refused"
                 );
                 Ok(())
@@ -406,14 +430,13 @@ impl PerpClient {
     /// Sign, send and wait for one `adjustMaker`.
     async fn send_adjust_maker_v1(
         &self,
-        params: &ExactAdjustMakerParams,
+        call: &Perp::adjustMakerCall,
         urgency: Urgency,
     ) -> Result<TransactionReceipt> {
-        let call = adjust_call(params, deadline_after(now_ms() / 1_000));
         tracing::debug!(
-            pos_id = %params.pos_id,
-            margin_delta_atoms = params.margin_delta.atoms(),
-            liquidity_delta = params.liquidity_delta.units(),
+            pos_id = %call.params.posId,
+            margin_delta_atoms = call.params.marginDelta,
+            liquidity_delta = call.params.liquidityDelta,
             deadline = call.params.deadline,
             ?urgency,
             "adjusting v1 maker position"
@@ -457,7 +480,7 @@ mod tests {
     use crate::client::{ARBITRUM_CHAIN_ID, ARBITRUM_SEPOLIA_CHAIN_ID};
     use crate::client::{ChainDeployments, Era, mock};
     use crate::contracts::Perp as EarlierPerp;
-    use crate::contracts::v1::{FundingState, OpenInterest};
+    use crate::contracts::v1::{FundingState, MakerFunding, OpenInterest};
     use crate::errors::NotReplaceableReason;
     use crate::errors::decode::revert_class;
     use crate::math::range::TickRange;
@@ -661,6 +684,30 @@ mod tests {
         );
     }
 
+    /// The only maker's partial removal leaves liquidity in its band, so it
+    /// is not the last maker: the depths decide, not the interest alone.
+    #[test]
+    fn a_partial_removal_by_the_only_maker_is_not_the_last() {
+        let (price, band) = w12_band();
+        let removed = LUnits::new(100_000_000);
+        let part = band_capacity_x64(price, &MakerBand::new(band.range, removed)).unwrap();
+        let (oi_long, oi_short) = (7, 5);
+        let check = |long_depth, short_depth| {
+            refused(check_removal(
+                &removal(
+                    -1_000_000_000,
+                    (oi_long, oi_short),
+                    (long_depth, short_depth),
+                    band.liquidity.units(),
+                ),
+                removed,
+            ))
+        };
+        let fits = (x64(oi_long) + part.short, x64(oi_short) + part.long);
+        assert_eq!(check(fits.0, fits.1), None);
+        assert_eq!(check(fits.0 - U256::ONE, fits.1), long(oi_long, false));
+    }
+
     #[test]
     fn a_removal_beyond_the_band_is_refused_before_the_depth() {
         let (_, band) = w12_band();
@@ -673,13 +720,29 @@ mod tests {
         ));
     }
 
-    /// Each read answers in order: the head, the build, the band, the
-    /// position row and owner, the open interest, both depth words, the
-    /// book and the pool. `owner` zero is a position that is not open.
-    fn answer_removal_reads(rpc: &mock::Rpc, owner: Address) -> B256 {
+    /// The head block the removal reads pin, by number then header; its
+    /// hash.
+    fn answer_head(rpc: &mock::Rpc) -> B256 {
         rpc.quantity(100);
-        let hash = rpc.block(100, 1_795_141_000);
-        rpc.immutables(Era::V1);
+        rpc.block(100, 1_795_141_000)
+    }
+
+    /// Depths the W12 band's removals with interest `(7, 5)` exceed on
+    /// the long side.
+    fn shallow() -> (U256, U256) {
+        (x64(11), x64(13))
+    }
+
+    /// Depths every removal fits.
+    fn deep() -> (U256, U256) {
+        (x64(u64::MAX.into()), x64(u64::MAX.into()))
+    }
+
+    /// The removal reads after the head, answered in order: the band, the
+    /// position row and owner, the open interest `(7, 5)`, both depth
+    /// words, the market's maker liquidity `book` and the pool. `owner`
+    /// zero is a position that is not open.
+    fn answer_removal_rows(rpc: &mock::Rpc, owner: Address, book: u64, depth: (U256, U256)) {
         rpc.raw(&mock::v1_maker_words(38_700, 39_540, 335_000_000));
         rpc.aggregate3(vec![
             mock::ok_row(mock::v1_position_words(
@@ -691,16 +754,33 @@ mod tests {
             mock::ok_row(mock::returns::<Perp::positionOwnerCall>(&owner)),
         ]);
         rpc.call::<Perp::openInterestCall>(&OpenInterest { long: 7, short: 5 });
-        rpc.storage(U256::from(11u8) << 64);
-        rpc.storage(U256::from(13u8) << 64);
+        rpc.storage(depth.0);
+        rpc.storage(depth.1);
         rpc.call::<Perp::fundingStateCall>(&FundingState {
             baseX96: I256::ZERO,
             inventoryX96: I256::ZERO,
-            makerLiquidity: U256::from(405_000_000u64),
+            makerLiquidity: U256::from(book),
         });
         let mut pool = mock::pool_state_at_tick(39_000);
         pool.sqrtPrice = U160::from(560_227_709_747_861_399_187_319_382_274u128);
         rpc.call::<EarlierPerp::poolStateCall>(&pool);
+    }
+
+    /// A v1 write's build check, then the removal reads of position 1,
+    /// owned by the client, with a second maker's liquidity in the book;
+    /// the pinned head's hash.
+    fn answer_removal(rpc: &mock::Rpc, client: &PerpClient, depth: (U256, U256)) -> B256 {
+        rpc.immutables(Era::V1);
+        let hash = answer_head(rpc);
+        answer_removal_rows(rpc, client.address(), 405_000_000, depth);
+        hash
+    }
+
+    /// Each read answers in order: the head, the build, then the rows.
+    fn answer_removal_reads(rpc: &mock::Rpc, owner: Address) -> B256 {
+        let hash = answer_head(rpc);
+        rpc.immutables(Era::V1);
+        answer_removal_rows(rpc, owner, 405_000_000, shallow());
         hash
     }
 
@@ -739,12 +819,13 @@ mod tests {
         ));
     }
 
-    fn reverted(selector: [u8; 4]) -> std::result::Result<(), TransactionError> {
+    fn reverted(selector: [u8; 4]) -> Result<()> {
         Err(TransactionError::SimulationReverted {
             error_name: String::new(),
             selector: selector.into(),
             revert_data: None,
-        })
+        }
+        .into())
     }
 
     #[test]
@@ -788,9 +869,20 @@ mod tests {
             },
             Err(TransactionError::GasUnavailable {
                 reason: "eth_call failed".into(),
-            }),
+            }
+            .into()),
         );
         assert!(unanswered.is_some_and(|error| error.is_transient()));
+        let missing = confirmed_refusal(
+            refusal(),
+            Err(ContractError::BlockUnavailable { number: 100 }.into()),
+        );
+        assert!(matches!(
+            missing,
+            Some(PerpCityError::Contract(ContractError::BlockUnavailable {
+                number: 100
+            }))
+        ));
         assert!(confirmed_refusal(refusal(), Ok(())).is_none());
         let excess = ValidationError::ExcessMakerRemoval {
             requested: 2,
@@ -802,6 +894,190 @@ mod tests {
                 ValidationError::ExcessMakerRemoval { .. }
             ))
         ));
+    }
+
+    /// The `adjustMaker` in `calldata`.
+    fn removal_call(calldata: &Bytes) -> AdjustMakerParams {
+        Perp::adjustMakerCall::abi_decode(calldata).unwrap().params
+    }
+
+    /// A refused close is confirmed by the contract at the block its reads
+    /// were pinned to, with the close's own calldata, and nothing is sent.
+    #[tokio::test]
+    async fn a_refused_close_is_confirmed_at_the_pinned_block() {
+        let (client, rpc) = mock::client();
+        let hash = answer_removal(&rpc, &client, shallow());
+        rpc.reverts(&Perp::LongCloseCapacityExceeded::SELECTOR);
+        let err = client
+            .close_maker_v1(U256::ONE, Urgency::Normal)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                PerpCityError::Validation(ValidationError::LongCloseCapacityExceeded {
+                    interest: 7,
+                    last_maker: false
+                })
+            ),
+            "{err}"
+        );
+        let confirmation = rpc.calls().pop().unwrap();
+        let call = removal_call(&confirmation);
+        assert_eq!(call.posId, U256::ONE);
+        assert_eq!(call.liquidityDelta, -335_000_000);
+        assert_eq!((call.amt0Limit, call.amt1Limit), (U256::ZERO, U256::ZERO));
+        assert_eq!(rpc.call_blocks().pop(), Some(BlockId::hash(hash)));
+        assert!(rpc.is_drained());
+    }
+
+    /// A refused partial removal is confirmed the same way.
+    #[tokio::test]
+    async fn a_refused_partial_removal_is_confirmed_at_the_pinned_block() {
+        let (client, rpc) = mock::client();
+        let hash = answer_removal(&rpc, &client, shallow());
+        rpc.reverts(&Perp::LongCloseCapacityExceeded::SELECTOR);
+        let err = client
+            .adjust_maker_v1(&adjust(), Urgency::Normal)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                PerpCityError::Validation(ValidationError::LongCloseCapacityExceeded {
+                    interest: 7,
+                    last_maker: false
+                })
+            ),
+            "{err}"
+        );
+        let call = removal_call(&rpc.calls().pop().unwrap());
+        assert_eq!(call.liquidityDelta, -50_000_000);
+        assert_eq!(call.marginDelta, -5_000_000);
+        assert_eq!(rpc.call_blocks().pop(), Some(BlockId::hash(hash)));
+        assert!(rpc.is_drained());
+    }
+
+    /// A confirmation whose node lacks the pinned block is the transient
+    /// `BlockUnavailable` a pinned read gives; pruned state is
+    /// `StateUnavailable`.
+    #[tokio::test]
+    async fn a_confirmation_without_the_pinned_block_is_typed_for_it() {
+        let (client, rpc) = mock::client();
+        answer_removal(&rpc, &client, shallow());
+        rpc.node_error(-32000, "header not found");
+        let err = client
+            .close_maker_v1(U256::ONE, Urgency::Normal)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                PerpCityError::Contract(ContractError::BlockUnavailable { number: 100 })
+            ),
+            "{err}"
+        );
+        assert!(err.is_transient());
+        assert!(rpc.is_drained());
+
+        let (client, rpc) = mock::client();
+        answer_removal(&rpc, &client, shallow());
+        rpc.node_error(-32000, "missing trie node 0xab (path )");
+        let err = client
+            .close_maker_v1(U256::ONE, Urgency::Normal)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                PerpCityError::Contract(ContractError::StateUnavailable { number: 100 })
+            ),
+            "{err}"
+        );
+        assert!(!err.is_transient());
+        assert!(rpc.is_drained());
+    }
+
+    /// `adjustMaker` mined for position 1 as an adjustment that left
+    /// `liquidity` in the band.
+    fn adjusted_receipt(client: &PerpClient, hash: B256, liquidity: u128) -> TransactionReceipt {
+        let event = Perp::MakerAdjusted {
+            posId: U256::ONE,
+            owner: client.address(),
+            marginDelta: 0,
+            liquidityDelta: -335_000_000,
+            funding: I256::ZERO,
+            lpFees: U256::ZERO,
+            delta: I256::ZERO,
+            margin: 100_000_000,
+            liquidity,
+            lastCumlFundingX96: I256::ZERO,
+            lastCumlFunding: MakerFunding {
+                belowX96: I256::ZERO,
+                withinInventoryX192: I256::ZERO,
+            },
+        };
+        taker::mined_trade_receipt(client, hash, &event)
+    }
+
+    /// A close that mined as an adjustment, the band having gained
+    /// liquidity after the read, is the transient `MakerNotClosed` with
+    /// its hash. Its cached limit's preflight runs without the buffer.
+    #[tokio::test(start_paused = true)]
+    async fn a_close_that_mines_as_an_adjustment_is_not_closed() {
+        let (client, rpc) = mock::client();
+        client.chain().set_base_fee(100);
+        client.gas_limit_cache.lock().unwrap().put(
+            Perp::adjustMakerCall::SELECTOR,
+            750_000,
+            now_ms(),
+        );
+        answer_removal(&rpc, &client, deep());
+        rpc.response(&Bytes::new());
+        let hash = B256::repeat_byte(0x7c);
+        rpc.response(&hash);
+        rpc.response(&adjusted_receipt(&client, hash, 20_000_000));
+        let err = client
+            .close_maker_v1(U256::ONE, Urgency::Normal)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, PerpCityError::Transaction(TransactionError::MakerNotClosed {
+                tx_hash, pos_id,
+            }) if tx_hash == hash && pos_id == U256::ONE),
+            "{err}"
+        );
+        assert!(err.is_transient());
+        assert_eq!(err.tx_hash(), Some(hash));
+        let preflight = rpc.calls().pop().unwrap();
+        assert_eq!(removal_call(&preflight).liquidityDelta, -335_000_000);
+        assert_eq!(rpc.call_blocks().pop(), Some(BlockId::pending()));
+        assert_eq!(rpc.call_gas().pop(), Some(Some(750_000)));
+        assert!(rpc.is_drained());
+    }
+
+    /// A removal the check refuses and the contract accepts at the pinned
+    /// block is sent: the contract is the authority on its own depth.
+    #[tokio::test(start_paused = true)]
+    async fn a_refusal_the_contract_accepts_is_sent() {
+        let (client, rpc) = mock::client();
+        client.chain().set_base_fee(100);
+        let hash = answer_removal(&rpc, &client, shallow());
+        rpc.response(&Bytes::new());
+        rpc.quantity(400_000);
+        let sent = B256::repeat_byte(0x7d);
+        rpc.response(&sent);
+        rpc.response(&adjusted_receipt(&client, sent, 285_000_000));
+        let adjusted = client
+            .adjust_maker_v1(&adjust(), Urgency::Normal)
+            .await
+            .unwrap();
+        assert!(
+            matches!(&adjusted, V1MakerAdjustment::Adjusted(result) if result.tx_hash == sent),
+            "{adjusted:?}"
+        );
+        assert_eq!(rpc.call_blocks().pop(), Some(BlockId::hash(hash)));
+        assert!(rpc.is_drained());
     }
 
     #[test]
