@@ -9,13 +9,16 @@ use alloy::consensus::transaction::SignerRecoverable;
 use alloy::consensus::{Transaction as ConsensusTransaction, TxType};
 use alloy::contract::Error as CallError;
 use alloy::eips::eip2718::Encodable2718;
+use alloy::hex;
 use alloy::network::TransactionBuilder;
 use alloy::primitives::{Address, B256, Bytes, I256, U256, keccak256};
 use alloy::providers::Provider;
+use alloy::rpc::json_rpc::ErrorPayload;
 use alloy::rpc::types::{TransactionReceipt, TransactionRequest};
 use alloy::sol_types::SolCall;
 use alloy::transports::TransportError;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::constants::{RECEIPT_POLL_INTERVAL, RECEIPT_TIMEOUT};
 use crate::contracts::v1::{AdjustTakerParams, OpenTakerParams, Perp};
@@ -261,10 +264,10 @@ fn is_clear_refusal(error: &TransportError) -> bool {
 }
 
 /// An era read's failure as every `v1.0.0` write reports it. No answer
-/// from the node (a timeout, a rate limit, a dropped connection, a server
-/// error) is the node's and transient, as [`PerpCityError::Rpc`]. An
-/// answer (an execution revert of `poolKey()` or `poolId()`, or a refusal
-/// of the request such as `-32601`) stays as it is, not transient.
+/// from the node ([`is_no_answer`]) is the node's and transient, as
+/// [`PerpCityError::Rpc`]. An answer (an execution revert of `poolKey()`
+/// or `poolId()`, or a refusal of the request such as `-32601`) stays as
+/// it is, not transient.
 fn era_read_error(error: PerpCityError) -> PerpCityError {
     match error {
         PerpCityError::Abi(CallError::TransportError(error)) if is_no_answer(&error) => {
@@ -274,20 +277,53 @@ fn era_read_error(error: PerpCityError) -> PerpCityError {
     }
 }
 
+/// Parts of an error answer's message that report no answer from the
+/// node behind the endpoint: a timeout, or a gateway with no node to ask.
+const NO_ANSWER_WORDINGS: [&str; 8] = [
+    "timeout",
+    "timed out",
+    "no backend",
+    "unavailable",
+    "bad gateway",
+    "upstream",
+    "overloaded",
+    "connection",
+];
+
 /// Whether a failed read got no answer from the node: a failure of the
 /// endpoint ([`Fault::Endpoint`], which counts a rate limit), or an error
-/// answer that reports one (an internal error, `-32603`, or a timeout) and
-/// is not an execution revert.
+/// answer that reports one (an internal error, `-32603`, or a wording in
+/// [`NO_ANSWER_WORDINGS`]). An error answer that is an execution revert,
+/// by its message or by revert data in `data`, is the contract's answer,
+/// whatever its code.
 fn is_no_answer(error: &TransportError) -> bool {
     let Some(resp) = error.as_error_resp() else {
         return fault(error) == Fault::Endpoint;
     };
     let message = resp.message.to_ascii_lowercase();
     !message.contains("execution reverted")
+        && !carries_revert_data(resp)
         && (fault(error) == Fault::Endpoint
             || resp.code == -32_603
-            || message.contains("timeout")
-            || message.contains("timed out"))
+            || NO_ANSWER_WORDINGS.iter().any(|w| message.contains(w)))
+}
+
+/// Whether an error answer's `data` holds revert data: a hex string, as
+/// it is or under a `data` key, as nodes nest it.
+fn carries_revert_data(resp: &ErrorPayload) -> bool {
+    fn is_revert_data(value: &Value) -> bool {
+        match value {
+            Value::String(text) => text
+                .strip_prefix("0x")
+                .is_some_and(|digits| hex::decode(digits).is_ok()),
+            Value::Object(fields) => fields.get("data").is_some_and(is_revert_data),
+            _ => false,
+        }
+    }
+    resp.data
+        .as_ref()
+        .and_then(|data| serde_json::from_str::<Value>(data.get()).ok())
+        .is_some_and(|value| is_revert_data(&value))
 }
 
 /// The adjustment `receipt` mined for `pos_id` on `perp`.
@@ -576,8 +612,9 @@ impl PerpClient {
             Err(error) => return Err(unconfirmed(None, error.into())),
         };
         // The node's answer is checked, not trusted: its signed fields must
-        // hash to the hash asked for, and its signature must recover to
-        // this client, whose key is about to sign its call again.
+        // hash to the hash asked for, its signature must recover to this
+        // client, whose key is about to sign its call again, and it must be
+        // signed for this client's chain.
         let signed = tx.inner.inner();
         if keccak256(signed.encoded_2718()) != stuck {
             return Err(refuse(NotReplaceableReason::UnknownToNode));
@@ -585,10 +622,15 @@ impl PerpClient {
         if signed.recover_signer().ok() != Some(self.address) {
             return Err(refuse(NotReplaceableReason::WrongSender));
         }
+        let chain_id = ConsensusTransaction::chain_id(signed);
+        if chain_id != Some(self.chain().chain_id()) {
+            return Err(refuse(NotReplaceableReason::OtherChain { chain_id }));
+        }
         if tx.to() != Some(perp) {
             return Err(refuse(NotReplaceableReason::OtherMarket));
         }
         let (call, calldata) = decode(tx.input(), now_ms() / 1_000)
+            .filter(|_| tx.value().is_zero())
             .ok_or_else(|| refuse(NotReplaceableReason::UnsupportedCall))?;
         let nonce = tx.nonce();
         let gas_limit = tx.gas_limit();
@@ -647,6 +689,7 @@ impl PerpClient {
                     original: stuck,
                     nonce,
                     replacement: None,
+                    refused: false,
                 }
                 .into()),
                 Settled::Pending => Err(unconfirmed(Some(nonce), source.into())),
@@ -694,6 +737,7 @@ impl PerpClient {
                 original: stuck,
                 nonce,
                 replacement: Some(replacement),
+                refused,
             }
             .into()),
             Settled::Pending => Err(TransactionError::ReplacementUnconfirmed {
@@ -801,7 +845,8 @@ impl PerpClient {
     /// One look at the account nonce, then at the receipts of `hashes`. The
     /// nonce is read first, so a nonce used before receipt reads that all
     /// answered "none" means none of `hashes` mined by that endpoint's
-    /// view. A failed read is no answer: the look is pending.
+    /// view. A failed read, or a receipt of another hash than the one
+    /// asked for, is no answer: the look is pending.
     async fn settled(&self, hashes: &[B256], nonce: u64) -> Settled {
         let provider = self.chain().provider();
         let used = provider
@@ -812,9 +857,11 @@ impl PerpClient {
         let mut answered = true;
         for hash in hashes {
             match provider.get_transaction_receipt(*hash).await {
-                Ok(Some(receipt)) => return Settled::Mined(Box::new(receipt)),
+                Ok(Some(receipt)) if receipt.transaction_hash == *hash => {
+                    return Settled::Mined(Box::new(receipt));
+                }
                 Ok(None) => {}
-                Err(_) => answered = false,
+                Ok(Some(_)) | Err(_) => answered = false,
             }
         }
         if used && answered {
@@ -863,6 +910,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
 
+    use alloy::consensus::Transaction as ConsensusTransaction;
     use alloy::consensus::transaction::Recovered;
     use alloy::consensus::{Receipt, ReceiptEnvelope};
     use alloy::eips::BlockId;
@@ -878,6 +926,7 @@ mod tests {
     use alloy::signers::local::PrivateKeySigner;
     use alloy::sol_types::{SolCall, SolError, SolEvent};
     use alloy::transports::{BoxTransport, TransportError, TransportErrorKind};
+    use serde_json::value::RawValue;
 
     use super::{
         MaxTotalFee, NONCE_USED_LOOKS, StuckCall, V1_TRADE_DEADLINE, V1TakerAdjustment,
@@ -1540,7 +1589,7 @@ mod tests {
         assert_ne!(r2, r1);
         assert!(
             matches!(err, PerpCityError::Transaction(TransactionError::ReplacementNonceUsed {
-                original, nonce: STUCK_NONCE, replacement: Some(replacement),
+                original, nonce: STUCK_NONCE, replacement: Some(replacement), refused: false,
             }) if original == r1 && replacement == r2),
             "{err}"
         );
@@ -1649,6 +1698,7 @@ mod tests {
                 original,
                 nonce: STUCK_NONCE,
                 replacement: None,
+                refused: false,
             }) if original == hash
         ));
         assert!(rpc.is_drained());
@@ -2066,8 +2116,9 @@ mod tests {
     }
 
     /// After an explicit rejection, a used nonce gets one more look after
-    /// a poll interval: the receipt it finds, or else the used nonce.
-    /// (S mined while R1 was refused.)
+    /// a poll interval: the receipt it finds, or else the used nonce, which
+    /// keeps the refusal and names the original, since the refused
+    /// replacement cannot have used it. (S mined while R1 was refused.)
     #[tokio::test(start_paused = true)]
     async fn a_rejected_replacement_looks_once_more_at_a_used_nonce() {
         for found in [true, false] {
@@ -2095,11 +2146,21 @@ mod tests {
                 Ok(V1TakerReplacement::Opened(opened)) if found => {
                     assert_eq!(opened.tx_hash, hash);
                 }
-                Err(PerpCityError::Transaction(TransactionError::ReplacementNonceUsed {
-                    original,
-                    nonce: STUCK_NONCE,
-                    replacement: Some(_),
-                })) if !found && original == hash => {}
+                Err(err) if !found => {
+                    let r1 = rpc.sent()[0];
+                    assert!(
+                        matches!(err, PerpCityError::Transaction(TransactionError::ReplacementNonceUsed {
+                            original,
+                            nonce: STUCK_NONCE,
+                            replacement: Some(replacement),
+                            refused: true,
+                        }) if original == hash && replacement == r1),
+                        "{err:?}"
+                    );
+                    assert_eq!(err.tx_hash(), Some(hash));
+                    assert_eq!(err.hash_to_replace(), None);
+                    assert!(err.is_unconfirmed() && !err.is_transient());
+                }
                 other => panic!("found={found}: {other:?}"),
             }
             assert!(rpc.is_drained());
@@ -2140,6 +2201,7 @@ mod tests {
         }
         for (answer, refused) in [
             ("replacement transaction underpriced", true),
+            ("Replacement Transaction Underpriced", true),
             ("transaction underpriced", true),
             ("nonce too low", false),
             ("insufficient funds for gas * price + value", true),
@@ -2171,8 +2233,10 @@ mod tests {
         for (failure, transient) in [
             ("connection", true),
             ("upstream timeout", true),
+            ("no backends", true),
             ("revert", false),
             ("code 3", false),
+            ("internal error with revert data", false),
             ("method not found", false),
         ] {
             for replacing in [false, true] {
@@ -2183,6 +2247,10 @@ mod tests {
                     "upstream timeout" => rpc.fails("upstream timeout"),
                     "revert" => rpc.fails("execution reverted"),
                     "code 3" => rpc.reverts(&[]),
+                    "no backends" => rpc.answers_error(-32_011, "no backends available", None),
+                    "internal error with revert data" => {
+                        rpc.answers_error(-32_603, "internal error", Some(r#""0xbcffc83f""#));
+                    }
                     _ => rpc.method_not_found(),
                 }
                 let case = format!("{failure}, replacing={replacing}");
@@ -2224,28 +2292,62 @@ mod tests {
         }
     }
 
-    /// What counts as no answer from the node for an era read.
+    /// What counts as no answer from the node for an era read: revert
+    /// data, under any code, is the contract's answer; a bare internal
+    /// error and a gateway with no node to ask are no answer.
     #[test]
     fn no_answer_is_a_failure_of_the_node_never_its_answer() {
-        for (code, message, no_answer) in [
-            (-32_603, "upstream timeout", true),
-            (-32_000, "request timed out", true),
-            (-32_000, "upstream timeout", true),
-            (-32_603, "internal error", true),
-            (429, "Too Many Requests", true),
-            (-32_000, "header not found", true),
-            (-32_603, "execution reverted", false),
-            (3, "execution reverted", false),
-            (-32_601, "the method does not exist/is not available", false),
-            (-32_602, "invalid params", false),
-            (-32_000, "missing trie node", false),
+        const REVERT: &str = r#""0x08c379a0""#;
+        const NESTED: &str = r#"{"message":"execution reverted","data":"0xbcffc83f"}"#;
+        for (code, message, data, no_answer) in [
+            (-32_603, "upstream timeout", None, true),
+            (-32_000, "request timed out", None, true),
+            (-32_000, "upstream timeout", None, true),
+            (-32_603, "internal error", None, true),
+            (
+                -32_603,
+                "Internal error",
+                Some(r#""not revert data""#),
+                true,
+            ),
+            (-32_603, "internal error", Some("null"), true),
+            (-32_603, "internal error", Some(r#""0xnot hex""#), true),
+            (429, "Too Many Requests", None, true),
+            (-32_000, "header not found", None, true),
+            (-32_011, "no backends available for method", None, true),
+            (-32_000, "Bad Gateway", None, true),
+            (-32_000, "service unavailable", None, true),
+            (-32_000, "upstream connect error", None, true),
+            (-32_000, "server overloaded", None, true),
+            (-32_000, "connection reset by peer", None, true),
+            (-32_603, "execution reverted", None, false),
+            (3, "execution reverted", None, false),
+            (3, "execution reverted", Some(REVERT), false),
+            (-32_603, "internal error", Some(REVERT), false),
+            (-32_603, "internal error", Some(r#""0x""#), false),
+            (-32_603, "internal error", Some(NESTED), false),
+            (-32_000, "upstream timeout", Some(REVERT), false),
+            (
+                -32_011,
+                "no backends available for method",
+                Some(NESTED),
+                false,
+            ),
+            (
+                -32_601,
+                "the method does not exist/is not available",
+                None,
+                false,
+            ),
+            (-32_602, "invalid params", None, false),
+            (-32_000, "missing trie node", None, false),
         ] {
             let error = TransportError::ErrorResp(ErrorPayload {
                 code,
                 message: message.to_owned().into(),
-                data: None,
+                data: data.map(|data| RawValue::from_string(data.to_owned()).unwrap()),
             });
-            assert_eq!(is_no_answer(&error), no_answer, "{code} {message}");
+            assert_eq!(is_no_answer(&error), no_answer, "{code} {message} {data:?}");
         }
         assert!(is_no_answer(&TransportError::local_usage_str(
             "request timed out"
@@ -2622,6 +2724,189 @@ mod tests {
                 assert_eq!(looks.load(Ordering::SeqCst), 2, "{first:?}");
             }
         }
+    }
+
+    /// The node answers the look-up with a transaction of the client, and
+    /// sets its JSON `hash` field to the hash asked for. The hash is the
+    /// signed fields' own, so the answer is refused and nothing is
+    /// preflighted, signed or sent.
+    #[tokio::test]
+    async fn a_forged_json_hash_is_not_trusted() {
+        let (client, rpc) = mock::client();
+        client.chain().set_base_fee(100);
+        let (own_hash, own) =
+            pending_trade(&client, stuck_open(&client, NOW + 600).abi_encode()).await;
+        let asked = B256::repeat_byte(0x5a);
+        let mut json = serde_json::to_value(&own).unwrap();
+        assert_eq!(json["hash"], serde_json::to_value(own_hash).unwrap());
+        json["hash"] = serde_json::to_value(asked).unwrap();
+        rpc.immutables(Era::V1);
+        rpc.response(&json);
+        let err = client
+            .replace_v1_taker(asked, Urgency::Normal)
+            .await
+            .unwrap_err();
+        assert_eq!(refusal(&err), NotReplaceableReason::UnknownToNode, "{err}");
+        assert_eq!(err.tx_hash(), Some(asked));
+        assert!(rpc.sent().is_empty(), "nothing signed or sent");
+        assert!(rpc.is_drained(), "nothing after the look-up");
+    }
+
+    /// The same key signs on two chains, for the same market address. A
+    /// trade of this client signed for the other chain, pending or mined,
+    /// or a legacy one signed for no chain, is refused before anything is
+    /// preflighted, signed or sent: its call is not signed again on this
+    /// client's chain.
+    #[tokio::test]
+    async fn a_trade_signed_for_another_chain_is_refused() {
+        let (client, _) = mock::client();
+        let chain = client.chain().chain_id();
+        let input = || stuck_open(&client, NOW + 600).abi_encode();
+        let no_chain = TransactionRequest::default()
+            .with_to(client.market().perp())
+            .with_input(Bytes::from(input()))
+            .with_nonce(STUCK_NONCE)
+            .with_gas_limit(STUCK_GAS)
+            .with_gas_price(800);
+        for (request, block, chain_id) in [
+            (
+                trade_request(&client, input()).with_chain_id(chain + 1),
+                None,
+                Some(chain + 1),
+            ),
+            (
+                trade_request(&client, input()).with_chain_id(chain + 1),
+                Some(92),
+                Some(chain + 1),
+            ),
+            (
+                trade_request(&client, input()).with_chain_id(ARBITRUM_SEPOLIA_CHAIN_ID),
+                None,
+                Some(ARBITRUM_SEPOLIA_CHAIN_ID),
+            ),
+            (no_chain, None, None),
+        ] {
+            let (client, rpc) = mock::client();
+            client.chain().set_base_fee(100);
+            let (hash, tx) = as_seen(&client, request, client.address(), block).await;
+            assert_eq!(ConsensusTransaction::chain_id(&tx), chain_id);
+            rpc.immutables(Era::V1);
+            rpc.response(&tx);
+            let err = client
+                .replace_v1_taker(hash, Urgency::Normal)
+                .await
+                .unwrap_err();
+            assert_eq!(
+                refusal(&err),
+                NotReplaceableReason::OtherChain { chain_id },
+                "{err}"
+            );
+            assert_eq!(err.tx_hash(), Some(hash));
+            assert!(err.is_unconfirmed() && !err.is_transient());
+            assert!(
+                rpc.sent().is_empty(),
+                "{chain_id:?}: nothing signed or sent"
+            );
+            assert!(rpc.is_drained(), "{chain_id:?}: nothing after the look-up");
+        }
+    }
+
+    /// The replacement carries no value, so a taker call that carried
+    /// value is not one it replaces: an open or an adjustment with value
+    /// is refused, and nothing is preflighted, signed or sent.
+    #[tokio::test]
+    async fn a_taker_call_with_value_is_refused() {
+        let (client, _) = mock::client();
+        let calls = [
+            stuck_open(&client, NOW + 600).abi_encode(),
+            adjust_call(&adjust(-400_000), UsdcAtoms::new(1_000), true, NOW + 600).abi_encode(),
+        ];
+        for input in calls {
+            let (client, rpc) = mock::client();
+            client.chain().set_base_fee(100);
+            let request = trade_request(&client, input).with_value(U256::from(1));
+            let (hash, tx) = as_seen(&client, request, client.address(), None).await;
+            rpc.immutables(Era::V1);
+            rpc.response(&tx);
+            let err = client
+                .replace_v1_taker(hash, Urgency::Normal)
+                .await
+                .unwrap_err();
+            assert_eq!(
+                refusal(&err),
+                NotReplaceableReason::UnsupportedCall,
+                "{err}"
+            );
+            assert!(err.is_unconfirmed());
+            assert!(rpc.sent().is_empty());
+            assert!(rpc.is_drained());
+        }
+    }
+
+    /// A node that answers a receipt read with the receipt of another
+    /// hash gave no answer for the hash asked for. After a refused
+    /// replacement, that look is pending, not the other trade's outcome.
+    #[tokio::test]
+    async fn a_receipt_of_another_hash_is_no_answer() {
+        let (client, rpc) = mock::client();
+        client.chain().set_base_fee(100);
+        let (hash, tx) = pending_trade(&client, stuck_open(&client, NOW + 600).abi_encode()).await;
+        let other = B256::repeat_byte(0x0e);
+        rpc.immutables(Era::V1);
+        rpc.response(&tx);
+        rpc.raw(&[]);
+        rpc.fails("replacement transaction underpriced");
+        rpc.quantity(STUCK_NONCE + 1);
+        rpc.foreign_receipt(&mined_trade_receipt(&client, other, &opened_event(&client)));
+        rpc.response(&None::<TransactionReceipt>);
+        let err = client
+            .replace_v1_taker(hash, Urgency::Normal)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                PerpCityError::Transaction(TransactionError::ReplacementUnconfirmed {
+                    original,
+                    refused: true,
+                    ..
+                }) if original == hash
+            ),
+            "{err:?}"
+        );
+        assert_eq!(err.tx_hash(), Some(hash));
+        assert!(rpc.is_drained());
+    }
+
+    /// A trade the look-up shows mined: a receipt of another hash is a
+    /// failed poll, and the next poll's own receipt is the outcome.
+    #[tokio::test(start_paused = true)]
+    async fn a_mined_trade_waits_for_its_own_receipt() {
+        let (client, rpc) = mock::client();
+        let (hash, tx) = as_seen(
+            &client,
+            trade_request(&client, stuck_open(&client, NOW + 600).abi_encode()),
+            client.address(),
+            Some(92),
+        )
+        .await;
+        let event = opened_event(&client);
+        rpc.immutables(Era::V1);
+        rpc.response(&tx);
+        rpc.foreign_receipt(&mined_trade_receipt(
+            &client,
+            B256::repeat_byte(0x0e),
+            &event,
+        ));
+        rpc.response(&mined_trade_receipt(&client, hash, &event));
+        let started = tokio::time::Instant::now();
+        let result = client.replace_v1_taker(hash, Urgency::Normal).await;
+        assert!(
+            matches!(&result, Ok(V1TakerReplacement::Opened(opened)) if opened.tx_hash == hash),
+            "{result:?}"
+        );
+        assert_eq!(started.elapsed(), RECEIPT_POLL_INTERVAL);
+        assert!(rpc.is_drained());
     }
 
     fn zero_swap() -> v1::SwapResult {

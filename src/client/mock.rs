@@ -4,7 +4,8 @@
 //! The mock answers requests in arrival order from a queue the test fills
 //! beforehand, and answers without inspecting a request, except that a
 //! queued receipt answers `eth_getTransactionReceipt` only for its own
-//! hash (any other hash gets `null`). A test therefore
+//! hash (any other hash gets `null`), unless it is queued as
+//! [`Rpc::foreign_receipt`]. A test therefore
 //! pins four things about a read: how many RPCs it makes (an unanswered
 //! request fails, and [`Rpc::is_drained`] proves none was left over), what
 //! it makes of the bytes it gets back, what it remembers between calls,
@@ -186,9 +187,12 @@ impl Service<RequestPacket> for Recorder {
     }
 }
 
+/// The field that marks a [`Rpc::foreign_receipt`].
+const FOREIGN: &str = "mockForeignReceipt";
+
 /// A queued receipt answer for `asked`: as queued, with [`SENT`] standing
-/// for `sent`, when it is `null` or the receipt of `asked`, and `null`
-/// when it is another hash's receipt.
+/// for `sent`, when it is `null`, the receipt of `asked` or a
+/// [`Rpc::foreign_receipt`], and `null` when it is another hash's receipt.
 fn receipt_only_for(asked: B256, sent: Option<B256>, response: ResponsePacket) -> ResponsePacket {
     let ResponsePacket::Single(Response {
         id,
@@ -201,11 +205,18 @@ fn receipt_only_for(asked: B256, sent: Option<B256>, response: ResponsePacket) -
     if let Some(sent) = sent {
         text = text.replace(&hex::encode_prefixed(SENT), &hex::encode_prefixed(sent));
     }
-    let value: serde_json::Value = serde_json::from_str(&text).expect("a queued answer is JSON");
+    let mut value: serde_json::Value =
+        serde_json::from_str(&text).expect("a queued answer is JSON");
     let answered = value.get("transactionHash").map(|hash| {
         serde_json::from_value::<B256>(hash.clone()).expect("a receipt names its hash")
     });
-    if answered.is_some_and(|hash| hash != asked) {
+    if value
+        .as_object_mut()
+        .and_then(|fields| fields.remove(FOREIGN))
+        .is_some()
+    {
+        text = value.to_string();
+    } else if answered.is_some_and(|hash| hash != asked) {
         text = "null".to_owned();
     }
     ResponsePacket::Single(Response {
@@ -460,6 +471,25 @@ impl Rpc {
             message: "the method does not exist/is not available".into(),
             data: None,
         });
+    }
+
+    /// The next request fails with this error answer and `data`, raw JSON.
+    pub(super) fn answers_error(&self, code: i64, message: &'static str, data: Option<&str>) {
+        self.asserter.push_failure(ErrorPayload {
+            code,
+            message: message.into(),
+            data: data.map(|data| {
+                RawValue::from_string(data.to_owned()).expect("error data is valid JSON")
+            }),
+        });
+    }
+
+    /// The next receipt read returns `receipt` whatever hash it names: a
+    /// node that answers with another transaction's receipt.
+    pub(super) fn foreign_receipt(&self, receipt: &impl serde::Serialize) {
+        let mut value = serde_json::to_value(receipt).expect("a receipt serializes");
+        value[FOREIGN] = true.into();
+        self.asserter.push_success(&value);
     }
 
     /// The next `eth_call` reverts, carrying `data` the way a node reports

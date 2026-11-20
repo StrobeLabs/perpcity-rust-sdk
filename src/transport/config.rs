@@ -104,10 +104,12 @@ impl Default for ReadRetryConfig {
 
 /// Retry configuration for write operations.
 ///
-/// Writes are only retried when the RPC node *rejects* the transaction before
-/// mempool inclusion (e.g. `-32003 insufficient funds` from a stale read
-/// replica). A rejected tx never lands on-chain, so resending the same signed
-/// bytes is safe and idempotent.
+/// A write is retried after an error answer (e.g. `-32003 insufficient
+/// funds` from a stale read replica) and after no answer, always as the
+/// same signed bytes. An earlier attempt may have succeeded: a timeout or
+/// a dropped connection can follow the node taking the transaction. The
+/// identical bytes can only be that one transaction, so a resend cannot
+/// make a second; it can be answered `already known` or `nonce too low`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WriteRetryConfig {
     /// Maximum number of retry attempts (0 = no retries, just the initial try).
@@ -126,16 +128,14 @@ impl Default for WriteRetryConfig {
 }
 
 impl WriteRetryConfig {
-    /// Check if a JSON-RPC response is a pre-mempool rejection safe to retry.
+    /// Whether a JSON-RPC response to a write is retried: any error answer.
     ///
-    /// Any error response to `eth_sendRawTransaction` means the RPC node
-    /// rejected the transaction before mempool inclusion — the signed bytes
-    /// never landed on-chain, so resending them is always safe and idempotent.
-    ///
-    /// Rather than maintaining a fragile allow-list of specific error codes
-    /// (e.g. `-32003`, `-32000` for "insufficient funds"), we retry on any
-    /// error. The worst case for genuinely invalid transactions is a bounded
-    /// delay (~1.75s) as retries exhaust harmlessly.
+    /// The node that answered does not hold the transaction only for an
+    /// explicit rejection, and another attempt may already have reached a
+    /// node; resending the same signed bytes is safe either way, since they
+    /// are one transaction. Rather than keep an allow-list of codes, every
+    /// error is retried; for a transaction that is invalid, the cost is a
+    /// bounded delay (~1.75s by default) as the retries run out.
     pub fn is_retriable(&self, response: &ResponsePacket) -> bool {
         response.first_error_code().is_some()
     }
@@ -163,7 +163,8 @@ pub struct TransportConfig {
     pub circuit_breaker: CircuitBreakerConfig,
     /// Retry settings for read operations.
     pub read_retry: ReadRetryConfig,
-    /// Retry settings for write operations (pre-mempool rejections only).
+    /// Retry settings for write operations (after an error answer or no
+    /// answer, as the same signed bytes).
     pub write_retry: WriteRetryConfig,
 }
 

@@ -25,7 +25,9 @@ pub(crate) enum Answer {
 pub(crate) type Script = dyn Fn(&str, &Value) -> Answer + Send + Sync;
 
 /// Start an endpoint that answers every request by `script`, and return
-/// its URL. One connection's requests are answered in order.
+/// its URL. One connection's requests are answered in order, and a batch's
+/// calls each by `script`; a status or silence for any call answers the
+/// whole batch.
 pub(crate) async fn endpoint(
     script: impl Fn(&str, &Value) -> Answer + Send + Sync + 'static,
 ) -> String {
@@ -46,24 +48,24 @@ async fn serve(mut socket: TcpStream, script: Arc<Script>) {
         let Some(request) = read_request(&mut socket, &mut buffer).await else {
             return;
         };
-        let id = request["id"].clone();
-        let method = request["method"].as_str().unwrap_or_default();
-        let (status, body) = match script(method, &request["params"]) {
-            Answer::Result(result) => (
-                200,
-                json!({ "jsonrpc": "2.0", "id": id, "result": result }).to_string(),
-            ),
-            Answer::Error(code, message) => (
-                200,
-                json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message } })
-                    .to_string(),
-            ),
-            Answer::Status(status) => (status, String::new()),
-            Answer::Silence => {
-                tokio::time::sleep(Duration::from_secs(30)).await;
-                return;
-            }
+        let (status, body) = match &request {
+            Value::Array(calls) => match calls
+                .iter()
+                .map(|call| answer(script.as_ref(), call))
+                .collect()
+            {
+                Ok(bodies) => (200, Value::Array(bodies).to_string()),
+                Err(status) => (status, String::new()),
+            },
+            call => match answer(script.as_ref(), call) {
+                Ok(body) => (200, body.to_string()),
+                Err(status) => (status, String::new()),
+            },
         };
+        if status == 0 {
+            tokio::time::sleep(Duration::from_secs(30)).await;
+            return;
+        }
         let response = format!(
             "HTTP/1.1 {status} Status\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
             body.len()
@@ -71,6 +73,21 @@ async fn serve(mut socket: TcpStream, script: Arc<Script>) {
         if socket.write_all(response.as_bytes()).await.is_err() {
             return;
         }
+    }
+}
+
+/// The JSON-RPC answer to one call, or the HTTP status (`0` for silence)
+/// that answers its whole request.
+fn answer(script: &Script, call: &Value) -> Result<Value, u16> {
+    let id = call["id"].clone();
+    let method = call["method"].as_str().unwrap_or_default();
+    match script(method, &call["params"]) {
+        Answer::Result(result) => Ok(json!({ "jsonrpc": "2.0", "id": id, "result": result })),
+        Answer::Error(code, message) => {
+            Ok(json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message } }))
+        }
+        Answer::Status(status) => Err(status),
+        Answer::Silence => Err(0),
     }
 }
 

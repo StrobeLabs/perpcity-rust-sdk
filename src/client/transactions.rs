@@ -339,11 +339,23 @@ pub(super) fn preflight_request(
 }
 
 /// The receipt poll loop behind [`PerpClient::poll_receipt`], generic over
-/// the provider so it is testable against a mocked transport.
+/// the provider so it is testable against a mocked transport. A receipt
+/// of another hash than `tx_hash` is a failed read.
 async fn wait_for_receipt<P: Provider>(provider: &P, tx_hash: B256) -> Result<TransactionReceipt> {
     let deadline = tokio::time::Instant::now() + RECEIPT_TIMEOUT;
     loop {
-        match provider.get_transaction_receipt(tx_hash).await {
+        let read = provider
+            .get_transaction_receipt(tx_hash)
+            .await
+            .map_err(|e| e.to_string())
+            .and_then(|receipt| match receipt {
+                Some(receipt) if receipt.transaction_hash != tx_hash => Err(format!(
+                    "the node answered with the receipt of {}",
+                    receipt.transaction_hash
+                )),
+                receipt => Ok(receipt),
+            });
+        match read {
             Ok(Some(receipt)) => return Ok(receipt),
             Ok(None) => {
                 if tokio::time::Instant::now() >= deadline {
@@ -393,7 +405,8 @@ impl PerpClient {
     /// Use it to resolve a send whose outcome is unknown, with the hash from
     /// [`PerpCityError::tx_hash`](crate::PerpCityError::tx_hash). On timeout it returns
     /// [`TransactionError::ReceiptTimeout`] for the same hash, so the call can
-    /// repeat. For one look-up with no wait, use
+    /// repeat. A receipt the node gives for another hash is a failed poll.
+    /// For one look-up with no wait, use
     /// `provider().get_transaction_receipt(tx_hash)`.
     ///
     /// The future holds no state, so dropping it only stops the polling;
@@ -617,6 +630,63 @@ mod tests {
         assert_eq!(err.tx_hash(), Some(tx_hash));
         assert!(
             matches!(&err, TransactionError::ReceiptTimeout { reason, .. } if reason.starts_with("last receipt poll failed")),
+            "{err}"
+        );
+    }
+
+    /// A receipt of another hash than the one polled is a failed poll: the
+    /// wait goes on to the hash's own receipt, and times out on receipts
+    /// of other hashes alone.
+    #[tokio::test(start_paused = true)]
+    async fn a_receipt_of_another_hash_is_a_failed_poll() {
+        use alloy::consensus::{Receipt, ReceiptEnvelope};
+
+        let tx_hash = B256::repeat_byte(0x66);
+        let receipt_of = |hash| TransactionReceipt {
+            inner: ReceiptEnvelope::Eip1559(
+                Receipt {
+                    status: true.into(),
+                    cumulative_gas_used: 21_000,
+                    logs: Vec::<alloy::rpc::types::Log>::new(),
+                }
+                .with_bloom(),
+            ),
+            transaction_hash: hash,
+            transaction_index: Some(0),
+            block_hash: Some(B256::with_last_byte(1)),
+            block_number: Some(92),
+            gas_used: 21_000,
+            effective_gas_price: 80,
+            blob_gas_used: None,
+            blob_gas_price: None,
+            from: Address::repeat_byte(1),
+            to: Some(Address::repeat_byte(2)),
+            contract_address: None,
+        };
+        let other = B256::repeat_byte(0x0e);
+
+        let asserter = Asserter::new();
+        asserter.push_success(&receipt_of(other));
+        asserter.push_success(&receipt_of(tx_hash));
+        let provider = ProviderBuilder::new().connect_mocked_client(asserter.clone());
+        let start = tokio::time::Instant::now();
+        let receipt = wait_for_receipt(&provider, tx_hash).await.unwrap();
+        assert_eq!(receipt.transaction_hash, tx_hash);
+        assert_eq!(start.elapsed(), RECEIPT_POLL_INTERVAL);
+        assert!(asserter.read_q().is_empty());
+
+        let asserter = Asserter::new();
+        for _ in 0..32 {
+            asserter.push_success(&receipt_of(other));
+        }
+        let provider = ProviderBuilder::new().connect_mocked_client(asserter);
+        let err = wait_for_receipt(&provider, tx_hash).await.unwrap_err();
+        let PerpCityError::Transaction(err) = err else {
+            panic!("expected a transaction error, got {err}");
+        };
+        assert_eq!(err.tx_hash(), Some(tx_hash));
+        assert!(
+            matches!(&err, TransactionError::ReceiptTimeout { reason, .. } if reason.contains(&other.to_string())),
             "{err}"
         );
     }
