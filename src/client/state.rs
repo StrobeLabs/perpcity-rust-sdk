@@ -873,10 +873,10 @@ impl StateAt {
                 })
                 .and_then(Ratio::from_e6)
         };
-        Ok(TakerFeeRates {
-            max_swap_fee: ratio(max_swap_fee, "maxSwapFee")?,
-            protocol_fee: ratio(protocol_fee, "protocolFee")?,
-        })
+        Ok(TakerFeeRates::new(
+            ratio(max_swap_fee, "maxSwapFee")?,
+            ratio(protocol_fee, "protocolFee")?,
+        ))
     }
 
     /// The module in force for each kind at this block: `modules()`.

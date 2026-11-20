@@ -131,10 +131,16 @@ pub enum TransactionError {
     /// after the call to it, other than a refusal, a parsed receipt or a
     /// used nonce, is this variant.
     ///
+    /// A market of another build, refused before `original` is looked
+    /// up, is this variant too, with the era error as `source`: nothing
+    /// about `original` was read.
+    ///
     /// The transience, [`Self::revert_class`] and [`Self::is_revert`]
     /// follow `source`: a preflight revert such as `MaxAmtExceeded` keeps
-    /// its class, and an RPC failure or a receipt timeout is transient.
-    /// With no `source`, no receipt came before the timeout: transient.
+    /// its class, an RPC failure or a receipt timeout is transient, and an
+    /// era refusal is not. With no `source`, no receipt came before the
+    /// timeout: transient. [`Self::hash_to_replace`] gives the hash to
+    /// replace again.
     #[error(
         "v1 trade replacement unconfirmed for original {original} and replacement {replacement:?}"
     )]
@@ -148,18 +154,25 @@ pub enum TransactionError {
         nonce: Option<u64>,
         /// Hash of the signed replacement, if broadcast was attempted.
         replacement: Option<FixedBytes<32>>,
+        /// Whether the node refused `replacement` with an explicit
+        /// rejection (an underpriced fee, a used nonce, missing funds), so
+        /// `original` is still the transaction the node holds.
+        refused: bool,
         /// The failure that stopped the replacement, when one occurred.
         #[source]
         source: Option<Box<PerpCityError>>,
     },
 
-    /// The account nonce passed `nonce`, but neither `original` nor
-    /// `replacement` has a receipt: another transaction at that nonce
-    /// mined, such as an earlier signing that `original` replaced. Neither
-    /// hash can land now. Its effect is unknown, so this is
-    /// [unconfirmed](Self::is_unconfirmed): read the position before a new
-    /// send. Not transient.
-    #[error("nonce {nonce} of {original} was used by another transaction")]
+    /// The account nonce passed `nonce`, and no receipt was found for
+    /// either `original` or `replacement` in several looks, the last one
+    /// [`RECEIPT_POLL_INTERVAL`](crate::constants::RECEIPT_POLL_INTERVAL)
+    /// or more after the nonce was first seen used. This is evidence that
+    /// the nonce advanced, not of which transaction used it: it can be an
+    /// earlier signing that `original` replaced, or one of the two hashes
+    /// whose receipt an endpoint did not serve. Neither hash can land now.
+    /// The effect is unknown, so this is [unconfirmed](Self::is_unconfirmed):
+    /// read the position before a new send. Not transient.
+    #[error("nonce {nonce} of {original} advanced, but no receipt was found for either hash")]
     ReplacementNonceUsed {
         /// Hash of the stuck transaction.
         original: FixedBytes<32>,
@@ -248,9 +261,13 @@ pub enum TransactionError {
 pub enum NotReplaceableReason {
     /// The node does not know the hash.
     UnknownToNode,
-    /// It is not from this client, or not to this market.
-    NotThisClientsTrade,
-    /// Its call is not one that the method replaces.
+    /// It is not from this client's address.
+    WrongSender,
+    /// It is from this client, to another address than this client's
+    /// market: a call that another client or method sends.
+    OtherMarket,
+    /// It is from this client to this market, but its call is not one
+    /// that the method replaces, such as a maker trade or a liquidation.
     UnsupportedCall,
     /// Its own send still waits for its receipt.
     InFlight,
@@ -265,11 +282,12 @@ pub enum NotReplaceableReason {
 }
 
 impl NotReplaceableReason {
-    /// Whether the transaction is this client's pending trade, which can
-    /// still land: every reason but [`Self::NotThisClientsTrade`] and
-    /// [`Self::UnsupportedCall`].
+    /// Whether the transaction can be this client's, pending or mined with
+    /// an effect the method did not read: every reason but
+    /// [`Self::WrongSender`]. A call the method does not replace, or one to
+    /// another market, still lands when it is pending.
     pub fn original_can_land(self) -> bool {
-        !matches!(self, Self::NotThisClientsTrade | Self::UnsupportedCall)
+        !matches!(self, Self::WrongSender)
     }
 }
 
@@ -277,7 +295,8 @@ impl fmt::Display for NotReplaceableReason {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::UnknownToNode => f.write_str("the node does not know it"),
-            Self::NotThisClientsTrade => f.write_str("not this client's trade on this market"),
+            Self::WrongSender => f.write_str("not from this client"),
+            Self::OtherMarket => f.write_str("not to this client's market"),
             Self::UnsupportedCall => f.write_str("not a call this method replaces"),
             Self::InFlight => f.write_str("its send still waits for the receipt"),
             Self::NotEip1559 { tx_type } => write!(f, "type {tx_type} is not EIP-1559"),
@@ -289,9 +308,10 @@ impl fmt::Display for NotReplaceableReason {
 impl TransactionError {
     /// Whether a trade's effect is unknown: a send broadcast and not
     /// confirmed either way (`BroadcastFailed`, `ReceiptTimeout`,
-    /// `ReplacementUnconfirmed`), a replacement whose nonce another
-    /// transaction used (`ReplacementNonceUsed`), or a refused replacement
-    /// whose original can still land (`NotReplaceable`).
+    /// `ReplacementUnconfirmed`), a replacement whose nonce advanced with
+    /// no receipt found (`ReplacementNonceUsed`), or a refused replacement
+    /// whose original can be this client's (`NotReplaceable`, every
+    /// [`NotReplaceableReason`] but `WrongSender`).
     ///
     /// Sending the same change again could make it twice. Read the state
     /// the send would have changed before acting.
@@ -309,7 +329,8 @@ impl TransactionError {
     /// Hash of the signed transaction, for every failure from the broadcast
     /// onward: `BroadcastFailed`, `ReceiptTimeout`, `Reverted`, `OutOfGas`
     /// and `TakerNotClosed`. A replacement's error gives the replacement's
-    /// hash, else the stuck one's. `None` means nothing was sent.
+    /// hash, else the stuck one's; [`Self::hash_to_replace`] gives the hash
+    /// to replace again. `None` means nothing was sent.
     ///
     /// A `Some` hash may have landed on chain even when the error says the
     /// send failed, so look up its receipt before treating the effect as
@@ -332,6 +353,41 @@ impl TransactionError {
             | Self::OutOfGas { tx_hash, .. }
             | Self::TakerNotClosed { tx_hash, .. }
             | Self::NotReplaceable { tx_hash, .. } => Some(*tx_hash),
+            _ => None,
+        }
+    }
+
+    /// The hash to give
+    /// [`PerpClient::replace_v1_taker`](crate::PerpClient::replace_v1_taker)
+    /// to replace the same trade again:
+    ///
+    /// - `ReceiptTimeout` and `BroadcastFailed`: the send's hash.
+    /// - `ReplacementUnconfirmed` with a replacement the node did not
+    ///   refuse (accepted, or an answer such as `already known` or a
+    ///   timeout): the replacement, whose fees are the highest at the
+    ///   nonce. If the node later says it does not know that hash
+    ///   ([`NotReplaceableReason::UnknownToNode`]), give `original`.
+    /// - `ReplacementUnconfirmed` with no replacement, or one that the node
+    ///   refused: `original`.
+    ///
+    /// `None` for every other error, and so after a refusal
+    /// (`NotReplaceable`, which names the hash it was given), a used nonce
+    /// or a mined receipt: nothing at the nonce is left to replace, or the
+    /// method does not replace it.
+    pub fn hash_to_replace(&self) -> Option<FixedBytes<32>> {
+        match self {
+            Self::ReceiptTimeout { tx_hash, .. } | Self::BroadcastFailed { tx_hash, .. } => {
+                Some(*tx_hash)
+            }
+            Self::ReplacementUnconfirmed {
+                original,
+                replacement,
+                refused,
+                ..
+            } => Some(match replacement {
+                Some(replacement) if !refused => *replacement,
+                _ => *original,
+            }),
             _ => None,
         }
     }

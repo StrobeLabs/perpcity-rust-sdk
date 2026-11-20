@@ -39,8 +39,8 @@ use perpcity_sdk::contracts::v1::{AdjustTakerParams, IFees, OpenMakerParams, Per
 use perpcity_sdk::errors::decode::try_extract_revert;
 use perpcity_sdk::{
     ChainReader, Era, ExactAdjustTakerParams, ExactOpenTakerParams, HftTransport, MaxTotalFee,
-    PerpCityError, PerpClient, PerpDelta, TransactionError, TransportConfig, Urgency, UsdcAtoms,
-    UsdcDelta, V1TakerAdjustment, V1TakerReplacement, ValidationError,
+    NotReplaceableReason, PerpCityError, PerpClient, PerpDelta, TransactionError, TransportConfig,
+    Urgency, UsdcAtoms, UsdcDelta, V1TakerAdjustment, V1TakerReplacement, ValidationError,
 };
 use serde_json::Value;
 use tokio::time::sleep;
@@ -250,6 +250,16 @@ async fn v1_taker_writes_on_a_sepolia_fork() {
     assert_eq!(client.market().era().await.unwrap(), Era::V1);
     let rates = client.market().get_taker_fee_rates().await.unwrap();
     assert_eq!(u64::from(rates.protocol_fee.e6()), PROTOCOL_FEE);
+    assert_eq!(
+        u64::try_from(manager.protocolFee().call().await.unwrap()).unwrap(),
+        PROTOCOL_FEE,
+        "the manager's fee"
+    );
+    assert_eq!(
+        u64::try_from(raw_perp.protocolFee().call().await.unwrap()).unwrap(),
+        PROTOCOL_FEE,
+        "the perp's synced fee"
+    );
 
     // ── Open: a swap across three initialized ticks, equal to the quote ──
     let pool = client
@@ -643,8 +653,114 @@ async fn v1_taker_writes_on_a_sepolia_fork() {
     assert!(renewed.reduceOnly);
     assert_eq!(renewed.perpDelta, stuck_call.perpDelta);
     assert_eq!(unpack(adjusted.event.delta).0, 100_000 - 40_000);
-    raw(&fork, "evm_setAutomine", serde_json::json!([true])).await;
     println!("stuck adjustment {stuck} replaced by {}", adjusted.tx_hash);
+    // ── S -> R1 -> R2: replace the replacement that hash_to_replace names ──
+    client.sync_nonce().await.unwrap();
+    client.chain().refresh_gas().await.unwrap();
+    let err = client
+        .open_taker_v1(
+            &open_params(10_000_000, 100_000, small),
+            MaxTotalFee::ForVolume(small),
+            Urgency::Normal,
+        )
+        .await
+        .unwrap_err();
+    let s = err.hash_to_replace().unwrap();
+    assert_eq!(err.tx_hash(), Some(s));
+    let s_tx = w
+        .provider
+        .get_transaction_by_hash(s)
+        .await
+        .unwrap()
+        .unwrap();
+    client.chain().refresh_gas().await.unwrap();
+    let err1 = client.replace_v1_taker(s, Urgency::High).await.unwrap_err();
+    let PerpCityError::Transaction(TransactionError::ReplacementUnconfirmed {
+        original,
+        nonce,
+        replacement: Some(r1),
+        refused: false,
+        ..
+    }) = &err1
+    else {
+        panic!("R1 taken and not mined: {err1:?}");
+    };
+    assert_eq!(*original, s);
+    assert_eq!(*nonce, Some(s_tx.nonce()));
+    assert!(err1.is_unconfirmed() && err1.is_transient(), "{err1}");
+    assert_eq!(err1.hash_to_replace(), Some(*r1), "replace R1 next");
+    let r1 = *r1;
+    // The node dropped S for R1, so S is no longer a hash to replace.
+    client.chain().refresh_gas().await.unwrap();
+    let again = client.replace_v1_taker(s, Urgency::High).await.unwrap_err();
+    assert!(
+        matches!(
+            again,
+            PerpCityError::Transaction(TransactionError::NotReplaceable {
+                tx_hash,
+                reason: NotReplaceableReason::UnknownToNode,
+            }) if tx_hash == s
+        ),
+        "{again:?}"
+    );
+    assert!(again.is_unconfirmed());
+    let r1_tx = w
+        .provider
+        .get_transaction_by_hash(r1)
+        .await
+        .unwrap()
+        .unwrap();
+    client.chain().refresh_gas().await.unwrap();
+    let (r2, _) = tokio::join!(client.replace_v1_taker(r1, Urgency::High), async {
+        sleep(Duration::from_secs(3)).await;
+        raw(&fork, "evm_mine", serde_json::json!([])).await;
+    });
+    let V1TakerReplacement::Opened(r2) = r2.unwrap() else {
+        panic!("an open replaced as an open");
+    };
+    let r2_tx = w
+        .provider
+        .get_transaction_by_hash(r2.tx_hash)
+        .await
+        .unwrap()
+        .unwrap();
+    let deadline = |tx: &alloy::rpc::types::Transaction| {
+        Perp::openTakerCall::abi_decode(tx.input())
+            .unwrap()
+            .params
+            .deadline
+    };
+    for (earlier, later) in [(&s_tx, &r1_tx), (&r1_tx, &r2_tx)] {
+        assert_eq!(later.nonce(), s_tx.nonce(), "one nonce");
+        assert!(later.max_fee_per_gas() > earlier.max_fee_per_gas());
+        assert!(later.max_priority_fee_per_gas() > earlier.max_priority_fee_per_gas());
+        assert!(deadline(later) > deadline(earlier));
+    }
+    for (hash, mined) in [(s, false), (r1, false), (r2.tx_hash, true)] {
+        let receipt = w.provider.get_transaction_receipt(hash).await.unwrap();
+        assert_eq!(receipt.map(|r| r.status()), mined.then_some(true), "{hash}");
+    }
+    // After R2 mined, neither earlier hash is known: nothing to replace.
+    for hash in [s, r1] {
+        client.chain().refresh_gas().await.unwrap();
+        let late = client
+            .replace_v1_taker(hash, Urgency::High)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                late,
+                PerpCityError::Transaction(TransactionError::NotReplaceable {
+                    reason: NotReplaceableReason::UnknownToNode,
+                    ..
+                })
+            ),
+            "{late:?}"
+        );
+        assert_eq!(late.hash_to_replace(), None);
+    }
+    println!("S {s} replaced by R1 {r1}, then by R2 {}", r2.tx_hash);
+    raw(&fork, "evm_setAutomine", serde_json::json!([true])).await;
 
     // ── Liquidation: an under-margined taker ────────────────────────
     client.chain().refresh_gas().await.unwrap();

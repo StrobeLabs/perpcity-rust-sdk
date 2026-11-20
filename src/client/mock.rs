@@ -204,7 +204,7 @@ fn client_with(provider: RootProvider<Ethereum>, transport: HftTransport) -> Per
 }
 
 /// The mocked clients' fixed signer.
-fn signer() -> PrivateKeySigner {
+pub(super) fn signer() -> PrivateKeySigner {
     PrivateKeySigner::from_bytes(&B256::repeat_byte(0x01))
         .expect("a non-zero scalar is a valid key")
 }

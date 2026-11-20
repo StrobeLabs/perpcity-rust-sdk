@@ -48,10 +48,7 @@ fn max_total_fee_cap() {
     let mut checked_holds = 0;
     for case in &cases {
         let i = &case["inputs"];
-        let rates = TakerFeeRates {
-            max_swap_fee: ratio(&i["max_swap_fee_e6"]),
-            protocol_fee: ratio(&i["protocol_fee_e6"]),
-        };
+        let rates = TakerFeeRates::new(ratio(&i["max_swap_fee_e6"]), ratio(&i["protocol_fee_e6"]));
         let volume: i128 = num(&i["usd_volume"]);
         let slack = UsdcAtoms::new(num(&i["rounding_slack"]));
         let fee = rates
@@ -220,10 +217,8 @@ fn swap_fees() {
         let total = fee("lp_fee") + fee("protocol_fee") + fee("creator_fee") + fee("insurance_fee");
         assert_eq!(total, fee("total_fee"), "{}", case["id"]);
 
-        let rates = TakerFeeRates {
-            max_swap_fee: Ratio::from_e6(8_600).unwrap(),
-            protocol_fee: ratio(&i["protocol_fee_e6"]),
-        };
+        let rates =
+            TakerFeeRates::new(Ratio::from_e6(8_600).unwrap(), ratio(&i["protocol_fee_e6"]));
         let bound = rates
             .max_total_fee(UsdcAtoms::new(volume), MAX_TOTAL_FEE_SLACK)
             .unwrap();
