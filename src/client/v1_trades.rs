@@ -1369,7 +1369,7 @@ mod tests {
         }
     }
 
-    fn mined_trade_receipt(
+    pub(super) fn mined_trade_receipt(
         client: &PerpClient,
         hash: B256,
         event: &impl SolEvent,

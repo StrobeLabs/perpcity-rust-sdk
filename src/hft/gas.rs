@@ -55,21 +55,26 @@ impl GasLimits {
     /// liquidations have run out of gas where `eth_estimateGas` passed, so
     /// the liquidation paths pin this bound instead of estimating.
     pub const LIQUIDATE: u64 = 3_000_000;
-    // Arbitrum Sepolia v1 fork: the largest `eth_estimateGas` at the block
-    // before each measured call, plus 20%, rounded up to 50,000, and above
-    // 120% of each receipt's gas used. Anvil's estimates and receipts
-    // exclude Arbitrum's L1 data gas. Adjust and close share a selector.
-    /// V1 taker open (669,982 estimated across four ticks).
+    // Empirical lower bounds from an Arbitrum Sepolia v1 fork: at least
+    // 120% of the largest of each measured call's gas used and its
+    // `eth_estimateGas` at the block before it, run with that block's time
+    // and with the mined block's (a trade in a new second accrues; see
+    // `measure_gas` in the fork tests), rounded up to 50,000. Anvil's
+    // estimates and receipts exclude Arbitrum's L1 data gas. Adjust and
+    // close share a selector.
+    /// V1 taker open (674,995 estimated across three ticks).
     pub const V1_OPEN_TAKER: u64 = 850_000;
-    /// V1 taker adjustment or close (390,634 estimated, 446,456 used).
-    pub const V1_ADJUST_TAKER: u64 = 550_000;
+    /// V1 taker adjustment or close (741,869 estimated and 715,398 used
+    /// for a flip, a sell across three ticks).
+    pub const V1_ADJUST_TAKER: u64 = 900_000;
     /// V1 maker open (756,117 estimated for a W12 band).
     pub const V1_OPEN_MAKER: u64 = 950_000;
     /// V1 maker adjustment or close (522,302 estimated for a last-maker
     /// close whose payout becomes a withdrawal claim).
     pub const V1_ADJUST_MAKER: u64 = 650_000;
-    /// V1 maker move (632,791 estimated for the W11 range change).
-    pub const V1_MOVE_MAKER: u64 = 800_000;
+    /// V1 maker move (664,356 estimated for the W11 range change; one step
+    /// above the rounding, which would leave 0.3%).
+    pub const V1_MOVE_MAKER: u64 = 850_000;
     /// V1 taker backstop (295,253 estimated with the owner change).
     pub const V1_BACKSTOP_TAKER: u64 = 400_000;
     /// V1 maker backstop (464,596 estimated with the owner change).
@@ -204,6 +209,14 @@ impl GasLimitCache {
                 cached_at_ms: now_ms,
             },
         );
+    }
+
+    /// The gas a cache hit's preflight runs with: `limit` without the
+    /// buffer. A call that fits it keeps the buffer for what `eth_call`
+    /// does not charge, Arbitrum's L1 data gas and work a later block's
+    /// timestamp adds; one that does not is re-estimated.
+    pub(crate) fn preflight_limit(&self, limit: u64) -> u64 {
+        (limit as f64 / self.buffer) as u64
     }
 
     /// Drop a cached estimate so the next send re-estimates. Used when a
@@ -361,6 +374,15 @@ impl FeeCache {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_cache_hit_preflights_without_the_buffer() {
+        let cache = GasLimitCache::new();
+        assert_eq!(cache.preflight_limit(1_200_000), 1_000_000);
+        assert_eq!(cache.preflight_limit(GasLimits::V1_ADJUST_TAKER), 750_000);
+        let unbuffered = GasLimitCache::with_config(DEFAULT_ESTIMATE_TTL_MS, 1.0);
+        assert_eq!(unbuffered.preflight_limit(900_000), 900_000);
+    }
 
     #[test]
     fn v1_selectors_floor_small_estimates_and_keep_larger_ones() {

@@ -344,10 +344,6 @@ mod tests {
     use super::*;
     use crate::math::tick::get_tick_at_sqrt_ratio;
 
-    /// Three of one Arbitrum band's changes (NYCRT v0.2.2, position 29,
-    /// range 38670..38760), each at the pool's price and tick then: an add
-    /// in range, an add with the price below the band, a removal in range.
-    /// The amounts are what the contract added to the position's delta.
     /// The W12 maker open vectors: adding each band at the vector price
     /// books these amounts, rounded up, as the contract's forge scenario,
     /// the TS SDK and W12's Python found them.
@@ -391,6 +387,10 @@ mod tests {
         assert_eq!(booked, [(-979_407, -49_477_350), (-864_571, -52_712_479)]);
     }
 
+    /// Three of one Arbitrum band's changes (NYCRT v0.2.2, position 29,
+    /// range 38670..38760), each at the pool's price and tick then: an add
+    /// in range, an add with the price below the band, a removal in range.
+    /// The amounts are what the contract added to the position's delta.
     #[test]
     fn a_liquidity_change_moves_what_the_pool_moved() {
         let range = TickRange::new(38_670, 38_760).unwrap();

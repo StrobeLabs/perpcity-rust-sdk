@@ -499,11 +499,15 @@ impl StateAt {
 
     /// `calldata` from `from` to the perp, as an `eth_call` at this block:
     /// the contract's answer to that call against this block's state.
-    pub(super) async fn simulate_from(
-        &self,
-        from: Address,
-        calldata: &Bytes,
-    ) -> std::result::Result<(), TransactionError> {
+    ///
+    /// # Errors
+    ///
+    /// The contract's revert as [`TransactionError::SimulationReverted`];
+    /// a node without this block or its state as
+    /// [`ContractError::BlockUnavailable`] (transient) or
+    /// [`ContractError::StateUnavailable`], as a pinned read types them;
+    /// any other failure as [`classify_simulation_failure`] sorts it.
+    pub(super) async fn simulate_from(&self, from: Address, calldata: &Bytes) -> Result<()> {
         let tx = preflight_request(from, self.market.perp, calldata, 0, None);
         self.market
             .chain
@@ -511,7 +515,19 @@ impl StateAt {
             .call(tx)
             .block(self.id())
             .await
-            .map_err(|e| classify_simulation_failure(&e, "eth_call"))?;
+            .map_err(|e| -> PerpCityError {
+                let failure = classify_simulation_failure(&e, "eth_call");
+                if matches!(failure, TransactionError::SimulationReverted { .. }) {
+                    return failure.into();
+                }
+                match e
+                    .as_error_resp()
+                    .and_then(|payload| pinned_block_failure(&payload.message, self.block.number))
+                {
+                    Some(block) => block.into(),
+                    None => failure.into(),
+                }
+            })?;
         Ok(())
     }
 
@@ -1628,13 +1644,22 @@ pub(super) fn pinned_read_error(error: PerpCityError, number: u64) -> PerpCityEr
     else {
         return error;
     };
-    let message = payload.message.to_ascii_lowercase();
+    match pinned_block_failure(&payload.message, number) {
+        Some(block) => block.into(),
+        None => error,
+    }
+}
+
+/// The failure a node's error `message` names about block `number`
+/// itself, as [`pinned_read_error`] types it, or `None` for any other.
+fn pinned_block_failure(message: &str, number: u64) -> Option<ContractError> {
+    let message = message.to_ascii_lowercase();
     if state_pruned(&message) {
-        ContractError::StateUnavailable { number }.into()
+        Some(ContractError::StateUnavailable { number })
     } else if block_missing(&message) {
-        ContractError::BlockUnavailable { number }.into()
+        Some(ContractError::BlockUnavailable { number })
     } else {
-        error
+        None
     }
 }
 
