@@ -63,9 +63,9 @@ impl GasLimits {
     // last touch, since a trade in a new second accrues and walks those
     // ticks; no fixed number covers every market. Each bound is at least
     // 120% of the largest gas used or estimated (at the mined block's time)
-    // on an Arbitrum Sepolia v1 fork, rounded up to 50,000, for the
-    // endpoints that refuse block overrides. Anvil's estimates and receipts
-    // exclude Arbitrum's L1 data gas. Adjust and close share a selector.
+    // on an Arbitrum Sepolia v1 fork, rounded up to 50,000. Anvil's
+    // estimates and receipts exclude Arbitrum's L1 data gas. Adjust and
+    // close share a selector.
     /// V1 taker open (724,179 estimated for a buy across three ticks with
     /// 13 initialized ticks in the utilization band).
     pub const V1_OPEN_TAKER: u64 = 900_000;

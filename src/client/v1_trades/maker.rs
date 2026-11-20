@@ -490,6 +490,7 @@ mod tests {
     use alloy::consensus::Transaction as _;
     use alloy::consensus::transaction::Recovered;
     use alloy::eips::BlockId;
+    use alloy::network::TransactionBuilder as _;
     use alloy::primitives::{I256, U160};
     use tracing::field::{Field, Visit};
     use tracing::instrument::WithSubscriber;
@@ -1294,6 +1295,8 @@ mod tests {
         let (hash, tx) = taker::pending_trade(&client, stuck_removal(taker::NOW + 600)).await;
         rpc.immutables(Era::V1);
         rpc.response(&tx);
+        rpc.block(taker::HEAD, taker::NOW);
+        rpc.reverts(&Perp::ShortCloseCapacityExceeded::SELECTOR);
         rpc.reverts(&Perp::ShortCloseCapacityExceeded::SELECTOR);
         taker::nothing_settled(&rpc, taker::STUCK_NONCE, 1);
         let err = client
@@ -1399,6 +1402,247 @@ mod tests {
         assert!(rpc.is_drained());
     }
 
+    /// A maker write signed for another chain, or one that carried value,
+    /// is refused before anything is preflighted, signed or sent, as a
+    /// taker trade is: the call is not signed again on this chain, and the
+    /// replacement carries no value.
+    #[tokio::test]
+    async fn a_maker_write_for_another_chain_or_with_value_is_refused() {
+        let (client, _) = mock::client();
+        let chain = client.chain().chain_id();
+        let input = || stuck_removal(taker::NOW + 600);
+        for (request, expected) in [
+            (
+                taker::trade_request(&client, input()).with_chain_id(chain + 1),
+                NotReplaceableReason::OtherChain {
+                    chain_id: Some(chain + 1),
+                },
+            ),
+            (
+                taker::trade_request(&client, input()).with_value(U256::from(1)),
+                NotReplaceableReason::UnsupportedCall,
+            ),
+            (
+                taker::trade_request(
+                    &client,
+                    open_call(client.address(), &open(), taker::NOW + 600).abi_encode(),
+                )
+                .with_value(U256::from(1)),
+                NotReplaceableReason::UnsupportedCall,
+            ),
+        ] {
+            let (client, rpc) = mock::client();
+            client.chain().set_base_fee(100);
+            let (hash, tx) = taker::as_seen(&client, request, client.address(), None).await;
+            rpc.immutables(Era::V1);
+            rpc.response(&tx);
+            let err = client
+                .replace_v1_maker(hash, Urgency::Normal)
+                .await
+                .unwrap_err();
+            assert_eq!(taker::refusal(&err), expected, "{err}");
+            assert_eq!(err.tx_hash(), Some(hash));
+            assert!(err.is_unconfirmed() && !err.is_transient());
+            assert!(rpc.sent().is_empty(), "{expected}: nothing signed or sent");
+            assert!(rpc.is_drained(), "{expected}: nothing after the look-up");
+        }
+    }
+
+    /// A maker replacement is preflighted at the stuck limit in the block
+    /// after the head, where it accrues as the mined replacement does. A
+    /// revert at that limit that passes without the cap is a limit too
+    /// low; that and a failed head read are checked against the original's
+    /// receipt, and nothing is signed.
+    #[tokio::test]
+    async fn a_maker_replacement_preflights_the_stuck_limit_in_the_next_block() {
+        let (client, rpc) = mock::client();
+        client.chain().set_base_fee(100);
+        let (hash, tx) = taker::pending_trade(&client, stuck_removal(taker::NOW + 600)).await;
+        rpc.immutables(Era::V1);
+        rpc.response(&tx);
+        rpc.block(taker::HEAD, taker::NOW);
+        rpc.raw(&[]);
+        rpc.fails("replacement transaction underpriced");
+        taker::nothing_settled(&rpc, taker::STUCK_NONCE, 2);
+        let err = client
+            .replace_v1_maker(hash, Urgency::Normal)
+            .await
+            .unwrap_err();
+        assert!(err.is_unconfirmed(), "{err}");
+        let calls = rpc.params("eth_call");
+        let preflight = calls.last().unwrap();
+        assert_eq!(preflight[1], format!("{:#x}", taker::HEAD));
+        assert_eq!(
+            preflight[3],
+            serde_json::json!({
+                "number": format!("{:#x}", taker::HEAD + 1),
+                "time": format!("{:#x}", taker::NOW + 1),
+            })
+        );
+        assert_eq!(rpc.call_gas().last(), Some(&Some(taker::STUCK_GAS)));
+        assert_eq!(rpc.sent().len(), 1);
+        assert!(rpc.is_drained());
+
+        for head_read_fails in [false, true] {
+            let (client, rpc) = mock::client();
+            client.chain().set_base_fee(100);
+            let (hash, tx) = taker::pending_trade(&client, stuck_removal(taker::NOW + 600)).await;
+            rpc.immutables(Era::V1);
+            rpc.response(&tx);
+            if head_read_fails {
+                rpc.fails("upstream timeout");
+            } else {
+                rpc.block(taker::HEAD, taker::NOW);
+                rpc.reverts(&TRANSFER_FROM_FAILED);
+                rpc.raw(&[]);
+            }
+            taker::nothing_settled(&rpc, taker::STUCK_NONCE, 1);
+            let err = client
+                .replace_v1_maker(hash, Urgency::Normal)
+                .await
+                .unwrap_err();
+            let PerpCityError::Transaction(TransactionError::ReplacementUnconfirmed {
+                original,
+                replacement: None,
+                source: Some(source),
+                ..
+            }) = &err
+            else {
+                panic!("{err}");
+            };
+            assert_eq!(*original, hash);
+            if head_read_fails {
+                assert!(err.is_transient(), "{err}");
+            } else {
+                assert!(
+                    matches!(
+                        source.as_ref(),
+                        PerpCityError::Transaction(TransactionError::GasLimitTooLow {
+                            gas_limit: taker::STUCK_GAS,
+                            ..
+                        })
+                    ),
+                    "{source}"
+                );
+                assert_eq!(
+                    rpc.call_gas()[rpc.call_gas().len() - 2..],
+                    [Some(taker::STUCK_GAS), None]
+                );
+            }
+            assert!(rpc.sent().is_empty());
+            assert!(rpc.is_drained());
+        }
+    }
+
+    /// A receipt of another hash is no answer for the hash asked for, in a
+    /// maker replacement's look after a refused broadcast.
+    #[tokio::test]
+    async fn a_maker_receipt_of_another_hash_is_no_answer() {
+        let (client, rpc) = mock::client();
+        client.chain().set_base_fee(100);
+        let (hash, tx) = taker::pending_trade(&client, stuck_removal(taker::NOW + 600)).await;
+        rpc.immutables(Era::V1);
+        rpc.response(&tx);
+        rpc.block(taker::HEAD, taker::NOW);
+        rpc.raw(&[]);
+        rpc.fails("replacement transaction underpriced");
+        rpc.quantity(taker::STUCK_NONCE + 1);
+        rpc.foreign_receipt(&adjusted_receipt(&client, B256::repeat_byte(0x0e), 0));
+        rpc.response(&None::<TransactionReceipt>);
+        let err = client
+            .replace_v1_maker(hash, Urgency::Normal)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                PerpCityError::Transaction(TransactionError::ReplacementUnconfirmed {
+                    original,
+                    refused: true,
+                    ..
+                }) if original == hash
+            ),
+            "{err:?}"
+        );
+        assert!(rpc.is_drained());
+    }
+
+    /// The maker writes classify a failed era read by the taker writes'
+    /// rule: no answer (a timeout, a bare internal error, a gateway with
+    /// no backend) is transient; revert data under any code is the
+    /// contract's answer.
+    #[tokio::test]
+    async fn the_maker_era_read_tells_an_answer_from_no_answer() {
+        for (failure, transient) in [
+            ("upstream timeout", true),
+            ("bare internal error", true),
+            ("no backends", true),
+            ("internal error with revert data", false),
+            ("code 3", false),
+        ] {
+            for write in ["open", "close", "replace"] {
+                let (client, rpc) = mock::client();
+                match failure {
+                    "upstream timeout" => rpc.fails("upstream timeout"),
+                    "bare internal error" => rpc.answers_error(-32_603, "internal error", None),
+                    "no backends" => rpc.answers_error(-32_011, "no backends available", None),
+                    "internal error with revert data" => {
+                        rpc.answers_error(-32_603, "internal error", Some(r#""0xbcffc83f""#));
+                    }
+                    _ => rpc.reverts(&[]),
+                }
+                let err = match write {
+                    "open" => client
+                        .open_maker_v1(&open(), Urgency::Normal)
+                        .await
+                        .unwrap_err(),
+                    "close" => client
+                        .close_maker_v1(U256::ONE, Urgency::Normal)
+                        .await
+                        .unwrap_err(),
+                    _ => {
+                        let err = client
+                            .replace_v1_maker(STUCK, Urgency::Normal)
+                            .await
+                            .unwrap_err();
+                        assert!(err.is_unconfirmed(), "{failure}: {err}");
+                        assert_eq!(err.hash_to_replace(), Some(STUCK));
+                        err
+                    }
+                };
+                assert_eq!(err.is_transient(), transient, "{failure}, {write}: {err}");
+                assert!(rpc.is_drained(), "{failure}, {write}");
+            }
+        }
+    }
+
+    /// A maker close whose receipt poll first gets another hash's receipt
+    /// waits for its own: the outcome, `MakerNotClosed` here, names the
+    /// close's own hash.
+    #[tokio::test(start_paused = true)]
+    async fn a_maker_close_waits_for_its_own_receipt() {
+        let (client, rpc) = mock::client();
+        client.chain().set_base_fee(100);
+        answer_removal(&rpc, &client, deep());
+        rpc.block(101, 1_795_141_002);
+        rpc.quantity(600_000);
+        rpc.response(&mock::SENT);
+        rpc.foreign_receipt(&adjusted_receipt(&client, B256::repeat_byte(0x0e), 0));
+        rpc.response(&adjusted_receipt(&client, mock::SENT, 20_000_000));
+        let err = client
+            .close_maker_v1(U256::ONE, Urgency::Normal)
+            .await
+            .unwrap_err();
+        let hash = rpc.sent()[0];
+        assert!(
+            matches!(err, PerpCityError::Transaction(TransactionError::MakerNotClosed {
+                tx_hash, ..
+            }) if tx_hash == hash),
+            "{err}"
+        );
+        assert!(rpc.is_drained());
+    }
+
     /// A mined maker write that used its whole limit is out of gas, and the
     /// `adjustMaker` estimate is evicted.
     #[tokio::test]
@@ -1437,6 +1681,10 @@ mod tests {
     }
 
     const STUCK: B256 = B256::repeat_byte(0x5a);
+
+    /// Solady's `TransferFromFailed()`, which a transfer that runs out of
+    /// gas inside the token reverts with.
+    const TRANSFER_FROM_FAILED: [u8; 4] = [0x79, 0x39, 0xf4, 0x24];
 
     /// The cause of a replacement refused before the look-up, which keeps
     /// the given hash, unresolved.

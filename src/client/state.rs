@@ -35,6 +35,7 @@ use crate::math::pricing::{BeaconIndex, Emas, Mark, PricePair, calculate_emas};
 use crate::math::range::{MakerBand, TickRange};
 use crate::math::swap::{PoolSnapshot, TakerFeeRates, TickLiquidity, active_liquidity};
 use crate::storage::{v4_tick_bitmap_slot, v4_tick_slot};
+use crate::transport::fault::{lacks_block, state_pruned};
 use crate::units::{
     Funding, FundingRate, LDelta, LUnits, PerSide, PerpAtoms, PerpDelta, Price, Ratio, SqrtPrice,
     UsdcAtoms, UsdcDelta, UtilizationRate,
@@ -1653,10 +1654,9 @@ pub(super) fn pinned_read_error(error: PerpCityError, number: u64) -> PerpCityEr
 /// The failure a node's error `message` names about block `number`
 /// itself, as [`pinned_read_error`] types it, or `None` for any other.
 pub(super) fn pinned_block_failure(message: &str, number: u64) -> Option<ContractError> {
-    let message = message.to_ascii_lowercase();
-    if state_pruned(&message) {
+    if state_pruned(message) {
         Some(ContractError::StateUnavailable { number })
-    } else if block_missing(&message) {
+    } else if lacks_block(message) {
         Some(ContractError::BlockUnavailable { number })
     } else {
         None
@@ -1698,23 +1698,6 @@ pub(super) fn ema_window_secs(ema_window: U256) -> Result<u64> {
         }
         .into()
     })
-}
-
-/// Whether a node's (lower-cased) error message is its refusal to serve
-/// pruned state: Nitro's "historical state … is not available", geth's
-/// "missing trie node". The message is the only place a node says so.
-fn state_pruned(message: &str) -> bool {
-    message.contains("historical state") || message.contains("missing trie node")
-}
-
-/// Whether a node's (lower-cased) error message says it does not have the
-/// block a call was pinned to: geth's "header not found" for a hash or
-/// number it has not seen, and the "unknown block" / "block not found"
-/// wordings of other clients and gateways.
-fn block_missing(message: &str) -> bool {
-    message.contains("header not found")
-        || message.contains("unknown block")
-        || message.contains("block not found")
 }
 
 #[cfg(test)]
