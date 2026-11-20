@@ -16,6 +16,7 @@ use crate::math::tick::{align_tick_down, align_tick_up, price_to_tick};
 use crate::units::{LDelta, LUnits, PerpAtoms, PerpDelta, UsdcAtoms, UsdcDelta};
 
 use super::market::{PositionRole, validate_fee_recipient};
+use super::queries::Era;
 use super::state::PositionRow;
 use super::{MAX_APPROVAL, PerpClient, i32_to_i24};
 
@@ -541,7 +542,23 @@ impl PerpClient {
     /// the USD paid at `u128::MAX`. For a protected close, call
     /// [`Self::adjust_taker_exact`] with an explicit `amt1_limit` and the
     /// position's exact delta.
+    ///
+    /// # Errors
+    ///
+    /// [`ContractError::UnsupportedEra`] for a `v1.0.0` market, before the
+    /// position is read or anything is sent: its close is another call
+    /// shape, which this send does not build;
+    /// [`ContractError::UnknownBuild`] for an unknown build;
+    /// [`ContractError::PositionNotFound`] for a closed id;
+    /// [`TransactionError::TakerNotClosed`] as above.
     pub async fn close_taker(&self, pos_id: U256, urgency: Urgency) -> Result<AdjustTakerResult> {
+        if self.market.era().await? == Era::V1 {
+            return Err(ContractError::UnsupportedEra {
+                era: Era::V1,
+                operation: "close_taker",
+            }
+            .into());
+        }
         let position = self.market.get_position(pos_id).await?;
         let perp_delta = closing_perp_delta(&position);
         let params = ExactAdjustTakerParams {
@@ -940,15 +957,19 @@ impl PerpClient {
 #[cfg(test)]
 mod tests {
     use alloy::primitives::{Address, B256, I256, U256, Uint};
+    use alloy::sol_types::SolCall;
 
     use super::{
-        AdjustTakerResult, OpenResult, PerpDelta, PositionRow, UsdcAtoms, UsdcDelta, closes_taker,
-        closing_perp_delta, scale_opening_margin,
+        AdjustTakerResult, Era, OpenResult, PerpDelta, PositionRow, UsdcAtoms, UsdcDelta,
+        closes_taker, closing_perp_delta, scale_opening_margin,
     };
+    use crate::client::mock;
     use crate::constants::Q96;
-    use crate::contracts::{Perp, Position, SwapResult};
+    use crate::contracts::{Perp, Position, SwapResult, v1};
     use crate::convert::pack_balance_delta;
+    use crate::errors::{ContractError, PerpCityError};
     use crate::events::rpc_log;
+    use crate::hft::gas::Urgency;
 
     #[test]
     fn open_result_serde_roundtrip() {
@@ -976,14 +997,13 @@ mod tests {
     }
 
     fn position(perp_atoms: i128, usd_atoms: i128) -> PositionRow {
-        PositionRow::try_from(Position {
+        PositionRow::from(Position {
             delta: pack_balance_delta(perp_atoms, usd_atoms),
             margin: 3_936_538_407,
             liqMarginRatio: Uint::ZERO,
             backstopMarginRatio: Uint::ZERO,
             lastCumlFundingX96: I256::ZERO,
         })
-        .unwrap()
     }
 
     fn swap(perp_atoms: i128) -> SwapResult {
@@ -1050,6 +1070,35 @@ mod tests {
             "another position's close does not close this one"
         );
         assert!(!closes_taker(&[], pos_id));
+    }
+
+    /// A `v1.0.0` taker is never closed on another build's call: the close
+    /// is refused after the market's era, before the position read and
+    /// before any send.
+    #[tokio::test]
+    async fn close_taker_refuses_a_v1_market_before_any_send() {
+        let (client, rpc) = mock::client();
+        rpc.immutables(Era::V1);
+        let err = client
+            .close_taker(U256::from(7u8), Urgency::Normal)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                PerpCityError::Contract(ContractError::UnsupportedEra {
+                    era: Era::V1,
+                    operation: "close_taker",
+                })
+            ),
+            "{err}"
+        );
+        assert!(!err.is_transient());
+        assert_eq!(
+            rpc.selectors(),
+            [Perp::poolKeyCall::SELECTOR, v1::Perp::poolIdCall::SELECTOR]
+        );
+        assert!(rpc.is_drained(), "poolKey, poolId; no row, no send");
     }
 
     #[test]

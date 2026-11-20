@@ -30,7 +30,7 @@ use crate::math::pricing::{Emas, Mark};
 use crate::units::{PerSide, PerpAtoms, Price, Ratio, UsdcAtoms};
 
 use super::market::MarketReader;
-use super::state::{PositionRow, ema_window_secs, pinned_read_error};
+use super::state::{PositionRow, decode_exact, ema_window_secs, pinned_read_error};
 use super::{PerpClient, i24_to_i32, now_secs, u24_to_u32};
 
 /// Funding/utilization rates are scaled by 1e18 per day on-chain.
@@ -389,17 +389,19 @@ impl MarketReader {
     pub async fn get_position(&self, pos_id: U256) -> Result<PositionRow> {
         let provider = self.chain.provider();
         let row = match self.immutables().await?.era {
-            Era::Legacy | Era::Upgradeable => PositionRow::try_from(
+            Era::Legacy | Era::Upgradeable => PositionRow::from(
                 Perp::new(self.perp, provider)
                     .positions(pos_id)
                     .call()
                     .await?,
-            )?,
-            Era::V1 => v1::Perp::new(self.perp, provider)
-                .positions(pos_id)
-                .call()
-                .await?
-                .into(),
+            ),
+            Era::V1 => {
+                let data = v1::Perp::new(self.perp, provider)
+                    .positions(pos_id)
+                    .call_raw()
+                    .await?;
+                decode_exact::<v1::Perp::positionsCall>(pos_id, &data, "position")?.into()
+            }
         };
         row.held()
             .ok_or_else(|| ContractError::PositionNotFound { pos_id }.into())
@@ -411,8 +413,10 @@ impl MarketReader {
     /// The two earlier builds' positions are NFTs: `ownerOf` reverts for a
     /// burned or never-minted token, and that id is skipped. A `v1.0.0`
     /// market has no NFT and no `ownerOf`: its `positionOwner` answers the
-    /// zero address for an inactive id and never reverts, so any failure
-    /// there is an error, never a skipped id.
+    /// zero address for an inactive id, which is skipped as
+    /// [`StateAt::owners`](super::StateAt::owners) skips it (so the zero
+    /// address holds nothing), and it never reverts, so any failure there
+    /// is an error, never a skipped id.
     ///
     /// **Note:** This is O(n) in total positions ever minted. For high-throughput
     /// use cases, prefer [`StateAt::owners`](super::StateAt::owners), one
@@ -452,12 +456,13 @@ impl MarketReader {
             let pos_id = U256::from(id);
             let holder = match era {
                 Era::Legacy | Era::Upgradeable => self.nft_owner(pos_id).await?,
-                Era::V1 => Some(
-                    v1::Perp::new(self.perp, provider)
+                Era::V1 => {
+                    let holder = v1::Perp::new(self.perp, provider)
                         .positionOwner(pos_id)
                         .call()
-                        .await?,
-                ),
+                        .await?;
+                    (holder != Address::ZERO).then_some(holder)
+                }
             };
             if holder == Some(owner) {
                 owned.push(pos_id);
@@ -992,9 +997,10 @@ mod tests {
         );
     }
 
-    /// `positions(id)` comes back as its stored row, its fields untouched.
+    /// `positions(id)` comes back as a [`PositionRow`] of its stored
+    /// fields, untouched.
     #[tokio::test]
-    async fn a_position_is_the_raw_contract_struct() {
+    async fn a_position_is_a_position_row_of_its_stored_fields() {
         let (client, rpc) = mock::client();
         rpc.immutables(Era::Legacy);
         rpc.call::<Perp::positionsCall>(&mock::position(1_000_000));
@@ -1293,6 +1299,29 @@ mod tests {
             "{err}"
         );
         assert!(rpc.is_drained());
+    }
+
+    /// On `v1.0.0` the zero address is an inactive id, never a holder: a
+    /// walk for `Address::ZERO` finds no closed id, and a walk for the
+    /// holder finds only its active one.
+    #[tokio::test]
+    async fn positions_by_owner_on_v1_never_finds_a_closed_id() {
+        let holder = Address::repeat_byte(0xaa);
+        let (client, rpc) = mock::client();
+        rpc.immutables(Era::V1);
+        for owner in [Address::ZERO, holder] {
+            rpc.call::<v1::Perp::nextPosIdCall>(&U256::from(3u8));
+            rpc.call::<v1::Perp::positionOwnerCall>(&holder);
+            rpc.call::<v1::Perp::positionOwnerCall>(&Address::ZERO);
+            let owned = client.market().get_positions_by_owner(owner).await.unwrap();
+            let expected = if owner == holder {
+                vec![U256::ONE]
+            } else {
+                vec![]
+            };
+            assert_eq!(owned, expected, "{owner}");
+            assert!(rpc.is_drained(), "{owner}");
+        }
     }
 
     /// The earlier builds keep the `ownerOf` walk.

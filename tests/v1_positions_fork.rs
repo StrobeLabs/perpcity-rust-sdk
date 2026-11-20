@@ -1,9 +1,11 @@
 //! Integration test: the position reads on a `v1.0.0` market. On an Anvil
 //! fork of Arbitrum Sepolia, the W11 market (`v1_fork`: one maker, moved
-//! and reduced, and one closed taker) is read through the SDK, and every
-//! read agrees with a raw `eth_call` of the `v1` binding at the same block.
-//! `get_positions_by_owner` asks `positionOwner`, so it finds the maker and
-//! not the closed taker, whose owner the contract zeroes.
+//! and reduced, and one closed taker) is read through the SDK, then a new
+//! taker is opened on it, and every read agrees with a raw `eth_call` of
+//! the `v1` binding at the same block. `get_positions_by_owner` asks
+//! `positionOwner`, so it finds the maker and the new taker and not the
+//! closed taker, whose owner the contract zeroes; the earlier builds'
+//! `ownerOf` walk on the same market finds nothing (map row 13, silent).
 //!
 //! Requires `anvil` (from Foundry) and an Arbitrum Sepolia endpoint in
 //! `SEPOLIA_FORK_URL` (default: the public RPC).
@@ -15,12 +17,13 @@
 mod v1_fork;
 
 use alloy::eips::BlockId;
-use alloy::primitives::{Address, U256};
+use alloy::primitives::{Address, Bytes, U256};
+use alloy::providers::DynProvider;
 
 use perpcity_sdk::contracts::{Perp as EarlierPerp, v1::Perp};
 use perpcity_sdk::{
     ChainReader, ContractError, Era, HftTransport, LUnits, MakerBand, PerpCityError, PositionRow,
-    TickRange, TransportConfig,
+    StateAt, TickRange, TransportConfig,
 };
 
 use v1_fork::{SepoliaFork, V1Fork};
@@ -52,7 +55,8 @@ async fn position_reads_agree_with_the_v1_market() {
 
     // What the contract says: the closed taker's owner is zero, the
     // maker's is the dev wallet, and two ids were minted.
-    let raw = Perp::new(m.perp, &w.provider);
+    let provider = w.provider.clone();
+    let raw = Perp::new(m.perp, &provider);
     assert_eq!(raw.positionOwner(m.maker_id).call().await.unwrap(), w.me);
     assert_eq!(
         raw.positionOwner(m.taker_id).call().await.unwrap(),
@@ -63,7 +67,7 @@ async fn position_reads_agree_with_the_v1_market() {
 
     // The earlier builds' calls on this market fail loudly: v1 has no
     // `ownerOf`, and its three-word row does not decode as five.
-    let earlier = EarlierPerp::new(m.perp, &w.provider);
+    let earlier = EarlierPerp::new(m.perp, &provider);
     let owner_of = earlier.ownerOf(m.maker_id).call().await.unwrap_err();
     let revert_data = match &owner_of {
         alloy::contract::Error::TransportError(e) => {
@@ -72,6 +76,10 @@ async fn position_reads_agree_with_the_v1_market() {
         _ => None,
     };
     println!("ownerOf on v1: {owner_of}; revert data {revert_data:?}");
+    // Anvil behaviour: the empty revert carries `0x` as its data, so the
+    // old walk takes it for a burned token. Nitro may attach no data,
+    // which the old walk fails on loudly instead.
+    assert_eq!(revert_data, Some(Bytes::new()), "anvil: an empty revert");
     assert!(earlier.positions(m.maker_id).call().await.is_err());
 
     // The walk: the two minted ids less the closed taker.
@@ -99,12 +107,98 @@ async fn position_reads_agree_with_the_v1_market() {
 
     // The pinned reads against raw calls at the same block.
     let state = market.state_at_head().await.unwrap();
-    let at = BlockId::hash(state.block().hash);
     let ids: Vec<U256> = (1..minted).map(U256::from).collect();
+    reads_agree_with_raw_calls(&state, &raw, &ids).await;
+
+    // The closed taker is gone from every read; the maker is in each.
+    let index = |id: U256| ids.iter().position(|&i| i == id).unwrap();
     let (rows, owners, bands) = tokio::join!(
         state.positions(&ids),
         state.owners(&ids),
         state.maker_bands(&ids)
+    );
+    let (maker, taker) = (index(m.maker_id), index(m.taker_id));
+    assert!(rows[taker].row.as_ref().unwrap().is_none());
+    assert!(owners[taker].row.as_ref().unwrap().is_none());
+    assert!(bands[taker].row.as_ref().unwrap().is_none());
+    assert!(rows[maker].row.as_ref().unwrap().is_some());
+    assert_eq!(*owners[maker].row.as_ref().unwrap(), Some(w.me));
+    assert!(bands[maker].row.as_ref().unwrap().is_some());
+
+    // A new taker on the same market: two live ids, one owner.
+    let new_taker = w.open_taker_sized(m.perp, NEW_TAKER_SIZE).await;
+    println!("new taker {new_taker}");
+    assert_eq!(
+        market.get_positions_by_owner(w.me).await.unwrap(),
+        vec![m.maker_id, new_taker]
+    );
+    let row = market.get_position(new_taker).await.unwrap();
+    assert_eq!(
+        row,
+        PositionRow::from(raw.positions(new_taker).call().await.unwrap())
+    );
+    assert_eq!(row.perp.atoms(), i128::from(NEW_TAKER_SIZE));
+    assert!(row.stored_margin_ratios.is_none());
+    assert!(matches!(
+        market.get_position(m.taker_id).await.unwrap_err(),
+        PerpCityError::Contract(ContractError::PositionNotFound { .. })
+    ));
+
+    let state = market.state_at_head().await.unwrap();
+    let minted: u64 = raw.nextPosId().call().await.unwrap().try_into().unwrap();
+    assert_eq!(minted, 4, "ids 1 to 3");
+    let ids: Vec<U256> = (1..minted).map(U256::from).collect();
+    reads_agree_with_raw_calls(&state, &raw, &ids).await;
+    let index = |id: U256| ids.iter().position(|&i| i == id).unwrap();
+    let (rows, owners, bands) = tokio::join!(
+        state.positions(&ids),
+        state.owners(&ids),
+        state.maker_bands(&ids)
+    );
+    let (maker, taker, live) = (index(m.maker_id), index(m.taker_id), index(new_taker));
+    assert!(rows[taker].row.as_ref().unwrap().is_none());
+    assert!(owners[taker].row.as_ref().unwrap().is_none());
+    assert!(bands[taker].row.as_ref().unwrap().is_none());
+    assert!(state.position(m.taker_id).await.unwrap().is_none());
+    assert!(state.maker_band(m.taker_id).await.unwrap().is_none());
+    assert_eq!(*rows[live].row.as_ref().unwrap(), Some(row));
+    assert_eq!(*owners[live].row.as_ref().unwrap(), Some(w.me));
+    assert!(
+        bands[live].row.as_ref().unwrap().is_none(),
+        "a taker has no band"
+    );
+    assert!(state.maker_band(new_taker).await.unwrap().is_none());
+    assert_eq!(*owners[maker].row.as_ref().unwrap(), Some(w.me));
+
+    // Map row 13, the silent case, on real v1.0.0 bytecode: the earlier
+    // builds' walk (`ownerOf` over `1..nextPosId`, an error with revert
+    // data taken for a burned token, an error without it propagated)
+    // finds neither live position.
+    assert!(
+        earlier_owner_of_walk(&earlier, minted, w.me)
+            .await
+            .unwrap()
+            .is_empty(),
+        "anvil: the old walk drops every v1 position silently"
+    );
+}
+
+/// The perp atoms of the new taker: after the fourteen W11 steps a
+/// `TAKER_SIZE` open reverts `PriceImpactTooHigh` on the thin band.
+const NEW_TAKER_SIZE: i64 = 100_000;
+
+/// Every pinned read of `ids` on `state` against the raw `v1` call at the
+/// same block.
+async fn reads_agree_with_raw_calls(
+    state: &StateAt,
+    raw: &Perp::PerpInstance<&DynProvider>,
+    ids: &[U256],
+) {
+    let at = BlockId::hash(state.block().hash);
+    let (rows, owners, bands) = tokio::join!(
+        state.positions(ids),
+        state.owners(ids),
+        state.maker_bands(ids)
     );
     for (((&pos_id, row), owner), band) in ids.iter().zip(rows).zip(owners).zip(bands) {
         let position = raw.positions(pos_id).block(at).call().await.unwrap();
@@ -138,19 +232,32 @@ async fn position_reads_agree_with_the_v1_market() {
             "{pos_id}: row {expected_row:?}, owner {expected_owner:?}, band {expected_band:?}"
         );
     }
+}
 
-    // The closed taker is gone from every read; the maker is in each.
-    let index = |id: U256| ids.iter().position(|&i| i == id).unwrap();
-    let (rows, owners, bands) = tokio::join!(
-        state.positions(&ids),
-        state.owners(&ids),
-        state.maker_bands(&ids)
-    );
-    let (maker, taker) = (index(m.maker_id), index(m.taker_id));
-    assert!(rows[taker].row.as_ref().unwrap().is_none());
-    assert!(owners[taker].row.as_ref().unwrap().is_none());
-    assert!(bands[taker].row.as_ref().unwrap().is_none());
-    assert!(rows[maker].row.as_ref().unwrap().is_some());
-    assert_eq!(*owners[maker].row.as_ref().unwrap(), Some(w.me));
-    assert!(bands[maker].row.as_ref().unwrap().is_some());
+/// The earlier builds' `get_positions_by_owner` walk, as it was before
+/// `v1.0.0`: `ownerOf` for each id in `1..next_pos_id`; a revert with
+/// revert data is a burned token and skipped, an error with none is
+/// propagated.
+async fn earlier_owner_of_walk(
+    earlier: &EarlierPerp::PerpInstance<&DynProvider>,
+    next_pos_id: u64,
+    owner: Address,
+) -> Result<Vec<U256>, alloy::contract::Error> {
+    let mut owned = Vec::new();
+    for id in 1..next_pos_id {
+        let pos_id = U256::from(id);
+        match earlier.ownerOf(pos_id).call().await {
+            Ok(holder) if holder == owner => owned.push(pos_id),
+            Ok(_) => {}
+            Err(alloy::contract::Error::TransportError(e))
+                if e.as_error_resp()
+                    .and_then(|resp| resp.as_revert_data())
+                    .is_none() =>
+            {
+                return Err(alloy::contract::Error::TransportError(e));
+            }
+            Err(_) => {}
+        }
+    }
+    Ok(owned)
 }
