@@ -257,12 +257,8 @@ fn method_unsupported(e: &TransportError) -> bool {
 }
 
 impl MarketReader {
-    /// [`StateAt::maker_equities`] at the lagged snapshot block. An empty
-    /// input resolves no block.
+    /// [`StateAt::maker_equities`] at the lagged snapshot block.
     pub async fn get_maker_equities(&self, pos_ids: &[U256]) -> Result<Vec<MakerEquityOutcome>> {
-        if pos_ids.is_empty() {
-            return Ok(Vec::new());
-        }
         self.state().await?.maker_equities(pos_ids).await
     }
 
@@ -272,9 +268,6 @@ impl MarketReader {
         pos_ids: &[U256],
         mark: Price,
     ) -> Result<Vec<MakerEquityOutcome>> {
-        if pos_ids.is_empty() {
-            return Ok(Vec::new());
-        }
         self.state()
             .await?
             .maker_equities_at_mark(pos_ids, mark)

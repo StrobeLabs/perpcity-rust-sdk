@@ -69,10 +69,10 @@ fn decode_w12_preview_words() {
     for row in cases {
         check(&row);
     }
-    check(
-        &json!({"id":"synthetic", "kind":"maker_preview_value", "expected":{
-            "pending_lp_fees":"37","payable_liq_fee":"11","meets_initial_margin":"1",
-            "liquidatable":"1","backstoppable":"1"
-        }}),
-    );
+    for (initial, liquidatable, backstoppable) in [("1", "0", "0"), ("0", "1", "0"), ("0", "0", "1")] {
+        check(&json!({"id":"synthetic", "kind":"maker_preview_value", "expected":{
+            "pending_lp_fees":"37","payable_liq_fee":"11","meets_initial_margin":initial,
+            "liquidatable":liquidatable,"backstoppable":backstoppable
+        }}));
+    }
 }

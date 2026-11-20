@@ -26,7 +26,7 @@ use perpcity_sdk::contracts::{
 };
 use perpcity_sdk::{
     ARBITRUM_CHAIN_ID, ChainDeployments, ChainReader, ContractError, Era, HftTransport,
-    PerpCityError, TransportConfig,
+    PerpCityError, Price, TransportConfig,
 };
 
 use v1_fork::{HOOK, SepoliaFork, V1Fork, index_1};
@@ -146,9 +146,19 @@ async fn each_build_reads_as_its_era_on_a_sepolia_fork() {
         .await
         .unwrap_err();
     assert!(
-        unsupported(&err, "maker_equities (use previewPosition)"),
+        unsupported(&err, "maker_equities (use preview_positions)"),
         "maker equities: {err:?}"
     );
+    let mark = Price::from_x96(U256::ONE);
+    for result in [
+        v1_market.get_maker_equities(&[]).await,
+        v1_market.get_maker_equities_at_mark(&[], mark).await,
+    ] {
+        assert!(unsupported(
+            &result.unwrap_err(),
+            "maker_equities (use preview_positions)"
+        ));
+    }
     println!("v1 get_maker_equities fails loudly: {err}");
 
     for (perp, era) in [(V022_PERP, Era::Upgradeable), (LEGACY_PERP, Era::Legacy)] {
@@ -157,6 +167,14 @@ async fn each_build_reads_as_its_era_on_a_sepolia_fork() {
         assert_eq!(
             market.is_upgradeable().await.unwrap(),
             era == Era::Upgradeable
+        );
+        assert!(market.get_maker_equities(&[]).await.unwrap().is_empty());
+        assert!(
+            market
+                .get_maker_equities_at_mark(&[], mark)
+                .await
+                .unwrap()
+                .is_empty()
         );
         let surface = PerpV022Surface::new(perp, &w.provider);
         let key = surface.poolKey().call().await.unwrap();
