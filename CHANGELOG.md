@@ -11,7 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - V1 pinned reads expose position previews and the collateral cap. Legacy valuation batches on v1 direct callers to the preview. Physical capacity checks account for terminal partial fills and fractional maker removals.
 
-- `StateAt::preview_position` returns `None` for a position that is not open, and a revert keeps its selector and transience, as a `preview_positions` row does. `StateAt::physical_close_capacity_x64` reads the close depth in X64 from storage, and `StateAt::maker_liquidity` reads the total maker liquidity. These are the inputs of `MarketCapacity::fits_maker_removal`. `MarketCapacity::fits_swap` accepts a credit to a side at `u128::MAX`. `TvlCap::allows_deposit` takes `UsdcAtoms`.
+- `StateAt::preview_position` returns `None` for a position that is not open, and a revert keeps its selector and transience, as a `preview_positions` row does; a revert without data is `ContractError::RevertedWithoutSelector`, as in a row. `StateAt::physical_close_capacity_x64` reads the close depth in X64 from storage, and `StateAt::maker_liquidity` reads the total maker liquidity. These are the inputs of `MarketCapacity::fits_maker_removal`. `MarketCapacity::fits_swap` accepts a credit to a side at `u128::MAX`. `TvlCap::allows_deposit` takes `UsdcAtoms`.
 
 - V1 marks and snapshots call the pinned market’s `readBeaconIndex` and preserve its revert data. For a revert shorter than four bytes, `ContractError::RevertedWithoutSelector` carries the complete payload. Outer RPC errors propagate. The timestamp API reads the beacon directly.
 
