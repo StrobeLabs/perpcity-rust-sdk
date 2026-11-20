@@ -145,7 +145,10 @@ async fn each_build_reads_as_its_era_on_a_sepolia_fork() {
         .get_maker_equities(&[U256::from(1u8)])
         .await
         .unwrap_err();
-    assert!(unsupported(&err, "maker_equities (use previewPosition)"), "maker equities: {err:?}");
+    assert!(
+        unsupported(&err, "maker_equities (use previewPosition)"),
+        "maker equities: {err:?}"
+    );
     println!("v1 get_maker_equities fails loudly: {err}");
 
     for (perp, era) in [(V022_PERP, Era::Upgradeable), (LEGACY_PERP, Era::Legacy)] {

@@ -17,10 +17,10 @@
 mod v1_fork;
 
 use alloy::eips::BlockId;
+use alloy::primitives::I256;
 use alloy::primitives::{Address, Bytes, U256};
 use alloy::providers::DynProvider;
 use alloy::sol_types::{SolError, SolValue};
-use alloy::primitives::I256;
 use perpcity_sdk::contracts::v1::OpenTakerParams;
 use perpcity_sdk::errors::decode::try_extract_revert;
 
@@ -135,7 +135,13 @@ async fn position_reads_agree_with_the_v1_market() {
     let margin = v1_fork::TAKER_MARGIN;
     let limit = initial.accounted + U256::from(margin);
     w.send("lower-tvl-cap", raw.lowerTvlCap(limit)).await;
-    let capped = market.state_at_head().await.unwrap().tvl_cap().await.unwrap();
+    let capped = market
+        .state_at_head()
+        .await
+        .unwrap()
+        .tvl_cap()
+        .await
+        .unwrap();
     assert_eq!(capped.cap, limit);
     assert!(capped.allows_deposit(U256::from(margin)));
     assert!(!capped.allows_deposit(U256::from(margin + 1)));
@@ -147,8 +153,16 @@ async fn position_reads_agree_with_the_v1_market() {
         maxTotalFee: U256::from(v1_fork::MAX_TOTAL_FEE),
         deadline: w.deadline().await,
     };
-    let err = raw.openTaker(oversized).from(w.me).call().await.unwrap_err();
-    assert_eq!(try_extract_revert(&err.to_string()).unwrap().1, Perp::TvlCapExceeded::SELECTOR);
+    let err = raw
+        .openTaker(oversized)
+        .from(w.me)
+        .call()
+        .await
+        .unwrap_err();
+    assert_eq!(
+        try_extract_revert(&err.to_string()).unwrap().1,
+        Perp::TvlCapExceeded::SELECTOR
+    );
     let new_taker = w.open_taker_sized(m.perp, NEW_TAKER_SIZE).await;
     println!("new taker {new_taker}");
     assert_eq!(
@@ -169,7 +183,10 @@ async fn position_reads_agree_with_the_v1_market() {
 
     let state = market.state_at_head().await.unwrap();
     let minted: u64 = raw.nextPosId().call().await.unwrap().try_into().unwrap();
-    let previews = state.preview_positions(&[m.maker_id, m.taker_id, new_taker]).await.unwrap();
+    let previews = state
+        .preview_positions(&[m.maker_id, m.taker_id, new_taker])
+        .await
+        .unwrap();
     for preview in previews {
         let row = preview.row.unwrap();
         if preview.pos_id == m.taker_id {
@@ -177,7 +194,12 @@ async fn position_reads_agree_with_the_v1_market() {
         } else {
             let value = row.unwrap();
             assert_eq!(value.isMaker, preview.pos_id == m.maker_id);
-            let raw_value = raw.previewPosition(preview.pos_id).block(state.block().hash.into()).call().await.unwrap();
+            let raw_value = raw
+                .previewPosition(preview.pos_id)
+                .block(state.block().hash.into())
+                .call()
+                .await
+                .unwrap();
             assert_eq!(value.abi_encode(), raw_value.abi_encode());
         }
     }

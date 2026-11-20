@@ -9,9 +9,10 @@ fn decode_w12_preview_words() {
         serde_json::from_str(include_str!("fixtures/w12-previews.json")).unwrap();
     assert_eq!(cases.len(), 77);
     for (id, expected) in cases {
-        let words: Vec<u8> = expected.iter().flat_map(|s| {
-            s.parse::<I256>().unwrap().into_raw().to_be_bytes::<32>()
-        }).collect();
+        let words: Vec<u8> = expected
+            .iter()
+            .flat_map(|s| s.parse::<I256>().unwrap().into_raw().to_be_bytes::<32>())
+            .collect();
         let preview = Perp::previewPositionCall::abi_decode_returns(&words).unwrap();
         let decoded = [
             u8::from(preview.isMaker).to_string(),
