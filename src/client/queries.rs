@@ -462,8 +462,8 @@ impl MarketReader {
 
     /// The rates a `v1.0.0` taker trade's fee bound is sized from, read now:
     /// the fees module's `maxSwapFee()` and the perp's `protocolFee()`, in
-    /// one multicall after `modules()`. Not cached: governance can change
-    /// the module and the perp syncs its protocol fee.
+    /// one multicall after `modules()`, pinned to the same head block.
+    /// Governance can change the module and the perp syncs its protocol fee.
     ///
     /// # Errors
     ///
@@ -481,31 +481,7 @@ impl MarketReader {
             }
             .into());
         }
-        let perp = v1::Perp::new(self.perp, self.chain.provider());
-        let modules = perp.modules().call().await?;
-        let fees = v1::IFees::new(
-            registered_module(modules.fees, "IFees")?,
-            self.chain.provider(),
-        );
-        let (max_swap_fee, protocol_fee) = self
-            .chain
-            .multicall_at(BlockId::latest())
-            .add(fees.maxSwapFee())
-            .add(perp.protocolFee())
-            .aggregate()
-            .await
-            .map_err(multicall_error)?;
-        let ratio = |e6: U256, name: &str| {
-            u32::try_from(e6)
-                .map_err(|_| ValidationError::Overflow {
-                    context: format!("{name} {e6} exceeds uint32"),
-                })
-                .and_then(Ratio::from_e6)
-        };
-        Ok(TakerFeeRates {
-            max_swap_fee: ratio(max_swap_fee, "maxSwapFee")?,
-            protocol_fee: ratio(protocol_fee, "protocolFee")?,
-        })
+        self.state_at_head().await?.taker_fee_rates().await
     }
 
     /// One position's stored row, read now, in the shape of the market's

@@ -141,6 +141,7 @@ impl PerpCityError {
                 | Self::Transaction(TransactionError::GasUnavailable { .. })
                 | Self::Transaction(TransactionError::BroadcastFailed { .. })
                 | Self::Transaction(TransactionError::ReceiptTimeout { .. })
+                | Self::Transaction(TransactionError::ReplacementUnconfirmed { .. })
                 | Self::Transaction(TransactionError::NonceDesynced { .. })
                 | Self::Transaction(TransactionError::TooManyInFlight { .. })
                 | Self::Transaction(TransactionError::TakerNotClosed { .. })

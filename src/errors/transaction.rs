@@ -120,6 +120,21 @@ pub enum TransactionError {
         source: TransportError,
     },
 
+    /// No receipt established which taker transaction mined. Transient:
+    /// look up both available hashes before sending a new trade.
+    #[error(
+        "taker replacement unconfirmed for original {original} and replacement {replacement:?}"
+    )]
+    ReplacementUnconfirmed {
+        /// Hash of the original transaction.
+        original: FixedBytes<32>,
+        /// Hash of the signed replacement, if broadcast was attempted.
+        replacement: Option<FixedBytes<32>>,
+        /// Preflight or broadcast failure, when one occurred.
+        #[source]
+        source: Option<Box<TransactionError>>,
+    },
+
     /// Transaction signing failed. Not transient; nothing left the process.
     #[error("signing failed: {reason}")]
     SigningFailed {
@@ -194,14 +209,16 @@ pub enum TransactionError {
 
 impl TransactionError {
     /// Whether the transaction was broadcast and not confirmed either way
-    /// (`BroadcastFailed`, `ReceiptTimeout`), so it may still land.
+    /// (`BroadcastFailed`, `ReceiptTimeout`, `ReplacementUnconfirmed`), so it may still land.
     ///
     /// Its effect is unknown: sending the same change again could make it
     /// twice. Read the state the send would have changed before acting.
     pub fn is_unconfirmed(&self) -> bool {
         matches!(
             self,
-            Self::BroadcastFailed { .. } | Self::ReceiptTimeout { .. }
+            Self::BroadcastFailed { .. }
+                | Self::ReceiptTimeout { .. }
+                | Self::ReplacementUnconfirmed { .. }
         )
     }
 
@@ -214,6 +231,11 @@ impl TransactionError {
     /// absent.
     pub fn tx_hash(&self) -> Option<FixedBytes<32>> {
         match self {
+            Self::ReplacementUnconfirmed {
+                original,
+                replacement,
+                ..
+            } => Some(replacement.unwrap_or(*original)),
             Self::BroadcastFailed { tx_hash, .. }
             | Self::ReceiptTimeout { tx_hash, .. }
             | Self::Reverted { tx_hash, .. }
