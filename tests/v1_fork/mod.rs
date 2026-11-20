@@ -454,12 +454,19 @@ impl V1Fork {
     }
 
     pub async fn open_taker(&mut self, perp: Address) -> U256 {
+        self.open_taker_sized(perp, TAKER_SIZE).await
+    }
+
+    /// [`Self::open_taker`] with `size` perp atoms in place of
+    /// [`TAKER_SIZE`]: after the fourteen steps the band is thin, and a
+    /// `TAKER_SIZE` open there reverts `PriceImpactTooHigh`.
+    pub async fn open_taker_sized(&mut self, perp: Address, size: i64) -> U256 {
         let p = Perp::new(perp, self.provider.clone());
         let id = p.nextPosId().call().await.unwrap();
         let params = OpenTakerParams {
             holder: self.me,
             margin: TAKER_MARGIN,
-            perpDelta: I256::try_from(TAKER_SIZE).unwrap(),
+            perpDelta: I256::try_from(size).unwrap(),
             amt1Limit: U256::MAX,
             maxTotalFee: U256::from(MAX_TOTAL_FEE),
             deadline: self.deadline().await,

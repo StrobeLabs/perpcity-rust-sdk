@@ -131,6 +131,15 @@ pub(super) fn client_over(provider: RootProvider<Ethereum>) -> PerpClient {
     client_with(provider, transport())
 }
 
+/// A client on a real chain's deployments and id, every RPC answered by
+/// the returned [`Rpc`]: the hooks its markets' pool keys name are that
+/// chain's.
+pub(super) fn client_on(deployments: ChainDeployments, chain_id: u64) -> (PerpClient, Rpc) {
+    let (provider, rpc) = mocked();
+    let chain = ChainReader::from_parts(provider, transport(), deployments, chain_id);
+    (PerpClient::new(chain.market(PERP), signer()), rpc)
+}
+
 /// A chain reader on its own, every RPC answered by the returned [`Rpc`].
 pub(super) fn chain() -> (ChainReader, Rpc) {
     let (provider, rpc) = mocked();
@@ -163,9 +172,13 @@ fn chain_with(provider: RootProvider<Ethereum>, transport: HftTransport) -> Chai
 }
 
 fn client_with(provider: RootProvider<Ethereum>, transport: HftTransport) -> PerpClient {
-    let signer = PrivateKeySigner::from_bytes(&B256::repeat_byte(0x01))
-        .expect("a non-zero scalar is a valid key");
-    PerpClient::new(chain_with(provider, transport).market(PERP), signer)
+    PerpClient::new(chain_with(provider, transport).market(PERP), signer())
+}
+
+/// The mocked clients' fixed signer.
+fn signer() -> PrivateKeySigner {
+    PrivateKeySigner::from_bytes(&B256::repeat_byte(0x01))
+        .expect("a non-zero scalar is a valid key")
 }
 
 /// The mock's answer queue, in the vocabulary of the reads, and the calls
@@ -473,6 +486,47 @@ pub(super) fn position(margin: u128) -> Position {
         backstopMarginRatio: Uint::ZERO,
         lastCumlFundingX96: I256::ZERO,
     }
+}
+
+/// One ABI word of a signed value.
+fn signed_word(value: i128) -> [u8; 32] {
+    I256::try_from(value)
+        .expect("i128 fits I256")
+        .to_be_bytes::<32>()
+}
+
+/// One ABI word of an unsigned value.
+fn word(value: u128) -> [u8; 32] {
+    U256::from(value).to_be_bytes::<32>()
+}
+
+/// A `v1.0.0` taker's row as the chain returns it, three words:
+/// `delta` (the packed `BalanceDelta`, `amount0` high), `margin`,
+/// `lastCumlFundingX96`.
+pub(super) fn v1_position_words(perp: i128, usd: i128, margin: u128, funding: i128) -> Vec<u8> {
+    [
+        crate::convert::pack_balance_delta(perp, usd).to_be_bytes::<32>(),
+        word(margin),
+        signed_word(funding),
+    ]
+    .concat()
+}
+
+/// A `v1.0.0` maker's details as the chain returns them, seven words:
+/// the band (`tickLower`, `tickUpper`, `liquidity`), the fee-growth
+/// checkpoint, the nested `MakerFunding` (`belowX96`,
+/// `withinInventoryX192`) and the funding correction.
+pub(super) fn v1_maker_words(lower: i32, upper: i32, liquidity: u128) -> Vec<u8> {
+    [
+        signed_word(lower.into()),
+        signed_word(upper.into()),
+        word(liquidity),
+        word(7),
+        signed_word(-8),
+        signed_word(9),
+        signed_word(-10),
+    ]
+    .concat()
 }
 
 /// A call's selector: its first four bytes.

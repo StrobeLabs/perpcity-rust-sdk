@@ -10,9 +10,9 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use alloy::eips::BlockId;
-use alloy::primitives::{Address, B256, Signed, U256};
+use alloy::primitives::{Address, B256, Signed, U256, Uint};
 use alloy::providers::{MulticallError, Provider};
-use alloy::sol_types::{SolCall, SolError};
+use alloy::sol_types::{SolCall, SolError, SolType};
 use alloy::transports::{RpcError, TransportError};
 use futures_util::stream::{self, StreamExt};
 use serde::{Deserialize, Serialize};
@@ -210,7 +210,11 @@ pub struct StoredMarginRatios {
 
 impl PositionRow {
     /// The row, or `None` for the empty row of an id never minted or
-    /// closed: no margin and both legs zero.
+    /// closed: no margin and both legs zero. This is the row rule. On
+    /// `v1.0.0` the contract's own existence rule is `positionOwner != 0`
+    /// (`Perp.sol:604`), and an active position may hold all-zero economic
+    /// fields, so a holder is read from `positionOwner`
+    /// ([`StateAt::owners`]), never from this.
     pub(super) fn held(self) -> Option<Self> {
         (self.margin != UsdcAtoms::ZERO
             || self.perp != PerpDelta::ZERO
@@ -220,22 +224,25 @@ impl PositionRow {
 }
 
 /// The two earlier builds' row, with its stored ratios.
-impl TryFrom<Position> for PositionRow {
-    type Error = ValidationError;
-
-    fn try_from(position: Position) -> std::result::Result<Self, ValidationError> {
+impl From<Position> for PositionRow {
+    fn from(position: Position) -> Self {
         let (perp, usd) = unpack_balance_delta(position.delta);
-        Ok(Self {
+        Self {
             perp: PerpDelta::new(perp),
             usd: UsdcDelta::new(usd),
             margin: UsdcAtoms::new(position.margin),
             last_cuml_funding: Funding::from_x96(position.lastCumlFundingX96),
             stored_margin_ratios: Some(StoredMarginRatios {
-                liquidation: Ratio::from_e6(u24_to_u32(position.liqMarginRatio))?,
-                backstop: Ratio::from_e6(u24_to_u32(position.backstopMarginRatio))?,
+                liquidation: stored_ratio(position.liqMarginRatio),
+                backstop: stored_ratio(position.backstopMarginRatio),
             }),
-        })
+        }
     }
+}
+
+/// A stored `uint24` ratio. Every `uint24` is in [`Ratio`]'s domain.
+fn stored_ratio(e6: Uint<24, 1>) -> Ratio {
+    Ratio::from_e6(u24_to_u32(e6)).expect("every uint24 is a ratio")
 }
 
 /// The `v1.0.0` row: three words, no ratios.
@@ -538,21 +545,23 @@ impl StateAt {
     pub async fn position(&self, pos_id: U256) -> Result<Option<PositionRow>> {
         let provider = self.market.chain.provider();
         let row = match self.era().await? {
-            Era::Legacy | Era::Upgradeable => PositionRow::try_from(
+            Era::Legacy | Era::Upgradeable => PositionRow::from(
                 Perp::new(self.market.perp, provider)
                     .positions(pos_id)
                     .block(self.id())
                     .call()
                     .await
                     .map_err(|e| self.read_error(e))?,
-            )?,
-            Era::V1 => v1::Perp::new(self.market.perp, provider)
-                .positions(pos_id)
-                .block(self.id())
-                .call()
-                .await
-                .map_err(|e| self.read_error(e))?
-                .into(),
+            ),
+            Era::V1 => {
+                let data = v1::Perp::new(self.market.perp, provider)
+                    .positions(pos_id)
+                    .block(self.id())
+                    .call_raw()
+                    .await
+                    .map_err(|e| self.read_error(e))?;
+                decode_exact::<v1::Perp::positionsCall>(pos_id, &data, "position")?.into()
+            }
         };
         Ok(row.held())
     }
@@ -578,7 +587,7 @@ impl StateAt {
                     |pos_id| [Perp::positionsCall { posId: pos_id }.abi_encode()],
                     |pos_id, [row]| {
                         let position = decode_row::<Perp::positionsCall>(pos_id, row, "position")?;
-                        Ok(PositionRow::try_from(position)?.held())
+                        Ok(PositionRow::from(position).held())
                     },
                 )
                 .await
@@ -589,7 +598,7 @@ impl StateAt {
                     |pos_id| [v1::Perp::positionsCall { posId: pos_id }.abi_encode()],
                     |pos_id, [row]| {
                         let position =
-                            decode_row::<v1::Perp::positionsCall>(pos_id, row, "position")?;
+                            decode_exact_row::<v1::Perp::positionsCall>(pos_id, row, "position")?;
                         Ok(PositionRow::from(position).held())
                     },
                 )
@@ -748,12 +757,14 @@ impl StateAt {
                 band(maker.tickLower, maker.tickUpper, maker.liquidity)
             }
             Era::V1 => {
-                let maker = v1::Perp::new(self.market.perp, provider)
+                let data = v1::Perp::new(self.market.perp, provider)
                     .makerDetails(pos_id)
                     .block(self.id())
-                    .call()
+                    .call_raw()
                     .await
                     .map_err(|e| self.read_error(e))?;
+                let maker =
+                    decode_exact::<v1::Perp::makerDetailsCall>(pos_id, &data, "maker details")?;
                 band(maker.tickLower, maker.tickUpper, maker.liquidity)
             }
         }
@@ -783,8 +794,11 @@ impl StateAt {
                     pos_ids,
                     |pos_id| [v1::Perp::makerDetailsCall { posId: pos_id }.abi_encode()],
                     |pos_id, [row]| {
-                        let maker =
-                            decode_row::<v1::Perp::makerDetailsCall>(pos_id, row, "maker details")?;
+                        let maker = decode_exact_row::<v1::Perp::makerDetailsCall>(
+                            pos_id,
+                            row,
+                            "maker details",
+                        )?;
                         band(maker.tickLower, maker.tickUpper, maker.liquidity)
                     },
                 )
@@ -1185,6 +1199,49 @@ pub(super) fn decode_row<C: SolCall>(
     })
 }
 
+/// [`decode_row`] for a `v1.0.0` row, which must also be exactly its
+/// return's width ([`decode_exact`]).
+fn decode_exact_row<C: SolCall>(
+    pos_id: U256,
+    row: &IMulticall3::Result,
+    what: &str,
+) -> Result<C::Return> {
+    if row.success {
+        exact_width::<C>(pos_id, &row.returnData, what)?;
+    }
+    decode_row::<C>(pos_id, row, what)
+}
+
+/// `data` decoded as `C`'s return only when it is exactly that return's
+/// width. The decode reads a static return's words and ignores any after
+/// them, so without this check an earlier build's five-word `positions` or
+/// ten-word `makerDetails` answer would read as a `v1.0.0` row. A wrong
+/// width is [`ValidationError::DecodeFailed`], as is an answer that does
+/// not decode.
+pub(super) fn decode_exact<C: SolCall>(pos_id: U256, data: &[u8], what: &str) -> Result<C::Return> {
+    exact_width::<C>(pos_id, data, what)?;
+    C::abi_decode_returns(data).map_err(|e| {
+        ValidationError::DecodeFailed {
+            context: format!("{what} {pos_id}: {e}"),
+        }
+        .into()
+    })
+}
+
+/// Fails unless `data` is exactly the width of `C`'s static return.
+fn exact_width<C: SolCall>(pos_id: U256, data: &[u8], what: &str) -> Result<()> {
+    match <C::ReturnTuple<'_> as SolType>::ENCODED_SIZE {
+        Some(width) if data.len() != width => Err(ValidationError::DecodeFailed {
+            context: format!(
+                "{what} {pos_id}: the answer is {} bytes, the row is {width}",
+                data.len()
+            ),
+        }
+        .into()),
+        _ => Ok(()),
+    }
+}
+
 /// A pinned read's failure, with the two answers a node gives about the
 /// block itself typed for block `number`: its refusal to serve pruned
 /// state is [`ContractError::StateUnavailable`], which is not transient,
@@ -1255,7 +1312,9 @@ mod tests {
     use alloy::transports::TransportErrorKind;
 
     use super::*;
-    use crate::client::mock::{self, PERP, Rpc, e6, returns, x96};
+    use crate::client::mock::{
+        self, PERP, Rpc, e6, returns, v1_maker_words, v1_position_words, x96,
+    };
     use crate::constants::SNAPSHOT_BLOCK_LAG;
     use crate::contracts::{IBeacon, Modules, Rates};
     use crate::math::capacity::Capacity;
@@ -1614,45 +1673,6 @@ mod tests {
 
     // ── A position's row, by build ────────────────────────────────────
 
-    /// One ABI word of a signed value, sign-extended as the ABI encodes
-    /// every `intN`.
-    fn signed_word(value: i128) -> [u8; 32] {
-        I256::try_from(value).unwrap().to_be_bytes::<32>()
-    }
-
-    /// One ABI word of an unsigned value.
-    fn word(value: u128) -> [u8; 32] {
-        U256::from(value).to_be_bytes::<32>()
-    }
-
-    /// The packed `BalanceDelta` word: `amount0` high, `amount1` low.
-    fn delta_word(perp: i128, usd: i128) -> [u8; 32] {
-        crate::convert::pack_balance_delta(perp, usd).to_be_bytes::<32>()
-    }
-
-    /// A `v1.0.0` taker's row as the chain returns it, three words:
-    /// `delta`, `margin`, `lastCumlFundingX96`.
-    fn v1_position_words(perp: i128, usd: i128, margin: u128, funding: i128) -> Vec<u8> {
-        [delta_word(perp, usd), word(margin), signed_word(funding)].concat()
-    }
-
-    /// A `v1.0.0` maker's details as the chain returns them, seven words:
-    /// the band (`tickLower`, `tickUpper`, `liquidity`), the fee-growth
-    /// checkpoint, the nested `MakerFunding` (`belowX96`,
-    /// `withinInventoryX192`) and the funding correction.
-    fn v1_maker_words(lower: i32, upper: i32, liquidity: u128) -> Vec<u8> {
-        [
-            signed_word(lower.into()),
-            signed_word(upper.into()),
-            word(liquidity),
-            word(7),
-            signed_word(-8),
-            signed_word(9),
-            signed_word(-10),
-        ]
-        .concat()
-    }
-
     /// The `v1.0.0` row is three words, and the earlier builds' five-word
     /// binding cannot read it: decoded with the old shape it is a loud
     /// failure, never a row with garbage ratios.
@@ -1687,7 +1707,7 @@ mod tests {
             lastCumlFundingX96: I256::try_from(77).unwrap(),
         };
         assert_eq!(
-            PositionRow::try_from(position).unwrap(),
+            PositionRow::from(position),
             PositionRow {
                 perp: PerpDelta::new(400_000),
                 usd: UsdcDelta::new(-1_000_000),
@@ -1730,8 +1750,12 @@ mod tests {
     }
 
     /// The market's hook names the shape: the two earlier builds read the
-    /// five-word row, `v1.0.0` the three-word one, and each read of the
-    /// other's answer fails loudly. One era read per market, then the row.
+    /// five-word row, `v1.0.0` the three-word one. Each read of the other's
+    /// answer fails loudly: the earlier binding cannot decode three words,
+    /// and the `v1.0.0` read refuses any answer that is not exactly three
+    /// words ([`decode_exact`], tested in
+    /// `v1_row_reads_refuse_an_earlier_build_s_answer`). One era read per
+    /// market, then the row.
     #[tokio::test]
     async fn position_reads_the_row_of_the_market_s_build() {
         let v1_row = v1_position_words(-2_500_000, 3_000_000, 7_000_000, 0);
@@ -1777,6 +1801,89 @@ mod tests {
                 v1::Perp::positionsCall::SELECTOR,
             ]
         );
+        assert!(rpc.is_drained());
+    }
+
+    /// Whether a read failed as a row that does not decode.
+    fn decode_failed<T>(read: &Result<T>) -> bool {
+        matches!(
+            read,
+            Err(PerpCityError::Validation(
+                ValidationError::DecodeFailed { .. }
+            ))
+        )
+    }
+
+    /// Alloy's decode of a static return reads its words and ignores any
+    /// after them, so an earlier build's longer answer decodes as a
+    /// `v1.0.0` row without error. The `v1.0.0` rows are therefore read
+    /// only at their exact width, three words for `positions` and seven
+    /// for `makerDetails`; the earlier builds' decode is unchanged.
+    #[test]
+    fn a_v1_row_is_decoded_only_at_its_exact_width() {
+        let earlier_position = returns::<Perp::positionsCall>(&mock::position(5_000_000));
+        let earlier_maker = returns::<Perp::makerDetailsCall>(&mock::maker(-600, 1_200, 7));
+        assert_eq!(
+            (earlier_position.len(), earlier_maker.len()),
+            (5 * 32, 10 * 32)
+        );
+        assert!(v1::Perp::positionsCall::abi_decode_returns(&earlier_position).is_ok());
+        assert!(v1::Perp::makerDetailsCall::abi_decode_returns(&earlier_maker).is_ok());
+
+        let id = U256::ONE;
+        assert!(decode_failed(&decode_exact::<v1::Perp::positionsCall>(
+            id,
+            &earlier_position,
+            "position"
+        )));
+        assert!(decode_failed(&decode_exact::<v1::Perp::makerDetailsCall>(
+            id,
+            &earlier_maker,
+            "maker details"
+        )));
+        let mut short = v1_position_words(1, 2, 3, 4);
+        short.pop();
+        assert!(decode_failed(&decode_exact::<v1::Perp::positionsCall>(
+            id, &short, "position"
+        )));
+        let row =
+            decode_exact::<v1::Perp::positionsCall>(id, &v1_position_words(1, 2, 3, 4), "position")
+                .unwrap();
+        assert_eq!(row.margin, 3);
+        let maker = decode_exact::<v1::Perp::makerDetailsCall>(
+            id,
+            &v1_maker_words(-600, 1_200, 7),
+            "maker details",
+        )
+        .unwrap();
+        assert_eq!(maker.liquidity, 7);
+
+        // The other way: the earlier binding cannot read three or seven words.
+        assert!(Perp::positionsCall::abi_decode_returns(&v1_position_words(1, 2, 3, 4)).is_err());
+        assert!(
+            Perp::makerDetailsCall::abi_decode_returns(&v1_maker_words(-600, 1_200, 7)).is_err()
+        );
+    }
+
+    /// On a `v1.0.0` market every row read, single and batched, refuses an
+    /// earlier build's five-word position and ten-word maker answer with
+    /// the row's decode error, never a row.
+    #[tokio::test]
+    async fn v1_row_reads_refuse_an_earlier_build_s_answer() {
+        let earlier_position = returns::<Perp::positionsCall>(&mock::position(5_000_000));
+        let earlier_maker = returns::<Perp::makerDetailsCall>(&mock::maker(-600, 1_200, 7));
+        let (state, rpc) = state().await;
+        rpc.immutables(Era::V1);
+        rpc.raw(&earlier_position);
+        assert!(decode_failed(&state.position(U256::ONE).await));
+        rpc.raw(&earlier_maker);
+        assert!(decode_failed(&state.maker_band(U256::ONE).await));
+        rpc.aggregate3(vec![mock::ok_row(earlier_position)]);
+        let rows = state.positions(&[U256::ONE]).await;
+        assert!(decode_failed(&rows[0].row), "{:?}", rows[0].row);
+        rpc.aggregate3(vec![mock::ok_row(earlier_maker)]);
+        let rows = state.maker_bands(&[U256::ONE]).await;
+        assert!(decode_failed(&rows[0].row), "{:?}", rows[0].row);
         assert!(rpc.is_drained());
     }
 
