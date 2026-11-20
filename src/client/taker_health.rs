@@ -22,15 +22,11 @@ use super::state::{PerpViews, RowOutcome, StateAt, decode_row, ema_window_secs};
 use super::u24_to_u32;
 
 impl MarketReader {
-    /// [`StateAt::taker_healths`] at the lagged snapshot block. An empty
-    /// input resolves no block.
+    /// [`StateAt::taker_healths`] at the lagged snapshot block.
     pub async fn get_taker_healths(
         &self,
         pos_ids: &[U256],
     ) -> Result<Vec<RowOutcome<TakerHealth>>> {
-        if pos_ids.is_empty() {
-            return Ok(Vec::new());
-        }
         self.state().await?.taker_healths(pos_ids).await
     }
 }
@@ -56,11 +52,11 @@ impl StateAt {
     /// [`Self::mark`] reads, so [`TakerHealth::is_liquidatable`] is the
     /// verdict `liquidateTaker` would reach at this block.
     pub async fn taker_healths(&self, pos_ids: &[U256]) -> Result<Vec<RowOutcome<TakerHealth>>> {
+        self.require_read_era(false, "taker_healths (use preview_positions)")
+            .await?;
         if pos_ids.is_empty() {
             return Ok(Vec::new());
         }
-        self.require_read_era(false, "taker_healths (use previewPosition)")
-            .await?;
         let market = self.taker_market().await?;
         let outcomes = self
             .rows(

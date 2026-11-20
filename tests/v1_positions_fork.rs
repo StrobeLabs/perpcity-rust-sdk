@@ -17,14 +17,12 @@
 mod v1_fork;
 
 use alloy::eips::BlockId;
-use alloy::primitives::I256;
-use alloy::primitives::{Address, Bytes, U256};
+use alloy::primitives::{Address, Bytes, I256, U256};
 use alloy::providers::DynProvider;
 use alloy::sol_types::{SolError, SolValue};
-use perpcity_sdk::contracts::v1::OpenTakerParams;
-use perpcity_sdk::errors::decode::try_extract_revert;
-
+use perpcity_sdk::contracts::v1::{AdjustMakerParams, AdjustTakerParams, OpenTakerParams};
 use perpcity_sdk::contracts::{Perp as EarlierPerp, v1::Perp};
+use perpcity_sdk::errors::decode::try_extract_revert;
 use perpcity_sdk::{
     ChainReader, ContractError, Era, HftTransport, LUnits, MakerBand, PerpCityError, PositionRow,
     StateAt, TickRange, TransportConfig,
@@ -164,6 +162,38 @@ async fn position_reads_agree_with_the_v1_market() {
         Perp::TvlCapExceeded::SELECTOR
     );
     let new_taker = w.open_taker_sized(m.perp, NEW_TAKER_SIZE).await;
+    let depth = raw.physicalCloseCapacity().call().await.unwrap();
+    assert_ne!(depth.longClose, depth.shortClose);
+    assert!(depth.longClose >= NEW_TAKER_SIZE as u128);
+    let close = AdjustTakerParams {
+        posId: new_taker,
+        marginDelta: 0,
+        perpDelta: I256::try_from(-NEW_TAKER_SIZE).unwrap(),
+        amt1Limit: U256::ZERO,
+        maxTotalFee: U256::from(v1_fork::MAX_TOTAL_FEE),
+        reduceOnly: true,
+        deadline: w.deadline().await,
+    };
+    raw.adjustTaker(close.clone()).from(w.me).call().await.unwrap();
+    // A reduce-only request beyond long depth also exceeds this position.
+    // Perp checks reduce-only before entering the swap.
+    let outside = AdjustTakerParams {
+        perpDelta: -I256::try_from(depth.longClose).unwrap() - I256::ONE,
+        ..close
+    };
+    let error = raw.adjustTaker(outside).from(w.me).call().await.unwrap_err();
+    assert_eq!(try_extract_revert(&error.to_string()).unwrap().1, Perp::ReduceOnlyViolated::SELECTOR);
+    let maker = raw.makerDetails(m.maker_id).call().await.unwrap();
+    let remove = AdjustMakerParams {
+        posId: m.maker_id,
+        marginDelta: 0,
+        liquidityDelta: -i128::try_from(maker.liquidity).unwrap(),
+        amt0Limit: U256::ZERO,
+        amt1Limit: U256::ZERO,
+        deadline: w.deadline().await,
+    };
+    let error = raw.adjustMaker(remove).from(w.me).call().await.unwrap_err();
+    assert_eq!(try_extract_revert(&error.to_string()).unwrap().1, Perp::LongCloseCapacityExceeded::SELECTOR);
     println!("new taker {new_taker}");
     assert_eq!(
         market.get_positions_by_owner(w.me).await.unwrap(),

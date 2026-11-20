@@ -180,6 +180,10 @@ impl PerpCityError {
     pub fn tx_hash(&self) -> Option<FixedBytes<32>> {
         match self {
             Self::Transaction(e) => e.tx_hash(),
+            Self::Contract(
+                ContractError::MinedEventMissing { tx_hash, .. }
+                | ContractError::MinedEventInvalid { tx_hash, .. },
+            ) => Some(*tx_hash),
             _ => None,
         }
     }

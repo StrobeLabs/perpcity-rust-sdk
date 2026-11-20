@@ -580,17 +580,7 @@ impl ChainReader {
             .into());
         };
         if !row.success {
-            let data = row.returnData.to_string();
-            let (error_name, selector) =
-                decode_revert(&data).ok_or_else(|| ContractError::RevertedWithoutSelector {
-                    data: row.returnData.clone(),
-                })?;
-            return Err(TransactionError::SimulationReverted {
-                selector: selector.into(),
-                error_name,
-                revert_data: Some(data),
-            }
-            .into());
+            return Err(row_revert(&row.returnData));
         }
         Ok(U256::from(
             v1::Perp::readBeaconIndexCall::abi_decode_returns_validate(&row.returnData)
@@ -701,6 +691,19 @@ fn storage_read_error(error: TransportError) -> PerpCityError {
             source: Some(Arc::new(other)),
         }
         .into(),
+    }
+}
+
+pub(super) fn row_revert(bytes: &alloy::primitives::Bytes) -> crate::errors::PerpCityError {
+    let data = bytes.to_string();
+    match decode_revert(&data) {
+        Some((error_name, selector)) => TransactionError::SimulationReverted {
+            selector: selector.into(),
+            error_name,
+            revert_data: Some(data),
+        }
+        .into(),
+        None => ContractError::RevertedWithoutSelector { data: bytes.clone() }.into(),
     }
 }
 

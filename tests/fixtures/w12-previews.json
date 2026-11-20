@@ -1,79 +1,936 @@
 [
-["taker_preview/s02_open_long/taker1", ["0", "3961408125713216879677197516799", "9970290", "0", "0", "0", "0", "19999999", "-140659", "9829631", "0", "0", "0", "0", "0"]],
-["taker_preview/s03_open_short/taker2", ["0", "3966729256305268857584825220270", "9969645", "0", "0", "0", "0", "20026864", "113793", "10083438", "0", "0", "0", "0", "0"]],
-["taker_preview/s03_open_short/taker1", ["0", "3966729256305268857584825220270", "9970282", "0", "0", "8", "0", "20026864", "-113794", "9856488", "0", "0", "0", "0", "0"]],
-["taker_preview/s04_open_long_lev/taker3", ["0", "3966222883779161348272895836832", "5166548", "0", "0", "0", "0", "22527346", "-150831", "5015717", "0", "0", "0", "0", "0"]],
-["taker_preview/s04_open_long_lev/taker1", ["0", "3966222883779161348272895836832", "9970251", "0", "19", "20", "0", "20024308", "-116350", "9853901", "0", "0", "0", "0", "0"]],
-["taker_preview/s04_open_long_lev/taker2", ["0", "3966222883779161348272895836832", "9969651", "0", "-18", "12", "0", "20024308", "116349", "10086000", "0", "0", "0", "0", "0"]],
-["taker_preview/s05_lazy_1h/taker1", ["0", "4024252804958513262236191785897", "9948466", "0", "1032", "20792", "0", "20317284", "176626", "10125092", "0", "0", "0", "0", "0"]],
-["taker_preview/s05_lazy_1h/taker2", ["0", "4024252804958513262236191785897", "9894738", "0", "-1031", "75938", "47692", "20317284", "-176627", "9718111", "0", "0", "0", "0", "0"]],
-["taker_preview/s05_lazy_1h/taker3", ["0", "4024252804958513262236191785897", "5142040", "0", "1140", "23368", "0", "22856945", "178768", "5320808", "0", "0", "0", "0", "0"]],
-["taker_preview/s06_touch/taker1", ["0", "4024252804958513262236191785897", "9948466", "0", "1032", "20792", "0", "20317284", "176626", "10125092", "0", "0", "0", "0", "0"]],
-["taker_preview/s06_touch/taker2", ["0", "4024252804958513262236191785897", "9894738", "0", "-1031", "75938", "47692", "20317284", "-176627", "9718111", "0", "0", "0", "0", "0"]],
-["taker_preview/s06_touch/taker3", ["0", "4024252804958513262236191785897", "5142040", "0", "1140", "23368", "0", "22856945", "178768", "5320808", "0", "0", "0", "0", "0"]],
-["taker_preview/s07_index_up_lazy_30m/taker1", ["0", "4270397959518847796292018923111", "9903338", "0", "7642", "59310", "12327", "21560000", "1419342", "11322680", "0", "0", "0", "0", "0"]],
-["taker_preview/s07_index_up_lazy_30m/taker2", ["0", "4270397959518847796292018923111", "9900970", "0", "-7641", "76316", "47692", "21560000", "-1419343", "8481627", "0", "0", "0", "0", "0"]],
-["taker_preview/s07_index_up_lazy_30m/taker3", ["0", "4270397959518847796292018923111", "5091271", "0", "8576", "66701", "13868", "24255000", "1576823", "6668094", "0", "0", "0", "0", "0"]],
-["taker_preview/s08_touch/taker1", ["0", "4270397959518847796292018923111", "9903338", "0", "7642", "59310", "12327", "21560000", "1419342", "11322680", "0", "0", "0", "0", "0"]],
-["taker_preview/s08_touch/taker2", ["0", "4270397959518847796292018923111", "9900970", "0", "-7641", "76316", "47692", "21560000", "-1419343", "8481627", "0", "0", "0", "0", "0"]],
-["taker_preview/s08_touch/taker3", ["0", "4270397959518847796292018923111", "5091271", "0", "8576", "66701", "13868", "24255000", "1576823", "6668094", "0", "0", "0", "0", "0"]],
-["taker_preview/s09_lazy_1d/taker1", ["0", "4270397959518847796292018923111", "9019378", "0", "-1070358", "2021270", "1974287", "21560000", "1419342", "10438720", "0", "0", "0", "0", "0"]],
-["taker_preview/s09_lazy_1d/taker2", ["0", "4270397959518847796292018923111", "6861010", "0", "1070359", "2038276", "2009652", "21560000", "-1419343", "5441667", "0", "0", "0", "0", "0"]],
-["taker_preview/s09_lazy_1d/taker3", ["0", "4270397959518847796292018923111", "4096816", "0", "-1204174", "2273906", "2221073", "24255000", "1576823", "5673639", "0", "0", "0", "0", "0"]],
-["taker_preview/s10_touch/taker1", ["0", "4270397959518847796292018923111", "9019378", "0", "-1070358", "2021270", "1974287", "21560000", "1419342", "10438720", "0", "0", "0", "0", "0"]],
-["taker_preview/s10_touch/taker2", ["0", "4270397959518847796292018923111", "6861010", "0", "1070359", "2038276", "2009652", "21560000", "-1419343", "5441667", "0", "0", "0", "0", "0"]],
-["taker_preview/s10_touch/taker3", ["0", "4270397959518847796292018923111", "4096816", "0", "-1204174", "2273906", "2221073", "24255000", "1576823", "5673639", "0", "0", "0", "0", "0"]],
-["taker_preview/s10b_reduce_short_half/taker2", ["0", "4270397959518847796292018923111", "6719299", "0", "0", "0", "0", "10780000", "-709671", "6009628", "0", "0", "0", "0", "0"]],
-["taker_preview/s10b_reduce_short_half/taker1", ["0", "4270397959518847796292018923111", "9018765", "0", "-1071107", "2022632", "1975650", "21560000", "1419342", "10438107", "0", "0", "0", "0", "0"]],
-["taker_preview/s10b_reduce_short_half/taker3", ["0", "4270397959518847796292018923111", "4096125", "0", "-1205016", "2275439", "2222606", "24255000", "1576823", "5672948", "0", "0", "0", "0", "0"]],
-["taker_preview/s11_index_down_2h/taker1", ["0", "3313321756346534598162008003051", "8963851", "0", "-1138073", "2144512", "2097529", "16727999", "-3412659", "5551192", "0", "0", "0", "0", "0"]],
-["taker_preview/s11_index_down_2h/taker2", ["0", "3313321756346534598162008003051", "6624875", "0", "33484", "60940", "60939", "8363999", "1706330", "8331205", "0", "0", "0", "0", "0"]],
-["taker_preview/s11_index_down_2h/taker3", ["0", "3313321756346534598162008003051", "4034348", "0", "-1280353", "2412553", "2359720", "18818999", "-3859178", "175170", "0", "0", "0", "0", "0"]],
-["taker_preview/s11a_partial_liquidation/taker3", ["0", "3313321756346534598162008003051", "3968546", "0", "0", "0", "0", "9409499", "-1804474", "2164072", "0", "0", "0", "0", "0"]],
-["taker_preview/s11a_partial_liquidation/taker1", ["0", "3313321756346534598162008003051", "8962213", "0", "-1137492", "2145569", "2098586", "16727999", "-3412659", "5549554", "0", "0", "0", "0", "0"]],
-["taker_preview/s11a_partial_liquidation/taker2", ["0", "3313321756346534598162008003051", "6624637", "0", "33193", "61469", "61468", "8363999", "1706330", "8330967", "0", "0", "0", "0", "0"]],
-["taker_preview/s11b_close_long/taker2", ["0", "3313321756346534598162008003051", "6624399", "0", "32903", "61997", "61996", "8363999", "1706330", "8330729", "0", "0", "0", "0", "0"]],
-["taker_preview/s11b_close_long/taker3", ["0", "3313321756346534598162008003051", "3967624", "0", "327", "595", "594", "9409499", "-1804474", "2163150", "0", "0", "0", "0", "0"]],
-["taker_preview/s12_lazy_3d/taker2", ["0", "3313321756346534598162008003051", "5595627", "0", "-1221697", "2345369", "2345368", "8363999", "1706330", "7301957", "0", "0", "0", "0", "0"]],
-["taker_preview/s12_lazy_3d/taker3", ["0", "3313321756346534598162008003051", "-12595", "0", "1411752", "2569389", "2569388", "9409499", "-1804474", "-1817069", "0", "0", "0", "0", "0"]],
-["taker_preview/s13_touch/taker2", ["0", "3313321756346534598162008003051", "5595627", "0", "-1221697", "2345369", "2345368", "8363999", "1706330", "7301957", "0", "0", "0", "0", "0"]],
-["taker_preview/s13_touch/taker3", ["0", "3313321756346534598162008003051", "-12595", "0", "1411752", "2569389", "2569388", "9409499", "-1804474", "-1817069", "0", "0", "0", "0", "0"]],
-["taker_preview/s14_liquidate_lev_long/taker2", ["0", "3313321756346534598162008003051", "5595388", "0", "-1221987", "2345898", "2345897", "8363999", "1706330", "7301718", "0", "0", "0", "0", "0"]],
-["taker_preview/s15_lazy_7d/taker2", ["0", "3313321756346534598162008003051", "3194920", "0", "-4149387", "7673766", "7673765", "8363999", "1706330", "4901250", "0", "0", "0", "0", "0"]],
-["maker_preview/s01_makers/maker1", ["1", "3961408125713216879677197516800", "0", "0", "0", "0", "0", "98447649", "-51", "0", "0", "0", "0", "492237", "0"]],
-["maker_preview/s01_makers/maker2", ["1", "3961408125713216879677197516800", "0", "0", "0", "0", "0", "95940978", "-51", "0", "0", "0", "0", "479704", "0"]],
-["maker_preview/s02_open_long/maker1", ["1", "3961408125713216879677197516799", "0", "0", "0", "0", "0", "98563954", "116255", "0", "0", "0", "0", "492237", "0"]],
-["maker_preview/s02_open_long/maker2", ["1", "3961408125713216879677197516799", "0", "0", "0", "0", "0", "95965278", "24250", "0", "0", "0", "0", "479704", "0"]],
-["maker_preview/s03_open_short/maker1", ["1", "3966729256305268857584825220270", "0", "0", "0", "0", "0", "98513427", "-52", "0", "0", "0", "0", "484604", "0"]],
-["maker_preview/s03_open_short/maker2", ["1", "3966729256305268857584825220270", "0", "0", "0", "0", "0", "95999044", "-51", "0", "0", "0", "0", "478331", "0"]],
-["maker_preview/s04_open_long_lev/maker1", ["1", "3966222883779161348272895836832", "0", "0", "0", "0", "0", "98631889", "124670", "0", "0", "0", "0", "485331", "0"]],
-["maker_preview/s04_open_long_lev/maker2", ["1", "3966222883779161348272895836832", "0", "0", "0", "0", "0", "96019576", "26007", "0", "0", "0", "0", "478461", "0"]],
-["maker_preview/s05_lazy_1h/maker1", ["1", "4024252804958513262236191785897", "0", "0", "0", "0", "0", "99076615", "-147961", "0", "0", "0", "0", "401065", "0"]],
-["maker_preview/s05_lazy_1h/maker2", ["1", "4024252804958513262236191785897", "0", "0", "0", "0", "0", "96595855", "-30961", "0", "0", "0", "0", "463270", "0"]],
-["maker_preview/s06_touch/maker1", ["1", "4024252804958513262236191785897", "0", "0", "0", "0", "0", "99076615", "-147961", "0", "0", "0", "0", "401065", "0"]],
-["maker_preview/s06_touch/maker2", ["1", "4024252804958513262236191785897", "0", "0", "0", "0", "0", "96595855", "-30961", "0", "0", "0", "0", "463270", "0"]],
-["maker_preview/s07_index_up_lazy_30m/maker1", ["1", "4270397959518847796292018923111", "0", "0", "0", "0", "0", "100963004", "-1304383", "0", "0", "0", "0", "233456", "0"]],
-["maker_preview/s07_index_up_lazy_30m/maker2", ["1", "4270397959518847796292018923111", "0", "0", "0", "0", "0", "99040251", "-272604", "0", "0", "0", "0", "394607", "0"]],
-["maker_preview/s08_touch/maker1", ["1", "4270397959518847796292018923111", "0", "0", "0", "0", "0", "100963004", "-1304383", "0", "0", "0", "0", "233456", "0"]],
-["maker_preview/s08_touch/maker2", ["1", "4270397959518847796292018923111", "0", "0", "0", "0", "0", "99040251", "-272604", "0", "0", "0", "0", "394607", "0"]],
-["maker_preview/s09_lazy_1d/maker1", ["1", "4270397959518847796292018923111", "0", "0", "0", "0", "0", "100963004", "-1304383", "0", "0", "0", "0", "233456", "0"]],
-["maker_preview/s09_lazy_1d/maker2", ["1", "4270397959518847796292018923111", "0", "0", "0", "0", "0", "99040251", "-272604", "0", "0", "0", "0", "394607", "0"]],
-["maker_preview/s10_touch/maker1", ["1", "4270397959518847796292018923111", "0", "0", "0", "0", "0", "100963004", "-1304383", "0", "0", "0", "0", "233456", "0"]],
-["maker_preview/s10_touch/maker2", ["1", "4270397959518847796292018923111", "0", "0", "0", "0", "0", "99040251", "-272604", "0", "0", "0", "0", "394607", "0"]],
-["maker_preview/s10b_reduce_short_half/maker1", ["1", "4270397959518847796292018923111", "0", "0", "0", "0", "0", "100479027", "-1788360", "0", "0", "0", "0", "233456", "0"]],
-["maker_preview/s10b_reduce_short_half/maker2", ["1", "4270397959518847796292018923111", "0", "0", "0", "0", "0", "98939115", "-373740", "0", "0", "0", "0", "394607", "0"]],
-["maker_preview/s11_index_down_2h/maker1", ["1", "3313321756346534598162008003051", "0", "0", "0", "0", "0", "95142675", "4706525", "0", "0", "0", "0", "204794", "0"]],
-["maker_preview/s11_index_down_2h/maker2", ["1", "3313321756346534598162008003051", "0", "0", "0", "0", "0", "89852249", "983411", "0", "0", "0", "0", "232863", "0"]],
-["maker_preview/s11a_partial_liquidation/maker1", ["1", "3313321756346534598162008003051", "0", "0", "0", "0", "0", "93443100", "3006950", "0", "0", "0", "0", "204794", "0"]],
-["maker_preview/s11a_partial_liquidation/maker2", ["1", "3313321756346534598162008003051", "0", "0", "0", "0", "0", "89497120", "628282", "0", "0", "0", "0", "232863", "0"]],
-["maker_preview/s11b_close_long/maker1", ["1", "3313321756346534598162008003051", "0", "0", "0", "0", "0", "90605714", "169564", "0", "0", "0", "0", "204794", "0"]],
-["maker_preview/s11b_close_long/maker2", ["1", "3313321756346534598162008003051", "0", "0", "0", "0", "0", "88904235", "35397", "0", "0", "0", "0", "232863", "0"]],
-["maker_preview/s12_lazy_3d/maker1", ["1", "3313321756346534598162008003051", "0", "0", "0", "0", "0", "90605714", "169564", "0", "0", "0", "0", "204794", "0"]],
-["maker_preview/s12_lazy_3d/maker2", ["1", "3313321756346534598162008003051", "0", "0", "0", "0", "0", "88904235", "35397", "0", "0", "0", "0", "232863", "0"]],
-["maker_preview/s13_touch/maker1", ["1", "3313321756346534598162008003051", "0", "0", "0", "0", "0", "90605714", "169564", "0", "0", "0", "0", "204794", "0"]],
-["maker_preview/s13_touch/maker2", ["1", "3313321756346534598162008003051", "0", "0", "0", "0", "0", "88904235", "35397", "0", "0", "0", "0", "232863", "0"]],
-["maker_preview/s14_liquidate_lev_long/maker1", ["1", "3313321756346534598162008003051", "0", "0", "0", "0", "0", "89111652", "-1324498", "0", "0", "0", "0", "204794", "0"]],
-["maker_preview/s14_liquidate_lev_long/maker2", ["1", "3313321756346534598162008003051", "0", "0", "0", "0", "0", "88592006", "-276832", "0", "0", "0", "0", "232863", "0"]],
-["maker_preview/s15_lazy_7d/maker1", ["1", "3313321756346534598162008003051", "0", "0", "0", "0", "0", "89111652", "-1324498", "0", "0", "0", "0", "204794", "0"]],
-["maker_preview/s15_lazy_7d/maker2", ["1", "3313321756346534598162008003051", "0", "0", "0", "0", "0", "88592006", "-276832", "0", "0", "0", "0", "232863", "0"]]
+  {
+    "id": "taker_preview/s02_open_long/taker1",
+    "kind": "taker_preview",
+    "expected": {
+      "mark_price": "3961408125713216879677197516799",
+      "settled_margin": "9970290",
+      "pending_funding": "0",
+      "pending_util": "0",
+      "pending_reserve_util": "0",
+      "value": "19999999",
+      "unrealized_pnl": "-140659",
+      "equity": "9829631"
+    }
+  },
+  {
+    "id": "taker_preview/s03_open_short/taker2",
+    "kind": "taker_preview",
+    "expected": {
+      "mark_price": "3966729256305268857584825220270",
+      "settled_margin": "9969645",
+      "pending_funding": "0",
+      "pending_util": "0",
+      "pending_reserve_util": "0",
+      "value": "20026864",
+      "unrealized_pnl": "113793",
+      "equity": "10083438"
+    }
+  },
+  {
+    "id": "taker_preview/s03_open_short/taker1",
+    "kind": "taker_preview",
+    "expected": {
+      "mark_price": "3966729256305268857584825220270",
+      "settled_margin": "9970282",
+      "pending_funding": "0",
+      "pending_util": "8",
+      "pending_reserve_util": "0",
+      "value": "20026864",
+      "unrealized_pnl": "-113794",
+      "equity": "9856488"
+    }
+  },
+  {
+    "id": "taker_preview/s04_open_long_lev/taker3",
+    "kind": "taker_preview",
+    "expected": {
+      "mark_price": "3966222883779161348272895836832",
+      "settled_margin": "5166548",
+      "pending_funding": "0",
+      "pending_util": "0",
+      "pending_reserve_util": "0",
+      "value": "22527346",
+      "unrealized_pnl": "-150831",
+      "equity": "5015717"
+    }
+  },
+  {
+    "id": "taker_preview/s04_open_long_lev/taker1",
+    "kind": "taker_preview",
+    "expected": {
+      "mark_price": "3966222883779161348272895836832",
+      "settled_margin": "9970251",
+      "pending_funding": "19",
+      "pending_util": "20",
+      "pending_reserve_util": "0",
+      "value": "20024308",
+      "unrealized_pnl": "-116350",
+      "equity": "9853901"
+    }
+  },
+  {
+    "id": "taker_preview/s04_open_long_lev/taker2",
+    "kind": "taker_preview",
+    "expected": {
+      "mark_price": "3966222883779161348272895836832",
+      "settled_margin": "9969651",
+      "pending_funding": "-18",
+      "pending_util": "12",
+      "pending_reserve_util": "0",
+      "value": "20024308",
+      "unrealized_pnl": "116349",
+      "equity": "10086000"
+    }
+  },
+  {
+    "id": "taker_preview/s05_lazy_1h/taker1",
+    "kind": "taker_preview",
+    "expected": {
+      "mark_price": "4024252804958513262236191785897",
+      "settled_margin": "9948466",
+      "pending_funding": "1032",
+      "pending_util": "20792",
+      "pending_reserve_util": "0",
+      "value": "20317284",
+      "unrealized_pnl": "176626",
+      "equity": "10125092"
+    }
+  },
+  {
+    "id": "taker_preview/s05_lazy_1h/taker2",
+    "kind": "taker_preview",
+    "expected": {
+      "mark_price": "4024252804958513262236191785897",
+      "settled_margin": "9894738",
+      "pending_funding": "-1031",
+      "pending_util": "75938",
+      "pending_reserve_util": "47692",
+      "value": "20317284",
+      "unrealized_pnl": "-176627",
+      "equity": "9718111"
+    }
+  },
+  {
+    "id": "taker_preview/s05_lazy_1h/taker3",
+    "kind": "taker_preview",
+    "expected": {
+      "mark_price": "4024252804958513262236191785897",
+      "settled_margin": "5142040",
+      "pending_funding": "1140",
+      "pending_util": "23368",
+      "pending_reserve_util": "0",
+      "value": "22856945",
+      "unrealized_pnl": "178768",
+      "equity": "5320808"
+    }
+  },
+  {
+    "id": "taker_preview/s06_touch/taker1",
+    "kind": "taker_preview",
+    "expected": {
+      "mark_price": "4024252804958513262236191785897",
+      "settled_margin": "9948466",
+      "pending_funding": "1032",
+      "pending_util": "20792",
+      "pending_reserve_util": "0",
+      "value": "20317284",
+      "unrealized_pnl": "176626",
+      "equity": "10125092"
+    }
+  },
+  {
+    "id": "taker_preview/s06_touch/taker2",
+    "kind": "taker_preview",
+    "expected": {
+      "mark_price": "4024252804958513262236191785897",
+      "settled_margin": "9894738",
+      "pending_funding": "-1031",
+      "pending_util": "75938",
+      "pending_reserve_util": "47692",
+      "value": "20317284",
+      "unrealized_pnl": "-176627",
+      "equity": "9718111"
+    }
+  },
+  {
+    "id": "taker_preview/s06_touch/taker3",
+    "kind": "taker_preview",
+    "expected": {
+      "mark_price": "4024252804958513262236191785897",
+      "settled_margin": "5142040",
+      "pending_funding": "1140",
+      "pending_util": "23368",
+      "pending_reserve_util": "0",
+      "value": "22856945",
+      "unrealized_pnl": "178768",
+      "equity": "5320808"
+    }
+  },
+  {
+    "id": "taker_preview/s07_index_up_lazy_30m/taker1",
+    "kind": "taker_preview",
+    "expected": {
+      "mark_price": "4270397959518847796292018923111",
+      "settled_margin": "9903338",
+      "pending_funding": "7642",
+      "pending_util": "59310",
+      "pending_reserve_util": "12327",
+      "value": "21560000",
+      "unrealized_pnl": "1419342",
+      "equity": "11322680"
+    }
+  },
+  {
+    "id": "taker_preview/s07_index_up_lazy_30m/taker2",
+    "kind": "taker_preview",
+    "expected": {
+      "mark_price": "4270397959518847796292018923111",
+      "settled_margin": "9900970",
+      "pending_funding": "-7641",
+      "pending_util": "76316",
+      "pending_reserve_util": "47692",
+      "value": "21560000",
+      "unrealized_pnl": "-1419343",
+      "equity": "8481627"
+    }
+  },
+  {
+    "id": "taker_preview/s07_index_up_lazy_30m/taker3",
+    "kind": "taker_preview",
+    "expected": {
+      "mark_price": "4270397959518847796292018923111",
+      "settled_margin": "5091271",
+      "pending_funding": "8576",
+      "pending_util": "66701",
+      "pending_reserve_util": "13868",
+      "value": "24255000",
+      "unrealized_pnl": "1576823",
+      "equity": "6668094"
+    }
+  },
+  {
+    "id": "taker_preview/s08_touch/taker1",
+    "kind": "taker_preview",
+    "expected": {
+      "mark_price": "4270397959518847796292018923111",
+      "settled_margin": "9903338",
+      "pending_funding": "7642",
+      "pending_util": "59310",
+      "pending_reserve_util": "12327",
+      "value": "21560000",
+      "unrealized_pnl": "1419342",
+      "equity": "11322680"
+    }
+  },
+  {
+    "id": "taker_preview/s08_touch/taker2",
+    "kind": "taker_preview",
+    "expected": {
+      "mark_price": "4270397959518847796292018923111",
+      "settled_margin": "9900970",
+      "pending_funding": "-7641",
+      "pending_util": "76316",
+      "pending_reserve_util": "47692",
+      "value": "21560000",
+      "unrealized_pnl": "-1419343",
+      "equity": "8481627"
+    }
+  },
+  {
+    "id": "taker_preview/s08_touch/taker3",
+    "kind": "taker_preview",
+    "expected": {
+      "mark_price": "4270397959518847796292018923111",
+      "settled_margin": "5091271",
+      "pending_funding": "8576",
+      "pending_util": "66701",
+      "pending_reserve_util": "13868",
+      "value": "24255000",
+      "unrealized_pnl": "1576823",
+      "equity": "6668094"
+    }
+  },
+  {
+    "id": "taker_preview/s09_lazy_1d/taker1",
+    "kind": "taker_preview",
+    "expected": {
+      "mark_price": "4270397959518847796292018923111",
+      "settled_margin": "9019378",
+      "pending_funding": "-1070358",
+      "pending_util": "2021270",
+      "pending_reserve_util": "1974287",
+      "value": "21560000",
+      "unrealized_pnl": "1419342",
+      "equity": "10438720"
+    }
+  },
+  {
+    "id": "taker_preview/s09_lazy_1d/taker2",
+    "kind": "taker_preview",
+    "expected": {
+      "mark_price": "4270397959518847796292018923111",
+      "settled_margin": "6861010",
+      "pending_funding": "1070359",
+      "pending_util": "2038276",
+      "pending_reserve_util": "2009652",
+      "value": "21560000",
+      "unrealized_pnl": "-1419343",
+      "equity": "5441667"
+    }
+  },
+  {
+    "id": "taker_preview/s09_lazy_1d/taker3",
+    "kind": "taker_preview",
+    "expected": {
+      "mark_price": "4270397959518847796292018923111",
+      "settled_margin": "4096816",
+      "pending_funding": "-1204174",
+      "pending_util": "2273906",
+      "pending_reserve_util": "2221073",
+      "value": "24255000",
+      "unrealized_pnl": "1576823",
+      "equity": "5673639"
+    }
+  },
+  {
+    "id": "taker_preview/s10_touch/taker1",
+    "kind": "taker_preview",
+    "expected": {
+      "mark_price": "4270397959518847796292018923111",
+      "settled_margin": "9019378",
+      "pending_funding": "-1070358",
+      "pending_util": "2021270",
+      "pending_reserve_util": "1974287",
+      "value": "21560000",
+      "unrealized_pnl": "1419342",
+      "equity": "10438720"
+    }
+  },
+  {
+    "id": "taker_preview/s10_touch/taker2",
+    "kind": "taker_preview",
+    "expected": {
+      "mark_price": "4270397959518847796292018923111",
+      "settled_margin": "6861010",
+      "pending_funding": "1070359",
+      "pending_util": "2038276",
+      "pending_reserve_util": "2009652",
+      "value": "21560000",
+      "unrealized_pnl": "-1419343",
+      "equity": "5441667"
+    }
+  },
+  {
+    "id": "taker_preview/s10_touch/taker3",
+    "kind": "taker_preview",
+    "expected": {
+      "mark_price": "4270397959518847796292018923111",
+      "settled_margin": "4096816",
+      "pending_funding": "-1204174",
+      "pending_util": "2273906",
+      "pending_reserve_util": "2221073",
+      "value": "24255000",
+      "unrealized_pnl": "1576823",
+      "equity": "5673639"
+    }
+  },
+  {
+    "id": "taker_preview/s10b_reduce_short_half/taker2",
+    "kind": "taker_preview",
+    "expected": {
+      "mark_price": "4270397959518847796292018923111",
+      "settled_margin": "6719299",
+      "pending_funding": "0",
+      "pending_util": "0",
+      "pending_reserve_util": "0",
+      "value": "10780000",
+      "unrealized_pnl": "-709671",
+      "equity": "6009628"
+    }
+  },
+  {
+    "id": "taker_preview/s10b_reduce_short_half/taker1",
+    "kind": "taker_preview",
+    "expected": {
+      "mark_price": "4270397959518847796292018923111",
+      "settled_margin": "9018765",
+      "pending_funding": "-1071107",
+      "pending_util": "2022632",
+      "pending_reserve_util": "1975650",
+      "value": "21560000",
+      "unrealized_pnl": "1419342",
+      "equity": "10438107"
+    }
+  },
+  {
+    "id": "taker_preview/s10b_reduce_short_half/taker3",
+    "kind": "taker_preview",
+    "expected": {
+      "mark_price": "4270397959518847796292018923111",
+      "settled_margin": "4096125",
+      "pending_funding": "-1205016",
+      "pending_util": "2275439",
+      "pending_reserve_util": "2222606",
+      "value": "24255000",
+      "unrealized_pnl": "1576823",
+      "equity": "5672948"
+    }
+  },
+  {
+    "id": "taker_preview/s11_index_down_2h/taker1",
+    "kind": "taker_preview",
+    "expected": {
+      "mark_price": "3313321756346534598162008003051",
+      "settled_margin": "8963851",
+      "pending_funding": "-1138073",
+      "pending_util": "2144512",
+      "pending_reserve_util": "2097529",
+      "value": "16727999",
+      "unrealized_pnl": "-3412659",
+      "equity": "5551192"
+    }
+  },
+  {
+    "id": "taker_preview/s11_index_down_2h/taker2",
+    "kind": "taker_preview",
+    "expected": {
+      "mark_price": "3313321756346534598162008003051",
+      "settled_margin": "6624875",
+      "pending_funding": "33484",
+      "pending_util": "60940",
+      "pending_reserve_util": "60939",
+      "value": "8363999",
+      "unrealized_pnl": "1706330",
+      "equity": "8331205"
+    }
+  },
+  {
+    "id": "taker_preview/s11_index_down_2h/taker3",
+    "kind": "taker_preview",
+    "expected": {
+      "mark_price": "3313321756346534598162008003051",
+      "settled_margin": "4034348",
+      "pending_funding": "-1280353",
+      "pending_util": "2412553",
+      "pending_reserve_util": "2359720",
+      "value": "18818999",
+      "unrealized_pnl": "-3859178",
+      "equity": "175170"
+    }
+  },
+  {
+    "id": "taker_preview/s11a_partial_liquidation/taker3",
+    "kind": "taker_preview",
+    "expected": {
+      "mark_price": "3313321756346534598162008003051",
+      "settled_margin": "3968546",
+      "pending_funding": "0",
+      "pending_util": "0",
+      "pending_reserve_util": "0",
+      "value": "9409499",
+      "unrealized_pnl": "-1804474",
+      "equity": "2164072"
+    }
+  },
+  {
+    "id": "taker_preview/s11a_partial_liquidation/taker1",
+    "kind": "taker_preview",
+    "expected": {
+      "mark_price": "3313321756346534598162008003051",
+      "settled_margin": "8962213",
+      "pending_funding": "-1137492",
+      "pending_util": "2145569",
+      "pending_reserve_util": "2098586",
+      "value": "16727999",
+      "unrealized_pnl": "-3412659",
+      "equity": "5549554"
+    }
+  },
+  {
+    "id": "taker_preview/s11a_partial_liquidation/taker2",
+    "kind": "taker_preview",
+    "expected": {
+      "mark_price": "3313321756346534598162008003051",
+      "settled_margin": "6624637",
+      "pending_funding": "33193",
+      "pending_util": "61469",
+      "pending_reserve_util": "61468",
+      "value": "8363999",
+      "unrealized_pnl": "1706330",
+      "equity": "8330967"
+    }
+  },
+  {
+    "id": "taker_preview/s11b_close_long/taker2",
+    "kind": "taker_preview",
+    "expected": {
+      "mark_price": "3313321756346534598162008003051",
+      "settled_margin": "6624399",
+      "pending_funding": "32903",
+      "pending_util": "61997",
+      "pending_reserve_util": "61996",
+      "value": "8363999",
+      "unrealized_pnl": "1706330",
+      "equity": "8330729"
+    }
+  },
+  {
+    "id": "taker_preview/s11b_close_long/taker3",
+    "kind": "taker_preview",
+    "expected": {
+      "mark_price": "3313321756346534598162008003051",
+      "settled_margin": "3967624",
+      "pending_funding": "327",
+      "pending_util": "595",
+      "pending_reserve_util": "594",
+      "value": "9409499",
+      "unrealized_pnl": "-1804474",
+      "equity": "2163150"
+    }
+  },
+  {
+    "id": "taker_preview/s12_lazy_3d/taker2",
+    "kind": "taker_preview",
+    "expected": {
+      "mark_price": "3313321756346534598162008003051",
+      "settled_margin": "5595627",
+      "pending_funding": "-1221697",
+      "pending_util": "2345369",
+      "pending_reserve_util": "2345368",
+      "value": "8363999",
+      "unrealized_pnl": "1706330",
+      "equity": "7301957"
+    }
+  },
+  {
+    "id": "taker_preview/s12_lazy_3d/taker3",
+    "kind": "taker_preview",
+    "expected": {
+      "mark_price": "3313321756346534598162008003051",
+      "settled_margin": "-12595",
+      "pending_funding": "1411752",
+      "pending_util": "2569389",
+      "pending_reserve_util": "2569388",
+      "value": "9409499",
+      "unrealized_pnl": "-1804474",
+      "equity": "-1817069"
+    }
+  },
+  {
+    "id": "taker_preview/s13_touch/taker2",
+    "kind": "taker_preview",
+    "expected": {
+      "mark_price": "3313321756346534598162008003051",
+      "settled_margin": "5595627",
+      "pending_funding": "-1221697",
+      "pending_util": "2345369",
+      "pending_reserve_util": "2345368",
+      "value": "8363999",
+      "unrealized_pnl": "1706330",
+      "equity": "7301957"
+    }
+  },
+  {
+    "id": "taker_preview/s13_touch/taker3",
+    "kind": "taker_preview",
+    "expected": {
+      "mark_price": "3313321756346534598162008003051",
+      "settled_margin": "-12595",
+      "pending_funding": "1411752",
+      "pending_util": "2569389",
+      "pending_reserve_util": "2569388",
+      "value": "9409499",
+      "unrealized_pnl": "-1804474",
+      "equity": "-1817069"
+    }
+  },
+  {
+    "id": "taker_preview/s14_liquidate_lev_long/taker2",
+    "kind": "taker_preview",
+    "expected": {
+      "mark_price": "3313321756346534598162008003051",
+      "settled_margin": "5595388",
+      "pending_funding": "-1221987",
+      "pending_util": "2345898",
+      "pending_reserve_util": "2345897",
+      "value": "8363999",
+      "unrealized_pnl": "1706330",
+      "equity": "7301718"
+    }
+  },
+  {
+    "id": "taker_preview/s15_lazy_7d/taker2",
+    "kind": "taker_preview",
+    "expected": {
+      "mark_price": "3313321756346534598162008003051",
+      "settled_margin": "3194920",
+      "pending_funding": "-4149387",
+      "pending_util": "7673766",
+      "pending_reserve_util": "7673765",
+      "value": "8363999",
+      "unrealized_pnl": "1706330",
+      "equity": "4901250"
+    }
+  },
+  {
+    "id": "maker_preview/s01_makers/maker1",
+    "kind": "maker_preview_value",
+    "expected": {
+      "value": "98447649",
+      "unrealized_pnl": "-51",
+      "nominal_liq_fee": "492237",
+      "mark_x96": "3961408125713216879677197516800"
+    }
+  },
+  {
+    "id": "maker_preview/s01_makers/maker2",
+    "kind": "maker_preview_value",
+    "expected": {
+      "value": "95940978",
+      "unrealized_pnl": "-51",
+      "nominal_liq_fee": "479704",
+      "mark_x96": "3961408125713216879677197516800"
+    }
+  },
+  {
+    "id": "maker_preview/s02_open_long/maker1",
+    "kind": "maker_preview_value",
+    "expected": {
+      "value": "98563954",
+      "unrealized_pnl": "116255",
+      "nominal_liq_fee": "492237",
+      "mark_x96": "3961408125713216879677197516799"
+    }
+  },
+  {
+    "id": "maker_preview/s02_open_long/maker2",
+    "kind": "maker_preview_value",
+    "expected": {
+      "value": "95965278",
+      "unrealized_pnl": "24250",
+      "nominal_liq_fee": "479704",
+      "mark_x96": "3961408125713216879677197516799"
+    }
+  },
+  {
+    "id": "maker_preview/s03_open_short/maker1",
+    "kind": "maker_preview_value",
+    "expected": {
+      "value": "98513427",
+      "unrealized_pnl": "-52",
+      "nominal_liq_fee": "484604",
+      "mark_x96": "3966729256305268857584825220270"
+    }
+  },
+  {
+    "id": "maker_preview/s03_open_short/maker2",
+    "kind": "maker_preview_value",
+    "expected": {
+      "value": "95999044",
+      "unrealized_pnl": "-51",
+      "nominal_liq_fee": "478331",
+      "mark_x96": "3966729256305268857584825220270"
+    }
+  },
+  {
+    "id": "maker_preview/s04_open_long_lev/maker1",
+    "kind": "maker_preview_value",
+    "expected": {
+      "value": "98631889",
+      "unrealized_pnl": "124670",
+      "nominal_liq_fee": "485331",
+      "mark_x96": "3966222883779161348272895836832"
+    }
+  },
+  {
+    "id": "maker_preview/s04_open_long_lev/maker2",
+    "kind": "maker_preview_value",
+    "expected": {
+      "value": "96019576",
+      "unrealized_pnl": "26007",
+      "nominal_liq_fee": "478461",
+      "mark_x96": "3966222883779161348272895836832"
+    }
+  },
+  {
+    "id": "maker_preview/s05_lazy_1h/maker1",
+    "kind": "maker_preview_value",
+    "expected": {
+      "value": "99076615",
+      "unrealized_pnl": "-147961",
+      "nominal_liq_fee": "401065",
+      "mark_x96": "4024252804958513262236191785897"
+    }
+  },
+  {
+    "id": "maker_preview/s05_lazy_1h/maker2",
+    "kind": "maker_preview_value",
+    "expected": {
+      "value": "96595855",
+      "unrealized_pnl": "-30961",
+      "nominal_liq_fee": "463270",
+      "mark_x96": "4024252804958513262236191785897"
+    }
+  },
+  {
+    "id": "maker_preview/s06_touch/maker1",
+    "kind": "maker_preview_value",
+    "expected": {
+      "value": "99076615",
+      "unrealized_pnl": "-147961",
+      "nominal_liq_fee": "401065",
+      "mark_x96": "4024252804958513262236191785897"
+    }
+  },
+  {
+    "id": "maker_preview/s06_touch/maker2",
+    "kind": "maker_preview_value",
+    "expected": {
+      "value": "96595855",
+      "unrealized_pnl": "-30961",
+      "nominal_liq_fee": "463270",
+      "mark_x96": "4024252804958513262236191785897"
+    }
+  },
+  {
+    "id": "maker_preview/s07_index_up_lazy_30m/maker1",
+    "kind": "maker_preview_value",
+    "expected": {
+      "value": "100963004",
+      "unrealized_pnl": "-1304383",
+      "nominal_liq_fee": "233456",
+      "mark_x96": "4270397959518847796292018923111"
+    }
+  },
+  {
+    "id": "maker_preview/s07_index_up_lazy_30m/maker2",
+    "kind": "maker_preview_value",
+    "expected": {
+      "value": "99040251",
+      "unrealized_pnl": "-272604",
+      "nominal_liq_fee": "394607",
+      "mark_x96": "4270397959518847796292018923111"
+    }
+  },
+  {
+    "id": "maker_preview/s08_touch/maker1",
+    "kind": "maker_preview_value",
+    "expected": {
+      "value": "100963004",
+      "unrealized_pnl": "-1304383",
+      "nominal_liq_fee": "233456",
+      "mark_x96": "4270397959518847796292018923111"
+    }
+  },
+  {
+    "id": "maker_preview/s08_touch/maker2",
+    "kind": "maker_preview_value",
+    "expected": {
+      "value": "99040251",
+      "unrealized_pnl": "-272604",
+      "nominal_liq_fee": "394607",
+      "mark_x96": "4270397959518847796292018923111"
+    }
+  },
+  {
+    "id": "maker_preview/s09_lazy_1d/maker1",
+    "kind": "maker_preview_value",
+    "expected": {
+      "value": "100963004",
+      "unrealized_pnl": "-1304383",
+      "nominal_liq_fee": "233456",
+      "mark_x96": "4270397959518847796292018923111"
+    }
+  },
+  {
+    "id": "maker_preview/s09_lazy_1d/maker2",
+    "kind": "maker_preview_value",
+    "expected": {
+      "value": "99040251",
+      "unrealized_pnl": "-272604",
+      "nominal_liq_fee": "394607",
+      "mark_x96": "4270397959518847796292018923111"
+    }
+  },
+  {
+    "id": "maker_preview/s10_touch/maker1",
+    "kind": "maker_preview_value",
+    "expected": {
+      "value": "100963004",
+      "unrealized_pnl": "-1304383",
+      "nominal_liq_fee": "233456",
+      "mark_x96": "4270397959518847796292018923111"
+    }
+  },
+  {
+    "id": "maker_preview/s10_touch/maker2",
+    "kind": "maker_preview_value",
+    "expected": {
+      "value": "99040251",
+      "unrealized_pnl": "-272604",
+      "nominal_liq_fee": "394607",
+      "mark_x96": "4270397959518847796292018923111"
+    }
+  },
+  {
+    "id": "maker_preview/s10b_reduce_short_half/maker1",
+    "kind": "maker_preview_value",
+    "expected": {
+      "value": "100479027",
+      "unrealized_pnl": "-1788360",
+      "nominal_liq_fee": "233456",
+      "mark_x96": "4270397959518847796292018923111"
+    }
+  },
+  {
+    "id": "maker_preview/s10b_reduce_short_half/maker2",
+    "kind": "maker_preview_value",
+    "expected": {
+      "value": "98939115",
+      "unrealized_pnl": "-373740",
+      "nominal_liq_fee": "394607",
+      "mark_x96": "4270397959518847796292018923111"
+    }
+  },
+  {
+    "id": "maker_preview/s11_index_down_2h/maker1",
+    "kind": "maker_preview_value",
+    "expected": {
+      "value": "95142675",
+      "unrealized_pnl": "4706525",
+      "nominal_liq_fee": "204794",
+      "mark_x96": "3313321756346534598162008003051"
+    }
+  },
+  {
+    "id": "maker_preview/s11_index_down_2h/maker2",
+    "kind": "maker_preview_value",
+    "expected": {
+      "value": "89852249",
+      "unrealized_pnl": "983411",
+      "nominal_liq_fee": "232863",
+      "mark_x96": "3313321756346534598162008003051"
+    }
+  },
+  {
+    "id": "maker_preview/s11a_partial_liquidation/maker1",
+    "kind": "maker_preview_value",
+    "expected": {
+      "value": "93443100",
+      "unrealized_pnl": "3006950",
+      "nominal_liq_fee": "204794",
+      "mark_x96": "3313321756346534598162008003051"
+    }
+  },
+  {
+    "id": "maker_preview/s11a_partial_liquidation/maker2",
+    "kind": "maker_preview_value",
+    "expected": {
+      "value": "89497120",
+      "unrealized_pnl": "628282",
+      "nominal_liq_fee": "232863",
+      "mark_x96": "3313321756346534598162008003051"
+    }
+  },
+  {
+    "id": "maker_preview/s11b_close_long/maker1",
+    "kind": "maker_preview_value",
+    "expected": {
+      "value": "90605714",
+      "unrealized_pnl": "169564",
+      "nominal_liq_fee": "204794",
+      "mark_x96": "3313321756346534598162008003051"
+    }
+  },
+  {
+    "id": "maker_preview/s11b_close_long/maker2",
+    "kind": "maker_preview_value",
+    "expected": {
+      "value": "88904235",
+      "unrealized_pnl": "35397",
+      "nominal_liq_fee": "232863",
+      "mark_x96": "3313321756346534598162008003051"
+    }
+  },
+  {
+    "id": "maker_preview/s12_lazy_3d/maker1",
+    "kind": "maker_preview_value",
+    "expected": {
+      "value": "90605714",
+      "unrealized_pnl": "169564",
+      "nominal_liq_fee": "204794",
+      "mark_x96": "3313321756346534598162008003051"
+    }
+  },
+  {
+    "id": "maker_preview/s12_lazy_3d/maker2",
+    "kind": "maker_preview_value",
+    "expected": {
+      "value": "88904235",
+      "unrealized_pnl": "35397",
+      "nominal_liq_fee": "232863",
+      "mark_x96": "3313321756346534598162008003051"
+    }
+  },
+  {
+    "id": "maker_preview/s13_touch/maker1",
+    "kind": "maker_preview_value",
+    "expected": {
+      "value": "90605714",
+      "unrealized_pnl": "169564",
+      "nominal_liq_fee": "204794",
+      "mark_x96": "3313321756346534598162008003051"
+    }
+  },
+  {
+    "id": "maker_preview/s13_touch/maker2",
+    "kind": "maker_preview_value",
+    "expected": {
+      "value": "88904235",
+      "unrealized_pnl": "35397",
+      "nominal_liq_fee": "232863",
+      "mark_x96": "3313321756346534598162008003051"
+    }
+  },
+  {
+    "id": "maker_preview/s14_liquidate_lev_long/maker1",
+    "kind": "maker_preview_value",
+    "expected": {
+      "value": "89111652",
+      "unrealized_pnl": "-1324498",
+      "nominal_liq_fee": "204794",
+      "mark_x96": "3313321756346534598162008003051"
+    }
+  },
+  {
+    "id": "maker_preview/s14_liquidate_lev_long/maker2",
+    "kind": "maker_preview_value",
+    "expected": {
+      "value": "88592006",
+      "unrealized_pnl": "-276832",
+      "nominal_liq_fee": "232863",
+      "mark_x96": "3313321756346534598162008003051"
+    }
+  },
+  {
+    "id": "maker_preview/s15_lazy_7d/maker1",
+    "kind": "maker_preview_value",
+    "expected": {
+      "value": "89111652",
+      "unrealized_pnl": "-1324498",
+      "nominal_liq_fee": "204794",
+      "mark_x96": "3313321756346534598162008003051"
+    }
+  },
+  {
+    "id": "maker_preview/s15_lazy_7d/maker2",
+    "kind": "maker_preview_value",
+    "expected": {
+      "value": "88592006",
+      "unrealized_pnl": "-276832",
+      "nominal_liq_fee": "232863",
+      "mark_x96": "3313321756346534598162008003051"
+    }
+  }
 ]

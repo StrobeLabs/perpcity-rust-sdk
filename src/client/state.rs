@@ -2302,6 +2302,19 @@ mod tests {
         assert_eq!(rpc.selectors(), [Perp::poolKeyCall::SELECTOR; 5]);
     }
 
+    #[tokio::test]
+    async fn stale_preview_row_keeps_its_selector() {
+        let (state, rpc) = state().await;
+        rpc.immutables(Era::V1);
+        let mut row = mock::failed_row();
+        row.returnData = v1::Perp::StaleBeaconIndex::SELECTOR.to_vec().into();
+        rpc.aggregate3(vec![row]);
+        let rows = state.preview_positions(&[U256::from(1)]).await.unwrap();
+        let error = rows[0].row.as_ref().err().unwrap();
+        assert!(error.is_transient());
+        assert!(matches!(error, PerpCityError::Transaction(e) if e.is_revert::<v1::Perp::StaleBeaconIndex>()));
+    }
+
     /// The batch reads each build's row: on `v1.0.0` the three-word row,
     /// and a closed taker's deleted row is `None`.
     #[tokio::test]

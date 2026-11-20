@@ -8,7 +8,7 @@ use crate::errors::Result;
 use crate::math::capacity::Capacity;
 use crate::units::PerpAtoms;
 
-use super::{RowOutcome, StateAt, decode_row};
+use super::{RowOutcome, StateAt, decode_exact, decode_exact_row};
 
 /// V1 collateral cap and accounted collateral, in USDC atoms at one block.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -32,12 +32,13 @@ impl StateAt {
     /// Read the v1 liquidation preview at this block.
     pub async fn preview_position(&self, pos_id: U256) -> Result<v1::PositionPreview> {
         self.require_read_era(true, "preview_position").await?;
-        v1::Perp::new(self.market.perp, self.market.chain.provider())
+        let bytes = v1::Perp::new(self.market.perp, self.market.chain.provider())
             .previewPosition(pos_id)
             .block(self.id())
-            .call()
+            .call_raw()
             .await
-            .map_err(|e| self.read_error(e))
+            .map_err(|e| self.read_error(e))?;
+        decode_exact::<v1::Perp::previewPositionCall>(pos_id, &bytes, "previewPosition")
     }
 
     /// Read v1 previews in input order. A missing position has no row.
@@ -59,7 +60,10 @@ impl StateAt {
                     {
                         return Ok(None);
                     }
-                    decode_row::<v1::Perp::previewPositionCall>(id, row, "previewPosition")
+                    if !row.success {
+                        return Err(crate::client::chain::row_revert(&row.returnData));
+                    }
+                    decode_exact_row::<v1::Perp::previewPositionCall>(id, row, "previewPosition")
                         .map(Some)
                 },
             )
