@@ -2,10 +2,14 @@
 //! characterised without a node.
 //!
 //! The mock answers requests in arrival order from a queue the test fills
-//! beforehand, and never inspects a request. A test therefore pins three
-//! things about a read: how many RPCs it makes (an unanswered request
-//! fails, and [`Rpc::is_drained`] proves none was left over), what it
-//! makes of the bytes it gets back, and what it remembers between calls.
+//! beforehand, and answers without inspecting a request. A test therefore
+//! pins four things about a read: how many RPCs it makes (an unanswered
+//! request fails, and [`Rpc::is_drained`] proves none was left over), what
+//! it makes of the bytes it gets back, what it remembers between calls,
+//! and, through [`Rpc::calls`], which calls it asked for.
+
+use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll};
 
 use alloy::consensus::Header as ConsensusHeader;
 use alloy::network::Ethereum;
@@ -13,22 +17,25 @@ use alloy::primitives::{Address, B256, Bytes, I256, Signed, U64, U256, Uint};
 use alloy::providers::RootProvider;
 use alloy::providers::bindings::IMulticall3 as Multicall;
 use alloy::rpc::client::RpcClient;
-use alloy::rpc::json_rpc::ErrorPayload;
+use alloy::rpc::json_rpc::{ErrorPayload, RequestPacket, ResponsePacket};
 use alloy::rpc::types::{
     Block, BlockTransactions, EIP1186AccountProofResponse, EIP1186StorageProof, Header,
 };
 use alloy::signers::local::PrivateKeySigner;
 use alloy::sol_types::SolCall;
-use alloy::transports::mock::Asserter;
+use alloy::transports::mock::{Asserter, MockTransport};
+use alloy::transports::{TransportError, TransportFut};
 use serde_json::value::RawValue;
+use tower::Service;
 
 use crate::contracts::{
     Capacity, IMulticall3, Maker, MakerFunding, Modules, OpenInterest, Perp, PoolKey, Position,
-    Rates, SolvencyState,
+    Rates, SolvencyState, v1,
 };
 use crate::{HftTransport, TransportConfig};
 
 use super::chain::ChainReader;
+use super::queries::Era;
 use super::{ChainDeployments, PerpClient};
 
 /// The market the mocked client points at.
@@ -52,6 +59,8 @@ pub(super) const CHAIN_ID: u64 = 42_161;
 pub(super) const V022_HOOK: Address = Address::repeat_byte(0x0a);
 /// The mocked chain's `v1.0.0` guard hook.
 pub(super) const V1_HOOK: Address = Address::repeat_byte(0x0b);
+/// The pool id [`Rpc::immutables`] answers.
+pub(super) const POOL_ID: B256 = B256::repeat_byte(0x99);
 
 /// A client whose every RPC is answered by the returned [`Rpc`].
 pub(super) fn client() -> (PerpClient, Rpc) {
@@ -62,9 +71,57 @@ pub(super) fn client() -> (PerpClient, Rpc) {
 /// transport the test hands in — the same one to several clients, to
 /// test what the transport remembers on their behalf.
 pub(super) fn client_sharing(transport: HftTransport) -> (PerpClient, Rpc) {
-    let asserter = Asserter::new();
-    let provider = RootProvider::<Ethereum>::new(RpcClient::mocked(asserter.clone()));
-    (client_with(provider, transport), Rpc(asserter))
+    let (provider, rpc) = mocked();
+    (client_with(provider, transport), rpc)
+}
+
+/// A provider over the mock's queue, and the queue.
+fn mocked() -> (RootProvider<Ethereum>, Rpc) {
+    let recorder = Recorder {
+        mock: MockTransport::new(Asserter::new()),
+        calls: Arc::default(),
+    };
+    let rpc = Rpc {
+        asserter: recorder.mock.asserter().clone(),
+        calls: Arc::clone(&recorder.calls),
+    };
+    (RootProvider::new(RpcClient::new(recorder, true)), rpc)
+}
+
+/// The mock transport, keeping the calldata of every `eth_call` it is
+/// asked, in arrival order.
+#[derive(Clone)]
+struct Recorder {
+    mock: MockTransport,
+    calls: Arc<Mutex<Vec<Bytes>>>,
+}
+
+impl Service<RequestPacket> for Recorder {
+    type Response = ResponsePacket;
+    type Error = TransportError;
+    type Future = TransportFut<'static>;
+
+    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        self.mock.poll_ready(cx)
+    }
+
+    fn call(&mut self, req: RequestPacket) -> Self::Future {
+        for req in req.requests() {
+            if req.method() != "eth_call" {
+                continue;
+            }
+            let params: serde_json::Value =
+                serde_json::from_str(req.params().map_or("null", RawValue::get))
+                    .expect("a request's params are JSON");
+            let call = &params[0];
+            let input = call["input"].as_str().or_else(|| call["data"].as_str());
+            if let Some(input) = input {
+                let calldata = alloy::hex::decode(input).expect("calldata is hex");
+                self.calls.lock().unwrap().push(calldata.into());
+            }
+        }
+        self.mock.call(req)
+    }
 }
 
 /// A client over any provider — a mocked one, or a
@@ -76,9 +133,8 @@ pub(super) fn client_over(provider: RootProvider<Ethereum>) -> PerpClient {
 
 /// A chain reader on its own, every RPC answered by the returned [`Rpc`].
 pub(super) fn chain() -> (ChainReader, Rpc) {
-    let asserter = Asserter::new();
-    let provider = RootProvider::<Ethereum>::new(RpcClient::mocked(asserter.clone()));
-    (chain_with(provider, transport()), Rpc(asserter))
+    let (provider, rpc) = mocked();
+    (chain_with(provider, transport()), rpc)
 }
 
 /// A transport no request ever reaches: the mocked provider is not wired
@@ -112,13 +168,63 @@ fn client_with(provider: RootProvider<Ethereum>, transport: HftTransport) -> Per
     PerpClient::new(chain_with(provider, transport).market(PERP), signer)
 }
 
-/// The mock's answer queue, in the vocabulary of the reads.
-pub(super) struct Rpc(Asserter);
+/// The mock's answer queue, in the vocabulary of the reads, and the calls
+/// it was asked.
+pub(super) struct Rpc {
+    asserter: Asserter,
+    calls: Arc<Mutex<Vec<Bytes>>>,
+}
 
 impl Rpc {
     /// The next `eth_call` returns `ret`, encoded as `C`'s return.
     pub(super) fn call<C: SolCall>(&self, ret: &C::Return) {
-        self.0.push_success(&Bytes::from(returns::<C>(ret)));
+        self.asserter.push_success(&Bytes::from(returns::<C>(ret)));
+    }
+
+    /// The next `eth_call` returns these bytes as they are: an answer in
+    /// a shape no binding of the caller's encodes.
+    pub(super) fn raw(&self, data: &[u8]) {
+        self.asserter.push_success(&Bytes::copy_from_slice(data));
+    }
+
+    /// The next two `eth_call`s are the immutables of a market of `era`:
+    /// its pool key, naming the mocked chain's hook for the build, then
+    /// the build's pool id view.
+    pub(super) fn immutables(&self, era: Era) {
+        let hook = match era {
+            Era::Legacy => Address::ZERO,
+            Era::Upgradeable => V022_HOOK,
+            Era::V1 => V1_HOOK,
+        };
+        self.call::<Perp::poolKeyCall>(&pool_key_with_hook(30, hook));
+        match era {
+            Era::Legacy | Era::Upgradeable => self.call::<Perp::POOL_IDCall>(&POOL_ID),
+            Era::V1 => self.call::<v1::Perp::poolIdCall>(&POOL_ID),
+        }
+    }
+
+    /// The calldata of every `eth_call` asked so far, in order; a
+    /// multicall is one entry.
+    pub(super) fn calls(&self) -> Vec<Bytes> {
+        self.calls.lock().unwrap().clone()
+    }
+
+    /// The selector of every `eth_call` asked so far, and of every call
+    /// inside an `aggregate3` in its place, in order.
+    pub(super) fn selectors(&self) -> Vec<[u8; 4]> {
+        self.calls()
+            .iter()
+            .flat_map(
+                |calldata| match IMulticall3::aggregate3Call::abi_decode(calldata) {
+                    Ok(batch) => batch
+                        .calls
+                        .iter()
+                        .map(|call| selector(&call.callData))
+                        .collect(),
+                    Err(_) => vec![selector(calldata)],
+                },
+            )
+            .collect()
     }
 
     /// The next Multicall3 `aggregate` returns these encoded results, in
@@ -137,7 +243,7 @@ impl Rpc {
 
     /// The next request returns a hex quantity (`eth_blockNumber`).
     pub(super) fn quantity(&self, n: u64) {
-        self.0.push_success(&U64::from(n));
+        self.asserter.push_success(&U64::from(n));
     }
 
     /// The next `eth_getBlockByNumber` finds a header with this number
@@ -150,25 +256,25 @@ impl Rpc {
         });
         let hash = header.hash;
         let block: Block = Block::new(header, BlockTransactions::Hashes(Vec::new()));
-        self.0.push_success(&block);
+        self.asserter.push_success(&block);
         hash
     }
 
     /// The next `eth_getBlockByNumber` finds nothing.
     pub(super) fn no_block(&self) {
-        self.0.push_success(&Option::<Block>::None);
+        self.asserter.push_success(&Option::<Block>::None);
     }
 
     /// The next `eth_getStorageAt` returns `word`.
     pub(super) fn storage(&self, word: U256) {
-        self.0.push_success(&word);
+        self.asserter.push_success(&word);
     }
 
     /// The next `eth_getProof` proves these `(slot, value)` pairs of
     /// `account`'s storage; the proofs themselves are empty, since the
     /// reads take the values on trust.
     pub(super) fn proof(&self, account: Address, slots: impl IntoIterator<Item = (U256, U256)>) {
-        self.0.push_success(&EIP1186AccountProofResponse {
+        self.asserter.push_success(&EIP1186AccountProofResponse {
             address: account,
             balance: U256::ZERO,
             code_hash: B256::ZERO,
@@ -189,13 +295,13 @@ impl Rpc {
     /// The next request fails as the node's own error, with no revert
     /// data: a transport-level failure.
     pub(super) fn fails(&self, message: &'static str) {
-        self.0.push_failure_msg(message);
+        self.asserter.push_failure_msg(message);
     }
 
     /// The next request is refused as a method the endpoint does not
     /// serve (JSON-RPC `-32601`), the one answer worth remembering.
     pub(super) fn method_not_found(&self) {
-        self.0.push_failure(ErrorPayload {
+        self.asserter.push_failure(ErrorPayload {
             code: -32601,
             message: "the method does not exist/is not available".into(),
             data: None,
@@ -207,7 +313,7 @@ impl Rpc {
     pub(super) fn reverts(&self, data: &[u8]) {
         let data = RawValue::from_string(format!("\"0x{}\"", alloy::hex::encode(data)))
             .expect("a quoted hex string is valid JSON");
-        self.0.push_failure(ErrorPayload {
+        self.asserter.push_failure(ErrorPayload {
             code: 3,
             message: "execution reverted".into(),
             data: Some(data),
@@ -217,7 +323,7 @@ impl Rpc {
     /// Whether every queued answer was consumed: the reads made exactly
     /// the RPCs the test expected.
     pub(super) fn is_drained(&self) -> bool {
-        self.0.read_q().is_empty()
+        self.asserter.read_q().is_empty()
     }
 }
 
@@ -367,6 +473,11 @@ pub(super) fn position(margin: u128) -> Position {
         backstopMarginRatio: Uint::ZERO,
         lastCumlFundingX96: I256::ZERO,
     }
+}
+
+/// A call's selector: its first four bytes.
+fn selector(calldata: &[u8]) -> [u8; 4] {
+    calldata[..4].try_into().expect("a call has a selector")
 }
 
 /// A price as the contract stores it: `mantissa / 2^shift`, in Q96.

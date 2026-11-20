@@ -330,13 +330,14 @@ async fn open_and_close_taker_on_fork() {
         open_result.usd_delta.atoms()
     );
 
-    // 9. Read position on-chain. `delta` is a packed BalanceDelta; `margin` is
-    //    in USDC 6-decimal units. Price-impact / live position details deferred
-    //    to the quoting stage — see issue #56.
+    // 9. Read position on-chain: its two legs and its margin, in exact atoms.
+    //    Price-impact / live position details deferred to the quoting stage —
+    //    see issue #56.
     let pos = client.market().get_position(pos_id).await.unwrap();
-    println!("  Margin (6-dec): {}", pos.margin);
-    println!("  Packed delta:   {}", pos.delta);
-    assert!(pos.margin > 0, "position margin should be positive");
+    println!("  Margin (USDC):  {}", pos.margin);
+    println!("  Perp leg:       {}", pos.perp);
+    println!("  USD leg:        {}", pos.usd);
+    assert!(pos.margin.atoms() > 0, "position margin should be positive");
 
     // 10. Adjust taker — reduce exposure by 0.5 perp (negative perp delta)
     println!("\nAdjusting taker -0.5 perp (reducing long exposure)...");

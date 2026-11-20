@@ -6,8 +6,8 @@ use alloy::sol_types::SolEvent;
 use serde::{Deserialize, Serialize};
 
 use crate::constants::{MIN_OPENING_MARGIN, TICK_SPACING};
-use crate::contracts::{IERC20, Perp, Position};
-use crate::convert::{scale_from_6dec, scale_to_6dec, unpack_balance_delta};
+use crate::contracts::{IERC20, Perp};
+use crate::convert::{scale_from_6dec, scale_to_6dec};
 use crate::errors::{ContractError, Result, TransactionError, ValidationError};
 use crate::feeds::{MarketEvent, decode_log};
 use crate::hft::gas::{GasLimits, Urgency};
@@ -16,6 +16,7 @@ use crate::math::tick::{align_tick_down, align_tick_up, price_to_tick};
 use crate::units::{LDelta, LUnits, PerpAtoms, PerpDelta, UsdcAtoms, UsdcDelta};
 
 use super::market::{PositionRole, validate_fee_recipient};
+use super::state::PositionRow;
 use super::{MAX_APPROVAL, PerpClient, i32_to_i24};
 
 // ── Parameters ──────────────────────────────────────────────────────
@@ -272,9 +273,8 @@ fn adjust_taker_result(receipt: &TransactionReceipt) -> Result<AdjustTakerResult
 }
 
 /// The perp delta that closes a position: its on-chain perp amount, reversed.
-fn closing_perp_delta(position: &Position) -> PerpDelta {
-    let (perp_atoms, _usd_atoms) = unpack_balance_delta(position.delta);
-    PerpDelta::new(-perp_atoms)
+fn closing_perp_delta(position: &PositionRow) -> PerpDelta {
+    PerpDelta::new(-position.perp.atoms())
 }
 
 /// Refuse a margin below the protocol's opening minimum.
@@ -942,7 +942,7 @@ mod tests {
     use alloy::primitives::{Address, B256, I256, U256, Uint};
 
     use super::{
-        AdjustTakerResult, OpenResult, PerpDelta, UsdcAtoms, UsdcDelta, closes_taker,
+        AdjustTakerResult, OpenResult, PerpDelta, PositionRow, UsdcAtoms, UsdcDelta, closes_taker,
         closing_perp_delta, scale_opening_margin,
     };
     use crate::constants::Q96;
@@ -975,14 +975,15 @@ mod tests {
         assert_eq!(result, recovered);
     }
 
-    fn position(perp_atoms: i128, usd_atoms: i128) -> Position {
-        Position {
+    fn position(perp_atoms: i128, usd_atoms: i128) -> PositionRow {
+        PositionRow::try_from(Position {
             delta: pack_balance_delta(perp_atoms, usd_atoms),
             margin: 3_936_538_407,
             liqMarginRatio: Uint::ZERO,
             backstopMarginRatio: Uint::ZERO,
             lastCumlFundingX96: I256::ZERO,
-        }
+        })
+        .unwrap()
     }
 
     fn swap(perp_atoms: i128) -> SwapResult {

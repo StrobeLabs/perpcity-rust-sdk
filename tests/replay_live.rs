@@ -21,7 +21,6 @@
 use std::env;
 
 use alloy::primitives::{Address, U256};
-use perpcity_sdk::convert::unpack_balance_delta;
 use perpcity_sdk::history::{Fold, PositionKind, Replay};
 use perpcity_sdk::{ChainReader, HftTransport, StateAt, TransportConfig};
 
@@ -195,7 +194,7 @@ async fn agrees(replay: &Replay, state: &StateAt, ema_window: u64) {
         match folded.kind() {
             PositionKind::Taker { .. } => match folded.taker_size() {
                 Some(size) => {
-                    let (perp, usd) = unpack_balance_delta(row.delta);
+                    let (perp, usd) = (row.perp.atoms(), row.usd.atoms());
                     assert_eq!(size.atoms(), perp, "position {pos_id}'s size");
                     assert_eq!(
                         folded.taker_usd().map(|leg| leg.atoms()),

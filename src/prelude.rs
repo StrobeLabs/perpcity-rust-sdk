@@ -12,7 +12,8 @@
 //! (`GasLimits`, `Urgency`), the event vocabulary and the feed that
 //! streams it (`MarketEvent`, `decode_log`, `MarketFeed`, ...), the
 //! client-facing params/result types
-//! (`OpenTakerParams`, `OpenResult`, `SolvencyState`, ...), the maker-equity types
+//! (`OpenTakerParams`, `OpenResult`, `SolvencyState`, ...), a position's stored
+//! row (`PositionRow`, `StoredMarginRatios`), the maker-equity types
 //! (`MakerEquityBreakdown`, `MakerState`, ...), the market's margin-ratio
 //! thresholds (`MarginRatios`, `MarginRatioTriple`), liquidity sizing
 //! (`estimate_liquidity`, `liquidity_for_target_ratio`,
@@ -46,11 +47,11 @@ pub use crate::{
     MakerEquityBreakdown, MakerEquityKind, MakerEquityOutcome, MakerMarketSnapshot, MakerState,
     MarginRatioTriple, MarginRatios, Mark, MarketCapacity, MarketConfig, MarketEvent, MarketFeed,
     MarketReader, MarketSnapshot, OpenInterest, OpenMakerParams, OpenResult, OpenTakerParams,
-    PerSide, PerpAtoms, PerpCityError, PerpClient, PerpDelta, Price, Ratio, Result, RevertClass,
-    RowOutcome, Share, Side, SolvencyState, SqrtPrice, StateAt, TickFunding, TickRange,
-    TransactionError, TransportConfig, TxBuilder, Urgency, UsdcAtoms, UsdcDelta, UtilizationRate,
-    ValidationError, align_tick_down, align_tick_up, amounts_for_liquidity, band_capacity,
-    decode_log, estimate_liquidity, fair_price, fair_price_f64, get_sqrt_ratio_at_tick,
-    get_tick_at_sqrt_ratio, liquidity_for_capacity, liquidity_for_target_ratio,
-    margin_for_liquidity, price_to_tick, tick_to_price,
+    PerSide, PerpAtoms, PerpCityError, PerpClient, PerpDelta, PositionRow, Price, Ratio, Result,
+    RevertClass, RowOutcome, Share, Side, SolvencyState, SqrtPrice, StateAt, StoredMarginRatios,
+    TickFunding, TickRange, TransactionError, TransportConfig, TxBuilder, Urgency, UsdcAtoms,
+    UsdcDelta, UtilizationRate, ValidationError, align_tick_down, align_tick_up,
+    amounts_for_liquidity, band_capacity, decode_log, estimate_liquidity, fair_price,
+    fair_price_f64, get_sqrt_ratio_at_tick, get_tick_at_sqrt_ratio, liquidity_for_capacity,
+    liquidity_for_target_ratio, margin_for_liquidity, price_to_tick, tick_to_price,
 };
