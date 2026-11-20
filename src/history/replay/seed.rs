@@ -6,9 +6,8 @@ use std::collections::BTreeMap;
 
 use alloy::primitives::{Address, U256};
 
-use crate::client::{MarketRates, SolvencyState, StateAt};
+use crate::client::{MarketRates, PositionRow, SolvencyState, StateAt};
 use crate::contracts::Modules;
-use crate::convert::unpack_balance_delta;
 use crate::errors::{Result, ValidationError};
 use crate::events::CumulativesInfo;
 use crate::math::BlockContext;
@@ -88,8 +87,9 @@ impl Seed {
             let Some(row) = row.row? else {
                 continue;
             };
-            let margin = UsdcAtoms::new(row.margin);
-            let (perp, usd) = unpack_balance_delta(row.delta);
+            let PositionRow {
+                perp, usd, margin, ..
+            } = row;
             let position = match band.row? {
                 Some(band) => SeedPosition::Maker {
                     range: band.range,
@@ -98,17 +98,17 @@ impl Seed {
                             context: "a band's liquidity as a signed sum".into(),
                         },
                     )?),
-                    moved: PerpDelta::new(perp),
-                    usd: UsdcDelta::new(usd),
+                    moved: perp,
+                    usd,
                     margin,
                 },
                 None => {
-                    if perp == 0 {
+                    if perp == PerpDelta::ZERO {
                         SeedPosition::Unknown { margin }
                     } else {
                         SeedPosition::Taker {
-                            size: PerpDelta::new(perp),
-                            usd: UsdcDelta::new(usd),
+                            size: perp,
+                            usd,
                             margin,
                         }
                     }

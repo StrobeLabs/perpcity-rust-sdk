@@ -144,13 +144,14 @@ async fn main() -> perpcity_sdk::Result<()> {
     println!("Position opened! NFT ID: {position_id}");
 
     // ── 7. Read position state ──────────────────────────────────────
-    // The position's `delta` is a packed Uniswap V4 BalanceDelta; `margin` is
-    // in USDC 6-decimal units. Price-impact / live PnL details deferred to the
-    // quoting stage — see issue #56.
+    // The row's two legs and its margin are exact atoms, printed as decimals.
+    // Price-impact / live PnL details deferred to the quoting stage — see
+    // issue #56.
     let pos = client.market().get_position(position_id).await?;
     println!("\n=== Position {position_id} ===");
-    println!("  Margin (6-dec): {}", pos.margin);
-    println!("  Packed delta:   {}", pos.delta);
+    println!("  Margin (USDC):  {}", pos.margin);
+    println!("  Perp leg:       {}", pos.perp);
+    println!("  USD leg:        {}", pos.usd);
 
     // ── 8. Close position (reverse the taker delta) ─────────────────
     println!("\nClosing position by reversing the taker delta...");

@@ -54,7 +54,8 @@ pub use market::{MarketReader, PositionRole};
 pub use queries::{Bounds, Era, Fees, MarketConfig, MarketSnapshot, OpenInterest};
 pub use state::Books;
 pub use state::{
-    MAX_ROW_BATCH, MarginRatioTriple, MarginRatios, MarketRates, RowOutcome, SolvencyState, StateAt,
+    MAX_ROW_BATCH, MarginRatioTriple, MarginRatios, MarketRates, PositionRow, RowOutcome,
+    SolvencyState, StateAt, StoredMarginRatios,
 };
 pub use trades::{
     AdjustMakerParams, AdjustMakerResult, AdjustTakerParams, AdjustTakerResult,

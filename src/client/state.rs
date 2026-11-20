@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use alloy::eips::BlockId;
-use alloy::primitives::{Address, B256, U256};
+use alloy::primitives::{Address, B256, Signed, U256};
 use alloy::providers::{MulticallError, Provider};
 use alloy::sol_types::{SolCall, SolError};
 use alloy::transports::{RpcError, TransportError};
@@ -22,7 +22,9 @@ use crate::constants::{
 };
 use crate::contracts::{
     IERC20, IMarginRatios, IMulticall3, IPoolManagerState, IPriceImpact, Modules, Perp, Position,
+    v1,
 };
+use crate::convert::unpack_balance_delta;
 use crate::errors::{ContractError, PerpCityError, Result, ValidationError};
 use crate::events::CumulativesInfo;
 use crate::math::BlockContext;
@@ -32,11 +34,12 @@ use crate::math::range::{MakerBand, TickRange};
 use crate::math::swap::{PoolSnapshot, TickLiquidity, active_liquidity};
 use crate::storage::{v4_tick_bitmap_slot, v4_tick_slot};
 use crate::units::{
-    FundingRate, LDelta, LUnits, PerSide, Price, Ratio, SqrtPrice, UsdcAtoms, UtilizationRate,
+    Funding, FundingRate, LDelta, LUnits, PerSide, PerpDelta, Price, Ratio, SqrtPrice, UsdcAtoms,
+    UsdcDelta, UtilizationRate,
 };
 
 use super::market::MarketReader;
-use super::queries::{MarketImmutables, multicall_error, registered_module};
+use super::queries::{Era, MarketImmutables, multicall_error, registered_module};
 use super::{i24_to_i32, u24_to_u32};
 
 /// Maximum position ids per multicall inside a batched row read.
@@ -170,6 +173,85 @@ pub struct MarketRates {
     pub last_touch: u64,
 }
 
+/// One position's stored row, whichever build the market runs: its two
+/// legs, its settled margin and its funding checkpoint, in the chain's
+/// units. The two earlier builds' row also holds the liquidation and
+/// backstop ratios the position stored at open; `v1.0.0` reads both live
+/// from the margin-ratio module, so its row has none.
+///
+/// An empty row is how every build reports an id never minted or closed,
+/// so a read hands back `None` (or `PositionNotFound`) for it, never this.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PositionRow {
+    /// The perp leg: `amount0` of the stored `BalanceDelta`.
+    pub perp: PerpDelta,
+    /// The USD leg: `amount1` of the stored `BalanceDelta`.
+    pub usd: UsdcDelta,
+    /// The settled margin.
+    pub margin: UsdcAtoms,
+    /// The market's funding cumulative at the position's last settle,
+    /// `lastCumlFundingX96`.
+    pub last_cuml_funding: Funding,
+    /// The ratios stored at open, on build `58b42b7` and `v0.2.2`; `None`
+    /// on `v1.0.0`.
+    pub stored_margin_ratios: Option<StoredMarginRatios>,
+}
+
+/// The two margin ratios a position of build `58b42b7` or `v0.2.2` stored
+/// at open, each the contract's `uint24` at 1e6.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoredMarginRatios {
+    /// `liqMarginRatio`: equity over value below which it is liquidatable.
+    pub liquidation: Ratio,
+    /// `backstopMarginRatio`: equity over value below which it can be
+    /// backstopped.
+    pub backstop: Ratio,
+}
+
+impl PositionRow {
+    /// The row, or `None` for the empty row of an id never minted or
+    /// closed: no margin and both legs zero.
+    pub(super) fn held(self) -> Option<Self> {
+        (self.margin != UsdcAtoms::ZERO
+            || self.perp != PerpDelta::ZERO
+            || self.usd != UsdcDelta::ZERO)
+            .then_some(self)
+    }
+}
+
+/// The two earlier builds' row, with its stored ratios.
+impl TryFrom<Position> for PositionRow {
+    type Error = ValidationError;
+
+    fn try_from(position: Position) -> std::result::Result<Self, ValidationError> {
+        let (perp, usd) = unpack_balance_delta(position.delta);
+        Ok(Self {
+            perp: PerpDelta::new(perp),
+            usd: UsdcDelta::new(usd),
+            margin: UsdcAtoms::new(position.margin),
+            last_cuml_funding: Funding::from_x96(position.lastCumlFundingX96),
+            stored_margin_ratios: Some(StoredMarginRatios {
+                liquidation: Ratio::from_e6(u24_to_u32(position.liqMarginRatio))?,
+                backstop: Ratio::from_e6(u24_to_u32(position.backstopMarginRatio))?,
+            }),
+        })
+    }
+}
+
+/// The `v1.0.0` row: three words, no ratios.
+impl From<v1::Position> for PositionRow {
+    fn from(position: v1::Position) -> Self {
+        let (perp, usd) = unpack_balance_delta(position.delta);
+        Self {
+            perp: PerpDelta::new(perp),
+            usd: UsdcDelta::new(usd),
+            margin: UsdcAtoms::new(position.margin),
+            last_cuml_funding: Funding::from_x96(position.lastCumlFundingX96),
+            stored_margin_ratios: None,
+        }
+    }
+}
+
 /// One id's row in a batched read: every id passed to [`StateAt::positions`]
 /// comes back as exactly one of these, in input order.
 #[derive(Debug)]
@@ -183,12 +265,13 @@ pub struct RowOutcome<T> {
     pub row: Result<Option<T>>,
 }
 
-/// A failure of one chunk's shared read (its row multicall, or a storage
-/// batch over its rows), reshaped so every id in the chunk can carry it as
-/// its own error. A transport cause is kept behind an `Arc` so the shared
-/// error stays retryable ([`PerpCityError::is_transient`]) on every
-/// affected id; the two answers a node gives about the block itself keep
-/// their typed, block-naming variants.
+/// A failure of one chunk's shared read (its row multicall, a storage
+/// batch over its rows, or the market's era before a batch), reshaped so
+/// every id it served can carry it as its own error. A transport cause is
+/// kept behind an `Arc` so the shared error stays retryable
+/// ([`PerpCityError::is_transient`]) on every affected id; the two answers
+/// a node gives about the block itself keep their typed, block-naming
+/// variants, and an unknown build stays `UnknownBuild`.
 pub(super) enum ChunkReadFailure {
     Storage {
         context: String,
@@ -199,6 +282,10 @@ pub(super) enum ChunkReadFailure {
     },
     StateUnavailable {
         number: u64,
+    },
+    UnknownBuild {
+        perp: Address,
+        hook: Address,
     },
 }
 
@@ -220,6 +307,9 @@ impl ChunkReadFailure {
             PerpCityError::Contract(ContractError::StateUnavailable { number }) => {
                 Self::StateUnavailable { number }
             }
+            PerpCityError::Contract(ContractError::UnknownBuild { perp, hook }) => {
+                Self::UnknownBuild { perp, hook }
+            }
             other => storage(format!("{what}: {other}"), None),
         }
     }
@@ -237,6 +327,10 @@ impl ChunkReadFailure {
             Self::StateUnavailable { number } => {
                 ContractError::StateUnavailable { number: *number }
             }
+            Self::UnknownBuild { perp, hook } => ContractError::UnknownBuild {
+                perp: *perp,
+                hook: *hook,
+            },
         }
         .into()
     }
@@ -396,66 +490,154 @@ impl StateAt {
         })
     }
 
-    /// One position's raw contract state, or `None` for an id that was
-    /// never minted or has been closed (the contract reports both as an
-    /// empty struct).
+    /// This market's build, from the cached immutables: the pool key's hook
+    /// against the chain's deployments, read once per market at the head
+    /// (a build is fixed for a market's life, so no block is needed).
+    ///
+    /// # Errors
+    ///
+    /// [`ContractError::UnknownBuild`] for a hook the chain's deployments
+    /// do not name; the transport error from either read.
+    async fn era(&self) -> Result<Era> {
+        Ok(self.market.immutables().await?.era)
+    }
+
+    /// The build for a batch over `pos_ids`, or the batch's whole answer
+    /// when there is nothing to read: no outcome for no ids, with no
+    /// request, and the era read's failure on every id when it fails.
+    async fn batch_era<T>(&self, pos_ids: &[U256]) -> std::result::Result<Era, Vec<RowOutcome<T>>> {
+        if pos_ids.is_empty() {
+            return Err(Vec::new());
+        }
+        self.era().await.map_err(|e| {
+            tracing::debug!(ids = pos_ids.len(), error = %e, "era read failed");
+            let failure = ChunkReadFailure::new("era read", e);
+            pos_ids
+                .iter()
+                .map(|&pos_id| RowOutcome {
+                    pos_id,
+                    row: Err(failure.error()),
+                })
+                .collect()
+        })
+    }
+
+    /// One position's stored row in the shape of the market's build, or
+    /// `None` for an id that was never minted or has been closed (every
+    /// build reports both as an empty row).
     ///
     /// `None` rather than an error because this is the read for
     /// enumerating `1..next_pos_id()`, where most ids are closed;
     /// [`MarketReader::get_position`] asks about a position expected to
     /// exist and fails with `PositionNotFound` instead.
-    pub async fn position(&self, pos_id: U256) -> Result<Option<Position>> {
-        let perp = Perp::new(self.market.perp, self.market.chain.provider());
-        let position = perp
-            .positions(pos_id)
-            .block(self.id())
-            .call()
-            .await
-            .map_err(|e| self.read_error(e))?;
-        Ok((position.margin != 0 || !position.delta.is_zero()).then_some(position))
+    ///
+    /// # Errors
+    ///
+    /// [`ContractError::UnknownBuild`] for an unknown build, before the
+    /// row is read; the pinned read's error.
+    pub async fn position(&self, pos_id: U256) -> Result<Option<PositionRow>> {
+        let provider = self.market.chain.provider();
+        let row = match self.era().await? {
+            Era::Legacy | Era::Upgradeable => PositionRow::try_from(
+                Perp::new(self.market.perp, provider)
+                    .positions(pos_id)
+                    .block(self.id())
+                    .call()
+                    .await
+                    .map_err(|e| self.read_error(e))?,
+            )?,
+            Era::V1 => v1::Perp::new(self.market.perp, provider)
+                .positions(pos_id)
+                .block(self.id())
+                .call()
+                .await
+                .map_err(|e| self.read_error(e))?
+                .into(),
+        };
+        Ok(row.held())
     }
 
-    /// The raw contract state of many positions, in one row multicall per
-    /// [`MAX_ROW_BATCH`] ids, all at this block.
+    /// The stored rows of many positions, in one row multicall per
+    /// [`MAX_ROW_BATCH`] ids, all at this block, each in the shape of the
+    /// market's build.
     ///
     /// Exactly one [`RowOutcome`] per input id, in input order, with
     /// [`Self::position`]'s reading of each row: `None` for an id that was
     /// never minted or has been closed. A row that reverts or does not
     /// decode fails alone; a chunk whose multicall fails marks every id of
-    /// that chunk failed with the shared cause, and the other chunks stand.
+    /// that chunk failed with the shared cause, and the other chunks stand;
+    /// an era read that fails, or an unknown build, marks every id failed.
     /// Nothing fails the batch, so a sweep over `1..next_pos_id()` always
     /// gets an answer for every id.
-    pub async fn positions(&self, pos_ids: &[U256]) -> Vec<RowOutcome<Position>> {
-        self.rows(
-            pos_ids,
-            |pos_id| [Perp::positionsCall { posId: pos_id }.abi_encode()],
-            |pos_id, [row]| {
-                let position = decode_row::<Perp::positionsCall>(pos_id, row, "position")?;
-                Ok((position.margin != 0 || !position.delta.is_zero()).then_some(position))
-            },
-        )
-        .await
+    pub async fn positions(&self, pos_ids: &[U256]) -> Vec<RowOutcome<PositionRow>> {
+        match self.batch_era(pos_ids).await {
+            Err(outcomes) => outcomes,
+            Ok(Era::Legacy | Era::Upgradeable) => {
+                self.rows(
+                    pos_ids,
+                    |pos_id| [Perp::positionsCall { posId: pos_id }.abi_encode()],
+                    |pos_id, [row]| {
+                        let position = decode_row::<Perp::positionsCall>(pos_id, row, "position")?;
+                        Ok(PositionRow::try_from(position)?.held())
+                    },
+                )
+                .await
+            }
+            Ok(Era::V1) => {
+                self.rows(
+                    pos_ids,
+                    |pos_id| [v1::Perp::positionsCall { posId: pos_id }.abi_encode()],
+                    |pos_id, [row]| {
+                        let position =
+                            decode_row::<v1::Perp::positionsCall>(pos_id, row, "position")?;
+                        Ok(PositionRow::from(position).held())
+                    },
+                )
+                .await
+            }
+        }
     }
 
-    /// The holder of each position NFT, in one row multicall per
+    /// The holder of each position, in one row multicall per
     /// [`MAX_ROW_BATCH`] ids, all at this block: exactly one
     /// [`RowOutcome`] per id, in input order.
     ///
-    /// `Ok(None)` is an id never minted or burned (the token's own
-    /// `TokenDoesNotExist` revert); any other revert fails that id alone,
-    /// so a row that ran out of gas is never read as burned.
+    /// `Ok(None)` is an id never minted or closed. On the two earlier
+    /// builds that is the position NFT's own `TokenDoesNotExist` revert of
+    /// `ownerOf`, and any other revert fails that id alone, so a row that
+    /// ran out of gas is never read as burned. A `v1.0.0` market has no
+    /// NFT: its `positionOwner` answers the zero address for an inactive
+    /// id, and any revert fails that id. An era read that fails, or an
+    /// unknown build, marks every id failed.
     pub async fn owners(&self, pos_ids: &[U256]) -> Vec<RowOutcome<Address>> {
-        self.rows(
-            pos_ids,
-            |pos_id| [Perp::ownerOfCall { tokenId: pos_id }.abi_encode()],
-            |pos_id, [row]| {
-                if !row.success && row.returnData[..] == Perp::TokenDoesNotExist::SELECTOR {
-                    return Ok(None);
-                }
-                decode_row::<Perp::ownerOfCall>(pos_id, row, "owner").map(Some)
-            },
-        )
-        .await
+        match self.batch_era(pos_ids).await {
+            Err(outcomes) => outcomes,
+            Ok(Era::Legacy | Era::Upgradeable) => {
+                self.rows(
+                    pos_ids,
+                    |pos_id| [Perp::ownerOfCall { tokenId: pos_id }.abi_encode()],
+                    |pos_id, [row]| {
+                        if !row.success && row.returnData[..] == Perp::TokenDoesNotExist::SELECTOR {
+                            return Ok(None);
+                        }
+                        decode_row::<Perp::ownerOfCall>(pos_id, row, "owner").map(Some)
+                    },
+                )
+                .await
+            }
+            Ok(Era::V1) => {
+                self.rows(
+                    pos_ids,
+                    |pos_id| [v1::Perp::positionOwnerCall { posId: pos_id }.abi_encode()],
+                    |pos_id, [row]| {
+                        let owner =
+                            decode_row::<v1::Perp::positionOwnerCall>(pos_id, row, "owner")?;
+                        Ok((owner != Address::ZERO).then_some(owner))
+                    },
+                )
+                .await
+            }
+        }
     }
 
     /// A batched row read: `pos_ids` in chunks of [`MAX_ROW_BATCH`], each
@@ -542,43 +724,73 @@ impl StateAt {
     }
 
     /// One position's band, or `None` if it holds no liquidity there: a
-    /// taker, or a maker whose liquidity is gone.
+    /// taker, or a maker whose liquidity is gone. Only the band's ticks and
+    /// liquidity are read from the build's `makerDetails`, the first three
+    /// fields on every build.
     ///
     /// The chain's ticks pass through [`TickRange::new`], so this is where
     /// a malformed range would fail — never the math downstream.
+    ///
+    /// # Errors
+    ///
+    /// [`ContractError::UnknownBuild`] for an unknown build, before the
+    /// row is read; the pinned read's error; a malformed range.
     pub async fn maker_band(&self, pos_id: U256) -> Result<Option<MakerBand>> {
-        let perp = Perp::new(self.market.perp, self.market.chain.provider());
-        let maker = perp
-            .makerDetails(pos_id)
-            .block(self.id())
-            .call()
-            .await
-            .map_err(|e| self.read_error(e))?;
-        if maker.liquidity == 0 {
-            return Ok(None);
+        let provider = self.market.chain.provider();
+        match self.era().await? {
+            Era::Legacy | Era::Upgradeable => {
+                let maker = Perp::new(self.market.perp, provider)
+                    .makerDetails(pos_id)
+                    .block(self.id())
+                    .call()
+                    .await
+                    .map_err(|e| self.read_error(e))?;
+                band(maker.tickLower, maker.tickUpper, maker.liquidity)
+            }
+            Era::V1 => {
+                let maker = v1::Perp::new(self.market.perp, provider)
+                    .makerDetails(pos_id)
+                    .block(self.id())
+                    .call()
+                    .await
+                    .map_err(|e| self.read_error(e))?;
+                band(maker.tickLower, maker.tickUpper, maker.liquidity)
+            }
         }
-        let range = TickRange::new(i24_to_i32(maker.tickLower), i24_to_i32(maker.tickUpper))?;
-        Ok(Some(MakerBand::new(range, LUnits::new(maker.liquidity))))
     }
 
     /// [`Self::maker_band`] for many ids, in one row multicall per
     /// [`MAX_ROW_BATCH`] ids, all at this block: exactly one
     /// [`RowOutcome`] per id, `Ok(None)` for an id that holds no liquidity.
+    /// An era read that fails, or an unknown build, marks every id failed.
     pub async fn maker_bands(&self, pos_ids: &[U256]) -> Vec<RowOutcome<MakerBand>> {
-        self.rows(
-            pos_ids,
-            |pos_id| [Perp::makerDetailsCall { posId: pos_id }.abi_encode()],
-            |pos_id, [row]| {
-                let maker = decode_row::<Perp::makerDetailsCall>(pos_id, row, "maker details")?;
-                if maker.liquidity == 0 {
-                    return Ok(None);
-                }
-                let range =
-                    TickRange::new(i24_to_i32(maker.tickLower), i24_to_i32(maker.tickUpper))?;
-                Ok(Some(MakerBand::new(range, LUnits::new(maker.liquidity))))
-            },
-        )
-        .await
+        match self.batch_era(pos_ids).await {
+            Err(outcomes) => outcomes,
+            Ok(Era::Legacy | Era::Upgradeable) => {
+                self.rows(
+                    pos_ids,
+                    |pos_id| [Perp::makerDetailsCall { posId: pos_id }.abi_encode()],
+                    |pos_id, [row]| {
+                        let maker =
+                            decode_row::<Perp::makerDetailsCall>(pos_id, row, "maker details")?;
+                        band(maker.tickLower, maker.tickUpper, maker.liquidity)
+                    },
+                )
+                .await
+            }
+            Ok(Era::V1) => {
+                self.rows(
+                    pos_ids,
+                    |pos_id| [v1::Perp::makerDetailsCall { posId: pos_id }.abi_encode()],
+                    |pos_id, [row]| {
+                        let maker =
+                            decode_row::<v1::Perp::makerDetailsCall>(pos_id, row, "maker details")?;
+                        band(maker.tickLower, maker.tickUpper, maker.liquidity)
+                    },
+                )
+                .await
+            }
+        }
     }
 
     /// The module in force for each kind at this block: `modules()`.
@@ -940,6 +1152,17 @@ impl StateAt {
     }
 }
 
+/// A stored band as a [`MakerBand`], or `None` when it holds no liquidity;
+/// the ticks pass through [`TickRange::new`]. Every build's `Maker` opens
+/// with these three fields.
+fn band(lower: Signed<24, 1>, upper: Signed<24, 1>, liquidity: u128) -> Result<Option<MakerBand>> {
+    if liquidity == 0 {
+        return Ok(None);
+    }
+    let range = TickRange::new(i24_to_i32(lower), i24_to_i32(upper))?;
+    Ok(Some(MakerBand::new(range, LUnits::new(liquidity))))
+}
+
 /// One `aggregate3` row decoded as `C`'s return, or why not: a reverted
 /// row is [`ContractError::MulticallFailed`], one that does not decode is
 /// [`ValidationError::DecodeFailed`]; neither is transient.
@@ -1205,12 +1428,13 @@ mod tests {
     #[tokio::test]
     async fn an_empty_position_is_none_here_and_not_found_there() {
         let (state, rpc) = state().await;
+        rpc.immutables(Era::Legacy);
         rpc.call::<Perp::positionsCall>(&mock::position(0));
         assert!(state.position(U256::from(3)).await.unwrap().is_none());
 
         rpc.call::<Perp::positionsCall>(&mock::position(5_000_000));
         let position = state.position(U256::from(4)).await.unwrap().unwrap();
-        assert_eq!(position.margin, 5_000_000);
+        assert_eq!(position.margin, UsdcAtoms::new(5_000_000));
 
         rpc.call::<Perp::positionsCall>(&mock::position(0));
         let Err(PerpCityError::Contract(ContractError::PositionNotFound { pos_id })) =
@@ -1226,6 +1450,7 @@ mod tests {
     #[tokio::test]
     async fn a_position_with_exposure_and_no_margin_is_present() {
         let (state, rpc) = state().await;
+        rpc.immutables(Era::Legacy);
         let mut exposed = mock::position(0);
         exposed.delta = I256::try_from(-7).unwrap();
         rpc.call::<Perp::positionsCall>(&exposed);
@@ -1235,6 +1460,7 @@ mod tests {
     #[tokio::test]
     async fn maker_band_is_none_without_liquidity() {
         let (state, rpc) = state().await;
+        rpc.immutables(Era::Legacy);
         rpc.call::<Perp::makerDetailsCall>(&mock::maker(-60, 60, 0));
         assert_eq!(state.maker_band(U256::from(1)).await.unwrap(), None);
 
@@ -1253,6 +1479,7 @@ mod tests {
     #[tokio::test]
     async fn a_malformed_range_fails_at_the_read() {
         let (state, rpc) = state().await;
+        rpc.immutables(Era::Legacy);
         rpc.call::<Perp::makerDetailsCall>(&mock::maker(60, -60, 5));
         assert!(matches!(
             state.maker_band(U256::from(2)).await,
@@ -1385,6 +1612,379 @@ mod tests {
         assert!(!error.is_transient());
     }
 
+    // ── A position's row, by build ────────────────────────────────────
+
+    /// One ABI word of a signed value, sign-extended as the ABI encodes
+    /// every `intN`.
+    fn signed_word(value: i128) -> [u8; 32] {
+        I256::try_from(value).unwrap().to_be_bytes::<32>()
+    }
+
+    /// One ABI word of an unsigned value.
+    fn word(value: u128) -> [u8; 32] {
+        U256::from(value).to_be_bytes::<32>()
+    }
+
+    /// The packed `BalanceDelta` word: `amount0` high, `amount1` low.
+    fn delta_word(perp: i128, usd: i128) -> [u8; 32] {
+        crate::convert::pack_balance_delta(perp, usd).to_be_bytes::<32>()
+    }
+
+    /// A `v1.0.0` taker's row as the chain returns it, three words:
+    /// `delta`, `margin`, `lastCumlFundingX96`.
+    fn v1_position_words(perp: i128, usd: i128, margin: u128, funding: i128) -> Vec<u8> {
+        [delta_word(perp, usd), word(margin), signed_word(funding)].concat()
+    }
+
+    /// A `v1.0.0` maker's details as the chain returns them, seven words:
+    /// the band (`tickLower`, `tickUpper`, `liquidity`), the fee-growth
+    /// checkpoint, the nested `MakerFunding` (`belowX96`,
+    /// `withinInventoryX192`) and the funding correction.
+    fn v1_maker_words(lower: i32, upper: i32, liquidity: u128) -> Vec<u8> {
+        [
+            signed_word(lower.into()),
+            signed_word(upper.into()),
+            word(liquidity),
+            word(7),
+            signed_word(-8),
+            signed_word(9),
+            signed_word(-10),
+        ]
+        .concat()
+    }
+
+    /// The `v1.0.0` row is three words, and the earlier builds' five-word
+    /// binding cannot read it: decoded with the old shape it is a loud
+    /// failure, never a row with garbage ratios.
+    #[test]
+    fn a_v1_position_is_three_words() {
+        let words = v1_position_words(-2_500_000, 3_000_000, 7_000_000, -42);
+        assert_eq!(words.len(), 3 * 32);
+        let position = v1::Perp::positionsCall::abi_decode_returns(&words).unwrap();
+        assert_eq!(position.margin, 7_000_000);
+        assert_eq!(position.lastCumlFundingX96, I256::try_from(-42).unwrap());
+        assert_eq!(
+            PositionRow::from(position),
+            PositionRow {
+                perp: PerpDelta::new(-2_500_000),
+                usd: UsdcDelta::new(3_000_000),
+                margin: UsdcAtoms::new(7_000_000),
+                last_cuml_funding: Funding::from_x96(I256::try_from(-42).unwrap()),
+                stored_margin_ratios: None,
+            }
+        );
+        assert!(Perp::positionsCall::abi_decode_returns(&words).is_err());
+    }
+
+    /// The earlier builds' row keeps its two stored ratios.
+    #[test]
+    fn an_earlier_build_s_row_keeps_its_stored_ratios() {
+        let position = Position {
+            delta: crate::convert::pack_balance_delta(400_000, -1_000_000),
+            margin: 10_000_000,
+            liqMarginRatio: e6(50_000),
+            backstopMarginRatio: e6(20_000),
+            lastCumlFundingX96: I256::try_from(77).unwrap(),
+        };
+        assert_eq!(
+            PositionRow::try_from(position).unwrap(),
+            PositionRow {
+                perp: PerpDelta::new(400_000),
+                usd: UsdcDelta::new(-1_000_000),
+                margin: UsdcAtoms::new(10_000_000),
+                last_cuml_funding: Funding::from_x96(I256::try_from(77).unwrap()),
+                stored_margin_ratios: Some(StoredMarginRatios {
+                    liquidation: Ratio::from_e6(50_000).unwrap(),
+                    backstop: Ratio::from_e6(20_000).unwrap(),
+                }),
+            }
+        );
+    }
+
+    /// The `v1.0.0` maker is seven words with the band in the first three;
+    /// the earlier builds' ten-word binding cannot read it.
+    #[test]
+    fn a_v1_maker_is_seven_words() {
+        let words = v1_maker_words(-600, 1_200, 335_000_000);
+        assert_eq!(words.len(), 7 * 32);
+        let maker = v1::Perp::makerDetailsCall::abi_decode_returns(&words).unwrap();
+        assert_eq!(
+            (
+                maker.tickLower.as_i32(),
+                maker.tickUpper.as_i32(),
+                maker.liquidity
+            ),
+            (-600, 1_200, 335_000_000)
+        );
+        assert_eq!(maker.lastLpFeeGrowthInsideX128, U256::from(7));
+        assert_eq!(maker.lastCumlFunding.belowX96, I256::try_from(-8).unwrap());
+        assert_eq!(
+            maker.lastCumlFunding.withinInventoryX192,
+            I256::try_from(9).unwrap()
+        );
+        assert_eq!(
+            maker.lastFundingCorrectionX128,
+            I256::try_from(-10).unwrap()
+        );
+        assert!(Perp::makerDetailsCall::abi_decode_returns(&words).is_err());
+    }
+
+    /// The market's hook names the shape: the two earlier builds read the
+    /// five-word row, `v1.0.0` the three-word one, and each read of the
+    /// other's answer fails loudly. One era read per market, then the row.
+    #[tokio::test]
+    async fn position_reads_the_row_of_the_market_s_build() {
+        let v1_row = v1_position_words(-2_500_000, 3_000_000, 7_000_000, 0);
+        for era in [Era::Legacy, Era::Upgradeable] {
+            let (state, rpc) = state().await;
+            rpc.immutables(era);
+            rpc.call::<Perp::positionsCall>(&mock::position(5_000_000));
+            let row = state.position(U256::from(4)).await.unwrap().unwrap();
+            assert_eq!(row.margin, UsdcAtoms::new(5_000_000));
+            assert!(row.stored_margin_ratios.is_some(), "{era:?}");
+
+            rpc.raw(&v1_row);
+            let err = state.position(U256::from(4)).await.unwrap_err();
+            assert!(
+                matches!(err, PerpCityError::Abi(_)),
+                "{era:?}: a v1 row on the old shape is loud: {err}"
+            );
+            assert!(rpc.is_drained(), "poolKey, POOL_ID, then one row per read");
+        }
+
+        let (state, rpc) = state().await;
+        rpc.immutables(Era::V1);
+        rpc.raw(&v1_row);
+        let row = state.position(U256::from(4)).await.unwrap().unwrap();
+        assert_eq!(
+            (row.perp, row.usd, row.margin, row.stored_margin_ratios),
+            (
+                PerpDelta::new(-2_500_000),
+                UsdcDelta::new(3_000_000),
+                UsdcAtoms::new(7_000_000),
+                None
+            )
+        );
+        // A closed v1 taker: the contract deletes the row.
+        rpc.raw(&v1_position_words(0, 0, 0, 0));
+        assert!(state.position(U256::from(5)).await.unwrap().is_none());
+        assert_eq!(
+            rpc.selectors(),
+            [
+                Perp::poolKeyCall::SELECTOR,
+                v1::Perp::poolIdCall::SELECTOR,
+                v1::Perp::positionsCall::SELECTOR,
+                v1::Perp::positionsCall::SELECTOR,
+            ]
+        );
+        assert!(rpc.is_drained());
+    }
+
+    /// A hook the chain does not name is refused after the pool key, on
+    /// every position read: no row is read and no shape is guessed. A
+    /// batch gives every id the typed refusal.
+    #[tokio::test]
+    async fn every_position_read_refuses_an_unknown_build() {
+        let unknown = Address::repeat_byte(0x0e);
+        let refused = |err: &PerpCityError| {
+            matches!(
+                err,
+                PerpCityError::Contract(ContractError::UnknownBuild { perp, hook })
+                    if *perp == PERP && *hook == unknown
+            ) && !err.is_transient()
+        };
+        let (state, rpc) = state().await;
+        let ids = [U256::ONE, U256::from(2u8)];
+        for read in 0..5 {
+            rpc.call::<Perp::poolKeyCall>(&mock::pool_key_with_hook(30, unknown));
+            let errors: Vec<PerpCityError> = match read {
+                0 => vec![state.position(U256::ONE).await.unwrap_err()],
+                1 => vec![state.maker_band(U256::ONE).await.unwrap_err()],
+                2 => state
+                    .positions(&ids)
+                    .await
+                    .into_iter()
+                    .map(|o| o.row.unwrap_err())
+                    .collect(),
+                3 => state
+                    .owners(&ids)
+                    .await
+                    .into_iter()
+                    .map(|o| o.row.unwrap_err())
+                    .collect(),
+                _ => state
+                    .maker_bands(&ids)
+                    .await
+                    .into_iter()
+                    .map(|o| o.row.unwrap_err())
+                    .collect(),
+            };
+            assert!(errors.iter().all(refused), "read {read}: {errors:?}");
+            assert!(rpc.is_drained(), "read {read}: the pool key only");
+        }
+        assert_eq!(rpc.selectors(), [Perp::poolKeyCall::SELECTOR; 5]);
+    }
+
+    /// The batch reads each build's row: on `v1.0.0` the three-word row,
+    /// and a closed taker's deleted row is `None`.
+    #[tokio::test]
+    async fn positions_read_the_v1_row() {
+        let (state, rpc) = state().await;
+        rpc.immutables(Era::V1);
+        rpc.aggregate3(vec![
+            mock::ok_row(v1_position_words(0, -9_000, 100_000_000, 3)),
+            mock::ok_row(v1_position_words(0, 0, 0, 0)),
+        ]);
+        let rows = state.positions(&[U256::ONE, U256::from(2u8)]).await;
+        let maker = rows[0].row.as_ref().unwrap().unwrap();
+        assert_eq!(
+            (maker.usd, maker.margin, maker.stored_margin_ratios),
+            (UsdcDelta::new(-9_000), UsdcAtoms::new(100_000_000), None)
+        );
+        assert!(rows[1].row.as_ref().unwrap().is_none(), "the closed taker");
+        assert_eq!(
+            rpc.selectors(),
+            [
+                Perp::poolKeyCall::SELECTOR,
+                v1::Perp::poolIdCall::SELECTOR,
+                v1::Perp::positionsCall::SELECTOR,
+                v1::Perp::positionsCall::SELECTOR,
+            ]
+        );
+        assert!(rpc.is_drained(), "poolKey, poolId, one multicall");
+    }
+
+    /// The earlier builds' batch reads the five-word row, and a v1 answer
+    /// fails its id loudly rather than decoding.
+    #[tokio::test]
+    async fn positions_read_the_earlier_builds_row() {
+        for era in [Era::Legacy, Era::Upgradeable] {
+            let (state, rpc) = state().await;
+            rpc.immutables(era);
+            rpc.aggregate3(vec![
+                mock::ok_row(mock::returns::<Perp::positionsCall>(&mock::position(5))),
+                mock::ok_row(v1_position_words(1, 2, 3, 4)),
+            ]);
+            let rows = state.positions(&[U256::ONE, U256::from(2u8)]).await;
+            let row = rows[0].row.as_ref().unwrap().unwrap();
+            assert_eq!(row.margin, UsdcAtoms::new(5));
+            assert!(row.stored_margin_ratios.is_some());
+            assert!(
+                matches!(
+                    rows[1].row,
+                    Err(PerpCityError::Validation(
+                        ValidationError::DecodeFailed { .. }
+                    ))
+                ),
+                "{era:?}: {:?}",
+                rows[1].row
+            );
+            assert!(rpc.is_drained());
+        }
+    }
+
+    /// A `v1.0.0` market's holders come from `positionOwner`, never
+    /// `ownerOf`: the zero address is an inactive id, `None`, and a reverted
+    /// row fails alone. The earlier builds' path on the same market would
+    /// have failed every row, because `v1.0.0` has no `ownerOf` (an empty
+    /// revert, not `TokenDoesNotExist`).
+    #[tokio::test]
+    async fn owners_on_v1_ask_position_owner() {
+        let (state, rpc) = state().await;
+        let holder = Address::repeat_byte(0xaa);
+        rpc.immutables(Era::V1);
+        rpc.aggregate3(vec![
+            mock::ok_row(mock::returns::<v1::Perp::positionOwnerCall>(&holder)),
+            mock::ok_row(mock::returns::<v1::Perp::positionOwnerCall>(&Address::ZERO)),
+            mock::failed_row(),
+        ]);
+        let ids = [U256::ONE, U256::from(2u8), U256::from(3u8)];
+        let rows = state.owners(&ids).await;
+        assert_eq!(*rows[0].row.as_ref().unwrap(), Some(holder));
+        assert!(rows[1].row.as_ref().unwrap().is_none(), "inactive");
+        assert!(rows[2].row.is_err(), "a reverted row is not inactive");
+        let selectors = rpc.selectors();
+        assert_eq!(
+            selectors,
+            [
+                Perp::poolKeyCall::SELECTOR,
+                v1::Perp::poolIdCall::SELECTOR,
+                v1::Perp::positionOwnerCall::SELECTOR,
+                v1::Perp::positionOwnerCall::SELECTOR,
+                v1::Perp::positionOwnerCall::SELECTOR,
+            ]
+        );
+        assert!(!selectors.contains(&Perp::ownerOfCall::SELECTOR));
+        assert!(rpc.is_drained());
+
+        // The same market read on the earlier builds' path: v1's answer to
+        // `ownerOf` is an empty revert, so every row fails, loudly.
+        let (state, rpc) = self::state().await;
+        rpc.immutables(Era::Upgradeable);
+        rpc.aggregate3(vec![mock::failed_row(), mock::failed_row()]);
+        let rows = state.owners(&ids[..2]).await;
+        assert!(rows.iter().all(|row| row.row.is_err()));
+        assert_eq!(
+            rpc.selectors()[2..],
+            [Perp::ownerOfCall::SELECTOR, Perp::ownerOfCall::SELECTOR]
+        );
+    }
+
+    /// A `v1.0.0` band is the first three of its seven words, singly and in
+    /// a batch; an empty band is `None`; the earlier builds' shape on a v1
+    /// answer fails loudly.
+    #[tokio::test]
+    async fn maker_bands_read_the_v1_maker() {
+        let band = Some(MakerBand::new(
+            TickRange::new(38_400, 39_840).unwrap(),
+            LUnits::new(100_000_000),
+        ));
+        let (state, rpc) = state().await;
+        rpc.immutables(Era::V1);
+        rpc.raw(&v1_maker_words(38_400, 39_840, 100_000_000));
+        assert_eq!(state.maker_band(U256::ONE).await.unwrap(), band);
+        rpc.aggregate3(vec![
+            mock::ok_row(v1_maker_words(38_400, 39_840, 100_000_000)),
+            mock::ok_row(v1_maker_words(0, 0, 0)),
+        ]);
+        let rows = state.maker_bands(&[U256::ONE, U256::from(2u8)]).await;
+        assert_eq!(*rows[0].row.as_ref().unwrap(), band);
+        assert!(rows[1].row.as_ref().unwrap().is_none(), "the taker");
+        assert!(rpc.is_drained());
+
+        let (state, rpc) = self::state().await;
+        rpc.immutables(Era::Upgradeable);
+        rpc.aggregate3(vec![mock::ok_row(v1_maker_words(38_400, 39_840, 1))]);
+        let rows = state.maker_bands(&[U256::ONE]).await;
+        assert!(
+            matches!(
+                rows[0].row,
+                Err(PerpCityError::Validation(
+                    ValidationError::DecodeFailed { .. }
+                ))
+            ),
+            "{:?}",
+            rows[0].row
+        );
+    }
+
+    /// An era read the endpoint fails gives every id of the batch the
+    /// failure, kept transient; no id is dropped.
+    #[tokio::test]
+    async fn a_failed_era_read_fails_every_id_of_the_batch() {
+        let (state, rpc) = state().await;
+        rpc.fails("connection reset");
+        let rows = state.owners(&[U256::ONE, U256::from(2u8)]).await;
+        assert_eq!(rows.len(), 2);
+        for row in &rows {
+            let Err(err) = &row.row else {
+                panic!("every id fails");
+            };
+            assert!(err.is_transient(), "{err}");
+        }
+        assert!(rpc.is_drained());
+    }
+
     // ── The batched row read ──────────────────────────────────────────
 
     /// Every id gets its row from one multicall, in input order: a present
@@ -1394,6 +1994,7 @@ mod tests {
     async fn positions_read_every_row_in_one_multicall() {
         let (state, rpc) = state().await;
         let pos_ids = [U256::from(11u8), U256::from(22u8), U256::from(33u8)];
+        rpc.immutables(Era::Legacy);
         rpc.aggregate3(vec![
             mock::ok_row(returns::<Perp::positionsCall>(&mock::position(5_000_000))),
             mock::ok_row(returns::<Perp::positionsCall>(&mock::position(0))),
@@ -1404,7 +2005,7 @@ mod tests {
         assert_eq!(rows.iter().map(|r| r.pos_id).collect::<Vec<_>>(), pos_ids);
         assert_eq!(
             rows[0].row.as_ref().unwrap().as_ref().unwrap().margin,
-            5_000_000
+            UsdcAtoms::new(5_000_000)
         );
         assert!(rows[1].row.as_ref().unwrap().is_none());
         let Err(err) = &rows[2].row else {
@@ -1428,6 +2029,7 @@ mod tests {
     async fn owners_tell_a_burned_id_from_a_failed_read() {
         let (state, rpc) = state().await;
         let holder = Address::repeat_byte(0xaa);
+        rpc.immutables(Era::Legacy);
         rpc.aggregate3(vec![
             mock::ok_row(returns::<Perp::ownerOfCall>(&holder)),
             IMulticall3::Result {
@@ -1451,6 +2053,7 @@ mod tests {
     #[tokio::test]
     async fn a_failed_row_multicall_fails_every_id_of_the_chunk_naming_the_block() {
         let (state, rpc) = state().await;
+        rpc.immutables(Era::Legacy);
         rpc.fails("header not found");
 
         let rows = state.positions(&[U256::ONE, U256::from(2u8)]).await;
@@ -1476,6 +2079,7 @@ mod tests {
     #[tokio::test]
     async fn a_short_multicall_answer_fails_the_chunk() {
         let (state, rpc) = state().await;
+        rpc.immutables(Era::Legacy);
         rpc.aggregate3(vec![mock::ok_row(returns::<Perp::positionsCall>(
             &mock::position(1),
         ))]);

@@ -20,7 +20,7 @@ use alloy::primitives::{Address, B256, U256};
 use alloy::providers::MulticallError;
 use serde::{Deserialize, Serialize};
 
-use crate::contracts::{self, IFees, IMarginRatios, Perp, Position, v1};
+use crate::contracts::{self, IFees, IMarginRatios, Perp, v1};
 use crate::convert::{price_x96_to_f64, scale_from_6dec};
 use crate::errors::{ContractError, PerpCityError, Result, ValidationError};
 use crate::hft::state_cache::{CachedBounds, CachedFees};
@@ -30,7 +30,7 @@ use crate::math::pricing::{Emas, Mark};
 use crate::units::{PerSide, PerpAtoms, Price, Ratio, UsdcAtoms};
 
 use super::market::MarketReader;
-use super::state::{ema_window_secs, pinned_read_error};
+use super::state::{PositionRow, ema_window_secs, pinned_read_error};
 use super::{PerpClient, i24_to_i32, now_secs, u24_to_u32};
 
 /// Funding/utilization rates are scaled by 1e18 per day on-chain.
@@ -376,32 +376,67 @@ impl MarketReader {
         })
     }
 
-    /// Get an on-chain position by its NFT token ID.
+    /// One position's stored row, read now, in the shape of the market's
+    /// build ([`Self::era`]). Use [`crate::math::position`] functions to
+    /// compute derived values (entry price, PnL, etc.).
     ///
-    /// Returns the raw contract position struct. Use [`crate::math::position`]
-    /// functions to compute derived values (entry price, PnL, etc.).
-    pub async fn get_position(&self, pos_id: U256) -> Result<Position> {
-        let perp = Perp::new(self.perp, self.chain.provider());
-        let pos = perp.positions(pos_id).call().await?;
-
-        // A non-existent or burned position decodes to an all-zero struct.
-        if pos.margin == 0 && pos.delta.is_zero() {
-            return Err(ContractError::PositionNotFound { pos_id }.into());
-        }
-
-        Ok(pos)
+    /// # Errors
+    ///
+    /// [`ContractError::PositionNotFound`] for an id never minted or
+    /// closed, which every build reports as an empty row;
+    /// [`ContractError::UnknownBuild`] for an unknown build, before the
+    /// row is read; the transport error from any read.
+    pub async fn get_position(&self, pos_id: U256) -> Result<PositionRow> {
+        let provider = self.chain.provider();
+        let row = match self.immutables().await?.era {
+            Era::Legacy | Era::Upgradeable => PositionRow::try_from(
+                Perp::new(self.perp, provider)
+                    .positions(pos_id)
+                    .call()
+                    .await?,
+            )?,
+            Era::V1 => v1::Perp::new(self.perp, provider)
+                .positions(pos_id)
+                .call()
+                .await?
+                .into(),
+        };
+        row.held()
+            .ok_or_else(|| ContractError::PositionNotFound { pos_id }.into())
     }
 
-    /// Get all position IDs owned by an address.
+    /// Every active position id held by `owner`, read now: each id in
+    /// `1..nextPosId` asked for its holder, by the market's build.
     ///
-    /// Iterates through all minted position NFTs (1..nextPosId) and returns
-    /// those owned by `owner`. Burned or non-existent tokens are skipped.
+    /// The two earlier builds' positions are NFTs: `ownerOf` reverts for a
+    /// burned or never-minted token, and that id is skipped. A `v1.0.0`
+    /// market has no NFT and no `ownerOf`: its `positionOwner` answers the
+    /// zero address for an inactive id and never reverts, so any failure
+    /// there is an error, never a skipped id.
     ///
     /// **Note:** This is O(n) in total positions ever minted. For high-throughput
-    /// use cases, prefer the bot API's position endpoints instead.
+    /// use cases, prefer [`StateAt::owners`](super::StateAt::owners), one
+    /// row multicall per 500 ids.
+    ///
+    /// # Errors
+    ///
+    /// [`ContractError::UnknownBuild`] for an unknown build, before the
+    /// counter is read; [`ValidationError::Overflow`] for a counter past
+    /// `u64`; the transport error from any read.
     pub async fn get_positions_by_owner(&self, owner: Address) -> Result<Vec<U256>> {
-        let perp = Perp::new(self.perp, self.chain.provider());
-        let next_pos_id: U256 = perp.nextPosId().call().await?;
+        let era = self.immutables().await?.era;
+        let provider = self.chain.provider();
+        let next_pos_id: U256 = match era {
+            Era::Legacy | Era::Upgradeable => {
+                Perp::new(self.perp, provider).nextPosId().call().await?
+            }
+            Era::V1 => {
+                v1::Perp::new(self.perp, provider)
+                    .nextPosId()
+                    .call()
+                    .await?
+            }
+        };
 
         let total: u64 = next_pos_id
             .try_into()
@@ -415,27 +450,48 @@ impl MarketReader {
         let mut owned = Vec::new();
         for id in 1..total {
             let pos_id = U256::from(id);
-            // ownerOf reverts for burned/non-existent tokens — skip those.
-            // How a revert surfaces is provider-dependent: some decode into
-            // contract errors, others wrap the raw JSON-RPC error response
-            // (code 3, revert data attached) as a transport error. Classify
-            // by revert data, and only propagate genuine transport failures
-            // so network errors aren't silently ignored.
-            match perp.ownerOf(pos_id).call().await {
-                Ok(addr) if addr == owner => owned.push(pos_id),
-                Ok(_) => {}
-                Err(alloy::contract::Error::TransportError(e))
-                    if e.as_error_resp()
-                        .and_then(|resp| resp.as_revert_data())
-                        .is_none() =>
-                {
-                    return Err(alloy::contract::Error::TransportError(e).into());
-                }
-                Err(_) => {} // burned or non-existent token
+            let holder = match era {
+                Era::Legacy | Era::Upgradeable => self.nft_owner(pos_id).await?,
+                Era::V1 => Some(
+                    v1::Perp::new(self.perp, provider)
+                        .positionOwner(pos_id)
+                        .call()
+                        .await?,
+                ),
+            };
+            if holder == Some(owner) {
+                owned.push(pos_id);
             }
         }
 
         Ok(owned)
+    }
+
+    /// The holder of an earlier build's position NFT, or `None` for a
+    /// burned or never-minted token.
+    ///
+    /// `ownerOf` reverts for those. How a revert surfaces is
+    /// provider-dependent: some decode into contract errors, others wrap
+    /// the raw JSON-RPC error response (code 3, revert data attached) as a
+    /// transport error. Classify by revert data, and only propagate
+    /// genuine transport failures so network errors aren't silently
+    /// ignored.
+    async fn nft_owner(&self, pos_id: U256) -> Result<Option<Address>> {
+        match Perp::new(self.perp, self.chain.provider())
+            .ownerOf(pos_id)
+            .call()
+            .await
+        {
+            Ok(holder) => Ok(Some(holder)),
+            Err(alloy::contract::Error::TransportError(e))
+                if e.as_error_resp()
+                    .and_then(|resp| resp.as_revert_data())
+                    .is_none() =>
+            {
+                Err(alloy::contract::Error::TransportError(e).into())
+            }
+            Err(_) => Ok(None),
+        }
     }
 
     /// The pool's spot price, `poolState().ammPrice`, from the fast cache
@@ -707,6 +763,7 @@ impl PerpClient {
 #[cfg(test)]
 mod tests {
     use alloy::primitives::Uint;
+    use alloy::sol_types::SolCall;
 
     use super::*;
     use crate::client::Balances;
@@ -716,7 +773,7 @@ mod tests {
     use crate::errors::PerpCityError;
     use crate::math::BlockContext;
     use crate::math::pricing::PricePair;
-    use crate::units::Side;
+    use crate::units::{PerpDelta, Side, UsdcDelta};
 
     /// The market's tick spacing in these tests.
     const SPACING: i32 = 30;
@@ -935,15 +992,16 @@ mod tests {
         );
     }
 
-    /// `positions(id)` comes back as the raw contract struct, untouched.
+    /// `positions(id)` comes back as its stored row, its fields untouched.
     #[tokio::test]
     async fn a_position_is_the_raw_contract_struct() {
         let (client, rpc) = mock::client();
+        rpc.immutables(Era::Legacy);
         rpc.call::<Perp::positionsCall>(&mock::position(1_000_000));
 
         let position = client.market().get_position(U256::from(7u8)).await.unwrap();
-        assert_eq!(position.margin, 1_000_000);
-        assert!(position.delta.is_zero());
+        assert_eq!(position.margin, UsdcAtoms::new(1_000_000));
+        assert!(position.perp == PerpDelta::ZERO && position.usd == UsdcDelta::ZERO);
         assert!(rpc.is_drained());
     }
 
@@ -952,6 +1010,7 @@ mod tests {
     #[tokio::test]
     async fn an_all_zero_position_is_not_found() {
         let (client, rpc) = mock::client();
+        rpc.immutables(Era::Legacy);
         rpc.call::<Perp::positionsCall>(&mock::position(0));
 
         let Err(err) = client.market().get_position(U256::from(7u8)).await else {
@@ -992,6 +1051,7 @@ mod tests {
     async fn positions_by_owner_walks_every_minted_id_and_skips_burned_ones() {
         let owner = Address::repeat_byte(0xaa);
         let (client, rpc) = mock::client();
+        rpc.immutables(Era::Legacy);
         rpc.call::<Perp::nextPosIdCall>(&U256::from(4u8));
         rpc.call::<Perp::ownerOfCall>(&owner);
         rpc.call::<Perp::ownerOfCall>(&Address::repeat_byte(0xbb));
@@ -1008,6 +1068,7 @@ mod tests {
     async fn positions_by_owner_propagates_a_transport_failure() {
         let owner = Address::repeat_byte(0xaa);
         let (client, rpc) = mock::client();
+        rpc.immutables(Era::Legacy);
         rpc.call::<Perp::nextPosIdCall>(&U256::from(3u8));
         rpc.call::<Perp::ownerOfCall>(&owner);
         rpc.fails("connection reset");
@@ -1033,6 +1094,7 @@ mod tests {
         let owner = Address::repeat_byte(0xaa);
         for next in [0u8, 1] {
             let (client, rpc) = mock::client();
+            rpc.immutables(Era::Legacy);
             rpc.call::<Perp::nextPosIdCall>(&U256::from(next));
 
             assert!(
@@ -1052,6 +1114,7 @@ mod tests {
     #[tokio::test]
     async fn positions_by_owner_rejects_a_counter_beyond_u64() {
         let (client, rpc) = mock::client();
+        rpc.immutables(Era::Legacy);
         rpc.call::<Perp::nextPosIdCall>(&(U256::from(u64::MAX) + U256::from(1u8)));
 
         let err = client
@@ -1066,6 +1129,189 @@ mod tests {
             ),
             "{err}"
         );
+    }
+
+    // ── Positions on each build ───────────────────────────────────────
+
+    /// A `v1.0.0` market's row is three words, read through its binding:
+    /// no stored ratios; a closed taker's deleted row is `PositionNotFound`.
+    #[tokio::test]
+    async fn get_position_reads_the_v1_row() {
+        let (client, rpc) = mock::client();
+        rpc.immutables(Era::V1);
+        rpc.call::<v1::Perp::positionsCall>(&v1::Position {
+            delta: crate::convert::pack_balance_delta(-400_000, 9_000_000),
+            margin: 10_000_000,
+            lastCumlFundingX96: alloy::primitives::I256::ZERO,
+        });
+        let row = client.market().get_position(U256::from(2u8)).await.unwrap();
+        assert_eq!(
+            (row.perp, row.usd, row.margin, row.stored_margin_ratios),
+            (
+                PerpDelta::new(-400_000),
+                UsdcDelta::new(9_000_000),
+                UsdcAtoms::new(10_000_000),
+                None
+            )
+        );
+
+        rpc.call::<v1::Perp::positionsCall>(&v1::Position {
+            delta: alloy::primitives::I256::ZERO,
+            margin: 0,
+            lastCumlFundingX96: alloy::primitives::I256::ZERO,
+        });
+        let err = client
+            .market()
+            .get_position(U256::from(3u8))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                PerpCityError::Contract(ContractError::PositionNotFound { pos_id })
+                    if pos_id == U256::from(3u8)
+            ),
+            "{err}"
+        );
+        assert!(rpc.is_drained(), "poolKey, poolId, then one row per read");
+    }
+
+    /// An unknown build reads its pool key and nothing more.
+    #[tokio::test]
+    async fn get_position_refuses_an_unknown_build() {
+        let (client, rpc) = mock::client();
+        rpc.call::<Perp::poolKeyCall>(&mock::pool_key_with_hook(30, Address::repeat_byte(0x0e)));
+        let err = client.market().get_position(U256::ONE).await.unwrap_err();
+        assert!(
+            matches!(
+                err,
+                PerpCityError::Contract(ContractError::UnknownBuild { .. })
+            ),
+            "{err}"
+        );
+        assert!(rpc.is_drained());
+        rpc.call::<Perp::poolKeyCall>(&mock::pool_key_with_hook(30, Address::repeat_byte(0x0e)));
+        let err = client
+            .market()
+            .get_positions_by_owner(Address::repeat_byte(0xaa))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                PerpCityError::Contract(ContractError::UnknownBuild { .. })
+            ),
+            "{err}"
+        );
+        assert!(rpc.is_drained(), "no nextPosId, no owner read");
+    }
+
+    /// Map row 13, the old way. `v1.0.0` has no `ownerOf` and no fallback,
+    /// so every `ownerOf` reverts with empty data. Read on the earlier
+    /// builds' walk, that is silent where the provider attaches the empty
+    /// data (each id is taken for a burned token, and the owner's position
+    /// is lost) and loud where it attaches none.
+    #[tokio::test]
+    async fn the_owner_of_walk_on_a_v1_answer_is_silent_or_loud_by_provider() {
+        let owner = Address::repeat_byte(0xaa);
+        let (client, rpc) = mock::client();
+        rpc.immutables(Era::Upgradeable);
+        rpc.call::<Perp::nextPosIdCall>(&U256::from(3u8));
+        rpc.reverts(&[]);
+        rpc.reverts(&[]);
+        let owned = client.market().get_positions_by_owner(owner).await.unwrap();
+        assert!(owned.is_empty(), "silent: the empty revert reads as burned");
+        assert!(rpc.is_drained());
+
+        rpc.call::<Perp::nextPosIdCall>(&U256::from(3u8));
+        rpc.fails("execution reverted");
+        let err = client
+            .market()
+            .get_positions_by_owner(owner)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                PerpCityError::Abi(alloy::contract::Error::TransportError(_))
+            ),
+            "loud: no revert data is a transport error: {err}"
+        );
+        assert!(rpc.is_drained());
+        assert!(
+            rpc.selectors()
+                .iter()
+                .filter(|s| **s == Perp::ownerOfCall::SELECTOR)
+                .count()
+                == 3
+        );
+    }
+
+    /// Map row 13, the new way. A `v1.0.0` market's walk asks
+    /// `positionOwner`, never `ownerOf`: the zero address is an inactive
+    /// id (a closed taker), and the owner's position is found. The empty
+    /// revert that the old walk took for a burned token is an error here,
+    /// since `positionOwner` never reverts.
+    #[tokio::test]
+    async fn positions_by_owner_on_v1_asks_position_owner() {
+        let owner = Address::repeat_byte(0xaa);
+        let (client, rpc) = mock::client();
+        rpc.immutables(Era::V1);
+        rpc.call::<v1::Perp::nextPosIdCall>(&U256::from(4u8));
+        rpc.call::<v1::Perp::positionOwnerCall>(&owner);
+        rpc.call::<v1::Perp::positionOwnerCall>(&Address::ZERO);
+        rpc.call::<v1::Perp::positionOwnerCall>(&Address::repeat_byte(0xbb));
+        let owned = client.market().get_positions_by_owner(owner).await.unwrap();
+        assert_eq!(owned, vec![U256::ONE]);
+        let selectors = rpc.selectors();
+        assert_eq!(
+            selectors,
+            [
+                Perp::poolKeyCall::SELECTOR,
+                v1::Perp::poolIdCall::SELECTOR,
+                v1::Perp::nextPosIdCall::SELECTOR,
+                v1::Perp::positionOwnerCall::SELECTOR,
+                v1::Perp::positionOwnerCall::SELECTOR,
+                v1::Perp::positionOwnerCall::SELECTOR,
+            ]
+        );
+        assert!(!selectors.contains(&Perp::ownerOfCall::SELECTOR));
+        assert!(rpc.is_drained());
+
+        rpc.call::<v1::Perp::nextPosIdCall>(&U256::from(2u8));
+        rpc.reverts(&[]);
+        let err = client
+            .market()
+            .get_positions_by_owner(owner)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                PerpCityError::Abi(alloy::contract::Error::TransportError(_))
+            ),
+            "{err}"
+        );
+        assert!(rpc.is_drained());
+    }
+
+    /// The earlier builds keep the `ownerOf` walk.
+    #[tokio::test]
+    async fn positions_by_owner_on_the_earlier_builds_asks_owner_of() {
+        let owner = Address::repeat_byte(0xaa);
+        for era in [Era::Legacy, Era::Upgradeable] {
+            let (client, rpc) = mock::client();
+            rpc.immutables(era);
+            rpc.call::<Perp::nextPosIdCall>(&U256::from(2u8));
+            rpc.call::<Perp::ownerOfCall>(&owner);
+            let owned = client.market().get_positions_by_owner(owner).await.unwrap();
+            assert_eq!(owned, vec![U256::ONE]);
+            assert_eq!(
+                rpc.selectors()[2..],
+                [Perp::nextPosIdCall::SELECTOR, Perp::ownerOfCall::SELECTOR]
+            );
+            assert!(rpc.is_drained());
+        }
     }
 
     // ── Slow layer: fees and bounds, keyed by module address ──────────
