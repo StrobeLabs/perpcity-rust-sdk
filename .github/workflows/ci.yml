@@ -111,6 +111,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          # Include the base commit of the PR merge without a later authenticated fetch.
+          fetch-depth: 0
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master, 2026-09
         with:
@@ -131,11 +133,10 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           PR: ${{ github.event.pull_request.number }}
           REPO: ${{ github.repository }}
-          BASE: ${{ github.base_ref }}
+          BASE: ${{ github.event.pull_request.base.sha }}
         run: |
-          git fetch --no-tags --depth=1 origin "+refs/heads/$BASE:refs/remotes/origin/$BASE"
           status=0
-          cargo xtask design --diff "origin/$BASE" > design-diff.md || status=$?
+          cargo xtask design --diff "$BASE" > design-diff.md || status=$?
           cat design-diff.md >> "$GITHUB_STEP_SUMMARY"
           marker='<!-- design-diff -->'
           { printf '%s\n' "$marker"; cat design-diff.md; } > body.md
