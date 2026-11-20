@@ -17,7 +17,6 @@ mod v1_fork;
 use alloy::primitives::{Address, U256, address, keccak256};
 use alloy::providers::Provider;
 use alloy::sol_types::SolValue;
-use alloy::transports::RpcError;
 
 use perpcity_sdk::client::PositionRole;
 use perpcity_sdk::constants::SNAPSHOT_BLOCK_LAG;
@@ -134,14 +133,6 @@ async fn each_build_reads_as_its_era_on_a_sepolia_fork() {
         !code.is_empty(),
         "the pinned block {pinned} holds the v1 market"
     );
-    // The earlier maker-equity batch still asks for the old EMA window.
-    let multicall_reverted = |err: &PerpCityError| {
-        matches!(
-            err,
-            PerpCityError::Abi(alloy::contract::Error::TransportError(RpcError::ErrorResp(payload)))
-                if payload.code == 3 && payload.message.contains("Multicall3: call failed")
-        ) && !err.is_transient()
-    };
     let snapshot = v1_market.get_pool_snapshot().await.unwrap();
     let raw = Perp::new(v1_perp, &w.provider)
         .poolState()
@@ -154,7 +145,7 @@ async fn each_build_reads_as_its_era_on_a_sepolia_fork() {
         .get_maker_equities(&[U256::from(1u8)])
         .await
         .unwrap_err();
-    assert!(multicall_reverted(&err), "maker equities: {err:?}");
+    assert!(unsupported(&err, "maker_equities (use previewPosition)"), "maker equities: {err:?}");
     println!("v1 get_maker_equities fails loudly: {err}");
 
     for (perp, era) in [(V022_PERP, Era::Upgradeable), (LEGACY_PERP, Era::Legacy)] {

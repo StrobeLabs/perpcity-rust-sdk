@@ -68,7 +68,7 @@ pub use client::{
     ExactOpenTakerParams, Fees, LpFee, LpFeeCurve, MAX_ROW_BATCH, MakerEquityKind,
     MakerEquityOutcome, MarginRatioTriple, MarginRatios, MarketConfig, MarketRates, MarketReader,
     MarketSnapshot, OpenInterest, OpenMakerParams, OpenResult, OpenTakerParams, PerpClient,
-    PositionRow, RowOutcome, SolvencyState, StateAt, StoredMarginRatios, TxBuilder,
+    TvlCap, PositionRow, RowOutcome, SolvencyState, StateAt, StoredMarginRatios, TxBuilder,
 };
 
 #[doc(inline)]

@@ -280,7 +280,7 @@ impl V1Fork {
 
     /// Estimate `call` from the dev wallet, send it with [`SEND_GAS`], and
     /// keep the mined step. A revert fails the test.
-    async fn send<P: Provider, D: CallDecoder>(
+    pub(super) async fn send<P: Provider, D: CallDecoder>(
         &mut self,
         label: &'static str,
         call: CallBuilder<P, D>,
