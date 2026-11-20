@@ -43,7 +43,7 @@ position_event!(TakerOpened, event => {
         .ok()
         .and_then(|deposit| deposit.checked_sub(event.sr.totalFeeAmt))
         .and_then(|net| u128::try_from(net).ok())
-        .ok_or("net taker margin exceeds uint128")?;
+        .ok_or("net taker margin out of range")?;
     Some(UsdcAtoms::new(margin))
 });
 position_event!(TakerAdjusted, event => Some(UsdcAtoms::new(event.margin)));
@@ -67,6 +67,13 @@ pub struct V1TradeResult<E> {
     pub margin: Option<UsdcAtoms>,
     /// Full event as emitted, including indexed fields.
     pub event: E,
+}
+
+impl<E> V1TradeResult<E> {
+    #[doc(hidden)]
+    pub fn new(tx_hash: B256, pos_id: U256, margin: Option<UsdcAtoms>, event: E) -> Self {
+        Self { tx_hash, pos_id, margin, event }
+    }
 }
 
 /// Find the expected event from this market, optionally for a known position.
@@ -133,6 +140,7 @@ pub fn minted_position_id(
 
 /// Outcome of removing all maker liquidity.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum MakerExit {
     /// All inventory closed.
     Closed(V1TradeResult<Perp::MakerClosed>),
@@ -150,7 +158,16 @@ pub fn parse_maker_exit(
     match parse_v1_receipt_for(receipt, perp, Some(pos_id), owner) {
         Ok(trade) => Ok(MakerExit::Closed(trade)),
         Err(crate::PerpCityError::Contract(ContractError::MinedEventMissing { .. })) => {
-            parse_v1_receipt_for(receipt, perp, Some(pos_id), owner).map(MakerExit::Converted)
+            match parse_v1_receipt_for(receipt, perp, Some(pos_id), owner) {
+                Ok(trade) => Ok(MakerExit::Converted(trade)),
+                Err(crate::PerpCityError::Contract(ContractError::MinedEventMissing { tx_hash, .. })) => {
+                    Err(ContractError::MinedEventMissing {
+                        tx_hash,
+                        event: "MakerClosed or MakerConverted",
+                    }.into())
+                }
+                Err(error) => Err(error),
+            }
         }
         Err(error) => Err(error),
     }
