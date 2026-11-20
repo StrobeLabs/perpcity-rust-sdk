@@ -110,7 +110,8 @@ fn name_for_selector(selector: [u8; 4]) -> Option<&'static str> {
             Perp::TransferToNonERC721ReceiverImplementer::SELECTOR,
             "TransferToNonERC721ReceiverImplementer",
         ),
-        // v1.0.0: the 30 errors only in its Errors.sol; the rest are above.
+        // v1.0.0: the 30 errors only in its Errors.sol (`EmaWindowTooLow`,
+        // before a factory error, is the row above); the rest are above.
         (
             v1::Perp::AggregateSwapFeesTooHigh::SELECTOR,
             "AggregateSwapFeesTooHigh",
@@ -130,7 +131,6 @@ fn name_for_selector(selector: [u8; 4]) -> Option<&'static str> {
             v1::Perp::DonationsRestricted::SELECTOR,
             "DonationsRestricted",
         ),
-        (v1::Perp::EmaWindowTooLow::SELECTOR, "EmaWindowTooLow"),
         (v1::Perp::HealthNotImproved::SELECTOR, "HealthNotImproved"),
         (v1::Perp::IdenticalTicks::SELECTOR, "IdenticalTicks"),
         (
@@ -191,33 +191,43 @@ fn name_for_selector(selector: [u8; 4]) -> Option<&'static str> {
 
 /// What a typed revert says about trying the call again.
 ///
-/// Only four `v1.0.0` errors are not [`Answer`](Self::Answer): none of them
+/// Five `v1.0.0` errors are not an [`Answer`](Self::Answer): none of them
 /// exists in an earlier build, so every revert of a legacy or `v0.2.2`
-/// market stays an answer.
+/// market stays an answer. The class comes from the selector alone; what
+/// a caller does with it also depends on the call that reverted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum RevertClass {
     /// The contract's answer to this call on this state: the same call
     /// gets it again. Not transient.
     Answer,
-    /// Time fixes it, not the caller's input: `StaleBeaconIndex` (the
-    /// beacon's last update is older than the market's `latency()`; the
-    /// call can pass after the next update) and `DeadlineExpired` (the
-    /// call ran after its deadline; a resend with a new deadline can pass).
-    /// Transient.
+    /// A later attempt can pass with no change to the caller's intent, but
+    /// not with the same calldata or not at once. Transient.
+    ///
+    /// - `DeadlineExpired`: the call ran after its `deadline`. The same
+    ///   calldata always fails again: a retry builds the call again with a
+    ///   new deadline.
+    /// - `StaleBeaconIndex`: the beacon's last update is older than the
+    ///   market's `latency()`, or is dated after the block. The call can
+    ///   pass after an update whose time the market accepts.
     Transient,
-    /// The market's beacon cannot give a usable index:
-    /// `BeaconIndexUnreadable` (the `index()` call failed or returned short
-    /// data) and `PriceOutsideRange` (the index is outside
-    /// `[2^96 / 1e6, 2^96 * 1e6]`). Every call that reads the index fails
-    /// the same way until the beacon is fixed, whatever the position or the
-    /// size: hold the market, not the position. Not transient. It is not a
-    /// price-impact refusal: a smaller trade gets the same answer.
+    /// A beacon gives no usable index: `BeaconIndexUnreadable` (its
+    /// `index()` call failed or returned short data) or `PriceOutsideRange`
+    /// (the index is outside `[2^96 / 1e6, 2^96 * 1e6]`). Not transient.
+    ///
+    /// From a trade, a liquidation or a `touch`, the beacon is the market's
+    /// own: every call that reads the index fails the same way until the
+    /// beacon is fixed, whatever the position or the size, so hold the
+    /// market, not the position. It is not a price-impact refusal: a
+    /// smaller trade gets the same answer. From `setBeacon`, `createPerp`
+    /// or `readBeaconIndex`, the beacon is the one the call names, and the
+    /// fault is that beacon's: the market's own beacon is not proved bad.
     BeaconFault,
-    /// `TvlCapExceeded`: the market holds as much as its owner's cap
-    /// allows, so a call that adds margin fails until the cap is raised or
-    /// the market's TVL falls. Hold the add, not the position. Not
-    /// transient.
+    /// `TvlCapExceeded`: the USDC this call brings in (margin, or a
+    /// donation) would take the market's accounted TVL past its `tvlCap()`.
+    /// A smaller amount can still fit; this one fails until the governor
+    /// raises the cap or the TVL falls (the owner can only lower the cap).
+    /// Hold the add, not the position. Not transient.
     Hold,
 }
 
@@ -230,7 +240,7 @@ impl RevertClass {
 }
 
 /// The [`RevertClass`] of a 4-byte error selector. A selector that is not
-/// one of the four `v1.0.0` errors named in [`RevertClass`], known or not,
+/// one of the five `v1.0.0` errors named in [`RevertClass`], known or not,
 /// is an [`RevertClass::Answer`].
 ///
 /// ```
@@ -411,7 +421,7 @@ mod tests {
         assert!(data.is_some());
     }
 
-    /// The errors that only `v1.0.0`'s `Errors.sol` has (map SDK row 62).
+    /// The 30 errors that only `v1.0.0`'s `Errors.sol` has.
     const V1_ONLY: [&str; 30] = [
         "AggregateSwapFeesTooHigh",
         "AlreadyInitialized",
@@ -545,7 +555,7 @@ mod tests {
     }
 
     #[test]
-    fn four_v1_errors_are_not_answers() {
+    fn five_v1_errors_are_not_answers() {
         let classes = [
             (v1::Perp::StaleBeaconIndex::SELECTOR, RevertClass::Transient),
             (v1::Perp::DeadlineExpired::SELECTOR, RevertClass::Transient),

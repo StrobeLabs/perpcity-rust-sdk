@@ -1,10 +1,11 @@
 //! Integration test: the `v1.0.0` reverts that time or the beacon cause,
 //! from deployed bytecode. A market is built on an Anvil fork of Arbitrum
 //! Sepolia by the W11 smoke steps (`v1_fork`); then a taker open past its
-//! deadline, after a warp past the market's `latency()`, and after a beacon
-//! update outside the price domain each reverts, and the node's answer
-//! decodes through the SDK's revert decode to its name and its
-//! [`RevertClass`].
+//! deadline, after a warp past the market's `latency()`, after a beacon
+//! update outside the price domain (also a 1-atom open and a maker
+//! reduce), and with the market's beacon code removed each reverts, and
+//! the node's answer decodes through the SDK's revert decode to its name
+//! and its [`RevertClass`].
 //!
 //! Requires `anvil` (from Foundry) and an Arbitrum Sepolia endpoint in
 //! `SEPOLIA_FORK_URL` (default: the public RPC).
@@ -22,7 +23,7 @@ use alloy::rpc::types::TransactionRequest;
 use alloy::sol_types::{SolCall, SolError};
 use serde_json::Value;
 
-use perpcity_sdk::contracts::v1::{IBeacon, OpenTakerParams, Perp};
+use perpcity_sdk::contracts::v1::{AdjustMakerParams, IBeacon, OpenTakerParams, Perp};
 use perpcity_sdk::errors::decode::{revert_class, try_extract_revert};
 use perpcity_sdk::{PerpCityError, RevertClass, TransactionError};
 
@@ -83,6 +84,54 @@ async fn v1_time_and_beacon_reverts_decode_with_their_class() {
         &err,
         Perp::PriceOutsideRange::SELECTOR,
         "PriceOutsideRange",
+        RevertClass::BeaconFault,
+    );
+    // Not a size refusal: a 1-atom open and a maker reduce fail the same way.
+    let tiny = Perp::openTakerCall {
+        params: OpenTakerParams {
+            holder: w.me,
+            margin: v1_fork::TAKER_MARGIN,
+            perpDelta: I256::ONE,
+            amt1Limit: U256::MAX,
+            maxTotalFee: U256::from(v1_fork::MAX_TOTAL_FEE),
+            deadline,
+        },
+    };
+    let err = call_revert(&w, m.perp, tiny.abi_encode()).await;
+    check(
+        &err,
+        Perp::PriceOutsideRange::SELECTOR,
+        "PriceOutsideRange",
+        RevertClass::BeaconFault,
+    );
+    let reduce = Perp::adjustMakerCall {
+        params: AdjustMakerParams {
+            posId: m.maker_id,
+            marginDelta: 0,
+            liquidityDelta: -1_000_000,
+            amt0Limit: U256::ZERO,
+            amt1Limit: U256::ZERO,
+            deadline,
+        },
+    };
+    let err = call_revert(&w, m.perp, reduce.abi_encode()).await;
+    check(
+        &err,
+        Perp::PriceOutsideRange::SELECTOR,
+        "PriceOutsideRange",
+        RevertClass::BeaconFault,
+    );
+    revert_to(&w, snapshot).await;
+
+    // The market's own beacon gives no data: its code is gone.
+    let snapshot = rpc(&w, "evm_snapshot", ()).await;
+    rpc(&w, "anvil_setCode", (m.beacon, Bytes::new())).await;
+    let deadline = w.deadline().await;
+    let err = open_taker_revert(&w, &m, deadline).await;
+    check(
+        &err,
+        Perp::BeaconIndexUnreadable::SELECTOR,
+        "BeaconIndexUnreadable",
         RevertClass::BeaconFault,
     );
     revert_to(&w, snapshot).await;
