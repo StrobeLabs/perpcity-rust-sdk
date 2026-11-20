@@ -949,7 +949,7 @@ mod tests {
     use crate::{HftTransport, TransportConfig};
 
     const HOLDER: Address = Address::repeat_byte(0x77);
-    const NOW: u64 = 1_763_600_000;
+    pub(super) const NOW: u64 = 1_763_600_000;
 
     fn open() -> ExactOpenTakerParams {
         ExactOpenTakerParams {
@@ -1300,12 +1300,12 @@ mod tests {
         assert!(rpc.is_drained());
     }
 
-    const STUCK_NONCE: u64 = 12;
-    const STUCK_GAS: u64 = 200_000;
+    pub(super) const STUCK_NONCE: u64 = 12;
+    pub(super) const STUCK_GAS: u64 = 200_000;
 
     /// A signed EIP-1559 trade of `client` on its market, as the request
     /// for [`as_seen`].
-    fn trade_request(client: &PerpClient, input: Vec<u8>) -> TransactionRequest {
+    pub(super) fn trade_request(client: &PerpClient, input: Vec<u8>) -> TransactionRequest {
         TransactionRequest::default()
             .with_to(client.market().perp())
             .with_input(Bytes::from(input))
@@ -1323,7 +1323,7 @@ mod tests {
 
     /// `request` signed by `from`, the client or [`other_signer`], as the
     /// node returns it, pending or mined in `block`.
-    async fn as_seen(
+    pub(super) async fn as_seen(
         client: &PerpClient,
         request: TransactionRequest,
         from: Address,
@@ -1351,7 +1351,7 @@ mod tests {
         )
     }
 
-    async fn pending_trade(client: &PerpClient, input: Vec<u8>) -> (B256, Transaction) {
+    pub(super) async fn pending_trade(client: &PerpClient, input: Vec<u8>) -> (B256, Transaction) {
         as_seen(client, trade_request(client, input), client.address(), None).await
     }
 
@@ -1379,7 +1379,11 @@ mod tests {
         receipt(client, hash, true, 123_000, vec![log])
     }
 
-    fn failed_receipt(client: &PerpClient, hash: B256, gas_used: u64) -> TransactionReceipt {
+    pub(super) fn failed_receipt(
+        client: &PerpClient,
+        hash: B256,
+        gas_used: u64,
+    ) -> TransactionReceipt {
         receipt(client, hash, false, gas_used, Vec::new())
     }
 
@@ -1413,14 +1417,14 @@ mod tests {
 
     /// One look at the nonce and the receipts: the account nonce, then no
     /// receipt for each of `hashes`.
-    fn nothing_settled(rpc: &mock::Rpc, account_nonce: u64, hashes: usize) {
+    pub(super) fn nothing_settled(rpc: &mock::Rpc, account_nonce: u64, hashes: usize) {
         rpc.quantity(account_nonce);
         for _ in 0..hashes {
             rpc.response(&None::<TransactionReceipt>);
         }
     }
 
-    fn refusal(err: &PerpCityError) -> NotReplaceableReason {
+    pub(super) fn refusal(err: &PerpCityError) -> NotReplaceableReason {
         match err {
             PerpCityError::Transaction(TransactionError::NotReplaceable { reason, .. }) => *reason,
             other => panic!("expected a refusal: {other}"),

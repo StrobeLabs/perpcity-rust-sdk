@@ -20,11 +20,11 @@ use alloy::consensus::Transaction;
 use alloy::contract::{CallBuilder, CallDecoder};
 use alloy::eips::BlockNumberOrTag;
 use alloy::hex;
-use alloy::network::EthereumWallet;
+use alloy::network::{EthereumWallet, TransactionBuilder};
 use alloy::primitives::aliases::{U24, U48};
 use alloy::primitives::{Address, B256, I256, U256, address, keccak256};
 use alloy::providers::{DynProvider, Provider, ProviderBuilder};
-use alloy::rpc::types::TransactionReceipt;
+use alloy::rpc::types::{TransactionReceipt, TransactionRequest};
 use alloy::signers::SignerSync;
 use alloy::signers::local::PrivateKeySigner;
 use alloy::sol;
@@ -36,6 +36,7 @@ use perpcity_sdk::contracts::v1::{
     AdjustMakerParams, AdjustTakerParams, Modules, MoveMakerParams, OpenMakerParams,
     OpenTakerParams, Perp, PerpFactory, WithdrawalConfig,
 };
+use perpcity_sdk::hft::gas::GasLimitCache;
 
 sol! {
     /// The test USDC on Arbitrum Sepolia: a public `mint`.
@@ -390,6 +391,16 @@ impl V1Fork {
     // ── 6-7. the market ─────────────────────────────────────────────
 
     pub async fn create_perp(&mut self, beacon: Address) -> Address {
+        let config = WithdrawalConfig {
+            capacity: u128::MAX,
+            refillPerSecond: u128::MAX,
+            challengeWindow: U48::from(86_400u64),
+        };
+        self.create_perp_with(beacon, config).await
+    }
+
+    /// [`Self::create_perp`] with the withdrawal controller's `config`.
+    pub async fn create_perp_with(&mut self, beacon: Address, config: WithdrawalConfig) -> Address {
         let factory = PerpFactory::new(FACTORY, self.provider.clone());
         let salt = keccak256(format!("v1-fork-{}-{}", self.me, self.now().await));
         let modules = Modules {
@@ -399,11 +410,6 @@ impl V1Fork {
             marginRatios: MARGIN_RATIOS,
             priceImpact: PRICE_IMPACT,
             pricing: PRICING,
-        };
-        let config = WithdrawalConfig {
-            capacity: u128::MAX,
-            refillPerSecond: u128::MAX,
-            challengeWindow: U48::from(86_400u64),
         };
         let call = factory.createPerp(
             self.me,
@@ -425,6 +431,15 @@ impl V1Fork {
             self.me
         );
         perp
+    }
+
+    /// The test USDC `who` holds.
+    pub async fn usdc_balance(&self, who: Address) -> U256 {
+        ITestUsdc::new(USDC, &self.provider)
+            .balanceOf(who)
+            .call()
+            .await
+            .unwrap()
     }
 
     pub async fn approve_usdc(&mut self, perp: Address) {
@@ -581,5 +596,61 @@ impl V1Fork {
             maker_id,
             taker_id,
         }
+    }
+}
+
+/// A mined trade's gas: the receipt's `gasUsed`, `eth_estimateGas` for the
+/// same call from the same sender at the block before it, and the cache
+/// floor for its selector.
+pub struct GasMeasure {
+    pub used: u64,
+    pub estimate: u64,
+    pub floor: u64,
+}
+
+/// Measure `hash` and check that its selector's floor is at least 120% of
+/// the estimate and of the gas used, the margin the floors are set with. Anvil's receipts and
+/// estimates exclude Arbitrum's L1 data gas; the floors cover L2
+/// execution only.
+pub async fn measure_gas(provider: &impl Provider, hash: B256, label: &str) -> GasMeasure {
+    let receipt = provider
+        .get_transaction_receipt(hash)
+        .await
+        .unwrap()
+        .unwrap();
+    let tx = provider
+        .get_transaction_by_hash(hash)
+        .await
+        .unwrap()
+        .unwrap();
+    let block = receipt.block_number.unwrap();
+    let request = TransactionRequest::default()
+        .with_from(tx.inner.signer())
+        .with_to(tx.to().unwrap())
+        .with_input(tx.input().clone());
+    let estimate = provider
+        .estimate_gas(request)
+        .block((block - 1).into())
+        .await
+        .unwrap_or_else(|e| panic!("{label}: no estimate at block {}: {e}", block - 1));
+    let selector: [u8; 4] = tx.input()[..4].try_into().unwrap();
+    let mut limits = GasLimitCache::new();
+    limits.put(selector, 1, 0);
+    let floor = limits.get(&selector, 0).unwrap();
+    println!(
+        "gas {label}: used {} estimate {estimate} at block {} floor {floor} tx {hash}",
+        receipt.gas_used,
+        block - 1
+    );
+    let need = estimate.max(receipt.gas_used);
+    assert!(
+        floor >= (need * 6).div_ceil(5),
+        "{label}: floor {floor} below 120% of {need} (estimate {estimate}, used {})",
+        receipt.gas_used
+    );
+    GasMeasure {
+        used: receipt.gas_used,
+        estimate,
+        floor,
     }
 }

@@ -4,10 +4,10 @@
 
 use alloy::primitives::{Address, B256, Bytes, U256};
 use alloy::rpc::types::TransactionReceipt;
-use alloy::sol_types::SolCall;
+use alloy::sol_types::{SolCall, SolError};
 
 use crate::contracts::v1::{AdjustMakerParams, OpenMakerParams, Perp};
-use crate::errors::{ContractError, PerpCityError, Result, ValidationError};
+use crate::errors::{ContractError, PerpCityError, Result, TransactionError, ValidationError};
 use crate::events::receipt::{MakerExit, V1TradeResult, parse_maker_exit, parse_v1_receipt_for};
 use crate::hft::gas::Urgency;
 use crate::math::capacity::{MarketCapacity, band_capacity_x64};
@@ -15,6 +15,7 @@ use crate::math::liquidity::band_amounts;
 use crate::math::range::MakerBand;
 use crate::units::{LUnits, PerSide, PerpAtoms, PerpDelta, Side, SqrtPrice, UsdcAtoms, UsdcDelta};
 
+use super::super::state::StateAt;
 use super::super::trades::{ExactAdjustMakerParams, ExactOpenMakerParams, check_opening_margin};
 use super::super::{PerpClient, i32_to_i24, now_ms};
 use super::{StuckCall, deadline_after, renewed_deadline};
@@ -165,6 +166,33 @@ fn check_removal(
     })
 }
 
+/// The answer to a removal [`check_removal`] refused, given the contract's
+/// answer to the same call at the same block: the refusal when the contract
+/// reverts with the same capacity error, the contract's revert when an
+/// earlier check fails first (`MarginTooLow` before the converted
+/// residual's depth, for one), and `None`, to send, when it accepts.
+fn confirmed_refusal(
+    refusal: ValidationError,
+    simulated: std::result::Result<(), TransactionError>,
+) -> Option<PerpCityError> {
+    let expected = match refusal {
+        ValidationError::LongCloseCapacityExceeded { .. } => {
+            Perp::LongCloseCapacityExceeded::SELECTOR
+        }
+        ValidationError::ShortCloseCapacityExceeded { .. } => {
+            Perp::ShortCloseCapacityExceeded::SELECTOR
+        }
+        _ => return Some(refusal.into()),
+    };
+    match simulated {
+        Ok(()) => None,
+        Err(TransactionError::SimulationReverted { selector, .. }) if selector.0 == expected => {
+            Some(refusal.into())
+        }
+        Err(error) => Some(error.into()),
+    }
+}
+
 impl PerpClient {
     /// Open a maker on a `v1.0.0` market, with a deadline
     /// [`V1_TRADE_DEADLINE`](super::V1_TRADE_DEADLINE) after now. The
@@ -216,14 +244,23 @@ impl PerpClient {
     /// checks it again at the block it mines in. Removing all of the
     /// band's liquidity exits the position: [`V1MakerAdjustment::Exit`].
     ///
+    /// A removal the check refuses is sent as an `eth_call` at the same
+    /// block before the refusal is returned. The contract checks the open
+    /// interest at the removal, then the margin, then the conversion's
+    /// margin and health, then the converted residual against the depth:
+    /// when an earlier check fails, its revert is returned instead.
+    ///
     /// # Errors
     ///
     /// As [`Self::open_maker_v1`], without the margin minimum;
     /// [`ValidationError::LongCloseCapacityExceeded`] or
     /// [`ValidationError::ShortCloseCapacityExceeded`] for a removal the
-    /// close depth cannot take, before anything is sent;
-    /// [`ContractError::PositionNotFound`] for an id that is not an open
-    /// maker when a removal reads it.
+    /// close depth cannot take, before anything is sent: not transient at
+    /// the block read, but the same removal can fit after the open
+    /// interest falls or the depth grows;
+    /// [`ValidationError::ExcessMakerRemoval`] for more liquidity than the
+    /// band holds; [`ContractError::PositionNotFound`] for an id that is
+    /// not an open maker when a removal reads it.
     pub async fn adjust_maker_v1(
         &self,
         params: &ExactAdjustMakerParams,
@@ -231,8 +268,10 @@ impl PerpClient {
     ) -> Result<V1MakerAdjustment> {
         self.require_v1("adjust_maker_v1").await?;
         if params.liquidity_delta.units() < 0 {
-            let state = self.removal_state(params.pos_id).await?;
-            check_removal(&state, params.liquidity_delta.magnitude())?;
+            let (at, state) = self.removal_state(params.pos_id).await?;
+            if let Err(refusal) = check_removal(&state, params.liquidity_delta.magnitude()) {
+                self.confirm_refusal(&at, params, refusal).await?;
+            }
         }
         let receipt = self.send_adjust_maker_v1(params, urgency).await?;
         maker_adjustment(&receipt, self.market.perp(), params.pos_id)
@@ -247,16 +286,21 @@ impl PerpClient {
     /// (`PerpLogic.checkPhysicalCapacity`). The last maker of a market
     /// clears both depths, so it closes only when no open interest is left
     /// and its own perp left is zero: a one-maker market's maker with a
-    /// residual is refused here before send. The send preflight checks
-    /// the conversion's margin and health.
+    /// residual is refused here before send. A refusal is confirmed at the
+    /// same block as [`Self::adjust_maker_v1`] confirms one, so a
+    /// conversion whose margin is too low returns the contract's
+    /// `MarginTooLow` even when its residual also exceeds the depth. The
+    /// send preflight checks the conversion's margin and health.
     ///
     /// # Errors
     ///
-    /// As [`Self::adjust_maker_v1`].
+    /// As [`Self::adjust_maker_v1`];
+    /// [`TransactionError::MakerNotClosed`], transient, when the close
+    /// mined as an adjustment because the band gained liquidity after the
+    /// read.
     pub async fn close_maker_v1(&self, pos_id: U256, urgency: Urgency) -> Result<MakerExit> {
         self.require_v1("close_maker_v1").await?;
-        let state = self.removal_state(pos_id).await?;
-        check_removal(&state, state.band.liquidity)?;
+        let (at, state) = self.removal_state(pos_id).await?;
         let params = ExactAdjustMakerParams {
             pos_id,
             margin_delta: UsdcDelta::ZERO,
@@ -264,8 +308,18 @@ impl PerpClient {
             amt0_limit: PerpAtoms::ZERO,
             amt1_limit: UsdcAtoms::ZERO,
         };
+        if let Err(refusal) = check_removal(&state, state.band.liquidity) {
+            self.confirm_refusal(&at, &params, refusal).await?;
+        }
         let receipt = self.send_adjust_maker_v1(&params, urgency).await?;
-        parse_maker_exit(&receipt, self.market.perp(), pos_id, Some(self.address))
+        match maker_adjustment(&receipt, self.market.perp(), pos_id)? {
+            V1MakerAdjustment::Exit(exit) => Ok(exit),
+            V1MakerAdjustment::Adjusted(adjusted) => Err(TransactionError::MakerNotClosed {
+                tx_hash: adjusted.tx_hash,
+                pos_id,
+            }
+            .into()),
+        }
     }
 
     /// Replace a pending v1 maker write at the same nonce with a new
@@ -294,9 +348,40 @@ impl PerpClient {
         }
     }
 
+    /// Return `refusal`, or the contract's earlier revert, unless the
+    /// contract accepts the removal at the block `refusal` was found at.
+    async fn confirm_refusal(
+        &self,
+        at: &StateAt,
+        params: &ExactAdjustMakerParams,
+        refusal: ValidationError,
+    ) -> Result<()> {
+        let simulated = match refusal {
+            ValidationError::LongCloseCapacityExceeded { .. }
+            | ValidationError::ShortCloseCapacityExceeded { .. } => {
+                let call = adjust_call(params, deadline_after(now_ms() / 1_000));
+                at.simulate_from(self.address, &call.abi_encode().into())
+                    .await
+            }
+            _ => Ok(()),
+        };
+        match confirmed_refusal(refusal, simulated) {
+            Some(error) => Err(error),
+            None => {
+                tracing::warn!(
+                    pos_id = %params.pos_id,
+                    block = at.block().number,
+                    "the contract accepts a maker removal the close-depth check refused"
+                );
+                Ok(())
+            }
+        }
+    }
+
     /// The band, the position's perp, the open interest, the X64 close
-    /// depth, the market's maker liquidity and the pool price, at the head.
-    async fn removal_state(&self, pos_id: U256) -> Result<RemovalState> {
+    /// depth, the market's maker liquidity and the pool price, at the head,
+    /// with the handle they were read at.
+    async fn removal_state(&self, pos_id: U256) -> Result<(StateAt, RemovalState)> {
         let state = self.market.state_at_head().await?;
         let (band, position, open_interest, depth_x64, book, sqrt_price) = tokio::try_join!(
             state.maker_band(pos_id),
@@ -307,14 +392,15 @@ impl PerpClient {
             state.pool_sqrt_price(),
         )?;
         let not_found = || -> PerpCityError { ContractError::PositionNotFound { pos_id }.into() };
-        Ok(RemovalState {
+        let removal = RemovalState {
             band: band.ok_or_else(not_found)?,
             perp: position.ok_or_else(not_found)?.perp,
             open_interest,
             depth_x64,
             book,
             sqrt_price,
-        })
+        };
+        Ok((state, removal))
     }
 
     /// Sign, send and wait for one `adjustMaker`.
@@ -366,13 +452,18 @@ fn maker_adjustment(
 
 #[cfg(test)]
 mod tests {
+    use super::super::tests as taker;
     use super::*;
     use crate::client::{ARBITRUM_CHAIN_ID, ARBITRUM_SEPOLIA_CHAIN_ID};
     use crate::client::{ChainDeployments, Era, mock};
     use crate::contracts::Perp as EarlierPerp;
-    use crate::errors::TransactionError;
+    use crate::contracts::v1::{FundingState, OpenInterest};
+    use crate::errors::NotReplaceableReason;
+    use crate::errors::decode::revert_class;
     use crate::math::range::TickRange;
     use crate::units::LDelta;
+    use alloy::eips::BlockId;
+    use alloy::primitives::{I256, U160};
 
     fn open() -> ExactOpenMakerParams {
         ExactOpenMakerParams {
@@ -392,6 +483,325 @@ mod tests {
             amt0_limit: PerpAtoms::new(100),
             amt1_limit: UsdcAtoms::new(1_000),
         }
+    }
+
+    /// The W12 band at the W12 pool price: in range, so its removal
+    /// leaves both depths, by different amounts.
+    fn w12_band() -> (SqrtPrice, MakerBand) {
+        let price = SqrtPrice::from_x96(U256::from(560_227_709_747_861_399_187_319_382_274u128));
+        let band = MakerBand::new(
+            TickRange::new(38_700, 39_540).unwrap(),
+            LUnits::new(335_000_000),
+        );
+        (price, band)
+    }
+
+    fn removal(
+        perp: i128,
+        interest: (u128, u128),
+        depth: (U256, U256),
+        book: u128,
+    ) -> RemovalState {
+        let (sqrt_price, band) = w12_band();
+        RemovalState {
+            band,
+            perp: PerpDelta::new(perp),
+            open_interest: PerSide::new(PerpAtoms::new(interest.0), PerpAtoms::new(interest.1)),
+            depth_x64: PerSide::new(depth.0, depth.1),
+            book: U256::from(book),
+            sqrt_price,
+        }
+    }
+
+    fn x64(atoms: u128) -> U256 {
+        U256::from(atoms) << 64
+    }
+
+    type Refusal = Option<(Side, u128, bool)>;
+
+    /// A check's refusal as the side, the interest and `last_maker`.
+    fn refused(result: std::result::Result<(), ValidationError>) -> Refusal {
+        match result {
+            Ok(()) => None,
+            Err(ValidationError::LongCloseCapacityExceeded {
+                interest,
+                last_maker,
+            }) => Some((Side::Long, interest, last_maker)),
+            Err(ValidationError::ShortCloseCapacityExceeded {
+                interest,
+                last_maker,
+            }) => Some((Side::Short, interest, last_maker)),
+            Err(other) => panic!("not a close-depth refusal: {other}"),
+        }
+    }
+
+    fn long(interest: u128, last_maker: bool) -> Refusal {
+        Some((Side::Long, interest, last_maker))
+    }
+
+    fn short(interest: u128, last_maker: bool) -> Refusal {
+        Some((Side::Short, interest, last_maker))
+    }
+
+    /// A partial removal takes only the removed liquidity's contribution,
+    /// crosswise (the long depth loses the band's short contribution), and
+    /// ignores the perp it does not convert.
+    #[test]
+    fn a_partial_removal_debits_its_own_contribution_crosswise() {
+        let (price, band) = w12_band();
+        let removed = LUnits::new(100_000_000);
+        let part = band_capacity_x64(price, &MakerBand::new(band.range, removed)).unwrap();
+        let whole = band_capacity_x64(price, &band).unwrap();
+        assert!(part.long != part.short && part.long < whole.long && part.short < whole.short);
+        let book = 2 * band.liquidity.units();
+        let (oi_long, oi_short) = (7, 5);
+        let depth_long = x64(oi_long) + part.short;
+        let depth_short = x64(oi_short) + part.long;
+        let check = |long_depth, short_depth| {
+            refused(check_removal(
+                &removal(
+                    -1_000_000_000,
+                    (oi_long, oi_short),
+                    (long_depth, short_depth),
+                    book,
+                ),
+                removed,
+            ))
+        };
+        assert_eq!(check(depth_long, depth_short), None);
+        assert_eq!(
+            check(depth_long - U256::ONE, depth_short),
+            long(oi_long, false)
+        );
+        assert_eq!(
+            check(depth_long, depth_short - U256::ONE),
+            short(oi_short, false)
+        );
+        // Each side keeps its own crosswise contribution: the sides' depths
+        // swapped refuse.
+        assert!(check(x64(oi_long) + part.long, x64(oi_short) + part.short).is_some());
+    }
+
+    /// A full removal converts the perp left, its stored perp plus the
+    /// principal the pool returns, and checks it on its own side after the
+    /// interest at the removal.
+    #[test]
+    fn a_full_removal_checks_the_signed_residual_on_its_side() {
+        let (price, band) = w12_band();
+        let whole = band_capacity_x64(price, &band).unwrap();
+        let (principal, _) = band_amounts(price, &band).unwrap();
+        let principal = i128::try_from(principal.atoms()).unwrap();
+        let book = 2 * band.liquidity.units();
+        let (oi_long, oi_short) = (7, 5);
+        let check = |perp, long_depth, short_depth| {
+            refused(check_removal(
+                &removal(perp, (oi_long, oi_short), (long_depth, short_depth), book),
+                band.liquidity,
+            ))
+        };
+        let fits_long = x64(oi_long) + whole.short;
+        let fits_short = x64(oi_short) + whole.long;
+
+        // No residual: the interest at the removal alone.
+        assert_eq!(check(-principal, fits_long, fits_short), None);
+        assert_eq!(
+            check(-principal, fits_long - U256::ONE, fits_short),
+            long(oi_long, false)
+        );
+
+        // A short residual of 4 joins the short interest.
+        let with_short = fits_short + x64(4);
+        assert_eq!(check(-principal - 4, fits_long, with_short), None);
+        assert_eq!(
+            check(-principal - 4, fits_long, with_short - U256::ONE),
+            short(oi_short + 4, false)
+        );
+
+        // A long residual of 3 joins the long interest.
+        let with_long = fits_long + x64(3);
+        assert_eq!(check(-principal + 3, with_long, fits_short), None);
+        assert_eq!(
+            check(-principal + 3, with_long - U256::ONE, fits_short),
+            long(oi_long + 3, false)
+        );
+
+        // The interest at the removal is checked first and named alone.
+        assert_eq!(
+            check(-principal + 3, fits_long - U256::ONE, fits_short),
+            long(oi_long, false)
+        );
+    }
+
+    /// The last maker's removal clears both depths: it fits only with no
+    /// interest and no residual, whatever the depths held.
+    #[test]
+    fn the_last_maker_closes_only_with_nothing_left_to_cover() {
+        let (price, band) = w12_band();
+        let (principal, _) = band_amounts(price, &band).unwrap();
+        let principal = i128::try_from(principal.atoms()).unwrap();
+        let book = band.liquidity.units();
+        let deep = (x64(u64::MAX.into()), x64(u64::MAX.into()));
+        let check = |perp, interest| {
+            refused(check_removal(
+                &removal(perp, interest, deep, book),
+                band.liquidity,
+            ))
+        };
+        assert_eq!(check(-principal, (0, 0)), None);
+        assert_eq!(check(-principal - 1, (0, 0)), short(1, true));
+        assert_eq!(check(-principal + 2, (0, 0)), long(2, true));
+        assert_eq!(check(-principal, (1, 0)), long(1, true));
+        // One more unit of liquidity elsewhere: not the last maker.
+        assert_eq!(
+            refused(check_removal(
+                &removal(-principal - 1, (0, 0), deep, book + 1),
+                band.liquidity
+            )),
+            None
+        );
+    }
+
+    #[test]
+    fn a_removal_beyond_the_band_is_refused_before_the_depth() {
+        let (_, band) = w12_band();
+        let state = removal(0, (0, 0), (U256::ZERO, U256::ZERO), band.liquidity.units());
+        let requested = band.liquidity.units() + 1;
+        assert!(matches!(
+            check_removal(&state, LUnits::new(requested)),
+            Err(ValidationError::ExcessMakerRemoval { requested: r, available })
+                if r == requested && available == band.liquidity.units()
+        ));
+    }
+
+    /// Each read answers in order: the head, the build, the band, the
+    /// position row and owner, the open interest, both depth words, the
+    /// book and the pool. `owner` zero is a position that is not open.
+    fn answer_removal_reads(rpc: &mock::Rpc, owner: Address) -> B256 {
+        rpc.quantity(100);
+        let hash = rpc.block(100, 1_795_141_000);
+        rpc.immutables(Era::V1);
+        rpc.raw(&mock::v1_maker_words(38_700, 39_540, 335_000_000));
+        rpc.aggregate3(vec![
+            mock::ok_row(mock::v1_position_words(
+                -979_408,
+                -49_477_350,
+                100_000_000,
+                0,
+            )),
+            mock::ok_row(mock::returns::<Perp::positionOwnerCall>(&owner)),
+        ]);
+        rpc.call::<Perp::openInterestCall>(&OpenInterest { long: 7, short: 5 });
+        rpc.storage(U256::from(11u8) << 64);
+        rpc.storage(U256::from(13u8) << 64);
+        rpc.call::<Perp::fundingStateCall>(&FundingState {
+            baseX96: I256::ZERO,
+            inventoryX96: I256::ZERO,
+            makerLiquidity: U256::from(405_000_000u64),
+        });
+        let mut pool = mock::pool_state_at_tick(39_000);
+        pool.sqrtPrice = U160::from(560_227_709_747_861_399_187_319_382_274u128);
+        rpc.call::<EarlierPerp::poolStateCall>(&pool);
+        hash
+    }
+
+    /// Every input of the removal check comes from one block, each read
+    /// into its own field.
+    #[tokio::test]
+    async fn the_removal_state_reads_each_input_at_one_block() {
+        let (client, rpc) = mock::client();
+        let hash = answer_removal_reads(&rpc, Address::repeat_byte(1));
+        let (at, state) = client.removal_state(U256::ONE).await.unwrap();
+        assert_eq!(at.block().hash, hash);
+        let (price, band) = w12_band();
+        assert_eq!(state.band, band);
+        assert_eq!(state.perp, PerpDelta::new(-979_408));
+        assert_eq!(
+            state.open_interest,
+            PerSide::new(PerpAtoms::new(7), PerpAtoms::new(5))
+        );
+        assert_eq!(
+            state.depth_x64,
+            PerSide::new(U256::from(11u8) << 64, U256::from(13u8) << 64)
+        );
+        assert_eq!(state.book, U256::from(405_000_000u64));
+        assert_eq!(state.sqrt_price, price);
+        let pinned = BlockId::hash(hash);
+        let blocks = rpc.call_blocks();
+        assert_eq!(blocks[2..], vec![pinned; blocks.len() - 2]);
+        assert_eq!(rpc.storage_blocks(), [pinned, pinned]);
+        assert!(rpc.is_drained());
+
+        let (client, rpc) = mock::client();
+        answer_removal_reads(&rpc, Address::ZERO);
+        assert!(matches!(
+            client.removal_state(U256::ONE).await,
+            Err(PerpCityError::Contract(ContractError::PositionNotFound { pos_id })) if pos_id == U256::ONE
+        ));
+    }
+
+    fn reverted(selector: [u8; 4]) -> std::result::Result<(), TransactionError> {
+        Err(TransactionError::SimulationReverted {
+            error_name: String::new(),
+            selector: selector.into(),
+            revert_data: None,
+        })
+    }
+
+    #[test]
+    fn a_refusal_stands_only_when_the_contract_reverts_the_same_way() {
+        let refusal = || ValidationError::ShortCloseCapacityExceeded {
+            interest: 9,
+            last_maker: false,
+        };
+        let same = confirmed_refusal(
+            refusal(),
+            reverted(Perp::ShortCloseCapacityExceeded::SELECTOR),
+        );
+        assert!(matches!(
+            same,
+            Some(PerpCityError::Validation(
+                ValidationError::ShortCloseCapacityExceeded {
+                    interest: 9,
+                    last_maker: false
+                }
+            ))
+        ));
+        let margin = confirmed_refusal(refusal(), reverted(Perp::MarginTooLow::SELECTOR));
+        assert!(
+            matches!(&margin, Some(PerpCityError::Transaction(error)) if error.is_revert::<Perp::MarginTooLow>()),
+            "{margin:?}"
+        );
+        let other_side = confirmed_refusal(
+            refusal(),
+            reverted(Perp::LongCloseCapacityExceeded::SELECTOR),
+        );
+        assert!(matches!(
+            other_side,
+            Some(PerpCityError::Transaction(
+                TransactionError::SimulationReverted { .. }
+            ))
+        ));
+        let unanswered = confirmed_refusal(
+            ValidationError::LongCloseCapacityExceeded {
+                interest: 1,
+                last_maker: false,
+            },
+            Err(TransactionError::GasUnavailable {
+                reason: "eth_call failed".into(),
+            }),
+        );
+        assert!(unanswered.is_some_and(|error| error.is_transient()));
+        assert!(confirmed_refusal(refusal(), Ok(())).is_none());
+        let excess = ValidationError::ExcessMakerRemoval {
+            requested: 2,
+            available: 1,
+        };
+        assert!(matches!(
+            confirmed_refusal(excess, Ok(())),
+            Some(PerpCityError::Validation(
+                ValidationError::ExcessMakerRemoval { .. }
+            ))
+        ));
     }
 
     #[test]
@@ -442,6 +852,128 @@ mod tests {
             replacement_calldata(&expected.abi_encode(), 1_000),
             Some((kind, None))
         );
+    }
+
+    fn stuck_removal(deadline: u64) -> Vec<u8> {
+        adjust_call(&adjust(), deadline).abi_encode()
+    }
+
+    /// A maker removal's preflight revert keeps the original's hash and
+    /// nonce and the revert's selector and class.
+    #[tokio::test]
+    async fn a_maker_preflight_revert_keeps_its_class_and_the_original() {
+        let (client, rpc) = mock::client();
+        client.chain().set_base_fee(100);
+        let (hash, tx) = taker::pending_trade(&client, stuck_removal(taker::NOW + 600)).await;
+        rpc.immutables(Era::V1);
+        rpc.response(&tx);
+        rpc.reverts(&Perp::ShortCloseCapacityExceeded::SELECTOR);
+        taker::nothing_settled(&rpc, taker::STUCK_NONCE, 1);
+        let err = client
+            .replace_v1_maker(hash, Urgency::Normal)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&err, PerpCityError::Transaction(TransactionError::ReplacementUnconfirmed {
+                original, nonce: Some(taker::STUCK_NONCE), replacement: None, refused: false,
+                source: Some(source),
+            }) if *original == hash && source.is_simulation_revert()),
+            "{err}"
+        );
+        assert_eq!(err.hash_to_replace(), Some(hash));
+        let class = revert_class(Perp::ShortCloseCapacityExceeded::SELECTOR);
+        assert_eq!(err.revert_class(), Some(class));
+        assert_eq!(err.is_transient(), class.is_transient());
+        assert!(err.is_unconfirmed());
+        let PerpCityError::Transaction(inner) = &err else {
+            unreachable!()
+        };
+        assert!(inner.is_revert::<Perp::ShortCloseCapacityExceeded>());
+        assert!(rpc.is_drained());
+    }
+
+    /// The node failing the look-up leaves the original pending: its hash,
+    /// unconfirmed and transient.
+    #[tokio::test]
+    async fn a_failed_maker_lookup_keeps_the_original() {
+        let (client, rpc) = mock::client();
+        let hash = B256::repeat_byte(0x5b);
+        rpc.immutables(Era::V1);
+        rpc.fails("upstream timeout");
+        let err = client
+            .replace_v1_maker(hash, Urgency::Normal)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, PerpCityError::Transaction(TransactionError::ReplacementUnconfirmed {
+                original, nonce: None, replacement: None, refused: false, source: Some(_),
+            }) if original == hash),
+            "{err}"
+        );
+        assert_eq!(err.hash_to_replace(), Some(hash));
+        assert!(err.is_transient() && err.is_unconfirmed());
+        assert_eq!(err.tx_hash(), Some(hash));
+        assert!(rpc.is_drained());
+    }
+
+    /// A pending EIP-7702 maker write is not signed again; nothing follows
+    /// the look-up.
+    #[tokio::test]
+    async fn a_pending_type_4_maker_write_is_refused() {
+        let (client, rpc) = mock::client();
+        client.chain().set_base_fee(100);
+        let mut request = taker::trade_request(&client, stuck_removal(taker::NOW + 600));
+        request.authorization_list = Some(Vec::new());
+        let (hash, tx) = taker::as_seen(&client, request, client.address(), None).await;
+        rpc.immutables(Era::V1);
+        rpc.response(&tx);
+        let err = client
+            .replace_v1_maker(hash, Urgency::Normal)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            taker::refusal(&err),
+            NotReplaceableReason::NotEip1559 { tx_type: 4 }
+        );
+        assert!(err.is_unconfirmed() && !err.is_transient());
+        assert!(rpc.is_drained());
+    }
+
+    /// A mined maker write that used its whole limit is out of gas, and the
+    /// `adjustMaker` estimate is evicted.
+    #[tokio::test]
+    async fn a_mined_maker_write_out_of_gas_evicts_its_estimate() {
+        let selector = Perp::adjustMakerCall::SELECTOR;
+        let (client, rpc) = mock::client();
+        client
+            .gas_limit_cache
+            .lock()
+            .unwrap()
+            .put(selector, 150_000, now_ms());
+        let request = taker::trade_request(&client, stuck_removal(taker::NOW + 600));
+        let (hash, tx) = taker::as_seen(&client, request, client.address(), Some(92)).await;
+        rpc.immutables(Era::V1);
+        rpc.response(&tx);
+        rpc.response(&taker::failed_receipt(&client, hash, taker::STUCK_GAS));
+        let err = client
+            .replace_v1_maker(hash, Urgency::Normal)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, PerpCityError::Transaction(TransactionError::OutOfGas {
+                tx_hash, gas_used: taker::STUCK_GAS, gas_limit: taker::STUCK_GAS,
+            }) if tx_hash == hash),
+            "{err}"
+        );
+        assert_eq!(
+            client
+                .gas_limit_cache
+                .lock()
+                .unwrap()
+                .get(&selector, now_ms()),
+            None
+        );
+        assert!(rpc.is_drained());
     }
 
     const STUCK: B256 = B256::repeat_byte(0x5a);

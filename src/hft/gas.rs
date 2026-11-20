@@ -55,22 +55,25 @@ impl GasLimits {
     /// liquidations have run out of gas where `eth_estimateGas` passed, so
     /// the liquidation paths pin this bound instead of estimating.
     pub const LIQUIDATE: u64 = 3_000_000;
-    // Arbitrum Sepolia v1 fork receipts, plus 20%, rounded up to 50,000.
-    // Adjust and close share a selector, so use the highest measured cost.
-    /// V1 taker open (659,938 gas across four ticks).
-    pub const V1_OPEN_TAKER: u64 = 800_000;
-    /// V1 taker adjustment or close (446,424 and 649,428 gas).
-    pub const V1_ADJUST_TAKER: u64 = 800_000;
-    /// V1 maker open (714,066 gas for the first W12 band).
-    pub const V1_OPEN_MAKER: u64 = 900_000;
-    /// V1 maker adjustment or close (up to 372,565 gas for conversion).
-    pub const V1_ADJUST_MAKER: u64 = 450_000;
-    /// V1 maker move (630,578 gas for the W11 range change).
+    // Arbitrum Sepolia v1 fork: the largest `eth_estimateGas` at the block
+    // before each measured call, plus 20%, rounded up to 50,000, and above
+    // 120% of each receipt's gas used. Anvil's estimates and receipts
+    // exclude Arbitrum's L1 data gas. Adjust and close share a selector.
+    /// V1 taker open (669,982 estimated across four ticks).
+    pub const V1_OPEN_TAKER: u64 = 850_000;
+    /// V1 taker adjustment or close (390,634 estimated, 446,456 used).
+    pub const V1_ADJUST_TAKER: u64 = 550_000;
+    /// V1 maker open (756,117 estimated for a W12 band).
+    pub const V1_OPEN_MAKER: u64 = 950_000;
+    /// V1 maker adjustment or close (522,302 estimated for a last-maker
+    /// close whose payout becomes a withdrawal claim).
+    pub const V1_ADJUST_MAKER: u64 = 650_000;
+    /// V1 maker move (632,791 estimated for the W11 range change).
     pub const V1_MOVE_MAKER: u64 = 800_000;
-    /// V1 taker backstop (286,283 gas including the owner change).
-    pub const V1_BACKSTOP_TAKER: u64 = 350_000;
-    /// V1 maker backstop (456,453 gas including the owner change).
-    pub const V1_BACKSTOP_MAKER: u64 = 550_000;
+    /// V1 taker backstop (295,253 estimated with the owner change).
+    pub const V1_BACKSTOP_TAKER: u64 = 400_000;
+    /// V1 maker backstop (464,596 estimated with the owner change).
+    pub const V1_BACKSTOP_MAKER: u64 = 600_000;
     /// ERC-20 `transfer` call.
     pub const TRANSFER: u64 = 65_000;
 }
