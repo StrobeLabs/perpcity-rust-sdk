@@ -119,3 +119,56 @@ async fn a_tail_check_holds_against_its_chain_and_fails_against_another() {
     assert_eq!((check.recorded, check.rescanned), (1, 0));
     assert!(!check.holds());
 }
+
+/// A recording of a `v1.0.0` market holds a `TickInitialized` (a topic the
+/// earlier builds share, whose third word is X192 on `v1.0.0`) and the
+/// `MakerOpened` of the same transaction. The raw capture succeeds; its
+/// tape is refused rather than built without the maker and with the tick
+/// checkpoint at the wrong scale.
+#[tokio::test]
+async fn a_recording_of_v1_events_refuses_its_tape() {
+    use alloy::primitives::{I256, Signed};
+
+    use crate::client::Era;
+    use crate::contracts::v1;
+
+    let tick = v1::Perp::TickInitialized {
+        tick: Signed::try_from(-60).unwrap(),
+        cumlFundingOppX96: I256::ZERO,
+        cumlFundingDivSqrtPOppX192: I256::ONE,
+    };
+    let opened = v1::Perp::MakerOpened {
+        posId: U256::from(1),
+        owner: Address::repeat_byte(0x0A),
+        tickLower: Signed::try_from(-60).unwrap(),
+        tickUpper: Signed::try_from(60).unwrap(),
+        liquidity: 1_000,
+        delta: I256::ZERO,
+        lastCumlFundingX96: I256::ZERO,
+        lastCumlFunding: v1::MakerFunding {
+            belowX96: I256::ZERO,
+            withinInventoryX192: I256::ZERO,
+        },
+    };
+    let logs = vec![
+        mined_event_log(&tick, PERP, 10, 0, Some(41)),
+        mined_event_log(&opened, PERP, 10, 1, Some(41)),
+    ];
+    let node = FakeNode::new(logs, u64::MAX).with_head(30);
+    let history = History::new(node.provider()).with_lag(0);
+    let recording = history.record(addresses(), 0, Some(30)).await.unwrap();
+    assert_eq!(recording.logs().len(), 2, "the raw capture keeps both logs");
+
+    let err = recording.tape().unwrap_err();
+    assert!(
+        matches!(
+            err,
+            PerpCityError::Contract(ContractError::UnsupportedEra {
+                era: Era::V1,
+                operation: "recording_tape",
+            })
+        ),
+        "{err}"
+    );
+    assert!(!err.is_transient());
+}

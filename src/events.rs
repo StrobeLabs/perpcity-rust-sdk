@@ -846,6 +846,7 @@ pub(crate) fn rpc_log<E: SolEvent>(event: &E, address: Address) -> Log {
 mod tests {
     use super::*;
     use alloy::json_abi::JsonAbi;
+    use alloy::primitives::keccak256;
 
     /// The table is complete and none of it is an earlier build's: each
     /// `v1.0.0` `Perp` event is in it exactly when its topic is not a topic
@@ -874,6 +875,18 @@ mod tests {
             "Upgraded",
         ];
         let abi: JsonAbi = v1::Perp::abi::contract();
+        // The four unbound shared events: each v1.0.0 topic is the keccak of
+        // the event's signature at `perpcity-contracts@v0.2.2-upgradeable`.
+        for v022 in [
+            "Abdicate(bytes4)",
+            "CreatorFeesCollected(uint256,address)",
+            "ProtocolFeesCollected(uint256,address)",
+            "ProtocolFeeSynced(uint256)",
+        ] {
+            let name = v022.split('(').next().unwrap();
+            let event = &abi.events[name][0];
+            assert_eq!(event.selector(), keccak256(v022), "{v022}");
+        }
         let mut expected: Vec<B256> = abi
             .events()
             .filter(|e| !earlier.contains(&e.selector().0) && !shared.contains(&e.name.as_str()))

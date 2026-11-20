@@ -61,7 +61,7 @@ pub(in crate::history) async fn market_events_with<P: Provider>(
 ) -> Result<Tape> {
     let filter = perp_filter(perp)?;
     let logs = scan_all(provider, &filter, from_block, to_block, widths, in_flight).await?;
-    tape_rows(provider, decode_known(logs, widths)?).await
+    tape_rows(provider, decode_known(logs, widths, "market_events")?).await
 }
 
 /// Everything the chain said about a market in blocks
@@ -113,7 +113,7 @@ pub(in crate::history) async fn market_tape_with<P: Provider>(
 ) -> Result<Tape> {
     let logs =
         market_logs_with(provider, addresses, from_block, to_block, widths, in_flight).await?;
-    let decoded = decode_known(logs, widths)?;
+    let decoded = decode_known(logs, widths, "market_tape")?;
     tape_rows(provider, decoded).await
 }
 
@@ -210,7 +210,7 @@ pub(in crate::history) async fn latest_market_events_with<P: Provider>(
     while held < limit
         && let Some(chunk) = chunks.try_next().await?
     {
-        let decoded = decode_known(chunk, widths)?;
+        let decoded = decode_known(chunk, widths, "latest_market_events")?;
         held += decoded.len();
         newest_first.push(decoded);
     }
@@ -327,7 +327,7 @@ pub(in crate::history) async fn markets_tape_with<P: Provider>(
         .iter()
         .map(|market| (market.perp, Vec::new()))
         .collect();
-    for (log, event) in decode_known(logs, widths)? {
+    for (log, event) in decode_known(logs, widths, "markets_tape")? {
         let from = log.address();
         for market in markets {
             let pool_log =
@@ -360,7 +360,11 @@ pub(in crate::history) async fn markets_tape_with<P: Provider>(
 /// [`ContractError::UnsupportedEra`] for a `v1.0.0` event no earlier build
 /// emits, which the decoder does not know yet: skipping it would drop a
 /// `v1.0.0` market's events with no gap counted.
-fn decode_known(logs: Vec<Log>, widths: &SharedWidths) -> Result<Vec<(Log, MarketEvent)>> {
+fn decode_known(
+    logs: Vec<Log>,
+    widths: &SharedWidths,
+    operation: &'static str,
+) -> Result<Vec<(Log, MarketEvent)>> {
     let mut undecodable = 0;
     let mut decoded = Vec::new();
     for log in logs {
@@ -370,7 +374,7 @@ fn decode_known(logs: Vec<Log>, widths: &SharedWidths) -> Result<Vec<(Log, Marke
                 if is_v1_only(&log) {
                     return Err(ContractError::UnsupportedEra {
                         era: Era::V1,
-                        operation: "market_tape",
+                        operation,
                     }
                     .into());
                 }
