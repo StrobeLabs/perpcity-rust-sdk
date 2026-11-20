@@ -541,25 +541,18 @@ impl ChainReader {
     }
 
     /// A `v1.0.0` beacon's `index()` at `block`: the value, exact in X96,
-    /// and the unix time it was set. A zero index is a broken beacon, as
-    /// in [`Self::index_x96_at`].
-    pub(super) async fn v1_index_at(&self, beacon: Address, block: BlockId) -> Result<(U256, u64)> {
+    /// and its full-width update timestamp.
+    pub(super) async fn v1_index_at(
+        &self,
+        beacon: Address,
+        block: BlockId,
+    ) -> Result<(U256, U256)> {
         let reading = v1::IBeacon::new(beacon, &self.inner.provider)
             .index()
             .block(block)
             .call()
             .await?;
-        if reading.index.is_zero() {
-            return Err(ValidationError::InvalidPrice {
-                reason: "beacon returned zero index".into(),
-            }
-            .into());
-        }
-        let updated_at =
-            u64::try_from(reading.updatedAt).map_err(|_| ValidationError::Overflow {
-                context: "beacon updatedAt exceeds u64".into(),
-            })?;
-        Ok((reading.index, updated_at))
+        Ok((reading.index, reading.updatedAt))
     }
 
     /// [`Self::get_index_price`] at `block`.

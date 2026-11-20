@@ -1,8 +1,10 @@
 //! Market reads on the W11 fork and W12 vectors from the partner plan.
 mod v1_fork;
 
-use alloy::primitives::U256;
+use alloy::primitives::{B256, U256};
 use alloy::providers::{Provider, ProviderBuilder};
+use alloy::sol_types::SolError;
+use perpcity_sdk::constants::{V1_MAX_INDEX_X96, V1_MIN_INDEX_X96};
 use perpcity_sdk::contracts::v1::{IFees, IPriceImpact, IPricing, Perp, PricePair as ModulePair};
 use perpcity_sdk::math::pricing::{PricePair, calculate_emas};
 use perpcity_sdk::{
@@ -264,4 +266,99 @@ async fn market_reads_match_raw_views() {
         (depth.long.atoms(), depth.short.atoms()),
         (close.longClose, close.shortClose)
     );
+    // Change only cFee in the first packed word of the local Fees instance.
+    let old_fee = config.fees.creator_fee.e6();
+    let new_fee = old_fee + 1;
+    let packed = w.provider.get_storage_at(FEES, U256::ZERO).await.unwrap();
+    assert_eq!((packed & U256::from(0xffffff)).to::<u32>(), old_fee);
+    let _: Value = w.provider.raw_request("evm_mine".into(), ()).await.unwrap();
+    let _: Value = w
+        .provider
+        .raw_request(
+            "anvil_setStorageAt".into(),
+            (
+                FEES,
+                B256::ZERO,
+                B256::from(packed - U256::from(old_fee) + U256::from(new_fee)),
+            ),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        market.get_config().await.unwrap().fees.creator_fee.e6(),
+        new_fee
+    );
+    assert_eq!(
+        market.get_snapshot().await.unwrap().0.fees.creator_fee.e6(),
+        old_fee
+    );
+    let _: Value = w
+        .provider
+        .raw_request("anvil_mine".into(), ("0x9",))
+        .await
+        .unwrap();
+    assert_eq!(
+        market.get_snapshot().await.unwrap().0.fees.creator_fee.e6(),
+        new_fee
+    );
+
+    // Return controlled index observations from the local beacon. The real
+    // Perp preview and the SDK then consume the same words at the same block.
+    let latency = raw.latency().call().await.unwrap();
+    for (price, age, refusal) in [
+        (V1_MIN_INDEX_X96, i64::from(latency), None),
+        (V1_MAX_INDEX_X96, 0, None),
+        (
+            mark,
+            i64::from(latency) + 1,
+            Some(Perp::StaleBeaconIndex::SELECTOR),
+        ),
+        (U256::ZERO, -1, Some(Perp::StaleBeaconIndex::SELECTOR)),
+        (
+            V1_MIN_INDEX_X96 - U256::ONE,
+            0,
+            Some(Perp::PriceOutsideRange::SELECTOR),
+        ),
+        (
+            V1_MAX_INDEX_X96 + U256::ONE,
+            0,
+            Some(Perp::PriceOutsideRange::SELECTOR),
+        ),
+    ] {
+        let timestamp = w.now().await + 100;
+        let updated = timestamp.checked_add_signed(-age).unwrap();
+        // PUSH32 price, MSTORE(0), PUSH32 updated, MSTORE(32), RETURN(0,64).
+        let code = format!("0x7f{price:064x}6000527f{updated:064x}60205260406000f3");
+        let _: Value = w
+            .provider
+            .raw_request("anvil_setCode".into(), (m.beacon, code))
+            .await
+            .unwrap();
+        let _: Value = w
+            .provider
+            .raw_request("evm_setNextBlockTimestamp".into(), (timestamp,))
+            .await
+            .unwrap();
+        let _: Value = w.provider.raw_request("evm_mine".into(), ()).await.unwrap();
+        let height = w.provider.get_block_number().await.unwrap();
+        let state = market.state_at(height).await.unwrap();
+        assert_eq!(state.block().timestamp, timestamp);
+        let sdk = state.mark().await;
+        let preview = raw
+            .previewPosition(m.maker_id)
+            .block(height.into())
+            .call()
+            .await;
+        if let Some(selector) = refusal {
+            let Err(err) = preview else {
+                panic!("preview accepted the observation")
+            };
+            assert_eq!(&err.as_revert_data().unwrap()[..4], selector);
+            assert!(
+                matches!(sdk.unwrap_err(), perpcity_sdk::PerpCityError::Transaction(perpcity_sdk::TransactionError::SimulationReverted { selector: actual, .. }) if actual.0 == selector)
+            );
+        } else {
+            assert_eq!(sdk.unwrap().price.x96(), preview.unwrap().markPrice);
+        }
+    }
 }

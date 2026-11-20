@@ -419,7 +419,7 @@ impl MarketReader {
     /// the beacon it takes its index from, and the bounds and fees its
     /// modules set, each read in the shape of the market's build.
     ///
-    /// Uses the [`crate::hft::state_cache::StateCache`] for fees and bounds (60s TTL).
+    /// Uses the [`crate::hft::state_cache::StateCache`] for bounds and pre-v1 fees (60s TTL).
     ///
     /// # Errors
     ///
@@ -659,7 +659,7 @@ impl MarketReader {
     /// block: every field of the snapshot is from that one block, which it
     /// carries. The stored pair is in slot 11 on earlier builds and slot
     /// 23 on v1. On v1 the pricing module prices the advanced pair at
-    /// that block. Fee and margin configuration use the module caches.
+    /// that block and the fee module returns its configuration at the same hash.
     ///
     /// The block comes from the header, not from Multicall3's
     /// `blockAndAggregate`: on Arbitrum `block.number` inside the EVM is the
@@ -757,7 +757,7 @@ impl MarketReader {
         let perp = v1::Perp::new(self.perp, self.chain.provider());
         let state = self.state().await?;
         let block = state.block();
-        let (modules, pool_key, pool_state, rates, oi, ema_window) = self
+        let (modules, pool_key, pool_state, rates, oi, ema_window, latency) = self
             .chain
             .multicall_at(state.id())
             .add(perp.modules())
@@ -766,6 +766,7 @@ impl MarketReader {
             .add(perp.rates())
             .add(perp.openInterest())
             .add(perp.emaWindow())
+            .add(perp.latency())
             .aggregate()
             .await
             .map_err(|e| pinned_read_error(multicall_error(e), block.number))?;
@@ -773,6 +774,7 @@ impl MarketReader {
         let pool_price = read_price(pool_state.ammPrice, "pool price")?;
         let funding_rate_daily = funding_per_day_to_f64(rates.fundingPerDay);
         let views = V1Views {
+            latency,
             modules,
             pool_state,
             last_touch: rates.lastTouch.to::<u64>(),
@@ -781,7 +783,10 @@ impl MarketReader {
         let (mark, stored_emas) = state.v1_mark_from(&views).await?;
         let modules = &views.modules;
 
-        let fees = self.get_or_fetch_fees(Era::V1, modules.fees).await?;
+        let fees = self
+            .fetch_v1_fees(modules.fees, state.id())
+            .await
+            .map_err(|e| pinned_read_error(e, block.number))?;
         let bounds = self.get_or_fetch_bounds(modules.marginRatios).await?;
         let config = MarketConfig {
             perp: self.perp,
@@ -809,6 +814,9 @@ impl MarketReader {
     /// Get fees from cache or fetch them from the fees module at
     /// `fees_addr`, in the shape of a market of build `era`.
     async fn get_or_fetch_fees(&self, era: Era, fees_addr: Address) -> Result<Fees> {
+        if era == Era::V1 {
+            return self.fetch_v1_fees(fees_addr, BlockId::latest()).await;
+        }
         let now_ts = now_secs();
         let key: [u8; 20] = fees_addr.into();
 
@@ -820,10 +828,7 @@ impl MarketReader {
         match cached {
             Some(cached) => Ok(Fees::from(cached)),
             None => {
-                let fees = match era {
-                    Era::Legacy | Era::Upgradeable => self.fetch_fees(fees_addr).await?,
-                    Era::V1 => self.fetch_v1_fees(fees_addr).await?,
-                };
+                let fees = self.fetch_fees(fees_addr).await?;
                 let mut cache = self.chain.state_cache().lock().unwrap();
                 cache.put_fees(key, CachedFees::from(fees), now_ts);
                 Ok(fees)
@@ -870,18 +875,18 @@ impl MarketReader {
         })
     }
 
-    /// Fetch a `v1.0.0` fees module's rates in one multicall at the head:
+    /// Fetch a `v1.0.0` fees module's rates in one multicall at the requested block:
     /// `cFee()`, `insFee()`, `lpFeeConfig()`, `maxSwapFee()` and
     /// `liqFee()`. The module has no zero-argument `fees()`; its
     /// three-argument one is a segment's quote.
-    async fn fetch_v1_fees(&self, fees_addr: Address) -> Result<Fees> {
+    async fn fetch_v1_fees(&self, fees_addr: Address, block: BlockId) -> Result<Fees> {
         let module = v1::IFees::new(
             registered_module(fees_addr, "IFees")?,
             self.chain.provider(),
         );
         let (c_fee, ins_fee, curve, max_swap_fee, liq_fee) = self
             .chain
-            .multicall_at(BlockId::latest())
+            .multicall_at(block)
             .add(module.cFee())
             .add(module.insFee())
             .add(module.lpFeeConfig())
