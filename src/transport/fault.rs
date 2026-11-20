@@ -91,6 +91,38 @@ pub(crate) fn is_rate_limit(payload: &ErrorPayload) -> bool {
     .is_retry_err()
 }
 
+/// Parts of a node's answer to `eth_sendRawTransaction` that reject the
+/// transaction outright, so that node does not hold it. The fee, pool and
+/// funds errors of geth, which Nitro runs (`transaction underpriced`,
+/// `replacement transaction underpriced`, `max fee per gas less than block
+/// base fee`, `max priority fee per gas higher than max fee per gas`,
+/// `tx fee (…) exceeds the configured cap (…)`), the older `fee cap less
+/// than block base fee`, and the wordings of other clients for the same
+/// answers.
+const REJECTIONS: [&str; 11] = [
+    "underpriced",
+    "replacement fee too low",
+    "gas price too low",
+    "less than block base fee",
+    "higher than max fee per gas",
+    "exceeds the configured cap",
+    "nonce too high",
+    "insufficient funds",
+    "intrinsic gas too low",
+    "exceeds block gas limit",
+    "invalid sender",
+];
+
+/// Whether a node's error answer to `eth_sendRawTransaction` is an
+/// explicit rejection ([`REJECTIONS`]), so that node does not hold the
+/// transaction. Every other answer is not: `already known`, `nonce too
+/// low` (the nonce is used, possibly by this transaction) and a wording
+/// not in the list can come from a node that holds it or mined it.
+pub(crate) fn is_rejection(payload: &ErrorPayload) -> bool {
+    let message = payload.message.to_ascii_lowercase();
+    !message.contains("already known") && REJECTIONS.iter().any(|r| message.contains(r))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -187,5 +219,48 @@ mod tests {
             Fault::Endpoint
         );
         assert_eq!(fault(&RpcError::NullResp), Fault::Endpoint);
+    }
+
+    /// Only an explicit rejection says the node does not hold a sent
+    /// transaction; a used nonce, a known one and an unknown wording do
+    /// not.
+    #[test]
+    fn only_an_explicit_rejection_is_one() {
+        for (answer, rejected) in [
+            ("replacement transaction underpriced", true),
+            (
+                "transaction underpriced: tip needed 1, tip permitted 0",
+                true,
+            ),
+            (
+                "max fee per gas less than block base fee: address 0x1, maxFeePerGas: 1, baseFee: 2",
+                true,
+            ),
+            ("fee cap less than block base fee", true),
+            ("max priority fee per gas higher than max fee per gas", true),
+            (
+                "tx fee (1.20 ether) exceeds the configured cap (1.00 ether)",
+                true,
+            ),
+            ("gas price too low", true),
+            ("replacement fee too low", true),
+            ("nonce too high", true),
+            ("insufficient funds for gas * price + value", true),
+            ("intrinsic gas too low", true),
+            ("exceeds block gas limit", true),
+            ("invalid sender", true),
+            ("nonce too low", false),
+            ("already known", false),
+            ("Known transaction", false),
+            ("upstream timeout", false),
+            ("unknown error", false),
+        ] {
+            let payload = ErrorPayload {
+                code: -32_000,
+                message: answer.to_owned().into(),
+                data: None,
+            };
+            assert_eq!(is_rejection(&payload), rejected, "{answer}");
+        }
     }
 }
