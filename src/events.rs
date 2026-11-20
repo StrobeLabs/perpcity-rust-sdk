@@ -69,8 +69,9 @@ use crate::contracts::{
 use crate::convert::unpack_balance_delta;
 use crate::errors::ValidationError;
 use crate::units::{
-    Earnings, Funding, FundingPerSqrtPrice, FundingRate, LDelta, LUnits, PerSide, PerpAtoms,
-    PerpDelta, Price, SqrtPrice, UsdcAtoms, UsdcDelta, UtilizationRate,
+    Earnings, FeeGrowth, Funding, FundingCorrection, FundingPerSqrtPrice, FundingPerSqrtPriceX192,
+    FundingRate, LDelta, LUnits, PerSide, PerpAtoms, PerpDelta, Price, SqrtPrice, UsdcAtoms,
+    UsdcDelta, UtilizationRate,
 };
 
 /// An ERC-20 `Transfer` indexes two of its three fields, so topic0 plus two.
@@ -117,6 +118,49 @@ impl From<Cumulatives> for CumulativesInfo {
                 Earnings::from_x96(c.longUtilEarningsX96),
                 Earnings::from_x96(c.shortUtilEarningsX96),
             ),
+        }
+    }
+}
+
+/// A `v1.0.0` market's cumulative accumulators: eight words where the
+/// earlier builds keep six, two of them in encodings those builds do not
+/// use, so their own type and never a [`CumulativesInfo`].
+///
+/// Levels, not growth, as there. The utilization payments are what takers
+/// on each side have paid; the reserve payments the part of them held
+/// back from makers; LP fees accrue to the market's own fee growth, not
+/// to Uniswap's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct V1Cumulatives {
+    /// `fundingX96`.
+    pub funding: Funding,
+    /// `fundingDivSqrtPX192`.
+    pub funding_div_sqrt_p: FundingPerSqrtPriceX192,
+    /// `lpFeeGrowthGlobalX128`.
+    pub lp_fee_growth: FeeGrowth,
+    /// `longUtilPaymentsX96` and `shortUtilPaymentsX96`.
+    pub util_payments: PerSide<Earnings>,
+    /// `longReserveUtilPaymentsX96` and `shortReserveUtilPaymentsX96`.
+    pub reserve_util_payments: PerSide<Earnings>,
+    /// `fundingCorrectionX128`.
+    pub funding_correction: FundingCorrection,
+}
+
+impl From<v1::Cumulatives> for V1Cumulatives {
+    fn from(c: v1::Cumulatives) -> Self {
+        Self {
+            funding: Funding::from_x96(c.fundingX96),
+            funding_div_sqrt_p: FundingPerSqrtPriceX192::from_x192(c.fundingDivSqrtPX192),
+            lp_fee_growth: FeeGrowth::from_x128(c.lpFeeGrowthGlobalX128),
+            util_payments: PerSide::new(
+                Earnings::from_x96(c.longUtilPaymentsX96),
+                Earnings::from_x96(c.shortUtilPaymentsX96),
+            ),
+            reserve_util_payments: PerSide::new(
+                Earnings::from_x96(c.longReserveUtilPaymentsX96),
+                Earnings::from_x96(c.shortReserveUtilPaymentsX96),
+            ),
+            funding_correction: FundingCorrection::from_x128(c.fundingCorrectionX128),
         }
     }
 }

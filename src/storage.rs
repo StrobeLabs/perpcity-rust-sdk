@@ -11,6 +11,10 @@
 //! - the Uniswap V4 `PoolManager`'s `_pools[poolId]` `Pool.State` — the
 //!   tick bitmap and the fee-growth accounting (read via `extsload`).
 //!
+//! The stored EMA pair is the one slot whose place differs by build: slot
+//! 11 on the two earlier builds and 23 on `v1.0.0`, whose layout file the
+//! `v1.0.0` slot is tested against.
+//!
 //! The offsets encode the deployed contract layouts, the same on build
 //! `58b42b7` and `v0.2.2-upgradeable` for everything read here, and are
 //! locked by chain-backed tests at the call sites (the pool snapshot
@@ -28,6 +32,12 @@ const PERP_TICKS_SLOT: u64 = 6;
 /// `PerpStorage.emas` slot: storage struct base 3 + field index 8. One
 /// word, `ammPrice` in the low 128 bits and `index` in the high 128.
 const PERP_EMAS_SLOT: u64 = 11;
+
+/// `v1.0.0`'s `emas` slot: `_s` (the `PerpStorage` struct) at 7, field
+/// `emas` at 16 (`perpcity-contracts@v1.0.0:script/storage-layout/Perp.json`).
+/// The same packing as [`PERP_EMAS_SLOT`]; on `v1.0.0` slot 11 is
+/// `modules.priceImpact`, an address.
+const V1_PERP_EMAS_SLOT: u64 = 23;
 
 /// Offset of `cumlFundingDivSqrtPOppX96` — the second word of the Perp's
 /// two-word `TickInfo` struct — from the struct's base slot.
@@ -77,9 +87,14 @@ pub(crate) fn perp_tick_funding_slots(tick: i32) -> [U256; 2] {
     [base, base + U256::from(TICK_FUNDING_DIV_SQRT_P_OPP_OFFSET)]
 }
 
-/// Slot of the Perp's stored EMA pair.
+/// Slot of the stored EMA pair on the two earlier builds.
 pub(crate) fn perp_emas_slot() -> U256 {
     U256::from(PERP_EMAS_SLOT)
+}
+
+/// Slot of the stored EMA pair on a `v1.0.0` market.
+pub(crate) fn v1_perp_emas_slot() -> U256 {
+    U256::from(V1_PERP_EMAS_SLOT)
 }
 
 /// The stored EMA pair from its storage word: `(ammPrice, index)`, each a
@@ -184,6 +199,47 @@ mod tests {
             }
         );
         assert_eq!(perp_emas_slot(), U256::from(11u8));
+    }
+
+    /// The `v1.0.0` layout the contracts repository checks its deploys
+    /// against: `emas` is field 16 of `_s` at slot 7, one word with
+    /// `ammPrice` in the low half and `index` in the high half, as
+    /// [`stored_emas`] unpacks it.
+    #[test]
+    fn the_v1_emas_slot_is_the_tagged_layout() {
+        let layout: serde_json::Value =
+            serde_json::from_str(include_str!("contracts/v1/storage-layout/Perp.json")).unwrap();
+        let slot =
+            |entry: &serde_json::Value| -> u64 { entry["slot"].as_str().unwrap().parse().unwrap() };
+        let storage = layout["storage"].as_array().unwrap();
+        let perp_storage = storage.iter().find(|e| e["label"] == "_s").unwrap();
+        assert_eq!(slot(perp_storage), 7);
+        let types = &layout["types"];
+        let struct_type = perp_storage["type"].as_str().unwrap();
+        let emas = types[struct_type]["members"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["label"] == "emas")
+            .unwrap();
+        assert_eq!(slot(perp_storage) + slot(emas), V1_PERP_EMAS_SLOT);
+        assert_eq!(v1_perp_emas_slot(), U256::from(23u8));
+
+        let pair = types[emas["type"].as_str().unwrap()]["members"]
+            .as_array()
+            .unwrap();
+        let fields: Vec<(&str, u64, u64)> = pair
+            .iter()
+            .map(|m| {
+                (
+                    m["label"].as_str().unwrap(),
+                    slot(m),
+                    m["offset"].as_u64().unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(fields, [("ammPrice", 0, 0), ("index", 0, 16)]);
+        assert_eq!(types[emas["type"].as_str().unwrap()]["numberOfBytes"], "32");
     }
 
     #[test]

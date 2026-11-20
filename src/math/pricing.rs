@@ -3,14 +3,26 @@
 //! Three prices, one relation. The pool price (`ammPrice` on chain) is the
 //! AMM's; the index is the beacon's; the contract smooths both into a
 //! [`PricePair`] of EMAs ([`calculate_emas`], exact to the Solady
-//! arithmetic); and the mark is the fair price of all four. `PerpLogic.accrue`
-//! sets `snap.markPrice = pricing.fairPrice(spots.ammPrice, spots.index,
-//! emas.ammPrice, emas.index)` with `emas` advanced to the block timestamp —
-//! [`Mark`] is those inputs at one block. Every health check, `valPnl`,
-//! liquidation test and the utilization accrual leg price at this fair
-//! price, never at the raw pool price.
+//! arithmetic, the same `_calcEmas` on every build); and the mark is the
+//! fair price of all four. `PerpLogic.accrue` sets `snap.markPrice =
+//! pricing.fairPrice(spots.ammPrice, spots.index, emas.ammPrice,
+//! emas.index)` with `emas` advanced to the block timestamp — [`Mark`] is
+//! those inputs at one block, with the pricing module's answer. Every
+//! health check, `valPnl`, liquidation test and the utilization accrual
+//! leg price at this fair price, never at the raw pool price.
 //!
-//! The live module is perpcity-contracts `test/mocks/Pricing.sol`, which
+//! The pricing module is the market's, and governance can swap it, so its
+//! rule is a fact of the build. A `v1.0.0` market's `Pricing` anchors the
+//! mark to the index, `index ± min(|emaAmm − emaIndex|, index ·
+//! maxPremiumRatio)`, and ignores the pool price; the SDK asks the module
+//! by `eth_call` rather than port it, so [`Mark::price`] is the module's
+//! word. The earlier builds' rule is ported below as [`fair_price`].
+//!
+//! A `v1.0.0` market also refuses its beacon's index when it is older than
+//! the market's latency or outside the price domain; [`BeaconIndex`] holds
+//! what that test reads.
+//!
+//! The earlier builds' module is perpcity-contracts `test/mocks/Pricing.sol`, which
 //! `script/Deploy.s.sol` deploys as the production module (on Arbitrum One
 //! at `0xf4689da0cac3f23a04145236dbfe81c3c58cfe22`, per HORMUZ-TRAFFIC
 //! `0x137e…5b17`'s `modules()` on 2026-09-07):
@@ -28,6 +40,7 @@
 use alloy::primitives::{I256, U256, uint};
 use serde::{Deserialize, Serialize};
 
+use crate::constants::{V1_MAX_INDEX_X96, V1_MIN_INDEX_X96};
 use crate::errors::ValidationError;
 use crate::math::BlockContext;
 use crate::units::Price;
@@ -107,9 +120,10 @@ pub fn calculate_emas(
 
 /// What the contract marks from at one block: the pool price, the beacon
 /// index, and the stored EMAs advanced to the block timestamp, as
-/// `PerpLogic.accrue` sees them. Read by
-/// [`StateAt::mark`](crate::StateAt::mark) and, at the lagged snapshot
-/// block, [`MarketReader::get_mark`](crate::MarketReader::get_mark).
+/// `PerpLogic.accrue` sees them, and the mark its pricing module makes of
+/// them. Read by [`StateAt::mark`](crate::StateAt::mark) and, at the
+/// lagged snapshot block,
+/// [`MarketReader::get_mark`](crate::MarketReader::get_mark).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Mark {
     /// The block the inputs were read at.
@@ -120,11 +134,17 @@ pub struct Mark {
     pub index: Price,
     /// The EMAs as of the block timestamp.
     pub emas: PricePair,
+    /// The pricing module's `fairPrice` of the four: on the earlier builds
+    /// the port [`fair_price`], on `v1.0.0` the module's own answer by
+    /// `eth_call` at the block.
+    pub price: Price,
 }
 
 impl Mark {
-    /// The mark from the raw views: the stored EMAs, last touched at
-    /// `last_touch`, advanced to the block timestamp.
+    /// The mark from the raw views on the two earlier builds: the stored
+    /// EMAs, last touched at `last_touch`, advanced to the block timestamp,
+    /// and priced by their module's rule, [`fair_price`]. A `v1.0.0`
+    /// market's module is asked instead ([`StateAt::mark`](crate::StateAt::mark)).
     ///
     /// # Errors
     ///
@@ -141,22 +161,66 @@ impl Mark {
     ) -> Result<Self, ValidationError> {
         let spot = PricePair::try_from_x96(pool_price.x96(), index.x96())?;
         let emas = calculate_emas(stored_emas, spot, last_touch, block.timestamp, ema_window)?;
+        let price = fair_price(
+            pool_price,
+            index,
+            Price::from_x96(U256::from(emas.amm)),
+            Price::from_x96(U256::from(emas.index)),
+        );
         Ok(Self {
             block,
             pool_price,
             index,
             emas,
+            price,
         })
     }
 
-    /// [`fair_price`] of these inputs: the price the contract marks at.
+    /// The price the contract marks at: [`Self::price`].
     pub fn fair_price(&self) -> Price {
-        fair_price(
-            self.pool_price,
-            self.index,
-            Price::from_x96(U256::from(self.emas.amm)),
-            Price::from_x96(U256::from(self.emas.index)),
-        )
+        self.price
+    }
+}
+
+/// The index a `v1.0.0` market takes from its beacon at one block, with
+/// what decides whether it takes it: the beacon's `index()` returns the
+/// value and its update time, and the market refuses the value
+/// (`SafeBeaconIndex.read`) when it is older than the market's
+/// `latency()` (`StaleBeaconIndex`), dated after the block, or outside
+/// `[V1_MIN_INDEX_X96, V1_MAX_INDEX_X96]` (`PriceOutsideRange`). Every
+/// action reverts then, liquidations included.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BeaconIndex {
+    /// The block the index, its time and the latency were read at.
+    pub block: BlockContext,
+    /// The beacon's value.
+    pub index: Price,
+    /// Unix timestamp the beacon last took a value.
+    pub updated_at: u64,
+    /// The market's `latency()`: the oldest index it accepts, in seconds.
+    /// Governance can change it (`setLatency`).
+    pub latency: u32,
+}
+
+impl BeaconIndex {
+    /// Whether the market refuses this index at `timestamp` with
+    /// `StaleBeaconIndex`: the update is after `timestamp`, or more than
+    /// [`Self::latency`] seconds before it. A send lands in a later block
+    /// than the read, so the caller asks at the time it expects to land.
+    pub fn is_stale_at(&self, timestamp: u64) -> bool {
+        self.updated_at > timestamp || timestamp - self.updated_at > u64::from(self.latency)
+    }
+
+    /// The last timestamp at which the market still accepts this index:
+    /// the update time plus the latency.
+    pub fn accepted_until(&self) -> u64 {
+        self.updated_at.saturating_add(u64::from(self.latency))
+    }
+
+    /// Whether the index is inside the domain the market accepts, where a
+    /// value outside it reverts `PriceOutsideRange` however fresh it is.
+    pub fn is_in_domain(&self) -> bool {
+        (V1_MIN_INDEX_X96..=V1_MAX_INDEX_X96).contains(&self.index.x96())
     }
 }
 
@@ -215,8 +279,11 @@ impl Emas {
         Ok(Self::stored(emas, timestamp.max(self.last_touch)))
     }
 
-    /// The contract's mark at `timestamp`: [`fair_price`] of the spot
-    /// prices and this pair advanced to it.
+    /// The earlier builds' mark at `timestamp`: [`fair_price`] of the spot
+    /// prices and this pair advanced to it. A `v1.0.0` market's module
+    /// prices by another rule, which the SDK asks the module for rather
+    /// than port, so a cache of one marks by an `eth_call`
+    /// ([`StateAt::mark`](crate::StateAt::mark)), not by this.
     ///
     /// # Errors
     ///
@@ -457,6 +524,39 @@ mod tests {
             ),
             p(U256::from(6u8))
         );
+    }
+
+    /// `SafeBeaconIndex.read`: an update exactly `latency` old is taken,
+    /// one second older or dated after the block is refused, and the
+    /// domain's ends are inside it.
+    #[test]
+    fn a_beacon_index_is_stale_past_its_latency_or_from_the_future() {
+        let reading = BeaconIndex {
+            block: BlockContext {
+                timestamp: 1_000_000,
+                ..BlockContext::default()
+            },
+            index: p(Q96),
+            updated_at: 1_000_000 - 600,
+            latency: 600,
+        };
+        assert!(!reading.is_stale_at(1_000_000));
+        assert!(reading.is_stale_at(1_000_001));
+        assert!(!reading.is_stale_at(reading.updated_at));
+        assert!(
+            reading.is_stale_at(reading.updated_at - 1),
+            "dated after the block"
+        );
+        assert_eq!(reading.accepted_until(), 1_000_000);
+
+        let at = |index_x96: U256| BeaconIndex {
+            index: p(index_x96),
+            ..reading
+        };
+        assert!(at(V1_MIN_INDEX_X96).is_in_domain());
+        assert!(at(V1_MAX_INDEX_X96).is_in_domain());
+        assert!(!at(V1_MIN_INDEX_X96 - U256::from(1u8)).is_in_domain());
+        assert!(!at(V1_MAX_INDEX_X96 + U256::from(1u8)).is_in_domain());
     }
 
     #[test]

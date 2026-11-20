@@ -6,7 +6,8 @@
 //! pins four things about a read: how many RPCs it makes (an unanswered
 //! request fails, and [`Rpc::is_drained`] proves none was left over), what
 //! it makes of the bytes it gets back, what it remembers between calls,
-//! and, through [`Rpc::calls`], which calls it asked for.
+//! and, through [`Rpc::calls`] and [`Rpc::slots`], which calls and
+//! storage slots it asked for.
 
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
@@ -82,20 +83,23 @@ fn mocked() -> (RootProvider<Ethereum>, Rpc) {
     let recorder = Recorder {
         mock: MockTransport::new(Asserter::new()),
         calls: Arc::default(),
+        slots: Arc::default(),
     };
     let rpc = Rpc {
         asserter: recorder.mock.asserter().clone(),
         calls: Arc::clone(&recorder.calls),
+        slots: Arc::clone(&recorder.slots),
     };
     (RootProvider::new(RpcClient::new(recorder, true)), rpc)
 }
 
-/// The mock transport, keeping the calldata of every `eth_call` it is
-/// asked, in arrival order.
+/// The mock transport, keeping the calldata of every `eth_call` and the
+/// slot of every `eth_getStorageAt` it is asked, in arrival order.
 #[derive(Clone)]
 struct Recorder {
     mock: MockTransport,
     calls: Arc<Mutex<Vec<Bytes>>>,
+    slots: Arc<Mutex<Vec<U256>>>,
 }
 
 impl Service<RequestPacket> for Recorder {
@@ -109,12 +113,20 @@ impl Service<RequestPacket> for Recorder {
 
     fn call(&mut self, req: RequestPacket) -> Self::Future {
         for req in req.requests() {
-            if req.method() != "eth_call" {
-                continue;
-            }
             let params: serde_json::Value =
                 serde_json::from_str(req.params().map_or("null", RawValue::get))
                     .expect("a request's params are JSON");
+            if req.method() == "eth_getStorageAt" {
+                let slot = params[1].as_str().expect("a slot is a hex quantity");
+                self.slots
+                    .lock()
+                    .unwrap()
+                    .push(slot.parse().expect("a slot parses as a U256"));
+                continue;
+            }
+            if req.method() != "eth_call" {
+                continue;
+            }
             let call = &params[0];
             let input = call["input"].as_str().or_else(|| call["data"].as_str());
             if let Some(input) = input {
@@ -188,6 +200,7 @@ fn signer() -> PrivateKeySigner {
 pub(super) struct Rpc {
     asserter: Asserter,
     calls: Arc<Mutex<Vec<Bytes>>>,
+    slots: Arc<Mutex<Vec<U256>>>,
 }
 
 impl Rpc {
@@ -206,10 +219,14 @@ impl Rpc {
     /// its pool key, naming the mocked chain's hook for the build, then
     /// the build's pool id view.
     pub(super) fn immutables(&self, era: Era) {
+        self.immutables_with_hooks(era, V022_HOOK, V1_HOOK);
+    }
+
+    pub(super) fn immutables_with_hooks(&self, era: Era, v022_hook: Address, v1_hook: Address) {
         let hook = match era {
             Era::Legacy => Address::ZERO,
-            Era::Upgradeable => V022_HOOK,
-            Era::V1 => V1_HOOK,
+            Era::Upgradeable => v022_hook,
+            Era::V1 => v1_hook,
         };
         self.call::<Perp::poolKeyCall>(&pool_key_with_hook(30, hook));
         match era {
@@ -222,6 +239,11 @@ impl Rpc {
     /// multicall is one entry.
     pub(super) fn calls(&self) -> Vec<Bytes> {
         self.calls.lock().unwrap().clone()
+    }
+
+    /// The slot of every `eth_getStorageAt` asked so far, in order.
+    pub(super) fn slots(&self) -> Vec<U256> {
+        self.slots.lock().unwrap().clone()
     }
 
     /// The selector of every `eth_call` asked so far, and of every call

@@ -110,10 +110,7 @@ async fn main() -> perpcity_sdk::Result<()> {
     println!("\n=== Market State ===");
     println!("  Pool price:   {pool_price:.6}");
     println!("  Tick spacing: {tick_spacing}");
-    println!(
-        "  LP fee:       {:.4}%",
-        config.fees.lp_fee.fraction() * 100.0
-    );
+    println!("  LP fee:       {:?}", config.fees.lp_fee);
     println!("  Wallet USDC:  {balance:.2}");
 
     // ── Calculate tick range ────────────────────────────────────────

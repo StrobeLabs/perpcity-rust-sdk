@@ -16,10 +16,15 @@
 //! surface will return in a later stage (off-chain math or `eth_call`
 //! simulation).
 
+use alloy::eips::BlockId;
 use alloy::primitives::{Address, B256, U256};
 use alloy::providers::MulticallError;
 use serde::{Deserialize, Serialize};
 
+use crate::constants::{
+    MAX_PROTOCOL_FEE, MAX_SWAP_SQRT_PRICE_X96, MIN_SWAP_SQRT_PRICE_X96, V1_MAX_PROTOCOL_FEE,
+    V1_MAX_SWAP_SQRT_PRICE_X96, V1_MIN_SWAP_SQRT_PRICE_X96,
+};
 use crate::contracts::{self, IFees, IMarginRatios, Perp, v1};
 use crate::convert::{price_x96_to_f64, scale_from_6dec};
 use crate::errors::{ContractError, PerpCityError, Result, ValidationError};
@@ -27,10 +32,10 @@ use crate::hft::state_cache::{CachedBounds, CachedFees};
 use crate::history::TapeAddresses;
 use crate::math::BlockContext;
 use crate::math::pricing::{Emas, Mark};
-use crate::units::{PerSide, PerpAtoms, Price, Ratio, UsdcAtoms};
+use crate::units::{LUnits, PerSide, PerpAtoms, Price, Ratio, SqrtPrice, UsdcAtoms};
 
 use super::market::MarketReader;
-use super::state::{PositionRow, ema_window_secs, pinned_read_error};
+use super::state::{PositionRow, V1Views, ema_window_secs, pinned_read_error};
 use super::{PerpClient, i24_to_i32, now_secs, u24_to_u32};
 
 /// Funding/utilization rates are scaled by 1e18 per day on-chain.
@@ -44,9 +49,11 @@ pub struct MarketConfig {
     pub perp: Address,
     /// Tick spacing for the underlying Uniswap V4 pool.
     pub tick_spacing: i32,
-    /// `EMA_WINDOW()`, in seconds: the time constant the contract smooths
-    /// the pool price and the index with; a deployment immutable, and what
-    /// [`Emas::advanced`] takes.
+    /// The EMA window, in seconds: the time constant the contract smooths
+    /// the pool price and the index with, and what [`Emas::advanced`]
+    /// takes. A deployment immutable on the earlier builds (`EMA_WINDOW()`);
+    /// on `v1.0.0` governance can change it (`emaWindow()`, `setEmaWindow`),
+    /// so it is the window at the read.
     pub ema_window: u64,
     /// The pool's (AMM spot) price at the read — not the contract's mark,
     /// which is the fair price ([`crate::math::pricing`]).
@@ -77,8 +84,8 @@ pub struct Bounds {
 
 /// A market's fee rates, each a share of the thing it is charged on.
 ///
-/// The contract holds all four as `uint24` at 1e6, so `1_000` is 0.1%, and
-/// `fraction()` on any of them is the number a person reads. They are
+/// The contract holds every rate as `uint24` at 1e6, so `1_000` is 0.1%,
+/// and `fraction()` on any of them is the number a person reads. They are
 /// [`Ratio`] rather than `f64` because a liquidation's fee *rate* and the
 /// USDC a liquidation *settles* are both called the liquidation fee, and as
 /// two floats they substituted for each other.
@@ -88,10 +95,46 @@ pub struct Fees {
     pub creator_fee: Ratio,
     /// Share that goes to the insurance fund.
     pub insurance_fee: Ratio,
-    /// Share earned by liquidity providers.
-    pub lp_fee: Ratio,
+    /// Share earned by liquidity providers: one rate on the earlier
+    /// builds, a curve on `v1.0.0`.
+    pub lp_fee: LpFee,
     /// Share charged on a liquidation, applied to the position's value.
     pub liquidation_fee: Ratio,
+}
+
+/// The LP fee a market's fees module charges a swap.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub enum LpFee {
+    /// The two earlier builds: the module's one `lpFee`, on every swap.
+    Fixed(Ratio),
+    /// `v1.0.0`: a rate per swap segment, set by the segment's liquidity
+    /// and the pool price's distance from its EMA (`Fees._lpFee`), so no
+    /// one rate is the market's.
+    Curve(LpFeeCurve),
+}
+
+/// A `v1.0.0` fees module's LP fee curve (`lpFeeConfig()`) and the cap it
+/// keeps the swap fee under. A segment pays `targetFee + (startFee −
+/// targetFee) · decay / (liquidity + decay)` as its base, plus the squared
+/// relative distance of the pool price from its EMA times the volatility
+/// scaler, at most the base times the multiplier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LpFeeCurve {
+    /// The base rate at no liquidity.
+    pub start_fee: Ratio,
+    /// The base rate the curve tends to as liquidity grows.
+    pub target_fee: Ratio,
+    /// The liquidity at which the base rate is halfway between the two.
+    pub liquidity_decay: LUnits,
+    /// The weight of the squared price distance, at 1e6.
+    pub volatility_scaler: Ratio,
+    /// The cap on a segment's rate as a multiple of its base, at 1e6
+    /// (`1_500_000` is 1.5 times); never below one.
+    pub max_fee_multiplier: Ratio,
+    /// `maxSwapFee()`: the most creator, insurance and LP rate together a
+    /// segment can pay, the protocol fee excluded. What a trade's fee bound
+    /// is sized from.
+    pub max_swap_fee: Ratio,
 }
 
 /// Taker open interest, per side, as the contract accumulates it: the sum
@@ -129,10 +172,9 @@ pub struct MarketSnapshot {
     /// basis the contract sees is this against the index, not the pool
     /// price against it.
     pub mark: Price,
-    /// The stored EMAs as of the market's last touch. A cache that follows
-    /// the feed advances them to now against the prices it holds and marks
-    /// with [`Emas::mark`]; `RatesAndEmasRefreshed` replaces them on every
-    /// touch.
+    /// The stored EMAs as of the market's last touch. Earlier builds use
+    /// [`Emas::mark`]. On v1, [`StateAt::mark`](super::StateAt::mark) asks
+    /// the market's pricing module for the advanced pair's mark.
     pub emas: Emas,
     /// Daily funding rate (positive = longs pay shorts).
     pub funding_rate_daily: f64,
@@ -207,6 +249,31 @@ pub enum Era {
     /// The audited `v1.0.0` (tag `0df4208`): a pool guarded by the chain's
     /// `v1.0.0` `PerpGuardHook`.
     V1,
+}
+
+impl Era {
+    /// The sqrt prices a swap on this build stops at: Uniswap's own limits
+    /// on the two earlier builds; on `v1.0.0` the maker tick band's edges
+    /// (`MIN_SWAP_SQRT_PRICE`, `MAX_SWAP_SQRT_PRICE`), so a swap cannot
+    /// rest where no band is active.
+    pub fn swap_sqrt_price_limits(self) -> (SqrtPrice, SqrtPrice) {
+        let (min, max) = match self {
+            Self::Legacy | Self::Upgradeable => (MIN_SWAP_SQRT_PRICE_X96, MAX_SWAP_SQRT_PRICE_X96),
+            Self::V1 => (V1_MIN_SWAP_SQRT_PRICE_X96, V1_MAX_SWAP_SQRT_PRICE_X96),
+        };
+        (SqrtPrice::from_x96(min), SqrtPrice::from_x96(max))
+    }
+
+    /// The highest protocol fee a market of this build can charge: 5% on
+    /// the earlier builds, 1% on `v1.0.0`, whose liquidation close reserve
+    /// adds it to the fees module's `maxSwapFee()`.
+    pub fn max_protocol_fee(self) -> Ratio {
+        let e6 = match self {
+            Self::Legacy | Self::Upgradeable => MAX_PROTOCOL_FEE,
+            Self::V1 => V1_MAX_PROTOCOL_FEE,
+        };
+        Ratio::from_e6(e6).expect("both caps are below 100%")
+    }
 }
 
 /// Perp/pool values fixed at deployment, cached after the first read that
@@ -350,19 +417,35 @@ impl MarketReader {
 
     /// The market's configuration: its pool's tick spacing, the EMA window,
     /// the beacon it takes its index from, and the bounds and fees its
-    /// modules set.
+    /// modules set, each read in the shape of the market's build.
     ///
     /// Uses the [`crate::hft::state_cache::StateCache`] for fees and bounds (60s TTL).
+    ///
+    /// # Errors
+    ///
+    /// [`ContractError::UnknownBuild`] for an unknown build, before any
+    /// view is read; [`ContractError::ModuleNotRegistered`] for a missing
+    /// fees or margin-ratio module; the transport error from any read.
     pub async fn get_config(&self) -> Result<MarketConfig> {
+        let era = self.immutables().await?.era;
         let perp = Perp::new(self.perp, self.chain.provider());
 
         let modules = perp.modules().call().await?;
         let pool_key = perp.poolKey().call().await?;
         let pool_state = perp.poolState().call().await?;
-        let ema_window = ema_window_secs(perp.EMA_WINDOW().call().await?)?;
+        let ema_window = match era {
+            Era::Legacy | Era::Upgradeable => ema_window_secs(perp.EMA_WINDOW().call().await?)?,
+            Era::V1 => {
+                let window = v1::Perp::new(self.perp, self.chain.provider())
+                    .emaWindow()
+                    .call()
+                    .await?;
+                u64::from(u24_to_u32(window))
+            }
+        };
         let pool_price = read_price(pool_state.ammPrice, "pool price")?;
 
-        let fees = self.get_or_fetch_fees(modules.fees).await?;
+        let fees = self.get_or_fetch_fees(era, modules.fees).await?;
         let bounds = self.get_or_fetch_bounds(modules.marginRatios).await?;
 
         Ok(MarketConfig {
@@ -567,16 +650,16 @@ impl MarketReader {
         Ok(daily_rate)
     }
 
-    /// The market's configuration and its state, in one multicall plus the
-    /// beacon index read and the stored EMAs' storage word.
+    /// The market's configuration and its state at the lagged block.
     ///
     /// Resolves the lagged snapshot block (see
     /// [`SNAPSHOT_BLOCK_LAG`](crate::constants::SNAPSHOT_BLOCK_LAG)) from the
     /// node's header, batches the `Perp`'s views at it, then reads `index()`
     /// on the beacon the batch named and the EMA slot together at the same
     /// block: every field of the snapshot is from that one block, which it
-    /// carries. The EMAs come from storage because `v0.2.2` markets have no
-    /// `emas()` view and both builds keep the pair at the same slot.
+    /// carries. The stored pair is in slot 11 on earlier builds and slot
+    /// 23 on v1. On v1 the pricing module prices the advanced pair at
+    /// that block. Fee and margin configuration use the module caches.
     ///
     /// The block comes from the header, not from Multicall3's
     /// `blockAndAggregate`: on Arbitrum `block.number` inside the EVM is the
@@ -592,6 +675,10 @@ impl MarketReader {
     /// [`ContractError::BlockUnavailable`] (transient) when a read lands on
     /// a replica that does not have the snapshot block.
     pub async fn get_snapshot(&self) -> Result<(MarketConfig, MarketSnapshot)> {
+        let era = self.immutables().await?.era;
+        if era == Era::V1 {
+            return self.v1_snapshot().await;
+        }
         let perp = Perp::new(self.perp, self.chain.provider());
         let (block, id) = self.chain.lagged_snapshot_block().await?;
         let (modules, pool_key, pool_state, rates, oi, ema_window) = self
@@ -635,7 +722,7 @@ impl MarketReader {
         let emas = Emas::stored(stored_emas, last_touch);
 
         // Fees/bounds (from cache or chain).
-        let fees = self.get_or_fetch_fees(modules.fees).await?;
+        let fees = self.get_or_fetch_fees(era, modules.fees).await?;
         let bounds = self.get_or_fetch_bounds(modules.marginRatios).await?;
 
         let config = MarketConfig {
@@ -662,10 +749,66 @@ impl MarketReader {
         Ok((config, snapshot))
     }
 
+    /// [`Self::get_snapshot`] on a `v1.0.0` market: the same one multicall
+    /// in its own shapes (`emaWindow()` for `EMA_WINDOW()`), the beacon's
+    /// index and the EMAs from slot 23, then the mark from the market's
+    /// pricing module by `eth_call`, every read at the lagged block.
+    async fn v1_snapshot(&self) -> Result<(MarketConfig, MarketSnapshot)> {
+        let perp = v1::Perp::new(self.perp, self.chain.provider());
+        let state = self.state().await?;
+        let block = state.block();
+        let (modules, pool_key, pool_state, rates, oi, ema_window) = self
+            .chain
+            .multicall_at(state.id())
+            .add(perp.modules())
+            .add(perp.poolKey())
+            .add(perp.poolState())
+            .add(perp.rates())
+            .add(perp.openInterest())
+            .add(perp.emaWindow())
+            .aggregate()
+            .await
+            .map_err(|e| pinned_read_error(multicall_error(e), block.number))?;
+
+        let pool_price = read_price(pool_state.ammPrice, "pool price")?;
+        let funding_rate_daily = funding_per_day_to_f64(rates.fundingPerDay);
+        let views = V1Views {
+            modules,
+            pool_state,
+            last_touch: rates.lastTouch.to::<u64>(),
+            ema_window: u64::from(u24_to_u32(ema_window)),
+        };
+        let (mark, stored_emas) = state.v1_mark_from(&views).await?;
+        let modules = &views.modules;
+
+        let fees = self.get_or_fetch_fees(Era::V1, modules.fees).await?;
+        let bounds = self.get_or_fetch_bounds(modules.marginRatios).await?;
+        let config = MarketConfig {
+            perp: self.perp,
+            tick_spacing: i24_to_i32(pool_key.tickSpacing),
+            ema_window: views.ema_window,
+            pool_price,
+            beacon: modules.beacon,
+            bounds,
+            fees,
+        };
+        let snapshot = MarketSnapshot {
+            block,
+            pool_price,
+            index_price: mark.index,
+            mark: mark.price,
+            emas: Emas::stored(stored_emas, views.last_touch),
+            funding_rate_daily,
+            open_interest: OpenInterest::new(PerpAtoms::new(oi.long), PerpAtoms::new(oi.short)),
+        };
+        Ok((config, snapshot))
+    }
+
     // ── Cache helpers ───────────────────────────────────────────────
 
-    /// Get fees from cache or fetch from the `IFees` module at `fees_addr`.
-    async fn get_or_fetch_fees(&self, fees_addr: Address) -> Result<Fees> {
+    /// Get fees from cache or fetch them from the fees module at
+    /// `fees_addr`, in the shape of a market of build `era`.
+    async fn get_or_fetch_fees(&self, era: Era, fees_addr: Address) -> Result<Fees> {
         let now_ts = now_secs();
         let key: [u8; 20] = fees_addr.into();
 
@@ -677,7 +820,10 @@ impl MarketReader {
         match cached {
             Some(cached) => Ok(Fees::from(cached)),
             None => {
-                let fees = self.fetch_fees(fees_addr).await?;
+                let fees = match era {
+                    Era::Legacy | Era::Upgradeable => self.fetch_fees(fees_addr).await?,
+                    Era::V1 => self.fetch_v1_fees(fees_addr).await?,
+                };
                 let mut cache = self.chain.state_cache().lock().unwrap();
                 cache.put_fees(key, CachedFees::from(fees), now_ts);
                 Ok(fees)
@@ -719,8 +865,49 @@ impl MarketReader {
         Ok(Fees {
             creator_fee: Ratio::from_e6(u24_to_u32(fee_result.cFee))?,
             insurance_fee: Ratio::from_e6(u24_to_u32(fee_result.insFee))?,
-            lp_fee: Ratio::from_e6(u24_to_u32(fee_result.lpFee))?,
+            lp_fee: LpFee::Fixed(Ratio::from_e6(u24_to_u32(fee_result.lpFee))?),
             liquidation_fee: Ratio::from_e6(u24_to_u32(liquidation_fee))?,
+        })
+    }
+
+    /// Fetch a `v1.0.0` fees module's rates in one multicall at the head:
+    /// `cFee()`, `insFee()`, `lpFeeConfig()`, `maxSwapFee()` and
+    /// `liqFee()`. The module has no zero-argument `fees()`; its
+    /// three-argument one is a segment's quote.
+    async fn fetch_v1_fees(&self, fees_addr: Address) -> Result<Fees> {
+        let module = v1::IFees::new(
+            registered_module(fees_addr, "IFees")?,
+            self.chain.provider(),
+        );
+        let (c_fee, ins_fee, curve, max_swap_fee, liq_fee) = self
+            .chain
+            .multicall_at(BlockId::latest())
+            .add(module.cFee())
+            .add(module.insFee())
+            .add(module.lpFeeConfig())
+            .add(module.maxSwapFee())
+            .add(module.liqFee())
+            .aggregate()
+            .await
+            .map_err(multicall_error)?;
+        let ratio = |e6| Ratio::from_e6(u24_to_u32(e6));
+        let max_swap_fee = u32::try_from(max_swap_fee)
+            .map_err(|_| ValidationError::Overflow {
+                context: "maxSwapFee exceeds uint24".into(),
+            })
+            .and_then(Ratio::from_e6)?;
+        Ok(Fees {
+            creator_fee: ratio(c_fee)?,
+            insurance_fee: ratio(ins_fee)?,
+            lp_fee: LpFee::Curve(LpFeeCurve {
+                start_fee: ratio(curve.startFee)?,
+                target_fee: ratio(curve.targetFee)?,
+                liquidity_decay: LUnits::new(curve.liquidityDecay),
+                volatility_scaler: ratio(curve.volatilityScaler)?,
+                max_fee_multiplier: ratio(curve.maxFeeMultiplier)?,
+                max_swap_fee,
+            }),
+            liquidation_fee: ratio(liq_fee)?,
         })
     }
 
@@ -801,7 +988,7 @@ mod tests {
         Fees {
             creator_fee: ratio(1_000),
             insurance_fee: ratio(2_000),
-            lp_fee: ratio(3_000),
+            lp_fee: LpFee::Fixed(ratio(3_000)),
             liquidation_fee: ratio(50_000),
         }
     }
@@ -1354,6 +1541,7 @@ mod tests {
     #[tokio::test]
     async fn a_zero_pool_price_is_an_invalid_price() {
         let (client, rpc) = mock::client();
+        rpc.immutables(Era::Legacy);
         rpc.call::<Perp::modulesCall>(&mock::modules());
         rpc.call::<Perp::poolKeyCall>(&mock::pool_key(SPACING));
         rpc.call::<Perp::poolStateCall>(&mock::pool_state(U256::ZERO));
@@ -1374,6 +1562,7 @@ mod tests {
     #[tokio::test]
     async fn perp_config_reads_the_perp_then_the_modules_it_names() {
         let (client, rpc) = mock::client();
+        rpc.immutables(Era::Legacy);
         config_answers(&rpc);
         fees_answers(&rpc);
         bounds_answers(&rpc);
@@ -1403,6 +1592,7 @@ mod tests {
     #[tokio::test]
     async fn fees_and_bounds_survive_a_fast_invalidation_but_not_a_full_one() {
         let (client, rpc) = mock::client();
+        rpc.immutables(Era::Legacy);
         config_answers(&rpc);
         fees_answers(&rpc);
         bounds_answers(&rpc);
@@ -1430,6 +1620,7 @@ mod tests {
     #[tokio::test]
     async fn an_unregistered_module_is_named_before_it_is_asked() {
         let (client, rpc) = mock::client();
+        rpc.immutables(Era::Legacy);
         rpc.call::<Perp::modulesCall>(&Modules {
             fees: Address::ZERO,
             ..mock::modules()
@@ -1580,6 +1771,7 @@ mod tests {
     #[tokio::test]
     async fn perp_snapshot_is_one_block_plus_the_slow_layer() {
         let (client, rpc) = mock::client();
+        rpc.immutables(Era::Legacy);
         let hash = snapshot_block(&rpc, 100);
         rpc.aggregate(100, snapshot_views());
         index_and_emas_answers(&rpc);
@@ -1656,6 +1848,7 @@ mod tests {
     async fn perp_snapshot_block_is_the_header_not_the_evm_block_number() {
         const L1_BLOCK: u64 = 26_090_712;
         let (client, rpc) = mock::client();
+        rpc.immutables(Era::Legacy);
         snapshot_block(&rpc, 510_368_453);
         rpc.aggregate(L1_BLOCK, snapshot_views());
         index_and_emas_answers(&rpc);
@@ -1673,6 +1866,7 @@ mod tests {
     #[tokio::test]
     async fn perp_snapshot_on_a_lagging_replica_is_block_unavailable() {
         let (client, rpc) = mock::client();
+        rpc.immutables(Era::Legacy);
         snapshot_block(&rpc, 100);
         rpc.aggregate(100, snapshot_views());
         rpc.fails("header not found");
@@ -1694,6 +1888,7 @@ mod tests {
     #[tokio::test]
     async fn perp_snapshot_without_a_beacon_names_the_missing_interface() {
         let (client, rpc) = mock::client();
+        rpc.immutables(Era::Legacy);
         let [_, pool_key, pool_state, rates, oi, window] = snapshot_views();
         let modules = returns::<Perp::modulesCall>(&Modules {
             beacon: Address::ZERO,
@@ -1724,6 +1919,7 @@ mod tests {
         let (client, rpc) = mock::client();
         rpc.quantity(100);
         let hash = rpc.block(100 - SNAPSHOT_BLOCK_LAG, TOUCHED_AT);
+        rpc.immutables(Era::Legacy);
         rpc.aggregate(
             100 - SNAPSHOT_BLOCK_LAG,
             [
@@ -1754,6 +1950,7 @@ mod tests {
                     amm: one.to::<u128>(),
                     index: one.to::<u128>(),
                 },
+                price: Price::from_x96(one),
             }
         );
         assert_eq!(mark.fair_price(), Price::from_x96(one));
@@ -1772,6 +1969,7 @@ mod tests {
         let (client, rpc) = mock::client();
         rpc.quantity(100);
         rpc.block(100 - SNAPSHOT_BLOCK_LAG, 1_700_000_000);
+        rpc.immutables(Era::Legacy);
         rpc.aggregate(
             100 - SNAPSHOT_BLOCK_LAG,
             [

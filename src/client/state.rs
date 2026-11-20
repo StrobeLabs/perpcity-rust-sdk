@@ -17,25 +17,23 @@ use alloy::transports::{RpcError, TransportError};
 use futures_util::stream::{self, StreamExt};
 use serde::{Deserialize, Serialize};
 
-use crate::constants::{
-    MAX_SWAP_SQRT_PRICE_X96, MAX_TICK, MIN_SWAP_SQRT_PRICE_X96, MIN_TICK, MULTICALL3,
-};
+use crate::constants::{MAX_TICK, MIN_TICK, MULTICALL3};
 use crate::contracts::{
     IERC20, IMarginRatios, IMulticall3, IPoolManagerState, IPriceImpact, Modules, Perp, Position,
     v1,
 };
 use crate::convert::unpack_balance_delta;
 use crate::errors::{ContractError, PerpCityError, Result, ValidationError};
-use crate::events::CumulativesInfo;
+use crate::events::{CumulativesInfo, V1Cumulatives};
 use crate::math::BlockContext;
-use crate::math::capacity::MarketCapacity;
-use crate::math::pricing::{Emas, Mark};
+use crate::math::capacity::{Capacity, MarketCapacity};
+use crate::math::pricing::{BeaconIndex, Emas, Mark, PricePair, calculate_emas};
 use crate::math::range::{MakerBand, TickRange};
 use crate::math::swap::{PoolSnapshot, TickLiquidity, active_liquidity};
 use crate::storage::{v4_tick_bitmap_slot, v4_tick_slot};
 use crate::units::{
-    Funding, FundingRate, LDelta, LUnits, PerSide, PerpDelta, Price, Ratio, SqrtPrice, UsdcAtoms,
-    UsdcDelta, UtilizationRate,
+    Funding, FundingRate, LDelta, LUnits, PerSide, PerpAtoms, PerpDelta, Price, Ratio, SqrtPrice,
+    UsdcAtoms, UsdcDelta, UtilizationRate,
 };
 
 use super::market::MarketReader;
@@ -871,9 +869,24 @@ impl StateAt {
         })
     }
 
-    /// The market's accumulators at this block: `cumulatives()`, as the
-    /// `CumulativesAccrued` event carries them.
+    /// The market's accumulators at this block on the two earlier builds:
+    /// `cumulatives()`, as the `CumulativesAccrued` event carries them.
+    ///
+    /// # Errors
+    ///
+    /// [`ContractError::UnsupportedEra`] on a `v1.0.0` market, before any
+    /// read: its eight words decode as the earlier six without an error and
+    /// into the wrong fields, so its accumulators are
+    /// [`Self::v1_cumulatives`]; [`ContractError::UnknownBuild`] for an
+    /// unknown build.
     pub async fn cumulatives(&self) -> Result<CumulativesInfo> {
+        if self.era().await? == Era::V1 {
+            return Err(ContractError::UnsupportedEra {
+                era: Era::V1,
+                operation: "cumulatives",
+            }
+            .into());
+        }
         Perp::new(self.market.perp, self.market.chain.provider())
             .cumulatives()
             .block(self.id())
@@ -883,17 +896,52 @@ impl StateAt {
             .map_err(|e| self.read_error(e))
     }
 
+    /// A `v1.0.0` market's accumulators at this block: its `cumulatives()`.
+    ///
+    /// # Errors
+    ///
+    /// [`ContractError::UnsupportedEra`] on an earlier build, before any
+    /// read; [`ContractError::UnknownBuild`] for an unknown build; the
+    /// pinned read's error.
+    pub async fn v1_cumulatives(&self) -> Result<V1Cumulatives> {
+        let era = self.era().await?;
+        if era != Era::V1 {
+            return Err(ContractError::UnsupportedEra {
+                era,
+                operation: "v1_cumulatives",
+            }
+            .into());
+        }
+        v1::Perp::new(self.market.perp, self.market.chain.provider())
+            .cumulatives()
+            .block(self.id())
+            .call()
+            .await
+            .map(Into::into)
+            .map_err(|e| self.read_error(e))
+    }
+
     /// The stored EMA pair and the touch it is current as of, at this
-    /// block: the pair from its storage word, the touch from `rates()`. The
-    /// same `Emas` the `RatesAndEmasRefreshed` event carries, before any
-    /// advance to a later timestamp; [`Self::mark`] is the advanced form.
+    /// block: the pair from its storage word (slot 11 on the earlier
+    /// builds, 23 on `v1.0.0`), the touch from `rates()`. The same `Emas`
+    /// the `RatesAndEmasRefreshed` event carries, before any advance to a
+    /// later timestamp; [`Self::mark`] is the advanced form.
+    ///
+    /// # Errors
+    ///
+    /// [`ContractError::UnknownBuild`] for an unknown build; the pinned
+    /// read's error.
     pub async fn emas(&self) -> Result<Emas> {
         let chain = &self.market.chain;
+        let era = self.era().await?;
         let (rates, stored) = tokio::try_join!(self.rates(), async {
-            chain
-                .stored_emas_at(self.market.perp, self.id())
-                .await
-                .map_err(|e| pinned_read_error(e, self.block.number))
+            let stored = match era {
+                Era::Legacy | Era::Upgradeable => {
+                    chain.stored_emas_at(self.market.perp, self.id()).await
+                }
+                Era::V1 => chain.v1_stored_emas_at(self.market.perp, self.id()).await,
+            };
+            stored.map_err(|e| pinned_read_error(e, self.block.number))
         })?;
         Ok(Emas {
             amm_price: Price::from_x96(U256::from(stored.amm)),
@@ -932,11 +980,20 @@ impl StateAt {
     }
 
     /// The market's taker capacity and the open interest drawing on it, in
-    /// one multicall.
+    /// one multicall; on a `v1.0.0` market with its physical close
+    /// capacity in the same batch.
     ///
     /// [`MarketCapacity`] derives each side's headroom and utilization as
-    /// the contract computes them.
+    /// the market's build computes them.
+    ///
+    /// # Errors
+    ///
+    /// [`ContractError::UnknownBuild`] for an unknown build; the pinned
+    /// read's error.
     pub async fn capacity(&self) -> Result<MarketCapacity> {
+        if self.era().await? == Era::V1 {
+            return self.v1_capacity().await;
+        }
         let perp = Perp::new(self.market.perp, self.market.chain.provider());
         let (capacity, oi) = self
             .market
@@ -951,6 +1008,7 @@ impl StateAt {
             block: self.block,
             capacity: capacity.into(),
             open_interest: oi.into(),
+            close_capacity: None,
         })
     }
 
@@ -1000,16 +1058,75 @@ impl StateAt {
     }
 
     /// What the contract marks from at this block: the pool price, the
-    /// beacon index, and the stored EMAs advanced to the block timestamp.
-    /// One multicall for the `Perp` views, then the beacon's `index()`,
-    /// both pinned here.
+    /// beacon index, and the stored EMAs advanced to the block timestamp,
+    /// with the mark the market's pricing module makes of them. One
+    /// multicall for the `Perp` views, then the beacon's `index()` and the
+    /// EMAs' storage word, all pinned here; on a `v1.0.0` market then the
+    /// module's `fairPrice` by `eth_call` at the block.
+    ///
+    /// A `v1.0.0` market marks only an index it accepts: past its latency
+    /// or outside the domain every action reverts. This read still prices
+    /// the index the beacon holds; [`Self::beacon_index`] says whether the
+    /// market would take it.
     ///
     /// # Errors
     ///
-    /// [`ContractError::ModuleNotRegistered`] when the perp has no beacon.
+    /// [`ContractError::ModuleNotRegistered`] when the perp has no beacon
+    /// (or, on `v1.0.0`, no pricing module); [`ContractError::UnknownBuild`]
+    /// for an unknown build.
     pub async fn mark(&self) -> Result<Mark> {
+        if self.era().await? == Era::V1 {
+            let views = self.v1_views().await?;
+            return Ok(self.v1_mark_from(&views).await?.0);
+        }
         let views = self.perp_views().await?;
         self.mark_from(&views).await
+    }
+
+    /// The beacon's index on a `v1.0.0` market at this block, with its
+    /// update time and the market's `latency()`: what decides whether the
+    /// market takes it ([`BeaconIndex::is_stale_at`],
+    /// [`BeaconIndex::is_in_domain`]). One multicall for `modules()` and
+    /// `latency()`, then the beacon's `index()`, both pinned here.
+    ///
+    /// # Errors
+    ///
+    /// [`ContractError::UnsupportedEra`] on an earlier build, whose beacon
+    /// returns no update time; [`ContractError::ModuleNotRegistered`] when
+    /// the perp has no beacon; [`ContractError::UnknownBuild`] for an
+    /// unknown build; the pinned read's error.
+    pub async fn beacon_index(&self) -> Result<BeaconIndex> {
+        let era = self.era().await?;
+        if era != Era::V1 {
+            return Err(ContractError::UnsupportedEra {
+                era,
+                operation: "beacon_index",
+            }
+            .into());
+        }
+        let perp = v1::Perp::new(self.market.perp, self.market.chain.provider());
+        let (modules, latency) = self
+            .market
+            .chain
+            .multicall_at(self.id())
+            .add(perp.modules())
+            .add(perp.latency())
+            .aggregate()
+            .await
+            .map_err(|e| self.multicall_read_error(e))?;
+        let beacon = registered_module(modules.beacon, "IBeacon")?;
+        let (index, updated_at) = self
+            .market
+            .chain
+            .v1_index_at(beacon, self.id())
+            .await
+            .map_err(|e| pinned_read_error(e, self.block.number))?;
+        Ok(BeaconIndex {
+            block: self.block,
+            index: Price::from_x96(index),
+            updated_at,
+            latency,
+        })
     }
 
     /// The pool at this block, exact to the deployed Perp
@@ -1025,35 +1142,55 @@ impl StateAt {
     /// when the tick map does not reproduce the pool's active liquidity.
     pub async fn pool(&self) -> Result<PoolSnapshot> {
         let immutables = self.market.immutables().await?;
-        let views = self.perp_views().await?;
-        let mark = self.mark_from(&views).await?;
-        let bounds = self.impact_bounds(views.modules.priceImpact, &mark).await?;
+        let (pool, (impact_sqrt_min, impact_sqrt_max)) = match immutables.era {
+            Era::Legacy | Era::Upgradeable => {
+                let views = self.perp_views().await?;
+                let mark = self.mark_from(&views).await?;
+                let bounds = self.impact_bounds(views.modules.priceImpact, &mark).await?;
+                let pool = &views.pool_state;
+                (
+                    (pool.tick, pool.sqrtPrice, pool.liquidity),
+                    (bounds.sqrtMin, bounds.sqrtMax),
+                )
+            }
+            Era::V1 => {
+                let views = self.v1_views().await?;
+                let (mark, _) = self.v1_mark_from(&views).await?;
+                let bounds = self.v1_impact_bounds(&views, &mark).await?;
+                let pool = &views.pool_state;
+                (
+                    (pool.tick, pool.sqrtPrice, pool.liquidity),
+                    (bounds.sqrtMin, bounds.sqrtMax),
+                )
+            }
+        };
         let ticks = self.tick_map(&immutables).await?;
 
-        let pool = &views.pool_state;
-        let tick = i24_to_i32(pool.tick);
+        let (tick, sqrt_price, liquidity) = pool;
+        let tick = i24_to_i32(tick);
         let reconstructed = active_liquidity(&ticks, tick)?;
-        if reconstructed != LUnits::new(pool.liquidity) {
+        if reconstructed != LUnits::new(liquidity) {
             return Err(ContractError::StorageReadFailed {
                 context: format!(
                     "tick map liquidity mismatch: reconstructed {}, pool {}",
                     reconstructed.units(),
-                    pool.liquidity
+                    liquidity
                 ),
                 source: None,
             }
             .into());
         }
+        let (protocol_sqrt_min, protocol_sqrt_max) = immutables.era.swap_sqrt_price_limits();
         Ok(PoolSnapshot {
             block: self.block,
-            sqrt_price: SqrtPrice::from_x96(pool.sqrtPrice.to::<U256>()),
+            sqrt_price: SqrtPrice::from_x96(sqrt_price.to::<U256>()),
             tick,
-            liquidity: LUnits::new(pool.liquidity),
+            liquidity: LUnits::new(liquidity),
             ticks,
-            protocol_sqrt_min: SqrtPrice::from_x96(MIN_SWAP_SQRT_PRICE_X96),
-            protocol_sqrt_max: SqrtPrice::from_x96(MAX_SWAP_SQRT_PRICE_X96),
-            impact_sqrt_min: SqrtPrice::from_x96(bounds.sqrtMin),
-            impact_sqrt_max: SqrtPrice::from_x96(bounds.sqrtMax),
+            protocol_sqrt_min,
+            protocol_sqrt_max,
+            impact_sqrt_min: SqrtPrice::from_x96(impact_sqrt_min),
+            impact_sqrt_max: SqrtPrice::from_x96(impact_sqrt_max),
         })
     }
 
@@ -1119,6 +1256,124 @@ impl StateAt {
             .call()
             .await
             .map_err(|e| self.read_error(e))
+    }
+
+    /// A `v1.0.0` market's mark-input views in one multicall at this block:
+    /// `modules()`, `poolState()`, `rates()` and `emaWindow()`.
+    pub(super) async fn v1_views(&self) -> Result<V1Views> {
+        let perp = v1::Perp::new(self.market.perp, self.market.chain.provider());
+        let (modules, pool_state, rates, ema_window) = self
+            .market
+            .chain
+            .multicall_at(self.id())
+            .add(perp.modules())
+            .add(perp.poolState())
+            .add(perp.rates())
+            .add(perp.emaWindow())
+            .aggregate()
+            .await
+            .map_err(|e| self.multicall_read_error(e))?;
+        Ok(V1Views {
+            modules,
+            pool_state,
+            last_touch: rates.lastTouch.to::<u64>(),
+            ema_window: u64::from(u24_to_u32(ema_window)),
+        })
+    }
+
+    /// A `v1.0.0` market's mark from its views, as `_previewAccrue` makes
+    /// it: the beacon's index and the stored EMAs (slot 23) read together
+    /// at this block, the pair advanced to the block's timestamp, then the
+    /// market's pricing module's `fairPrice` of the spots and the advanced
+    /// pair by `eth_call` here. The stored pair comes back beside it.
+    pub(super) async fn v1_mark_from(&self, views: &V1Views) -> Result<(Mark, PricePair)> {
+        let beacon = registered_module(views.modules.beacon, "IBeacon")?;
+        let pricing = registered_module(views.modules.pricing, "IPricing")?;
+        let chain = &self.market.chain;
+        let ((index, _), stored) = tokio::try_join!(
+            chain.v1_index_at(beacon, self.id()),
+            chain.v1_stored_emas_at(self.market.perp, self.id()),
+        )
+        .map_err(|e| pinned_read_error(e, self.block.number))?;
+        let pool_price = Price::from_x96(views.pool_state.ammPrice);
+        let index = Price::from_x96(index);
+        let spot = PricePair::try_from_x96(pool_price.x96(), index.x96())?;
+        let emas = calculate_emas(
+            stored,
+            spot,
+            views.last_touch,
+            self.block.timestamp,
+            views.ema_window,
+        )?;
+        let price = v1::IPricing::new(pricing, chain.provider())
+            .fairPrice(
+                pool_price.x96(),
+                index.x96(),
+                U256::from(emas.amm),
+                U256::from(emas.index),
+            )
+            .block(self.id())
+            .call()
+            .await
+            .map_err(|e| self.read_error(e))?;
+        let mark = Mark {
+            block: self.block,
+            pool_price,
+            index,
+            emas,
+            price: Price::from_x96(price),
+        };
+        Ok((mark, stored))
+    }
+
+    /// A `v1.0.0` price-impact module's swap bounds at this mark: its
+    /// five-argument `sqrtPriceBounds`, whose last argument is the mark.
+    async fn v1_impact_bounds(
+        &self,
+        views: &V1Views,
+        mark: &Mark,
+    ) -> Result<v1::IPriceImpact::sqrtPriceBoundsReturn> {
+        let module = registered_module(views.modules.priceImpact, "IPriceImpact")?;
+        v1::IPriceImpact::new(module, self.market.chain.provider())
+            .sqrtPriceBounds(
+                mark.pool_price.x96(),
+                mark.index.x96(),
+                U256::from(mark.emas.amm),
+                U256::from(mark.emas.index),
+                mark.price.x96(),
+            )
+            .block(self.id())
+            .call()
+            .await
+            .map_err(|e| self.read_error(e))
+    }
+
+    /// [`Self::capacity`] on a `v1.0.0` market: `capacity()`,
+    /// `openInterest()` and `physicalCloseCapacity()` in one multicall.
+    async fn v1_capacity(&self) -> Result<MarketCapacity> {
+        let perp = v1::Perp::new(self.market.perp, self.market.chain.provider());
+        let (capacity, oi, close) = self
+            .market
+            .chain
+            .multicall_at(self.id())
+            .add(perp.capacity())
+            .add(perp.openInterest())
+            .add(perp.physicalCloseCapacity())
+            .aggregate()
+            .await
+            .map_err(|e| self.multicall_read_error(e))?;
+        Ok(MarketCapacity {
+            block: self.block,
+            capacity: Capacity::new(
+                PerpAtoms::new(capacity.long),
+                PerpAtoms::new(capacity.short),
+            ),
+            open_interest: PerSide::new(PerpAtoms::new(oi.long), PerpAtoms::new(oi.short)),
+            close_capacity: Some(Capacity::new(
+                PerpAtoms::new(close.longClose),
+                PerpAtoms::new(close.shortClose),
+            )),
+        })
     }
 
     /// The pool's initialized ticks at this block: the PoolManager's tick
@@ -1305,6 +1560,19 @@ pub(super) struct PerpViews {
     pub(super) ema_window: u64,
 }
 
+/// A `v1.0.0` market's views a mark and the pool are built from, read
+/// together at one block: [`PerpViews`] in that build's shapes.
+pub(super) struct V1Views {
+    /// `modules()`.
+    pub(super) modules: v1::Modules,
+    /// `poolState()`.
+    pub(super) pool_state: v1::Perp::poolStateReturn,
+    /// `rates().lastTouch`.
+    pub(super) last_touch: u64,
+    /// `emaWindow()`, in seconds.
+    pub(super) ema_window: u64,
+}
+
 /// The contract's `EMA_WINDOW` (seconds) narrowed to the width
 /// [`Mark::advanced`] takes.
 pub(super) fn ema_window_secs(ema_window: U256) -> Result<u64> {
@@ -1342,7 +1610,7 @@ mod tests {
     use crate::client::mock::{
         self, PERP, Rpc, e6, returns, v1_maker_words, v1_position_words, x96,
     };
-    use crate::constants::SNAPSHOT_BLOCK_LAG;
+    use crate::constants::{MAX_SWAP_SQRT_PRICE_X96, MIN_SWAP_SQRT_PRICE_X96, SNAPSHOT_BLOCK_LAG};
     use crate::contracts::{IBeacon, Modules, Rates};
     use crate::convert::pack_balance_delta;
     use crate::math::capacity::Capacity;
@@ -1616,6 +1884,7 @@ mod tests {
     #[tokio::test]
     async fn one_handle_resolves_the_header_once_for_every_read() {
         let (state, rpc) = state().await;
+        rpc.immutables(Era::Legacy);
         rpc.aggregate(
             92,
             [
@@ -1644,6 +1913,7 @@ mod tests {
     async fn the_mark_is_one_multicall_and_the_index_at_the_handles_block() {
         let one = x96(1, 0);
         let (state, rpc) = state().await;
+        rpc.immutables(Era::Legacy);
         perp_views_answers(&rpc, 92, 0);
         rpc.call::<IBeacon::indexCall>(&one);
         rpc.storage(mock::emas_word(one.to::<u128>(), one.to::<u128>()));
@@ -1689,6 +1959,7 @@ mod tests {
     #[tokio::test]
     async fn pruned_state_fails_a_multicall_read_the_same_way() {
         let (state, rpc) = state().await;
+        rpc.immutables(Era::Legacy);
         rpc.fails("historical state 1682db2b is not available");
 
         let error = state.capacity().await.unwrap_err();
@@ -2453,6 +2724,7 @@ mod tests {
         let (client, rpc) = mock::client();
         rpc.quantity(100);
         let hash = rpc.block(100 - SNAPSHOT_BLOCK_LAG, TIMESTAMP);
+        rpc.immutables(Era::Legacy);
         rpc.aggregate(
             100 - SNAPSHOT_BLOCK_LAG,
             [
@@ -2474,6 +2746,7 @@ mod tests {
                     short: PerpAtoms::new(20),
                 },
                 open_interest: PerSide::new(PerpAtoms::new(3), PerpAtoms::new(4)),
+                close_capacity: None,
             }
         );
         assert!(rpc.is_drained(), "blockNumber, block, one multicall");

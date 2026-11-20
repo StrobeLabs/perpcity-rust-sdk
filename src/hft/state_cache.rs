@@ -13,7 +13,7 @@
 //! # Example
 //!
 //! ```
-//! use perpcity_sdk::Ratio;
+//! use perpcity_sdk::{LpFee, Ratio};
 //! use perpcity_sdk::hft::state_cache::{StateCache, StateCacheConfig, CachedFees};
 //!
 //! let mut cache = StateCache::new(StateCacheConfig::default());
@@ -21,7 +21,7 @@
 //! let fees = CachedFees {
 //!     creator_fee: Ratio::from_e6(1_000)?,
 //!     insurance_fee: Ratio::from_e6(500)?,
-//!     lp_fee: Ratio::from_e6(3_000)?,
+//!     lp_fee: LpFee::Fixed(Ratio::from_e6(3_000)?),
 //!     liquidation_fee: Ratio::from_e6(10_000)?,
 //! };
 //! cache.put_fees(addr, fees, 1000);
@@ -32,6 +32,7 @@
 
 use std::collections::HashMap;
 
+use crate::client::LpFee;
 use crate::units::{Ratio, UsdcAtoms};
 
 /// A cached value with an expiration timestamp.
@@ -58,8 +59,8 @@ pub struct CachedFees {
     pub creator_fee: Ratio,
     /// Insurance fund fee share.
     pub insurance_fee: Ratio,
-    /// LP fee share.
-    pub lp_fee: Ratio,
+    /// LP fee share: one rate, or a `v1.0.0` market's curve.
+    pub lp_fee: LpFee,
     /// Liquidation fee share.
     pub liquidation_fee: Ratio,
 }
@@ -281,7 +282,7 @@ mod tests {
         CachedFees {
             creator_fee: e6(1_000),
             insurance_fee: e6(500),
-            lp_fee: e6(3_000),
+            lp_fee: LpFee::Fixed(e6(3_000)),
             liquidation_fee: e6(10_000),
         }
     }

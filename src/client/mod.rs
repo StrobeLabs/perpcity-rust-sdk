@@ -49,11 +49,15 @@ mod state;
 mod taker_health;
 mod trades;
 mod transactions;
+#[cfg(test)]
+mod v1_market_tests;
 
 pub use chain::{Balances, ChainDeployments, ChainReader};
 pub use maker_equity::{MakerEquityKind, MakerEquityOutcome};
 pub use market::{MarketReader, PositionRole};
-pub use queries::{Bounds, Era, Fees, MarketConfig, MarketSnapshot, OpenInterest};
+pub use queries::{
+    Bounds, Era, Fees, LpFee, LpFeeCurve, MarketConfig, MarketSnapshot, OpenInterest,
+};
 pub use state::Books;
 pub use state::{
     MAX_ROW_BATCH, MarginRatioTriple, MarginRatios, MarketRates, PositionRow, RowOutcome,
