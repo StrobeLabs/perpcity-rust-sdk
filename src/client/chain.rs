@@ -694,7 +694,7 @@ fn storage_read_error(error: TransportError) -> PerpCityError {
     }
 }
 
-pub(super) fn row_revert(bytes: &alloy::primitives::Bytes) -> crate::errors::PerpCityError {
+pub(super) fn row_revert(bytes: &Bytes) -> PerpCityError {
     let data = bytes.to_string();
     match decode_revert(&data) {
         Some((error_name, selector)) => TransactionError::SimulationReverted {
@@ -703,7 +703,10 @@ pub(super) fn row_revert(bytes: &alloy::primitives::Bytes) -> crate::errors::Per
             revert_data: Some(data),
         }
         .into(),
-        None => ContractError::RevertedWithoutSelector { data: bytes.clone() }.into(),
+        None => ContractError::RevertedWithoutSelector {
+            data: bytes.clone(),
+        }
+        .into(),
     }
 }
 

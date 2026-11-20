@@ -132,7 +132,7 @@ pub fn minted_position_id(
 }
 
 /// Outcome of removing all maker liquidity.
-#[derive(Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MakerExit {
     /// All inventory closed.
     Closed(V1TradeResult<Perp::MakerClosed>),

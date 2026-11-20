@@ -10,13 +10,24 @@ fn check(row: &Value) {
     let maker = row["kind"] == "maker_preview_value";
     let mark = if maker { "mark_x96" } else { "mark_price" };
     let fields = [
-        if maker { "1" } else { "0" }, field(mark), field("settled_margin"),
-        field("pending_lp_fees"), field("pending_funding"), field("pending_util"),
-        field("pending_reserve_util"), field("value"), field("unrealized_pnl"), field("equity"),
-        field("meets_initial_margin"), field("liquidatable"), field("backstoppable"),
-        field("nominal_liq_fee"), field("payable_liq_fee"),
+        if maker { "1" } else { "0" },
+        field(mark),
+        field("settled_margin"),
+        field("pending_lp_fees"),
+        field("pending_funding"),
+        field("pending_util"),
+        field("pending_reserve_util"),
+        field("value"),
+        field("unrealized_pnl"),
+        field("equity"),
+        field("meets_initial_margin"),
+        field("liquidatable"),
+        field("backstoppable"),
+        field("nominal_liq_fee"),
+        field("payable_liq_fee"),
     ];
-    let words: Vec<u8> = fields.iter()
+    let words: Vec<u8> = fields
+        .iter()
         .flat_map(|s| s.parse::<I256>().unwrap().into_raw().to_be_bytes::<32>())
         .collect();
     let p = Perp::previewPositionCall::abi_decode_returns(&words).unwrap();
@@ -39,14 +50,29 @@ fn check(row: &Value) {
 
 #[test]
 fn decode_w12_preview_words() {
-    let cases: Vec<Value> = serde_json::from_str(include_str!("fixtures/w12-previews.json")).unwrap();
-    assert_eq!(cases.iter().filter(|r| r["kind"] == "taker_preview").count(), 41);
-    assert_eq!(cases.iter().filter(|r| r["kind"] == "maker_preview_value").count(), 36);
+    let cases: Vec<Value> =
+        serde_json::from_str(include_str!("fixtures/w12-previews.json")).unwrap();
+    assert_eq!(
+        cases
+            .iter()
+            .filter(|r| r["kind"] == "taker_preview")
+            .count(),
+        41
+    );
+    assert_eq!(
+        cases
+            .iter()
+            .filter(|r| r["kind"] == "maker_preview_value")
+            .count(),
+        36
+    );
     for row in cases {
         check(&row);
     }
-    check(&json!({"id":"synthetic", "kind":"maker_preview_value", "expected":{
-        "pending_lp_fees":"37","payable_liq_fee":"11","meets_initial_margin":"1",
-        "liquidatable":"1","backstoppable":"1"
-    }}));
+    check(
+        &json!({"id":"synthetic", "kind":"maker_preview_value", "expected":{
+            "pending_lp_fees":"37","payable_liq_fee":"11","meets_initial_margin":"1",
+            "liquidatable":"1","backstoppable":"1"
+        }}),
+    );
 }
