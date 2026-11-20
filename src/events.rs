@@ -35,9 +35,7 @@
 //!
 //! ```rust,no_run
 //! use perpcity_sdk::feeds::events::{MarketEvent, decode_log};
-//! # pub mod receipt;
-
-use alloy::rpc::types::Log;
+//! # use alloy::rpc::types::Log;
 //! # fn example(log: &Log) {
 //! match decode_log(log) {
 //!     // A log this vocabulary covers.
@@ -59,6 +57,8 @@ use alloy::rpc::types::Log;
 //! ```
 
 #![doc = "\n\nThe design of this module: [`src/events/DESIGN.md`](https://github.com/StrobeLabs/perpcity-rust-sdk/blob/main/src/events/DESIGN.md)."]
+
+pub mod receipt;
 
 use alloy::primitives::{Address, B256, I256, U256};
 use alloy::rpc::types::Log;
