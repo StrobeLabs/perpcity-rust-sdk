@@ -19,8 +19,9 @@ use alloy::providers::Provider;
 use alloy::rpc::types::Log;
 use serde::{Deserialize, Serialize};
 
+use crate::client::Era;
 use crate::errors::{ContractError, Result, ValidationError};
-use crate::events::decode_log;
+use crate::events::{decode_log, is_v1_only};
 
 use super::History;
 use super::tape::{Tape, TapeAddresses, TapeEvent, market_logs_with, stamp_timestamps};
@@ -175,12 +176,22 @@ impl Recording {
     ///
     /// # Errors
     ///
+    /// [`ContractError::UnsupportedEra`] for a `v1.0.0` event no earlier
+    /// build emits, which the decoder does not know yet, so the tape would
+    /// miss it with no gap;
     /// [`ValidationError::DecodeFailed`] for a log this vocabulary names
     /// and cannot read, or one with no timestamp;
     /// [`ValidationError::InvalidTape`] for logs out of chain order.
     pub fn tape(&self) -> Result<Tape> {
         let mut rows = Vec::with_capacity(self.logs.len());
         for log in &self.logs {
+            if is_v1_only(log) {
+                return Err(ContractError::UnsupportedEra {
+                    era: Era::V1,
+                    operation: "recording_tape",
+                }
+                .into());
+            }
             let Some(event) = decode_log(log)? else {
                 continue;
             };
