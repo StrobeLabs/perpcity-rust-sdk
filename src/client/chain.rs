@@ -25,11 +25,11 @@ use crate::history::History;
 use crate::math::BlockContext;
 use crate::math::pricing::PricePair;
 use crate::storage::{perp_emas_slot, stored_emas, v1_perp_emas_slot};
+use crate::transport::fault::lacks_block;
 use crate::transport::provider::HftTransport;
 use crate::units::UsdcAtoms;
 
 use super::queries::{Era, MarketImmutables};
-use super::state::pinned_block_failure;
 use super::transactions::{classify_simulation_failure, preflight_request};
 use super::{
     ARBITRUM_CHAIN_ID, ARBITRUM_POOL_MANAGER, ARBITRUM_SEPOLIA_CHAIN_ID,
@@ -690,13 +690,14 @@ impl ChainReader {
             .await
     }
 
-    /// The block after the head for a `v1.0.0` trade's simulation, or
-    /// `None` once an endpoint of the transport has refused block
-    /// overrides, when the simulation runs at the endpoint's own block.
-    pub(super) async fn next_block(&self) -> Result<Option<NextBlock>> {
-        if !self.inner.transport.supports_block_overrides() {
-            return Ok(None);
-        }
+    /// The block after the head, read now, for a `v1.0.0` trade's
+    /// simulation.
+    ///
+    /// # Errors
+    ///
+    /// [`TransactionError::GasUnavailable`] (transient) when the endpoint
+    /// returns no head block, or the read's failure.
+    pub(super) async fn next_block(&self) -> Result<NextBlock> {
         let head = self
             .inner
             .provider
@@ -705,13 +706,11 @@ impl ChainReader {
             .ok_or_else(|| TransactionError::GasUnavailable {
                 reason: "the endpoint returned no head block".into(),
             })?;
-        Ok(Some(NextBlock::after(
-            head.header.number,
-            head.header.timestamp,
-        )))
+        Ok(NextBlock::after(head.header.number, head.header.timestamp))
     }
 
-    /// [`Self::preflight_call`] in `next` when it is given.
+    /// [`Self::preflight_call`] in `next` when it is given (see
+    /// [`Self::in_next_block`]).
     pub(super) async fn preflight_call_in(
         &self,
         from: Address,
@@ -723,27 +722,31 @@ impl ChainReader {
     ) -> std::result::Result<(), TransactionError> {
         let tx = preflight_request(from, to, calldata, value, gas_limit);
         let provider = &self.inner.provider;
-        let answer = match next {
-            None => provider.call(tx).await,
-            Some(next) => match provider
-                .call(tx.clone())
-                .block(next.state())
-                .with_block_overrides(next.overrides())
+        match next {
+            None => provider
+                .call(tx)
                 .await
-            {
-                Err(refusal) if refuses_overrides(&refusal) => {
-                    self.without_overrides(&refusal, provider.call(tx).await)
-                }
-                answer => answer,
-            },
-        };
-        answer
-            .map(drop)
-            .map_err(|e| simulation_failure(&e, "eth_call", next))
+                .map(drop)
+                .map_err(|e| classify_simulation_failure(&e, "eth_call")),
+            Some(next) => {
+                self.in_next_block("eth_call", next, |next| {
+                    let tx = tx.clone();
+                    async move {
+                        provider
+                            .call(tx)
+                            .block(next.state())
+                            .with_block_overrides(next.overrides())
+                            .await
+                            .map(drop)
+                    }
+                })
+                .await
+            }
+        }
     }
 
     /// `eth_estimateGas` for the call from `from`, in `next` when it is
-    /// given, with a contract revert decoded.
+    /// given (see [`Self::in_next_block`]), with a contract revert decoded.
     pub(super) async fn estimate_gas_in(
         &self,
         from: Address,
@@ -754,41 +757,137 @@ impl ChainReader {
     ) -> std::result::Result<u64, TransactionError> {
         let tx = preflight_request(from, to, calldata, value, None);
         let provider = &self.inner.provider;
-        let answer = match next {
-            None => provider.estimate_gas(tx).await,
-            Some(next) => match provider
-                .estimate_gas(tx.clone())
-                .block(next.state())
-                .with_block_overrides(next.overrides())
+        match next {
+            None => provider
+                .estimate_gas(tx)
                 .await
-            {
-                Err(refusal) if refuses_overrides(&refusal) => {
-                    self.without_overrides(&refusal, provider.estimate_gas(tx).await)
-                }
-                answer => answer,
-            },
-        };
-        answer.map_err(|e| simulation_failure(&e, "eth_estimateGas", next))
+                .map_err(|e| classify_simulation_failure(&e, "eth_estimateGas")),
+            Some(next) => {
+                self.in_next_block("eth_estimateGas", next, |next| {
+                    let tx = tx.clone();
+                    async move {
+                        provider
+                            .estimate_gas(tx)
+                            .block(next.state())
+                            .with_block_overrides(next.overrides())
+                            .await
+                    }
+                })
+                .await
+            }
+        }
     }
 
-    /// The answer `plain` to a simulation the endpoint refused with block
-    /// overrides, sent again without them. A refusal of `plain` too is not
-    /// about the overrides; any other answer latches the transport off
-    /// them, so later trades simulate at the head's time and their gas
-    /// floors carry them.
-    fn without_overrides<T>(
+    /// The preflight of a call whose gas limit is fixed, by the caller or
+    /// by the stuck transaction a replacement signs again: capped at
+    /// `gas_limit`, in `next` when it is given. With no endpoint that takes
+    /// block overrides for `eth_call`, the preflight runs at the endpoint's
+    /// own block, since the limit sent does not depend on it. A capped call
+    /// that reverts may only have run short of gas inside a token transfer,
+    /// so it is run once more without the cap.
+    ///
+    /// # Errors
+    ///
+    /// [`TransactionError::GasLimitTooLow`] when the call succeeds without
+    /// the cap; else the capped call's failure, as
+    /// [`classify_simulation_failure`] sorts it.
+    pub(super) async fn preflight_at_limit(
         &self,
-        refusal: &TransportError,
-        plain: std::result::Result<T, TransportError>,
-    ) -> std::result::Result<T, TransportError> {
-        if !plain.as_ref().is_err_and(refuses_overrides) {
-            self.inner.transport.note_block_overrides_unsupported();
+        from: Address,
+        to: Address,
+        calldata: &Bytes,
+        value: u128,
+        gas_limit: u64,
+        next: Option<&NextBlock>,
+    ) -> std::result::Result<(), TransactionError> {
+        let mut next = next;
+        let mut capped = self
+            .preflight_call_in(from, to, calldata, value, Some(gas_limit), next)
+            .await;
+        if next.is_some()
+            && matches!(capped, Err(TransactionError::GasUnavailable { .. }))
+            && !self.inner.transport.simulates_with_overrides("eth_call")
+        {
             tracing::warn!(
-                error = %refusal,
-                "endpoint refuses block overrides; v1 trades simulate at the head's time"
+                gas_limit,
+                "fixed-limit preflight runs at the endpoint's own block: no endpoint takes block overrides"
             );
+            next = None;
+            capped = self
+                .preflight_call_in(from, to, calldata, value, Some(gas_limit), None)
+                .await;
         }
-        plain
+        let Err(TransactionError::SimulationReverted { error_name, .. }) = &capped else {
+            return capped;
+        };
+        match self
+            .preflight_call_in(from, to, calldata, value, None, next)
+            .await
+        {
+            Ok(()) => Err(TransactionError::GasLimitTooLow {
+                gas_limit,
+                error_name: error_name.clone(),
+            }),
+            Err(_) => capped,
+        }
+    }
+
+    /// `simulate`, a simulation with block overrides, in `next`. Refused as
+    /// [`TransactionError::GasUnavailable`] (transient) when no endpoint
+    /// takes block overrides for `method`, since a simulation at the head's
+    /// time can skip a `v1.0.0` trade's accrual. A node without the head
+    /// `next` pins, which the transport passes to another endpoint first,
+    /// is answered by reading the head again and simulating once more;
+    /// a second miss is `GasUnavailable` too.
+    async fn in_next_block<T, F, Fut>(
+        &self,
+        method: &'static str,
+        next: &NextBlock,
+        simulate: F,
+    ) -> std::result::Result<T, TransactionError>
+    where
+        F: Fn(NextBlock) -> Fut,
+        Fut: Future<Output = std::result::Result<T, TransportError>>,
+    {
+        if !self.inner.transport.simulates_with_overrides(method) {
+            tracing::error!(
+                method,
+                "no endpoint takes block overrides; a v1 trade's gas cannot be simulated in the next block"
+            );
+            return Err(TransactionError::GasUnavailable {
+                reason: format!(
+                    "no endpoint takes block overrides for {method}, which a v1 trade's gas needs"
+                ),
+            });
+        }
+        let mut next = *next;
+        let mut answer = simulate(next).await;
+        if answer.as_ref().is_err_and(lacks_pinned_block) {
+            match self.next_block().await {
+                Ok(head) => {
+                    tracing::debug!(
+                        missing = next.head,
+                        head = head.head,
+                        method,
+                        "simulation's pinned head missing; read the head again"
+                    );
+                    next = head;
+                    answer = simulate(next).await;
+                }
+                Err(error) => {
+                    tracing::debug!(%error, method, "head read after a missing pinned head failed");
+                }
+            }
+        }
+        answer.map_err(|error| {
+            if lacks_pinned_block(&error) {
+                TransactionError::GasUnavailable {
+                    reason: format!("{method} at block {} failed: {error}", next.head),
+                }
+            } else {
+                classify_simulation_failure(&error, method)
+            }
+        })
     }
 }
 
@@ -826,35 +925,12 @@ impl NextBlock {
     }
 }
 
-/// Whether a node refused a request's params (JSON-RPC `-32602`), as a
-/// node without block overrides refuses a fourth one.
-fn refuses_overrides(error: &TransportError) -> bool {
+/// Whether a simulation's `error` is the node's answer that it lacks the
+/// block the simulation pinned ([`lacks_block`]).
+fn lacks_pinned_block(error: &TransportError) -> bool {
     error
         .as_error_resp()
-        .is_some_and(|resp| resp.code == -32602)
-}
-
-/// A failed simulation, sorted by [`classify_simulation_failure`], with a
-/// node that lacks the head `next` pins read as no answer.
-fn simulation_failure(
-    error: &TransportError,
-    what: &str,
-    next: Option<&NextBlock>,
-) -> TransactionError {
-    let failure = classify_simulation_failure(error, what);
-    match (next, &failure) {
-        (Some(next), TransactionError::SimulationFailed { .. })
-            if error
-                .as_error_resp()
-                .and_then(|resp| pinned_block_failure(&resp.message, next.head))
-                .is_some() =>
-        {
-            TransactionError::GasUnavailable {
-                reason: format!("{what} at block {} failed: {error}", next.head),
-            }
-        }
-        _ => failure,
-    }
+        .is_some_and(|resp| lacks_block(&resp.message))
 }
 
 /// A raw storage read's failure, classified: the node answering with an
@@ -896,6 +972,56 @@ mod tests {
 
     use super::*;
     use crate::client::mock;
+
+    /// The next block, as a public Arbitrum Sepolia node takes it in the
+    /// param shape the simulations send: code that returns `TIMESTAMP`, run
+    /// with the overrides, gives the head's time plus one, and
+    /// `eth_estimateGas` takes the same overrides. (`NUMBER` is the L1
+    /// block number on Arbitrum, which the number override does not set.)
+    #[tokio::test]
+    #[ignore = "network: simulates on a public Arbitrum Sepolia node"]
+    async fn a_public_node_runs_the_next_block() {
+        use alloy::rpc::types::state::{AccountOverride, StateOverride};
+
+        let url = std::env::var("SEPOLIA_FORK_URL")
+            .unwrap_or_else(|_| "https://sepolia-rollup.arbitrum.io/rpc".to_string());
+        let transport = HftTransport::new(
+            crate::TransportConfig::builder()
+                .shared_endpoint(&url)
+                .build()
+                .unwrap(),
+        )
+        .unwrap();
+        let chain = ChainReader::arbitrum_sepolia(transport);
+        let next = chain.next_block().await.unwrap();
+        let probe = address!("00000000000000000000000000000000000042ab");
+        // TIMESTAMP, PUSH0, MSTORE, PUSH1 32, PUSH0, RETURN.
+        let code = Bytes::from_static(&[0x42, 0x5f, 0x52, 0x60, 0x20, 0x5f, 0xf3]);
+        let state: StateOverride = [(
+            probe,
+            AccountOverride {
+                code: Some(code),
+                ..AccountOverride::default()
+            },
+        )]
+        .into_iter()
+        .collect();
+        let tx = preflight_request(Address::ZERO, probe, &Bytes::new(), 0, None);
+        let word = chain
+            .provider()
+            .call(tx)
+            .block(next.state())
+            .overrides(state)
+            .with_block_overrides(next.overrides())
+            .await
+            .unwrap();
+        assert_eq!(U256::from_be_slice(&word), U256::from(next.head_time + 1));
+        let gas = chain
+            .estimate_gas_in(Address::ZERO, probe, &Bytes::new(), 0, Some(&next))
+            .await
+            .unwrap();
+        assert!(gas >= 21_000, "{gas}");
+    }
 
     #[tokio::test]
     async fn beacon_read_preserves_node_errors() {

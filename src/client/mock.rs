@@ -278,20 +278,44 @@ pub(super) fn transport() -> HftTransport {
     .expect("a parseable URL builds a transport")
 }
 
-fn chain_with(provider: RootProvider<Ethereum>, transport: HftTransport) -> ChainReader {
-    let deployments = ChainDeployments {
+/// The mocked chain's deployments.
+fn deployments() -> ChainDeployments {
+    ChainDeployments {
         usdc: USDC,
         pool_manager: POOL_MANAGER,
         v022_perp_guard_hook: V022_HOOK,
         v1_perp_guard_hook: V1_HOOK,
         v1_perp_factory: Address::repeat_byte(0x0c),
         v1_withdrawal_controller_impl: Address::repeat_byte(0x0d),
-    };
-    ChainReader::from_parts(provider, transport, deployments, CHAIN_ID)
+    }
+}
+
+fn chain_with(provider: RootProvider<Ethereum>, transport: HftTransport) -> ChainReader {
+    ChainReader::from_parts(provider, transport, deployments(), CHAIN_ID)
+}
+
+/// A client whose requests go through `transport` itself, to endpoints a
+/// test scripts.
+pub(super) fn client_through(transport: HftTransport) -> PerpClient {
+    PerpClient::new(
+        ChainReader::new(transport, deployments(), CHAIN_ID).market(PERP),
+        signer(),
+    )
 }
 
 fn client_with(provider: RootProvider<Ethereum>, transport: HftTransport) -> PerpClient {
     PerpClient::new(chain_with(provider, transport).market(PERP), signer())
+}
+
+/// A block with this number and timestamp and no transactions, as
+/// `eth_getBlockByNumber` returns it.
+pub(super) fn block(number: u64, timestamp: u64) -> Block {
+    let header = Header::new(ConsensusHeader {
+        number,
+        timestamp,
+        ..ConsensusHeader::default()
+    });
+    Block::new(header, BlockTransactions::Hashes(Vec::new()))
 }
 
 /// The mocked clients' fixed signer.
@@ -486,15 +510,9 @@ impl Rpc {
     /// The next `eth_getBlockByNumber` finds a header with this number
     /// and timestamp; returns its hash, which pinned reads carry.
     pub(super) fn block(&self, number: u64, timestamp: u64) -> B256 {
-        let header = Header::new(ConsensusHeader {
-            number,
-            timestamp,
-            ..ConsensusHeader::default()
-        });
-        let hash = header.hash;
-        let block: Block = Block::new(header, BlockTransactions::Hashes(Vec::new()));
+        let block = block(number, timestamp);
         self.asserter.push_success(&block);
-        hash
+        block.header.hash
     }
 
     /// The next `eth_getBlockByNumber` finds nothing.

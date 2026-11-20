@@ -230,8 +230,24 @@ pub enum TransactionError {
         reason: String,
     },
 
+    /// A call sent with a fixed gas limit (the caller's, or the stuck
+    /// transaction's in a replacement) reverted in its preflight at that
+    /// limit, as `error_name`, and succeeds without a cap: the limit is too
+    /// low, and the revert is the gas running out (inside a token
+    /// transfer, say). The transaction was **not** broadcast. Not
+    /// transient: the same limit fails again.
+    #[error("the call reverts as {error_name} at gas limit {gas_limit} and succeeds without a cap")]
+    GasLimitTooLow {
+        /// The fixed gas limit.
+        gas_limit: u64,
+        /// The decoded revert at that limit.
+        error_name: String,
+    },
+
     /// Gas price or base fee is not available (cache stale, RPC down), or a
-    /// pre-flight simulation could not reach the node (transport failure).
+    /// pre-flight simulation could not reach the node (transport failure),
+    /// or no endpoint takes the block overrides a `v1.0.0` trade's gas is
+    /// simulated with.
     /// Transient: the transaction was neither disproved nor broadcast.
     #[error("gas unavailable: {reason}")]
     GasUnavailable {

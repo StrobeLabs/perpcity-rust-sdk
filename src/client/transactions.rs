@@ -20,7 +20,7 @@ use alloy::providers::Provider;
 use alloy::rpc::types::{TransactionReceipt, TransactionRequest};
 
 use crate::constants::{RECEIPT_POLL_INTERVAL, RECEIPT_TIMEOUT};
-use crate::errors::{Result, TransactionError, ValidationError, decode};
+use crate::errors::{PerpCityError, Result, TransactionError, ValidationError, decode};
 use crate::hft::gas::{Urgency, is_out_of_gas, is_v1_trade};
 use crate::hft::pipeline::TxRequest;
 
@@ -132,7 +132,9 @@ impl<'a> TxBuilder<'a> {
             .into());
         }
         let next = match selector {
-            Some(selector) if is_v1_trade(&selector) => self.client.chain().next_block().await?,
+            Some(selector) if is_v1_trade(&selector) => {
+                Some(self.client.chain().next_block().await?)
+            }
             _ => None,
         };
 
@@ -145,12 +147,12 @@ impl<'a> TxBuilder<'a> {
                 // of gas at this limit must fail here, not on-chain.
                 self.client
                     .chain()
-                    .preflight_call_in(
+                    .preflight_at_limit(
                         self.client.address,
                         self.to,
                         &self.calldata,
                         self.value,
-                        Some(limit),
+                        limit,
                         next.as_ref(),
                     )
                     .await?;
@@ -436,7 +438,9 @@ impl PerpClient {
     /// cache's buffer. A capped call that fails, out of gas or with a
     /// revert, is estimated again without the cap: running short of gas
     /// inside a token transfer reverts as the transfer's own error, so only
-    /// the uncapped answer tells a revert from a stale limit.
+    /// the uncapped answer tells a revert from a stale limit. An uncapped
+    /// estimate that the node answers with no revert data leaves the
+    /// capped call's decoded revert as the answer.
     ///
     /// Every code path guarantees the transaction has been simulated.
     async fn simulate(
@@ -462,6 +466,7 @@ impl PerpClient {
 
         // Check cache — if hit, simulate via eth_call to verify still valid.
         // Drop the guard before the async preflight call.
+        let mut capped_revert = None;
         let cached = {
             let cache = self.gas_limit_cache.lock().unwrap();
             cache
@@ -502,8 +507,9 @@ impl PerpClient {
                         %error,
                         "cached gas limit failed preflight; re-estimating"
                     );
-                    if matches!(error, TransactionError::SimulationFailed { .. }) {
-                        self.gas_limit_cache.lock().unwrap().invalidate(&selector);
+                    match error {
+                        TransactionError::SimulationReverted { .. } => capped_revert = Some(error),
+                        _ => self.gas_limit_cache.lock().unwrap().invalidate(&selector),
                     }
                 }
                 // The call never reached the node (a timeout, a rate limit):
@@ -514,7 +520,15 @@ impl PerpClient {
         }
 
         // Cache miss, or a failed capped preflight — call eth_estimateGas
-        let raw_estimate = self.estimate_gas(to, calldata, value, next).await?;
+        let raw_estimate = match self.estimate_gas(to, calldata, value, next).await {
+            Ok(raw) => raw,
+            Err(PerpCityError::Transaction(TransactionError::SimulationFailed { .. }))
+                if let Some(revert) = capped_revert =>
+            {
+                return Err(revert.into());
+            }
+            Err(error) => return Err(error),
+        };
 
         // Cache with buffer
         let buffered = {
@@ -597,10 +611,12 @@ mod tests {
     use serde_json::Value;
     use serde_json::value::RawValue;
 
+    use std::sync::{Arc, Mutex};
+
     use super::*;
     use crate::client::{mock, now_ms};
     use crate::contracts::{Perp as EarlierPerp, v1};
-    use crate::errors::{PerpCityError, RevertClass};
+    use crate::errors::RevertClass;
     use crate::hft::gas::GasLimits;
 
     /// Solady's `TransferFromFailed()`, which a transfer that runs out of
@@ -767,55 +783,167 @@ mod tests {
         assert!(rpc.is_drained());
     }
 
-    /// An endpoint that refuses block overrides, where it takes the same
-    /// call without them, is answered without them and remembered: the
-    /// next v1 trade reads no head and simulates at the endpoint's block,
-    /// carried by the floor. A refusal of the plain call too is not about
-    /// the overrides.
+    /// The transport keeps an endpoint's refusal of block overrides, per
+    /// method. With no endpoint left that takes them, a v1 trade's
+    /// automatic limit is refused as transient after the head read, on a
+    /// cache miss (`eth_estimateGas`) and a cache hit (`eth_call`): an
+    /// estimate at the head's time can be below the mined trade's gas. An
+    /// explicit limit is preflighted at the endpoint's own block and sent.
     #[tokio::test(start_paused = true)]
-    async fn a_refused_override_falls_back_to_the_floor_and_is_remembered() {
+    async fn no_endpoint_with_overrides_refuses_an_automatic_v1_limit() {
         let selector = v1::Perp::adjustTakerCall::SELECTOR;
+        let gas_unavailable = |err: &PerpCityError| {
+            matches!(
+                err,
+                PerpCityError::Transaction(TransactionError::GasUnavailable { reason })
+                    if reason.contains("block overrides")
+            )
+        };
+
         let (client, rpc) = mock::client();
         client.chain().set_base_fee(100);
-        rpc.block(500, 1_000);
-        rpc.node_error(-32602, "too many arguments, want at most 3");
-        rpc.quantity(600_000);
-        answer_send(&rpc, &client);
         client
+            .chain()
+            .transport()
+            .note_override_refusal(0, "eth_estimateGas");
+        rpc.block(500, 1_000);
+        let err = client
             .tx(mock::PERP, calldata(selector))
             .send()
             .await
-            .unwrap();
-        let estimates = rpc.params("eth_estimateGas");
-        assert_eq!(overrides(&estimates[0])["time"], "0x3e9");
-        assert!(estimates[1].get(3).is_none());
-        assert_eq!(rpc.sent_txs()[0].gas_limit(), GasLimits::V1_ADJUST_TAKER);
-        assert!(!client.chain().transport().supports_block_overrides());
+            .unwrap_err();
+        assert!(gas_unavailable(&err) && err.is_transient(), "{err}");
+        assert_eq!(rpc.methods(), ["eth_getBlockByNumber"]);
 
+        let (client, rpc) = cached(selector, 1_300_000);
+        client
+            .chain()
+            .transport()
+            .note_override_refusal(0, "eth_call");
+        rpc.block(500, 1_000);
+        let err = client
+            .tx(mock::PERP, calldata(selector))
+            .send()
+            .await
+            .unwrap_err();
+        assert!(gas_unavailable(&err) && err.is_transient(), "{err}");
+        assert_eq!(rpc.methods(), ["eth_getBlockByNumber"]);
+        assert_eq!(cached_limit(&client, selector), Some(1_560_000));
+
+        rpc.block(500, 1_000);
         rpc.response(&Bytes::new());
         answer_send(&rpc, &client);
         client
             .tx(mock::PERP, calldata(selector))
+            .with_gas_limit(2_000_000)
             .send()
             .await
             .unwrap();
-        assert_eq!(
-            rpc.methods()
-                .iter()
-                .filter(|m| *m == "eth_getBlockByNumber")
-                .count(),
-            1
-        );
-        assert!(rpc.params("eth_call")[0].get(3).is_none());
+        let preflight = &rpc.params("eth_call")[0];
+        assert!(preflight.get(3).is_none(), "{preflight}");
+        assert_eq!(rpc.call_gas(), [Some(2_000_000)]);
+        assert_eq!(rpc.sent_txs()[0].gas_limit(), 2_000_000);
         assert!(rpc.is_drained());
+    }
 
+    /// Through the real transport, with one endpoint that refuses block
+    /// overrides and answers the same call without them: the transport
+    /// records the refusal during the explicit-limit preflight and passes
+    /// the refusal on, and the preflight then runs at the endpoint's own
+    /// block before the send. The next explicit preflight goes there at
+    /// once.
+    #[tokio::test]
+    async fn a_refusal_recorded_during_an_explicit_preflight_falls_back() {
+        use crate::transport::scripted::{self, Answer};
+        use crate::{HftTransport, TransportConfig};
+
+        let seen = Arc::new(Mutex::new(Vec::<(String, usize)>::new()));
+        let log = Arc::clone(&seen);
+        let head = serde_json::to_value(mock::block(500, 1_000)).unwrap();
+        let url = scripted::endpoint(move |method, params| {
+            let count = params.as_array().map_or(0, Vec::len);
+            log.lock().unwrap().push((method.to_owned(), count));
+            match (method, count) {
+                ("eth_getBlockByNumber", _) => Answer::Result(head.clone()),
+                ("eth_call", 4) => Answer::Error(-32602, "too many arguments".into()),
+                ("eth_call", _) => Answer::Result("0x".into()),
+                ("eth_getTransactionCount", _) => Answer::Result("0x0".into()),
+                _ => Answer::Error(-32000, "insufficient funds for gas".into()),
+            }
+        })
+        .await;
+        let transport = HftTransport::new(
+            TransportConfig::builder()
+                .shared_endpoint(&url)
+                .write_retry(crate::transport::config::WriteRetryConfig {
+                    max_retries: 0,
+                    base_delay: std::time::Duration::from_millis(1),
+                })
+                .build()
+                .unwrap(),
+        )
+        .unwrap();
+        let client = mock::client_through(transport.clone());
+        client.chain().set_base_fee(100);
+        let err = client
+            .tx(mock::PERP, calldata(v1::Perp::moveMakerCall::SELECTOR))
+            .with_gas_limit(2_000_000)
+            .send()
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                PerpCityError::Transaction(TransactionError::BroadcastFailed { .. })
+            ),
+            "{err}"
+        );
+        let asked = |seen: &Mutex<Vec<(String, usize)>>| {
+            seen.lock()
+                .unwrap()
+                .iter()
+                .map(|(m, n)| format!("{m}/{n}"))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            asked(&seen),
+            [
+                "eth_getBlockByNumber/2",
+                "eth_call/4",
+                "eth_call/3",
+                "eth_call/2",
+                "eth_sendRawTransaction/1"
+            ]
+        );
+        assert_eq!(transport.override_refusals().len(), 1);
+
+        seen.lock().unwrap().clear();
+        let err = client
+            .tx(mock::PERP, calldata(v1::Perp::moveMakerCall::SELECTOR))
+            .with_gas_limit(2_000_000)
+            .send()
+            .await;
+        assert!(err.is_err());
+        assert_eq!(
+            asked(&seen)
+                .into_iter()
+                .filter(|m| m.starts_with("eth_call"))
+                .collect::<Vec<_>>(),
+            ["eth_call/2"],
+            "the recorded refusal sends the explicit preflight plain at once"
+        );
+    }
+
+    /// A refusal of the overrides that the transport passed on, with no
+    /// other endpoint to ask, is no answer about the call: transient.
+    #[tokio::test]
+    async fn a_refused_override_is_no_answer() {
         let (client, rpc) = mock::client();
         client.chain().set_base_fee(100);
         rpc.block(500, 1_000);
-        rpc.node_error(-32602, "invalid argument 0: bad input");
-        rpc.node_error(-32602, "invalid argument 0: bad input");
+        rpc.node_error(-32602, "too many arguments, want at most 3");
         let err = client
-            .tx(mock::PERP, calldata(selector))
+            .tx(mock::PERP, calldata(v1::Perp::adjustTakerCall::SELECTOR))
             .send()
             .await
             .unwrap_err();
@@ -826,8 +954,59 @@ mod tests {
             ),
             "{err}"
         );
-        assert!(client.chain().transport().supports_block_overrides());
+        assert!(rpc.sent_txs().is_empty());
         assert!(rpc.is_drained());
+    }
+
+    /// The head read for a v1 trade finds no block: no simulation runs at
+    /// the endpoint's own block instead, and nothing is sent.
+    #[tokio::test]
+    async fn no_head_block_is_no_answer() {
+        let (client, rpc) = mock::client();
+        client.chain().set_base_fee(100);
+        rpc.no_block();
+        let err = client
+            .tx(mock::PERP, calldata(v1::Perp::openTakerCall::SELECTOR))
+            .send()
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                PerpCityError::Transaction(TransactionError::GasUnavailable { reason })
+                    if reason.contains("no head block")
+            ),
+            "{err}"
+        );
+        assert!(err.is_transient());
+        assert_eq!(rpc.methods(), ["eth_getBlockByNumber"]);
+        assert!(rpc.is_drained());
+    }
+
+    /// A zero limit is refused before any request.
+    #[tokio::test]
+    async fn a_zero_gas_limit_is_refused_before_any_request() {
+        for selector in [
+            v1::Perp::openTakerCall::SELECTOR,
+            EarlierPerp::openMakerCall::SELECTOR,
+        ] {
+            let (client, rpc) = mock::client();
+            client.chain().set_base_fee(100);
+            let err = client
+                .tx(mock::PERP, calldata(selector))
+                .with_gas_limit(0)
+                .send()
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(
+                    err,
+                    PerpCityError::Validation(ValidationError::InvalidConfig { .. })
+                ),
+                "{err}"
+            );
+            assert!(rpc.methods().is_empty());
+        }
     }
 
     /// An explicit limit on a v1 trade is preflighted at that limit in the
@@ -871,29 +1050,255 @@ mod tests {
         assert!(rpc.is_drained());
     }
 
-    /// A node without the head the simulation pins gave no answer: a
-    /// transient failure, not the call's.
-    #[tokio::test]
-    async fn a_missing_pinned_head_is_no_answer() {
+    /// Nitro's answer for a block number above its head, which a node
+    /// behind the one that served the head gives.
+    const NITRO_MISSING: &str = "unsupported block number 500";
+
+    /// How a v1 trade resolves its limit: an estimate, a cache hit's
+    /// preflight, or an explicit limit's preflight.
+    #[derive(Clone, Copy, Debug)]
+    enum Path {
+        Estimate,
+        CacheHit,
+        Explicit,
+    }
+
+    /// A v1 trade's client for `path`, and the send for it.
+    fn v1_trade_on(path: Path) -> (PerpClient, mock::Rpc) {
+        let selector = v1::Perp::adjustTakerCall::SELECTOR;
+        let (client, rpc) = match path {
+            Path::CacheHit => cached(selector, 1_300_000),
+            Path::Estimate | Path::Explicit => mock::client(),
+        };
+        client.chain().set_base_fee(100);
+        (client, rpc)
+    }
+
+    async fn send_on(path: Path, client: &PerpClient) -> Result<TransactionReceipt> {
+        let tx = client.tx(mock::PERP, calldata(v1::Perp::adjustTakerCall::SELECTOR));
+        match path {
+            Path::Explicit => tx.with_gas_limit(2_000_000).send().await,
+            Path::Estimate | Path::CacheHit => tx.send().await,
+        }
+    }
+
+    /// The method `path` simulates with, and its successful answer.
+    fn simulation_succeeds(path: Path, rpc: &mock::Rpc) -> &'static str {
+        match path {
+            Path::Estimate => {
+                rpc.quantity(1_300_000);
+                "eth_estimateGas"
+            }
+            Path::CacheHit | Path::Explicit => {
+                rpc.response(&Bytes::new());
+                "eth_call"
+            }
+        }
+    }
+
+    /// A node without the head the simulation pins (Nitro's "unsupported
+    /// block number", which the transport passes to another endpoint
+    /// first) is answered by reading the head again and simulating once
+    /// more, on each path; the second simulation pins the new head.
+    #[tokio::test(start_paused = true)]
+    async fn a_missing_pinned_head_is_read_again_once() {
+        for path in [Path::Estimate, Path::CacheHit, Path::Explicit] {
+            let (client, rpc) = v1_trade_on(path);
+            rpc.block(500, 1_000);
+            rpc.node_error(-32000, NITRO_MISSING);
+            rpc.block(498, 996);
+            let method = simulation_succeeds(path, &rpc);
+            answer_send(&rpc, &client);
+            send_on(path, &client).await.unwrap();
+            let pins: Vec<_> = rpc
+                .params(method)
+                .iter()
+                .map(|params| (params[1].clone(), overrides(params)["time"].clone()))
+                .collect();
+            assert_eq!(
+                pins,
+                [
+                    ("0x1f4".into(), "0x3e9".into()),
+                    ("0x1f2".into(), "0x3e5".into())
+                ],
+                "{path:?}"
+            );
+            assert_eq!(rpc.sent_txs().len(), 1, "{path:?}");
+            assert!(rpc.is_drained(), "{path:?}");
+        }
+    }
+
+    /// A second miss, or a failed head read after the first, is no
+    /// answer: transient, nothing sent, and a cached limit kept. Not the
+    /// call's failure.
+    #[tokio::test(start_paused = true)]
+    async fn a_missing_pinned_head_twice_is_no_answer() {
+        for path in [Path::Estimate, Path::CacheHit, Path::Explicit] {
+            for head_read_fails in [false, true] {
+                let (client, rpc) = v1_trade_on(path);
+                rpc.block(500, 1_000);
+                rpc.node_error(-32000, NITRO_MISSING);
+                if head_read_fails {
+                    rpc.fails("request timed out");
+                } else {
+                    rpc.block(500, 1_000);
+                    rpc.node_error(-32000, NITRO_MISSING);
+                }
+                let err = send_on(path, &client).await.unwrap_err();
+                assert!(
+                    matches!(
+                        &err,
+                        PerpCityError::Transaction(TransactionError::GasUnavailable { reason })
+                            if reason.contains(NITRO_MISSING)
+                    ),
+                    "{path:?}: {err}"
+                );
+                assert!(err.is_transient());
+                assert!(rpc.sent_txs().is_empty());
+                if let Path::CacheHit = path {
+                    assert_eq!(
+                        cached_limit(&client, v1::Perp::adjustTakerCall::SELECTOR),
+                        Some(1_560_000)
+                    );
+                }
+                assert!(rpc.is_drained(), "{path:?}");
+            }
+        }
+    }
+
+    /// A v1 cache hit whose capped preflight fails is estimated again in
+    /// the same next block, never at the endpoint's own block: after a
+    /// revert that may be the gas running out in a transfer, and after
+    /// running out of gas.
+    #[tokio::test(start_paused = true)]
+    async fn a_v1_cache_hit_that_fails_is_estimated_in_the_next_block() {
+        let selector = v1::Perp::adjustTakerCall::SELECTOR;
+        for revert in [true, false] {
+            let (client, rpc) = cached(selector, 1_300_000);
+            rpc.block(500, 1_000);
+            if revert {
+                rpc.reverts(&TRANSFER_FROM_FAILED);
+            } else {
+                rpc.node_error(-32000, "out of gas");
+            }
+            rpc.quantity(1_700_000);
+            answer_send(&rpc, &client);
+            client
+                .tx(mock::PERP, calldata(selector))
+                .send()
+                .await
+                .unwrap();
+            let estimate = &rpc.params("eth_estimateGas")[0];
+            assert_eq!(estimate[1], "0x1f4");
+            assert_eq!(
+                overrides(estimate),
+                &serde_json::json!({"number": "0x1f5", "time": "0x3e9"})
+            );
+            assert_eq!(rpc.sent_txs()[0].gas_limit(), 2_040_000);
+            assert_eq!(cached_limit(&client, selector), Some(2_040_000));
+            assert!(rpc.is_drained());
+        }
+    }
+
+    /// After a capped revert, an uncapped estimate the node answers with
+    /// no revert data leaves the capped call's decoded revert as the
+    /// answer; one that gets no answer stays transient.
+    #[tokio::test(start_paused = true)]
+    async fn a_capped_revert_stands_when_the_estimate_answers_without_data() {
+        let selector = v1::Perp::adjustTakerCall::SELECTOR;
+        let (client, rpc) = cached(selector, 1_300_000);
+        rpc.block(500, 1_000);
+        rpc.reverts(&TRANSFER_FROM_FAILED);
+        rpc.node_error(-32000, "execution reverted");
+        let err = client
+            .tx(mock::PERP, calldata(selector))
+            .send()
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&err, PerpCityError::Transaction(TransactionError::SimulationReverted {
+                selector, ..
+            }) if selector.0 == TRANSFER_FROM_FAILED),
+            "{err}"
+        );
+        assert_eq!(cached_limit(&client, selector), Some(1_560_000));
+        assert!(rpc.is_drained());
+
+        rpc.block(500, 1_000);
+        rpc.reverts(&TRANSFER_FROM_FAILED);
+        rpc.fails("request timed out");
+        let err = client
+            .tx(mock::PERP, calldata(selector))
+            .send()
+            .await
+            .unwrap_err();
+        assert!(err.is_transient(), "{err}");
+        assert!(rpc.sent_txs().is_empty());
+        assert!(rpc.is_drained());
+    }
+
+    /// An explicit limit whose preflight reverts is run once more without
+    /// the cap, in the same next block: a success there is a limit too
+    /// low, typed as such, and a revert there leaves the capped revert.
+    #[tokio::test(start_paused = true)]
+    async fn an_explicit_limit_that_reverts_is_checked_without_the_cap() {
         let (client, rpc) = mock::client();
         client.chain().set_base_fee(100);
         rpc.block(500, 1_000);
-        rpc.node_error(-32000, "header not found");
+        rpc.reverts(&TRANSFER_FROM_FAILED);
+        rpc.response(&Bytes::new());
         let err = client
-            .tx(mock::PERP, calldata(v1::Perp::openTakerCall::SELECTOR))
+            .tx(mock::PERP, calldata(v1::Perp::moveMakerCall::SELECTOR))
+            .with_gas_limit(400_000)
             .send()
             .await
             .unwrap_err();
         assert!(
             matches!(
-                err,
-                PerpCityError::Transaction(TransactionError::GasUnavailable { .. })
+                &err,
+                PerpCityError::Transaction(TransactionError::GasLimitTooLow {
+                    gas_limit: 400_000,
+                    error_name,
+                }) if error_name == "TransferFromFailed"
             ),
             "{err}"
         );
-        assert!(err.is_transient());
+        assert!(!err.is_transient());
+        assert_eq!(rpc.call_gas(), [Some(400_000), None]);
+        for call in rpc.params("eth_call") {
+            assert_eq!(call[1], "0x1f4");
+            assert_eq!(overrides(&call)["time"], "0x3e9");
+        }
         assert!(rpc.sent_txs().is_empty());
         assert!(rpc.is_drained());
+
+        for uncapped_reverts in [true, false] {
+            let (client, rpc) = mock::client();
+            client.chain().set_base_fee(100);
+            rpc.reverts(&TRANSFER_FROM_FAILED);
+            if uncapped_reverts {
+                rpc.reverts(&TRANSFER_FROM_FAILED);
+            } else {
+                rpc.node_error(-32000, "execution reverted");
+            }
+            let err = client
+                .tx(
+                    mock::PERP,
+                    calldata(EarlierPerp::liquidateTakerCall::SELECTOR),
+                )
+                .with_gas_limit(GasLimits::LIQUIDATE)
+                .send()
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(&err, PerpCityError::Transaction(TransactionError::SimulationReverted {
+                    selector, ..
+                }) if selector.0 == TRANSFER_FROM_FAILED),
+                "{err}"
+            );
+            assert_eq!(rpc.call_gas(), [Some(GasLimits::LIQUIDATE), None]);
+            assert!(rpc.is_drained());
+        }
     }
 
     /// The explicit-limit path exists for operations (liquidations) where

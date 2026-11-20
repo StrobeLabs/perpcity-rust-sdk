@@ -190,6 +190,28 @@ pub(crate) fn is_rejection(payload: &ErrorPayload) -> bool {
     !message.contains("already known") && REJECTIONS.iter().any(|r| message.contains(r))
 }
 
+/// Whether a node's error `message` is its refusal to serve pruned state:
+/// Nitro's "historical state … is not available", geth's "missing trie
+/// node". The message is the only place a node says so.
+pub(crate) fn state_pruned(message: &str) -> bool {
+    let message = message.to_ascii_lowercase();
+    message.contains("historical state") || message.contains("missing trie node")
+}
+
+/// Whether a node's error `message` says it does not have the block a
+/// call was pinned to: Nitro's "unsupported block number N" for a number
+/// above its head, geth's "header not found" for a hash or number it has
+/// not seen, and the "unknown block" / "block not found" wordings of other
+/// clients and gateways. Another node, or the same one a moment later, can
+/// have it.
+pub(crate) fn lacks_block(message: &str) -> bool {
+    let message = message.to_ascii_lowercase();
+    message.contains("unsupported block number")
+        || message.contains("header not found")
+        || message.contains("unknown block")
+        || message.contains("block not found")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

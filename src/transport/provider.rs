@@ -80,6 +80,10 @@ use tower::Service;
 use super::config::{Strategy, TransportConfig};
 use super::fault::{Fault, fault, is_rate_limit, is_rejection};
 use super::health::{CircuitState, EndpointHealth, EndpointStatus, ProbeSlot, Reserved};
+use super::overrides::{
+    METHODS, OverrideRefusal, REFUSAL_TTL_MS, Refusals, Simulation, is_conclusive,
+    lacks_pinned_block, refuses_params,
+};
 
 // ── Packed atomic state constants ────────────────────────────────────
 //
@@ -122,6 +126,9 @@ struct ManagedEndpoint {
     /// Packed circuit state for lock-free reads.
     /// Read by `select_*` to filter callable endpoints without locking.
     atomic_state: AtomicU64,
+    /// Until when this endpoint is taken to refuse block overrides, per
+    /// simulation method.
+    override_refusals: Refusals,
 }
 
 impl ManagedEndpoint {
@@ -292,6 +299,7 @@ impl EndpointPool {
                     label: super::redact_url(url),
                     atomic_latency_ns: AtomicU64::new(0),
                     atomic_state: AtomicU64::new(TAG_CLOSED),
+                    override_refusals: Refusals::default(),
                 })
             })
             .collect::<crate::Result<Vec<_>>>()?;
@@ -314,9 +322,21 @@ impl EndpointPool {
     /// outlive the request: dropping it gives back any probe slot the
     /// selection reserved.
     pub fn select(&self, strategy: Strategy, now_ms: u64) -> Option<(usize, ProbePermit<'_>)> {
+        self.select_where(strategy, now_ms, &|_| true)
+    }
+
+    /// [`Self::select`] among the endpoints `eligible` admits.
+    fn select_where(
+        &self,
+        strategy: Strategy,
+        now_ms: u64,
+        eligible: &dyn Fn(usize) -> bool,
+    ) -> Option<(usize, ProbePermit<'_>)> {
         match strategy {
-            Strategy::RoundRobin => self.select_round_robin(now_ms),
-            Strategy::LatencyBased | Strategy::Hedged { .. } => self.select_latency_based(now_ms),
+            Strategy::RoundRobin => self.select_round_robin(now_ms, eligible),
+            Strategy::LatencyBased | Strategy::Hedged { .. } => {
+                self.select_latency_based(now_ms, eligible)
+            }
         }
     }
 
@@ -342,14 +362,19 @@ impl EndpointPool {
 
     /// Select the first closed endpoint in round-robin order, or a probe
     /// when no closed endpoint is available.
-    fn select_round_robin(&self, now_ms: u64) -> Option<(usize, ProbePermit<'_>)> {
+    fn select_round_robin(
+        &self,
+        now_ms: u64,
+        eligible: &dyn Fn(usize) -> bool,
+    ) -> Option<(usize, ProbePermit<'_>)> {
         let n = self.endpoints.len();
         let start = self.round_robin.fetch_add(1, Ordering::Relaxed) % n.max(1);
 
         for i in 0..n {
             let idx = (start + i) % n;
-            let state = self.endpoints[idx].atomic_state.load(Ordering::Relaxed);
-            if state & TAG_MASK == TAG_CLOSED {
+            if eligible(idx)
+                && self.endpoints[idx].atomic_state.load(Ordering::Relaxed) & TAG_MASK == TAG_CLOSED
+            {
                 return Some((idx, ProbePermit::free()));
             }
         }
@@ -357,17 +382,27 @@ impl EndpointPool {
         // With no closed endpoint, use the configured concurrent probe budget.
         (0..n).find_map(|i| {
             let idx = (start + i) % n;
+            if !eligible(idx) {
+                return None;
+            }
             Some((idx, self.reserve(idx, now_ms)?))
         })
     }
 
     /// Select the fastest closed endpoint, or a probe when no closed
     /// endpoint is available.
-    fn select_latency_based(&self, now_ms: u64) -> Option<(usize, ProbePermit<'_>)> {
+    fn select_latency_based(
+        &self,
+        now_ms: u64,
+        eligible: &dyn Fn(usize) -> bool,
+    ) -> Option<(usize, ProbePermit<'_>)> {
         // Lock-free fast path: best Closed endpoint by latency. A closed
         // circuit reserves nothing, so no lock is needed.
         let mut best: Option<(usize, u64)> = None;
         for (i, endpoint) in self.endpoints.iter().enumerate() {
+            if !eligible(i) {
+                continue;
+            }
             if endpoint.atomic_state.load(Ordering::Relaxed) & TAG_MASK == TAG_CLOSED {
                 let latency = endpoint.atomic_latency_ns.load(Ordering::Relaxed);
                 if best.is_none_or(|(_, best_latency)| latency < best_latency) {
@@ -386,7 +421,7 @@ impl EndpointPool {
         // choose, and with the default budget of one slot those endpoints
         // would never be probed again.
         let mut best: Option<(usize, u64, ProbePermit<'_>)> = None;
-        for idx in 0..self.endpoints.len() {
+        for idx in (0..self.endpoints.len()).filter(|&idx| eligible(idx)) {
             let Some(permit) = self.reserve(idx, now_ms) else {
                 continue;
             };
@@ -460,6 +495,30 @@ impl EndpointPool {
             .into_iter()
             .map(|(idx, _, permit)| (idx, permit))
             .collect()
+    }
+
+    /// Whether endpoint `idx` is taken to refuse block overrides for
+    /// simulation method `method` at `now_ms`.
+    fn refuses_overrides(&self, idx: usize, method: usize, now_ms: u64) -> bool {
+        self.endpoints[idx]
+            .override_refusals
+            .refuses(method, now_ms)
+    }
+
+    /// The refusals of block overrides that last at `now_ms`.
+    fn override_refusals(&self, now_ms: u64) -> impl Iterator<Item = OverrideRefusal> + '_ {
+        self.endpoints.iter().flat_map(move |endpoint| {
+            METHODS
+                .iter()
+                .enumerate()
+                .filter_map(move |(method, name)| {
+                    Some(OverrideRefusal {
+                        endpoint: endpoint.label.clone(),
+                        method: name,
+                        until_ms: endpoint.override_refusals.until(method, now_ms)?,
+                    })
+                })
+        })
     }
 
     /// Number of endpoints in this pool.
@@ -587,9 +646,6 @@ struct Router {
     /// Set once any endpoint has answered `eth_getProof` with "method not
     /// found"; see [`HftTransport::supports_get_proof`].
     get_proof_unsupported: AtomicBool,
-    /// Set once an endpoint has refused a simulation's block overrides;
-    /// see [`HftTransport::supports_block_overrides`].
-    block_overrides_unsupported: AtomicBool,
 }
 
 /// Multi-endpoint RPC transport with health-aware routing.
@@ -623,7 +679,6 @@ impl HftTransport {
                 strategy: config.strategy,
                 config,
                 get_proof_unsupported: AtomicBool::new(false),
-                block_overrides_unsupported: AtomicBool::new(false),
             }),
         })
     }
@@ -675,23 +730,44 @@ impl HftTransport {
             .store(true, Ordering::Relaxed);
     }
 
-    /// Whether `eth_call` and `eth_estimateGas` are still worth sending
-    /// with block overrides over this transport: false once an endpoint
-    /// has refused them as invalid params (JSON-RPC `-32602`) where the
-    /// same call without them was not. One latch for the endpoint set, as
-    /// [`Self::supports_get_proof`] is.
-    pub(crate) fn supports_block_overrides(&self) -> bool {
-        !self
-            .router
-            .block_overrides_unsupported
-            .load(Ordering::Relaxed)
+    /// Whether some endpoint a read can reach is not taken to refuse block
+    /// overrides for `method` (`eth_call` or `eth_estimateGas`): a
+    /// simulation with them can still be answered. False while every such
+    /// endpoint's refusal lasts ([`Self::override_refusals`]).
+    pub(crate) fn simulates_with_overrides(&self, method: &str) -> bool {
+        let Some(method) = METHODS.iter().position(|m| *m == method) else {
+            return false;
+        };
+        let r = &self.router;
+        let now_ms = now_ms();
+        [&r.read, &r.shared]
+            .into_iter()
+            .any(|pool| (0..pool.len()).any(|idx| !pool.refuses_overrides(idx, method, now_ms)))
     }
 
-    /// Remember that an endpoint refused block overrides.
-    pub(crate) fn note_block_overrides_unsupported(&self) {
-        self.router
-            .block_overrides_unsupported
-            .store(true, Ordering::Relaxed);
+    /// The endpoints taken to refuse block overrides now, per method, and
+    /// until when. A `v1.0.0` trade's automatic gas limit needs an
+    /// endpoint that takes them, so a monitor alerts on a pool where every
+    /// endpoint is listed.
+    pub fn override_refusals(&self) -> Vec<OverrideRefusal> {
+        let r = &self.router;
+        let now_ms = now_ms();
+        r.shared
+            .override_refusals(now_ms)
+            .chain(r.read.override_refusals(now_ms))
+            .chain(r.write.override_refusals(now_ms))
+            .collect()
+    }
+
+    /// Record that endpoint `idx` of the shared pool refuses block
+    /// overrides for `method`, as the router does after a conclusive
+    /// answer without them.
+    #[cfg(test)]
+    pub(crate) fn note_override_refusal(&self, idx: usize, method: &str) {
+        let method = METHODS.iter().position(|m| *m == method).unwrap();
+        self.router.shared.endpoints[idx]
+            .override_refusals
+            .record(method, now_ms());
     }
 }
 
@@ -976,25 +1052,68 @@ impl Router {
     /// Tries the dedicated pool first (read or write), then falls back to
     /// the shared pool. Returns a reference to the chosen pool and the
     /// endpoint index within that pool, or `None` if all endpoints across
-    /// both pools are unavailable.
+    /// both pools that `eligible` admits are unavailable.
     fn select_for(
         &self,
         is_write: bool,
         now_ms: u64,
+        eligible: &dyn Fn(&EndpointPool, usize) -> bool,
     ) -> Option<(&EndpointPool, usize, ProbePermit<'_>)> {
         let dedicated = if is_write { &self.write } else { &self.read };
 
         // Try dedicated pool first
         if !dedicated.is_empty()
-            && let Some((idx, permit)) = dedicated.select(self.strategy, now_ms)
+            && let Some((idx, permit)) =
+                dedicated.select_where(self.strategy, now_ms, &|idx| eligible(dedicated, idx))
         {
             return Some((dedicated, idx, permit));
         }
 
         // Fall back to shared pool
         self.shared
-            .select(self.strategy, now_ms)
+            .select_where(self.strategy, now_ms, &|idx| eligible(&self.shared, idx))
             .map(|(idx, permit)| (&self.shared, idx, permit))
+    }
+
+    /// Send `simulation`'s call without its block overrides to endpoint
+    /// `idx` of `pool`, which refused them as invalid params, and record a
+    /// refusal of the overrides when that answer is the call's own
+    /// outcome ([`is_conclusive`]). Returns whether it recorded one.
+    async fn record_override_refusal(
+        &self,
+        pool: &EndpointPool,
+        idx: usize,
+        simulation: &Simulation,
+    ) -> bool {
+        let now_ms = now_ms();
+        let answer = tokio::time::timeout(
+            self.config.request_timeout,
+            pool.transport(idx).call(simulation.plain.clone()),
+        )
+        .await;
+        let conclusive = match &answer {
+            Ok(Ok(response)) => is_conclusive(response),
+            Ok(Err(error)) => {
+                pool.record_error(idx, now_ms, error);
+                false
+            }
+            Err(_timeout) => {
+                pool.record_failure(idx, now_ms);
+                false
+            }
+        };
+        if conclusive {
+            pool.endpoints[idx]
+                .override_refusals
+                .record(simulation.method, now_ms);
+            tracing::error!(
+                endpoint = %pool.label(idx),
+                method = METHODS[simulation.method],
+                for_secs = REFUSAL_TTL_MS / 1_000,
+                "endpoint refuses block overrides; v1 trade simulations go to other endpoints"
+            );
+        }
+        conclusive
     }
 
     /// Select up to `fan_out` endpoints for a hedged read, with their
@@ -1056,20 +1175,44 @@ impl Router {
         let (max_attempts, base_delay) = (1 + retry.0, retry.1);
         let timeout = self.config.request_timeout;
 
+        // A simulation with block overrides goes to one endpoint at a time,
+        // so an endpoint's refusal of the overrides is known to be its own.
+        let simulation = if is_write { None } else { Simulation::of(&req) };
+
         // Handle hedged reads
-        if !is_write && let Strategy::Hedged { fan_out } = self.strategy {
+        if !is_write
+            && simulation.is_none()
+            && let Strategy::Hedged { fan_out } = self.strategy
+        {
             return self.hedged_request(req, fan_out, timeout).await;
         }
 
         // Standard path: select endpoint from appropriate pool, try with retry
         let mut last_err = None;
         let mut may_be_held = false;
+        // The endpoints a simulation passed over, by pool address and
+        // index, because they lack its pinned block or refuse its
+        // overrides, and the last such answer.
+        let mut passed: Vec<(usize, usize)> = Vec::new();
+        let mut passed_answer = None;
 
         for attempt in 0..max_attempts {
-            // An outcome is stamped with the time it arrived, not the time
-            // its request left: a circuit a slow failure opens would
-            // otherwise start its recovery window early.
-            let Some((pool, idx, permit)) = self.select_for(is_write, now_ms()) else {
+            let selection_time = now_ms();
+            let eligible = |pool: &EndpointPool, idx: usize| {
+                simulation.as_ref().is_none_or(|simulation| {
+                    !pool.refuses_overrides(idx, simulation.method, selection_time)
+                        && !passed.contains(&(std::ptr::from_ref(pool).addr(), idx))
+                })
+            };
+            let Some((pool, idx, permit)) = self.select_for(is_write, selection_time, &eligible) else {
+                if let Some(answer) = passed_answer {
+                    return Ok(answer);
+                }
+                if simulation.is_some() {
+                    return Err(TransportError::local_usage_str(
+                        "no RPC endpoint for a simulation with block overrides (circuits open or overrides refused)",
+                    ));
+                }
                 tracing::error!("all RPC endpoints unavailable (circuits open)");
                 return Err(TransportError::local_usage_str(
                     "all RPC endpoints unavailable (circuits open)",
@@ -1133,6 +1276,22 @@ impl Router {
                         } else {
                             pool.record_read(idx, now_ms(), latency_ns, &response, permit);
                         }
+                        if let Some(simulation) = &simulation {
+                            let passed_over = if refuses_params(&response) {
+                                self.record_override_refusal(pool, idx, simulation).await
+                            } else {
+                                lacks_pinned_block(&response)
+                            };
+                            if passed_over {
+                                tracing::debug!(
+                                    endpoint = %pool.label(idx),
+                                    "simulation passed to another endpoint"
+                                );
+                                passed.push((std::ptr::from_ref(pool).addr(), idx));
+                                passed_answer = Some(response);
+                                continue;
+                            }
+                        }
                         return Ok(response);
                     }
                 }
@@ -1184,6 +1343,9 @@ impl Router {
             }
         }
 
+        if let Some(answer) = passed_answer {
+            return Ok(answer);
+        }
         Err(last_err.unwrap_or_else(|| TransportError::local_usage_str("no endpoints available")))
     }
 
@@ -1339,15 +1501,15 @@ impl Service<RequestPacket> for HftTransport {
 
 #[cfg(test)]
 mod tests {
-    use alloy::eips::BlockNumberOrTag;
+    use alloy::eips::{BlockId, BlockNumberOrTag};
     use alloy::network::Ethereum;
-    use alloy::primitives::{Address, Bytes, U256};
+    use alloy::primitives::{Address, B256, Bytes, U256};
     #[allow(unused_imports)]
     use alloy::providers::Provider as _;
     use alloy::providers::RootProvider;
     use alloy::rpc::client::RpcClient;
     use alloy::rpc::json_rpc::Id;
-    use alloy::rpc::types::{Filter, TransactionRequest};
+    use alloy::rpc::types::{BlockOverrides, Filter, TransactionRequest};
     use serde_json::{Value, json};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::sync::Notify;
@@ -3592,6 +3754,235 @@ mod tests {
         alloy::rpc::client::RpcClient::new(alloy::transports::BoxTransport::new(transport), false)
     }
 
+    /// The params of every request an endpoint got, by method.
+    type Seen = Arc<Mutex<Vec<(String, Value)>>>;
+
+    /// An endpoint answering by `script`, recording what it was asked.
+    async fn seen_endpoint(
+        script: impl Fn(&str, &Value) -> Answer + Send + Sync + 'static,
+    ) -> (String, Seen) {
+        let seen: Seen = Arc::default();
+        let log = Arc::clone(&seen);
+        let url = scripted::endpoint(move |method, params| {
+            log.lock()
+                .unwrap()
+                .push((method.to_owned(), params.clone()));
+            script(method, params)
+        })
+        .await;
+        (url, seen)
+    }
+
+    /// A transport over `urls`, routed round robin, with a short timeout.
+    fn simulation_transport(urls: &[&str]) -> HftTransport {
+        let mut builder = TransportConfig::builder()
+            .strategy(Strategy::RoundRobin)
+            .request_timeout(std::time::Duration::from_millis(300));
+        for url in urls {
+            builder = builder.shared_endpoint(*url);
+        }
+        HftTransport::new(builder.build().unwrap()).unwrap()
+    }
+
+    fn provider_on(transport: &HftTransport) -> alloy::providers::RootProvider {
+        alloy::providers::RootProvider::new(alloy::rpc::client::RpcClient::new(
+            alloy::transports::BoxTransport::new(transport.clone()),
+            false,
+        ))
+    }
+
+    /// The head a simulation pins, and the next block's overrides.
+    const PINNED: u64 = 500;
+
+    fn next_block() -> BlockOverrides {
+        BlockOverrides {
+            number: Some(alloy::primitives::U256::from(PINNED + 1)),
+            time: Some(1_001),
+            ..BlockOverrides::default()
+        }
+    }
+
+    async fn estimate_in_next_block(
+        provider: &alloy::providers::RootProvider,
+    ) -> Result<u64, TransportError> {
+        provider
+            .estimate_gas(TransactionRequest::default())
+            .block(BlockId::number(PINNED))
+            .with_block_overrides(next_block())
+            .await
+    }
+
+    async fn call_in_next_block(
+        provider: &alloy::providers::RootProvider,
+    ) -> Result<Bytes, TransportError> {
+        provider
+            .call(TransactionRequest::default())
+            .block(BlockId::number(PINNED))
+            .with_block_overrides(next_block())
+            .await
+    }
+
+    /// The requests of `method` in `seen`, with their param counts.
+    fn asked(seen: &Seen, method: &str) -> Vec<usize> {
+        seen.lock()
+            .unwrap()
+            .iter()
+            .filter(|(m, _)| m == method)
+            .map(|(_, params)| params.as_array().map_or(0, Vec::len))
+            .collect()
+    }
+
+    /// An endpoint that refuses block overrides as invalid params, where
+    /// the same call without them at the same pinned block is answered, is
+    /// recorded as refusing them for that method alone: the simulation is
+    /// answered by the other endpoint, the next one goes there directly,
+    /// and the refusing endpoint still gets `eth_call` with overrides.
+    #[tokio::test]
+    async fn an_endpoint_that_refuses_overrides_is_passed_over_per_method() {
+        let (a, seen_a) = seen_endpoint(|method, params| {
+            let with_overrides = params.as_array().is_some_and(|p| p.len() == 4);
+            match (method, with_overrides) {
+                ("eth_estimateGas", true) => Answer::Error(-32602, "too many arguments".into()),
+                ("eth_estimateGas", false) => {
+                    assert_eq!(params[1], json!(format!("{PINNED:#x}")));
+                    Answer::Result(json!("0x5208"))
+                }
+                _ => Answer::Result(json!("0x")),
+            }
+        })
+        .await;
+        let (b, seen_b) = seen_endpoint(|method, _| match method {
+            "eth_estimateGas" => Answer::Result(json!("0x7a120")),
+            _ => Answer::Result(json!("0x")),
+        })
+        .await;
+        let transport = simulation_transport(&[&a, &b]);
+        let provider = provider_on(&transport);
+        assert!(transport.override_refusals().is_empty());
+
+        assert_eq!(estimate_in_next_block(&provider).await.unwrap(), 500_000);
+        assert_eq!(asked(&seen_a, "eth_estimateGas"), [4, 3]);
+        assert_eq!(asked(&seen_b, "eth_estimateGas"), [4]);
+        let refusals = transport.override_refusals();
+        assert_eq!(refusals.len(), 1);
+        assert_eq!(refusals[0].method, "eth_estimateGas");
+        assert_eq!(refusals[0].endpoint, crate::transport::redact_url(&a));
+        assert!(transport.simulates_with_overrides("eth_estimateGas"));
+
+        assert_eq!(estimate_in_next_block(&provider).await.unwrap(), 500_000);
+        assert_eq!(asked(&seen_a, "eth_estimateGas"), [4, 3], "passed over");
+        assert_eq!(asked(&seen_b, "eth_estimateGas"), [4, 4]);
+
+        for _ in 0..2 {
+            call_in_next_block(&provider).await.unwrap();
+        }
+        assert_eq!(asked(&seen_a, "eth_call"), [4], "eth_call is not refused");
+    }
+
+    /// The refusal is recorded only when the call without overrides is the
+    /// call's own outcome (a result, or a revert with data). Another
+    /// refusal, a timeout, a rate limit or an error without data records
+    /// nothing; either way, with no other endpoint, the caller gets the
+    /// refusal. Once recorded, nothing more is sent to that endpoint.
+    #[tokio::test]
+    async fn a_refusal_is_recorded_only_after_a_conclusive_plain_answer() {
+        let plains: [(&str, bool); 6] = [
+            ("result", true),
+            ("revert data", true),
+            ("refusal", false),
+            ("silence", false),
+            ("rate limit", false),
+            ("no data", false),
+        ];
+        for (plain, recorded) in plains {
+            let (url, seen) = seen_endpoint(move |_, params| {
+                if params.as_array().is_some_and(|p| p.len() == 4) {
+                    return Answer::Error(-32602, "invalid argument 3".into());
+                }
+                match plain {
+                    "result" => Answer::Result(json!("0x")),
+                    "revert data" => {
+                        Answer::ErrorData(3, "execution reverted".into(), json!("0x7939f424"))
+                    }
+                    "refusal" => Answer::Error(-32602, "invalid argument 0".into()),
+                    "silence" => Answer::Silence,
+                    "rate limit" => Answer::Status(429),
+                    _ => Answer::Error(-32000, "execution reverted".into()),
+                }
+            })
+            .await;
+            let transport = simulation_transport(&[&url]);
+            let provider = provider_on(&transport);
+            let error = call_in_next_block(&provider).await.unwrap_err();
+            assert_eq!(
+                error.as_error_resp().map(|e| e.code),
+                Some(-32602),
+                "{plain}: {error}"
+            );
+            assert_eq!(asked(&seen, "eth_call"), [4, 3], "{plain}");
+            assert_eq!(
+                transport.override_refusals().len(),
+                usize::from(recorded),
+                "{plain}"
+            );
+            assert_eq!(
+                transport.simulates_with_overrides("eth_call"),
+                !recorded,
+                "{plain}"
+            );
+            assert!(transport.simulates_with_overrides("eth_estimateGas"));
+            if recorded {
+                let error = call_in_next_block(&provider).await.unwrap_err();
+                assert!(error.as_error_resp().is_none(), "{plain}: {error}");
+                assert_eq!(asked(&seen, "eth_call"), [4, 3], "{plain}: nothing sent");
+            }
+        }
+    }
+
+    /// An endpoint without a simulation's pinned block (Nitro's answer for
+    /// a number above its head) passes the simulation to another endpoint,
+    /// without recording anything; with every endpoint missing it, the
+    /// caller gets the answer. A call without overrides is not passed on.
+    #[tokio::test]
+    async fn a_simulation_passes_a_missing_block_to_another_endpoint() {
+        let missing = || Answer::Error(-32000, format!("unsupported block number {PINNED}"));
+        let (a, seen_a) = seen_endpoint(move |_, _| missing()).await;
+        let (b, seen_b) = seen_endpoint(|_, _| Answer::Result(json!("0x01"))).await;
+        let transport = simulation_transport(&[&a, &b]);
+        let provider = provider_on(&transport);
+        assert_eq!(
+            call_in_next_block(&provider).await.unwrap(),
+            Bytes::from_static(&[1])
+        );
+        assert_eq!(asked(&seen_a, "eth_call"), [4]);
+        assert_eq!(asked(&seen_b, "eth_call"), [4]);
+        assert!(transport.override_refusals().is_empty());
+
+        let (c, seen_c) = seen_endpoint(move |_, _| missing()).await;
+        let transport = simulation_transport(&[&a, &c]);
+        let provider = provider_on(&transport);
+        let error = call_in_next_block(&provider).await.unwrap_err();
+        assert!(
+            error
+                .as_error_resp()
+                .is_some_and(|e| super::super::fault::lacks_block(&e.message)),
+            "{error}"
+        );
+        assert_eq!(asked(&seen_c, "eth_call"), [4]);
+
+        let error = provider
+            .call(TransactionRequest::default())
+            .block(BlockId::number(PINNED))
+            .await
+            .unwrap_err();
+        assert!(error.as_error_resp().is_some(), "{error}");
+        assert_eq!(
+            asked(&seen_a, "eth_call").len() + asked(&seen_c, "eth_call").len(),
+            4,
+            "one endpoint asked"
+        );
+    }
+
     /// The width search narrows by being told no, so a declined request
     /// must cost one round trip, not one plus the read retries.
     #[tokio::test]
@@ -3673,7 +4064,7 @@ mod tests {
         let transport = HftTransport::new(config).unwrap();
         let router = &transport.router;
 
-        let (pool, _idx, _permit) = router.select_for(false, now_ms()).unwrap();
+        let (pool, _idx, _permit) = router.select_for(false, now_ms(), &|_, _| true).unwrap();
         // Should select from the read pool (1 endpoint), not shared
         assert_eq!(pool.len(), 1);
         assert_eq!(pool.endpoint_urls()[0], "https://read.example.com");
@@ -3689,7 +4080,7 @@ mod tests {
         let transport = HftTransport::new(config).unwrap();
         let router = &transport.router;
 
-        let (pool, _idx, _permit) = router.select_for(true, now_ms()).unwrap();
+        let (pool, _idx, _permit) = router.select_for(true, now_ms(), &|_, _| true).unwrap();
         // No write pool → falls back to shared
         assert_eq!(pool.endpoint_urls()[0], "https://shared.example.com");
     }
@@ -3711,7 +4102,7 @@ mod tests {
         router.read.record_failure(0, now);
 
         // Read should fall back to shared
-        let (pool, _idx, _permit) = router.select_for(false, now).unwrap();
+        let (pool, _idx, _permit) = router.select_for(false, now, &|_, _| true).unwrap();
         assert_eq!(pool.endpoint_urls()[0], "https://shared.example.com");
     }
 

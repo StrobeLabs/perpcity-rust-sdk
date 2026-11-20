@@ -492,8 +492,11 @@ impl PerpClient {
     /// [`TransactionError::ReceiptTimeout`] or
     /// [`TransactionError::BroadcastFailed`]. When the stuck transaction has
     /// mined already, nothing is signed and its outcome is returned. Else
-    /// the replacement is preflighted at the stuck one's gas limit. A
-    /// failed preflight checks the original receipt. A broadcast attempt
+    /// the replacement is preflighted at the stuck one's gas limit in the
+    /// block after the head, where a trade in a new second accrues; a
+    /// revert there that passes without the cap is
+    /// [`TransactionError::GasLimitTooLow`]. A failed preflight, or a
+    /// failed head read, checks the original receipt. A broadcast attempt
     /// checks both hashes and the account nonce, and parses the first
     /// receipt it finds; after the node's explicit rejection on every
     /// attempt of the transport it checks once. A nonce seen used with no
@@ -673,11 +676,18 @@ impl PerpClient {
             old_priority,
             current,
         );
-        if let Err(source) = self
-            .chain()
-            .preflight_call(self.address, perp, &calldata, 0, Some(gas_limit))
-            .await
-        {
+        // At the stuck limit, in the next block: a trade in a second other
+        // than the market's last touch accrues, and the replacement mines in
+        // a later second than the head's.
+        let preflight = match self.chain().next_block().await {
+            Ok(next) => self
+                .chain()
+                .preflight_at_limit(self.address, perp, &calldata, 0, gas_limit, Some(&next))
+                .await
+                .map_err(PerpCityError::from),
+            Err(error) => Err(error),
+        };
+        if let Err(source) = preflight {
             return match self.first_receipt(&[stuck], nonce, false).await {
                 Settled::Mined(receipt) => self.mined(call, *receipt, gas_limit, selector),
                 Settled::NonceUsed => Err(TransactionError::ReplacementNonceUsed {
@@ -687,7 +697,7 @@ impl PerpClient {
                     refused: false,
                 }
                 .into()),
-                Settled::Pending => Err(unconfirmed(Some(nonce), source.into())),
+                Settled::Pending => Err(unconfirmed(Some(nonce), source)),
             };
         }
 
@@ -950,6 +960,8 @@ mod tests {
 
     const HOLDER: Address = Address::repeat_byte(0x77);
     pub(super) const NOW: u64 = 1_763_600_000;
+    /// The head a replacement's preflight reads; the next block follows it.
+    pub(super) const HEAD: u64 = 90;
 
     fn open() -> ExactOpenTakerParams {
         ExactOpenTakerParams {
@@ -1439,6 +1451,7 @@ mod tests {
         let event = opened_event(&client);
         rpc.immutables(Era::V1);
         rpc.response(&tx);
+        rpc.block(HEAD, NOW);
         rpc.raw(&[]);
         // The nonce is used: the first look finds the original.
         rpc.fails("nonce too low");
@@ -1476,6 +1489,7 @@ mod tests {
         };
         rpc.immutables(Era::V1);
         rpc.response(&tx);
+        rpc.block(HEAD, NOW);
         rpc.fails("execution reverted");
         rpc.quantity(STUCK_NONCE + 1);
         rpc.response(&mined_trade_receipt(&client, hash, &event));
@@ -1498,6 +1512,7 @@ mod tests {
         let (hash, tx) = pending_trade(&client, stuck_open(&client, NOW + 600).abi_encode()).await;
         rpc.immutables(Era::V1);
         rpc.response(&tx);
+        rpc.block(HEAD, NOW);
         rpc.raw(&[]);
         // Not a refusal: a resent copy can be what the node already has.
         rpc.fails("already known");
@@ -1530,6 +1545,7 @@ mod tests {
         let (hash, tx) = pending_trade(&client, stuck_open(&client, NOW + 600).abi_encode()).await;
         rpc.immutables(Era::V1);
         rpc.response(&tx);
+        rpc.block(HEAD, NOW);
         rpc.raw(&[]);
         rpc.fails("replacement transaction underpriced");
         nothing_settled(&rpc, STUCK_NONCE, 2);
@@ -1574,6 +1590,7 @@ mod tests {
         let (r1, tx) = pending_trade(&client, stuck_open(&client, NOW + 601).abi_encode()).await;
         rpc.immutables(Era::V1);
         rpc.response(&tx);
+        rpc.block(HEAD, NOW);
         rpc.raw(&[]);
         rpc.fails("already known");
         for _ in 0..=NONCE_USED_LOOKS {
@@ -1652,6 +1669,9 @@ mod tests {
                 pending_trade(&client, stuck_open(&client, NOW + 600).abi_encode()).await;
             rpc.immutables(Era::V1);
             rpc.response(&tx);
+            rpc.block(HEAD, NOW);
+            rpc.reverts(&selector);
+            // The uncapped check of the revert.
             rpc.reverts(&selector);
             nothing_settled(&rpc, STUCK_NONCE, 1);
             let err = client
@@ -1684,6 +1704,9 @@ mod tests {
         let (hash, tx) = pending_trade(&client, stuck_open(&client, NOW + 600).abi_encode()).await;
         rpc.immutables(Era::V1);
         rpc.response(&tx);
+        rpc.block(HEAD, NOW);
+        rpc.reverts(&v1::Perp::MaxAmtExceeded::SELECTOR);
+        // The uncapped check of the revert.
         rpc.reverts(&v1::Perp::MaxAmtExceeded::SELECTOR);
         nothing_settled(&rpc, STUCK_NONCE + 1, 1);
         nothing_settled(&rpc, STUCK_NONCE + 1, 1);
@@ -2016,6 +2039,7 @@ mod tests {
         let (hash, tx) = pending_trade(&client, stuck_open(&client, NOW + 600).abi_encode()).await;
         rpc.immutables(Era::V1);
         rpc.response(&tx);
+        rpc.block(HEAD, NOW);
         rpc.raw(&[]);
         rpc.fails("already known");
         rpc.quantity(STUCK_NONCE + 1);
@@ -2045,6 +2069,7 @@ mod tests {
             let event = opened_event(&client);
             rpc.immutables(Era::V1);
             rpc.response(&tx);
+            rpc.block(HEAD, NOW);
             rpc.raw(&[]);
             rpc.fails("already known");
             // Poll 1: the nonce is used; the receipt reads are behind or fail.
@@ -2087,6 +2112,7 @@ mod tests {
             let other = B256::repeat_byte(0x0e);
             rpc.immutables(Era::V1);
             rpc.response(&tx);
+            rpc.block(HEAD, NOW);
             rpc.raw(&[]);
             rpc.fails("already known");
             for _ in 0..=RECEIPT_TIMEOUT.as_secs() / RECEIPT_POLL_INTERVAL.as_secs() {
@@ -2140,6 +2166,7 @@ mod tests {
             let event = opened_event(&client);
             rpc.immutables(Era::V1);
             rpc.response(&tx);
+            rpc.block(HEAD, NOW);
             rpc.raw(&[]);
             rpc.fails("replacement transaction underpriced");
             nothing_settled(&rpc, STUCK_NONCE + 1, 2);
@@ -2196,6 +2223,7 @@ mod tests {
                 pending_trade(&client, stuck_open(&client, NOW + 600).abi_encode()).await;
             rpc.immutables(Era::V1);
             rpc.response(&tx);
+            rpc.block(HEAD, NOW);
             rpc.raw(&[]);
             rpc.fails(answer);
             nothing_settled(&rpc, STUCK_NONCE, 2);
@@ -2528,6 +2556,7 @@ mod tests {
         client.wallet = EthereumWallet::from(mock::signer().with_chain_id(Some(1)));
         rpc.immutables(Era::V1);
         rpc.response(&tx);
+        rpc.block(HEAD, NOW);
         rpc.raw(&[]);
         let err = client
             .replace_v1_taker(hash, Urgency::Normal)
@@ -2568,6 +2597,7 @@ mod tests {
         let event = opened_event(&client);
         rpc.immutables(Era::V1);
         rpc.response(&tx);
+        rpc.block(HEAD, NOW);
         rpc.raw(&[]);
         rpc.fails("already known");
         for _ in 0..3 {
@@ -2597,6 +2627,7 @@ mod tests {
         let (hash, tx) = pending_trade(&client, stuck_open(&client, NOW + 600).abi_encode()).await;
         rpc.immutables(Era::V1);
         rpc.response(&tx);
+        rpc.block(HEAD, NOW);
         rpc.raw(&[]);
         rpc.fails("already known");
         for _ in 0..3 {
@@ -2643,6 +2674,7 @@ mod tests {
                 pending_trade(&client, stuck_open(&client, NOW + 600).abi_encode()).await;
             rpc.immutables(Era::V1);
             rpc.response(&tx);
+            rpc.block(HEAD, NOW);
             rpc.raw(&[]);
             rpc.fails("nonce too low");
             let (looks, account_nonce) = if nonce_seen_used {
@@ -2698,6 +2730,7 @@ mod tests {
         let (hash, tx) = pending_trade(&client, stuck_open(&client, NOW + 600).abi_encode()).await;
         rpc.immutables(Era::V1);
         rpc.response(&tx);
+        rpc.block(HEAD, NOW);
         rpc.raw(&[]);
         rpc.fails("already known");
         for _ in 0..RECEIPT_TIMEOUT.as_secs() / RECEIPT_POLL_INTERVAL.as_secs() {
@@ -2751,6 +2784,7 @@ mod tests {
             let (stuck, tx) =
                 pending_trade(&setup, stuck_open(&setup, NOW + 600).abi_encode()).await;
             let tx = serde_json::to_value(&tx).unwrap();
+            let head = serde_json::to_value(mock::block(HEAD, NOW)).unwrap();
             let receipt = serde_json::to_string(&mined_trade_receipt(
                 &setup,
                 mock::SENT,
@@ -2778,6 +2812,7 @@ mod tests {
                         }
                     }
                     "eth_getTransactionByHash" => Answer::Result(tx.clone()),
+                    "eth_getBlockByNumber" => Answer::Result(head.clone()),
                     "eth_sendRawTransaction" => {
                         let raw = hex::decode(params[0].as_str().unwrap()).unwrap();
                         let mut sent = sent_by_node.lock().unwrap();
@@ -2995,6 +3030,7 @@ mod tests {
         let other = B256::repeat_byte(0x0e);
         rpc.immutables(Era::V1);
         rpc.response(&tx);
+        rpc.block(HEAD, NOW);
         rpc.raw(&[]);
         rpc.fails("replacement transaction underpriced");
         rpc.quantity(STUCK_NONCE + 1);
