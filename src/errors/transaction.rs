@@ -1,9 +1,13 @@
 //! Transaction lifecycle errors.
 
+use std::fmt;
+
 use alloy::primitives::{FixedBytes, U256};
+use alloy::sol_types::SolError;
 use alloy::transports::TransportError;
 use thiserror::Error;
 
+use super::PerpCityError;
 use super::decode::{RevertClass, revert_class};
 
 /// Errors arising from the transaction lifecycle: simulation, signing,
@@ -120,19 +124,49 @@ pub enum TransactionError {
         source: TransportError,
     },
 
-    /// No receipt established which taker transaction mined. Transient:
-    /// look up both available hashes before sending a new trade.
+    /// A replacement of a stuck `v1.0.0` trade did not establish which
+    /// transaction at the nonce mined, so `original` can still land.
+    /// Every failure of
+    /// [`PerpClient::replace_v1_taker`](crate::PerpClient::replace_v1_taker)
+    /// after the call to it, other than a refusal, a parsed receipt or a
+    /// used nonce, is this variant.
+    ///
+    /// The transience, [`Self::revert_class`] and [`Self::is_revert`]
+    /// follow `source`: a preflight revert such as `MaxAmtExceeded` keeps
+    /// its class, and an RPC failure or a receipt timeout is transient.
+    /// With no `source`, no receipt came before the timeout: transient.
     #[error(
-        "taker replacement unconfirmed for original {original} and replacement {replacement:?}"
+        "v1 trade replacement unconfirmed for original {original} and replacement {replacement:?}"
     )]
     ReplacementUnconfirmed {
-        /// Hash of the original transaction.
+        /// Hash of the stuck transaction.
         original: FixedBytes<32>,
+        /// The stuck transaction's nonce, when it was read. The outcome is
+        /// known when the account nonce at the latest block is greater
+        /// than this nonce: one transaction at it mined, possibly one
+        /// signed before `original`.
+        nonce: Option<u64>,
         /// Hash of the signed replacement, if broadcast was attempted.
         replacement: Option<FixedBytes<32>>,
-        /// Preflight or broadcast failure, when one occurred.
+        /// The failure that stopped the replacement, when one occurred.
         #[source]
-        source: Option<Box<TransactionError>>,
+        source: Option<Box<PerpCityError>>,
+    },
+
+    /// The account nonce passed `nonce`, but neither `original` nor
+    /// `replacement` has a receipt: another transaction at that nonce
+    /// mined, such as an earlier signing that `original` replaced. Neither
+    /// hash can land now. Its effect is unknown, so this is
+    /// [unconfirmed](Self::is_unconfirmed): read the position before a new
+    /// send. Not transient.
+    #[error("nonce {nonce} of {original} was used by another transaction")]
+    ReplacementNonceUsed {
+        /// Hash of the stuck transaction.
+        original: FixedBytes<32>,
+        /// The nonce the two hashes share.
+        nonce: u64,
+        /// Hash of the signed replacement, if broadcast was attempted.
+        replacement: Option<FixedBytes<32>>,
     },
 
     /// Transaction signing failed. Not transient; nothing left the process.
@@ -194,37 +228,88 @@ pub enum TransactionError {
 
     /// A stuck transaction that
     /// [`PerpClient::replace_v1_taker`](crate::PerpClient::replace_v1_taker)
-    /// does not sign again: the node does not know it, it is not this
-    /// client's `v1.0.0` taker trade on this market, or its own send still
-    /// waits for its receipt. Nothing was signed or sent. Not transient:
-    /// `tx_hash` may still land, so look up its receipt before a new send.
+    /// does not sign again, for `reason`. Nothing was signed or sent. Not
+    /// transient. When [`NotReplaceableReason::original_can_land`] holds,
+    /// `tx_hash` can still land and the error is
+    /// [unconfirmed](Self::is_unconfirmed).
     #[error("cannot replace {tx_hash}: {reason}")]
     NotReplaceable {
         /// Hash of the stuck transaction.
         tx_hash: FixedBytes<32>,
         /// Why it is not replaced.
-        reason: &'static str,
+        reason: NotReplaceableReason,
     },
 }
 
+/// Why a stuck transaction is not signed again
+/// ([`TransactionError::NotReplaceable`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum NotReplaceableReason {
+    /// The node does not know the hash.
+    UnknownToNode,
+    /// It is not from this client, or not to this market.
+    NotThisClientsTrade,
+    /// Its call is not one that the method replaces.
+    UnsupportedCall,
+    /// Its own send still waits for its receipt.
+    InFlight,
+    /// It is pending with an envelope type other than EIP-1559 (`2`), such
+    /// as an EIP-7702 transaction (`4`).
+    NotEip1559 {
+        /// The envelope type.
+        tx_type: u8,
+    },
+    /// It is pending and its deadline is `u64::MAX`.
+    DeadlineCannotAdvance,
+}
+
+impl NotReplaceableReason {
+    /// Whether the transaction is this client's pending trade, which can
+    /// still land: every reason but [`Self::NotThisClientsTrade`] and
+    /// [`Self::UnsupportedCall`].
+    pub fn original_can_land(self) -> bool {
+        !matches!(self, Self::NotThisClientsTrade | Self::UnsupportedCall)
+    }
+}
+
+impl fmt::Display for NotReplaceableReason {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::UnknownToNode => f.write_str("the node does not know it"),
+            Self::NotThisClientsTrade => f.write_str("not this client's trade on this market"),
+            Self::UnsupportedCall => f.write_str("not a call this method replaces"),
+            Self::InFlight => f.write_str("its send still waits for the receipt"),
+            Self::NotEip1559 { tx_type } => write!(f, "type {tx_type} is not EIP-1559"),
+            Self::DeadlineCannotAdvance => f.write_str("its deadline cannot advance"),
+        }
+    }
+}
+
 impl TransactionError {
-    /// Whether the transaction was broadcast and not confirmed either way
-    /// (`BroadcastFailed`, `ReceiptTimeout`, `ReplacementUnconfirmed`), so it may still land.
+    /// Whether a trade's effect is unknown: a send broadcast and not
+    /// confirmed either way (`BroadcastFailed`, `ReceiptTimeout`,
+    /// `ReplacementUnconfirmed`), a replacement whose nonce another
+    /// transaction used (`ReplacementNonceUsed`), or a refused replacement
+    /// whose original can still land (`NotReplaceable`).
     ///
-    /// Its effect is unknown: sending the same change again could make it
-    /// twice. Read the state the send would have changed before acting.
+    /// Sending the same change again could make it twice. Read the state
+    /// the send would have changed before acting.
     pub fn is_unconfirmed(&self) -> bool {
-        matches!(
-            self,
+        match self {
             Self::BroadcastFailed { .. }
-                | Self::ReceiptTimeout { .. }
-                | Self::ReplacementUnconfirmed { .. }
-        )
+            | Self::ReceiptTimeout { .. }
+            | Self::ReplacementUnconfirmed { .. }
+            | Self::ReplacementNonceUsed { .. } => true,
+            Self::NotReplaceable { reason, .. } => reason.original_can_land(),
+            _ => false,
+        }
     }
 
     /// Hash of the signed transaction, for every failure from the broadcast
-    /// onward: `BroadcastFailed`, `ReceiptTimeout`, `Reverted` and
-    /// `OutOfGas`. `None` means nothing was sent.
+    /// onward: `BroadcastFailed`, `ReceiptTimeout`, `Reverted`, `OutOfGas`
+    /// and `TakerNotClosed`. A replacement's error gives the replacement's
+    /// hash, else the stuck one's. `None` means nothing was sent.
     ///
     /// A `Some` hash may have landed on chain even when the error says the
     /// send failed, so look up its receipt before treating the effect as
@@ -232,6 +317,11 @@ impl TransactionError {
     pub fn tx_hash(&self) -> Option<FixedBytes<32>> {
         match self {
             Self::ReplacementUnconfirmed {
+                original,
+                replacement,
+                ..
+            }
+            | Self::ReplacementNonceUsed {
                 original,
                 replacement,
                 ..
@@ -248,7 +338,8 @@ impl TransactionError {
 
     /// Whether this error is a [`Self::SimulationReverted`] carrying the
     /// typed contract error `E`, compared by 4-byte selector — no string
-    /// matching.
+    /// matching; for a [`Self::ReplacementUnconfirmed`], whether its
+    /// `source` is.
     ///
     /// ```rust,ignore
     /// use perpcity_sdk::Perp;
@@ -259,16 +350,20 @@ impl TransactionError {
     ///     // never liquidatable on this path — drop the id
     /// }
     /// ```
-    pub fn is_revert<E: alloy::sol_types::SolError>(&self) -> bool {
-        matches!(
-            self,
-            Self::SimulationReverted { selector, .. } if selector.0 == E::SELECTOR
-        )
+    pub fn is_revert<E: SolError>(&self) -> bool {
+        match self {
+            Self::SimulationReverted { selector, .. } => selector.0 == E::SELECTOR,
+            Self::ReplacementUnconfirmed {
+                source: Some(source),
+                ..
+            } => matches!(source.as_ref(), PerpCityError::Transaction(e) if e.is_revert::<E>()),
+            _ => false,
+        }
     }
 
     /// The [`RevertClass`] of a [`Self::SimulationReverted`], by its
-    /// selector; `None` for every other variant (a mined revert carries no
-    /// selector).
+    /// selector, and of a [`Self::ReplacementUnconfirmed`]'s `source`;
+    /// `None` for every other variant (a mined revert carries no selector).
     ///
     /// ```rust,ignore
     /// use perpcity_sdk::RevertClass;
@@ -284,6 +379,10 @@ impl TransactionError {
     pub fn revert_class(&self) -> Option<RevertClass> {
         match self {
             Self::SimulationReverted { selector, .. } => Some(revert_class(selector.0)),
+            Self::ReplacementUnconfirmed {
+                source: Some(source),
+                ..
+            } => source.revert_class(),
             _ => None,
         }
     }

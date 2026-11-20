@@ -89,9 +89,10 @@ impl MarketReader {
     /// like the send.
     ///
     /// The call is the market's era's: the 2-arg whole-position form on
-    /// `58b42b7`, the 3-arg form with the position's whole size on `v0.2.2`,
-    /// which costs one `makerDetails` read first. A position whose
-    /// liquidity is already zero is [`ContractError::PositionNotFound`].
+    /// `58b42b7`, the 3-arg form with the position's whole size on `v0.2.2`
+    /// and `v1.0.0`, which costs one `makerDetails` read of the build's own
+    /// row first. A position whose liquidity is already zero is
+    /// [`ContractError::PositionNotFound`].
     pub async fn simulate_liquidate_maker(
         &self,
         from: Address,
