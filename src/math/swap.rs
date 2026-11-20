@@ -175,6 +175,7 @@ pub const MAX_TOTAL_FEE_SLACK: UsdcAtoms = UsdcAtoms::new(100);
 /// fees module's `maxSwapFee()`, the most LP, creator and insurance rate a
 /// segment pays together, and the perp's cached `protocolFee()`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct TakerFeeRates {
     /// `maxSwapFee()` of the market's fees module.
     pub max_swap_fee: Ratio,
@@ -183,6 +184,14 @@ pub struct TakerFeeRates {
 }
 
 impl TakerFeeRates {
+    /// The two rates, as a read returns them.
+    pub const fn new(max_swap_fee: Ratio, protocol_fee: Ratio) -> Self {
+        Self {
+            max_swap_fee,
+            protocol_fee,
+        }
+    }
+
     /// The bound for a swap that moves `volume` USDC, either way:
     /// `⌈volume · (maxSwapFee + protocolFee) / 1e6⌉ + slack`. The contract
     /// compares the swap's total of LP, protocol, creator and insurance fees

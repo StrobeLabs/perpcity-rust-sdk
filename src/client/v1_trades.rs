@@ -37,6 +37,7 @@ pub const V1_TRADE_DEADLINE: Duration = Duration::from_secs(600);
 /// The `maxTotalFee` a `v1.0.0` taker trade carries: the most LP,
 /// protocol, creator and insurance fee its swap may charge to margin.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum MaxTotalFee {
     /// The bound for a swap that moves at most this much USDC, from the
     /// market's rates read at the send
@@ -90,11 +91,32 @@ type ReplacementCalldata = fn(&[u8], u64) -> Option<(StuckCall, Option<Bytes>)>;
 enum Settled {
     /// One of the hashes mined.
     Mined(Box<TransactionReceipt>),
-    /// Another transaction at the nonce mined.
+    /// The account nonce passed the nonce, and every receipt read answered
+    /// with no receipt.
     NonceUsed,
-    /// Nothing at the nonce mined yet.
+    /// Nothing at the nonce mined yet, or a read gave no answer.
     Pending,
 }
+
+/// The looks at the receipts after the account nonce is first seen past a
+/// trade's, before a polling wait reports the nonce used: an endpoint can
+/// serve the nonce before the receipt that advanced it. A single check
+/// takes one.
+const NONCE_USED_LOOKS: u32 = 3;
+
+/// Parts of a node's answer that reject a transaction outright, so the
+/// node does not hold it.
+const REJECTIONS: [&str; 9] = [
+    "underpriced",
+    "nonce too low",
+    "nonce too high",
+    "insufficient funds",
+    "less than block base fee",
+    "intrinsic gas too low",
+    "exceeds block gas limit",
+    "invalid sender",
+    "higher than max fee per gas",
+];
 
 /// The deadline of a trade signed at `now_secs`.
 fn deadline_after(now_secs: u64) -> u64 {
@@ -240,12 +262,27 @@ fn replacement_fees(max_fee: u128, priority: u128, current: GasFees) -> (u128, u
     (max_fee.max(priority), priority)
 }
 
-/// Whether a broadcast error is the node's refusal of the replacement:
-/// an error response that does not say the node already has it.
+/// Whether a broadcast error is the node's explicit rejection of the
+/// replacement ([`REJECTIONS`]). An `already known` answer, an unknown one
+/// and a failure to get an answer are not: the node can hold it.
 fn is_clear_refusal(error: &TransportError) -> bool {
-    error
-        .as_error_resp()
-        .is_some_and(|resp| !resp.message.to_ascii_lowercase().contains("known"))
+    error.as_error_resp().is_some_and(|resp| {
+        let message = resp.message.to_ascii_lowercase();
+        !message.contains("already known") && REJECTIONS.iter().any(|r| message.contains(r))
+    })
+}
+
+/// Whether a failed contract read is the node's execution revert, its
+/// answer for the call (JSON-RPC code `3`, or `execution reverted`), and
+/// not a failure to get an answer.
+fn is_execution_revert(error: &TransportError) -> bool {
+    error.as_error_resp().is_some_and(|resp| {
+        resp.code == 3
+            || resp
+                .message
+                .to_ascii_lowercase()
+                .contains("execution reverted")
+    })
 }
 
 /// The adjustment `receipt` mined for `pos_id` on `perp`.
@@ -419,7 +456,10 @@ impl PerpClient {
     /// the replacement is preflighted at the stuck one's gas limit. A
     /// failed preflight checks the original receipt. A broadcast attempt
     /// checks both hashes and the account nonce, and parses the first
-    /// receipt it finds; after a clear refusal by the node it checks once.
+    /// receipt it finds; after an explicit rejection by the node it checks
+    /// once. A nonce seen used with no receipt is looked at again before it
+    /// is reported, because an endpoint can serve the nonce before the
+    /// receipt.
     ///
     /// Like a send, it needs fresh gas data: a receipt timeout outlives the
     /// fee cache, so call
@@ -429,22 +469,38 @@ impl PerpClient {
     /// reuses a nonce the pipeline has already counted, and
     /// `TxPipeline::is_in_flight` does not see it.
     ///
+    /// # To replace again
+    ///
+    /// Give the hash that
+    /// [`PerpCityError::hash_to_replace`] returns for the last error. For a
+    /// stuck send `S` replaced by `R1`: after the node rejected `R1`, it is
+    /// `S`; after the node took `R1` and no receipt came, it is `R1`, whose
+    /// fees are the highest at the nonce. When the node says it does not
+    /// know that hash ([`NotReplaceableReason::UnknownToNode`]), give the
+    /// one before it. `None` means nothing is left to replace.
+    ///
     /// # Errors
     ///
-    /// No error proves that the stuck trade did not happen: until a receipt
-    /// or the account nonce settles it, the original can still land.
-    ///
-    /// Earlier and unknown builds are refused as in [`Self::open_taker_v1`].
-    /// [`TransactionError::NotReplaceable`] with a
-    /// [`NotReplaceableReason`] when the stuck transaction is not signed
-    /// again. [`TransactionError::ReplacementUnconfirmed`], carrying the
-    /// stuck hash, its nonce, any replacement hash and the cause, for an RPC
-    /// failure, a stale fee cache, a failed preflight or signing, or no
-    /// receipt before the timeout.
-    /// [`TransactionError::ReplacementNonceUsed`] when another transaction
-    /// used the nonce. For a mined receipt, [`TransactionError::OutOfGas`],
+    /// The outcome is final when a transaction at the nonce mined and was
+    /// read: `Ok`, and for its receipt [`TransactionError::OutOfGas`],
     /// [`TransactionError::Reverted`] and the parse errors of
-    /// [`Self::open_taker_v1`] and [`Self::adjust_taker_v1`].
+    /// [`Self::open_taker_v1`] and [`Self::adjust_taker_v1`]. Gas was burned
+    /// and nothing else at the nonce can land. Every other error leaves the
+    /// outcome open and is
+    /// [unconfirmed](crate::PerpCityError::is_unconfirmed), except
+    /// [`NotReplaceableReason::WrongSender`]: read the position before a
+    /// new send.
+    ///
+    /// [`TransactionError::ReplacementUnconfirmed`], carrying the stuck
+    /// hash, its nonce, any replacement hash, whether the node rejected it
+    /// and the cause, for a market of another or an unknown build (before
+    /// the look-up, as [`ContractError::UnsupportedEra`] or
+    /// [`ContractError::UnknownBuild`] in `source`), an RPC failure, a
+    /// stale fee cache, a failed preflight or signing, or no receipt before
+    /// the timeout. [`TransactionError::NotReplaceable`] with a
+    /// [`NotReplaceableReason`] when the stuck transaction is not signed
+    /// again. [`TransactionError::ReplacementNonceUsed`] when the account
+    /// nonce advanced and no receipt was found for either hash.
     pub async fn replace_v1_taker(
         &self,
         stuck: B256,
@@ -485,19 +541,25 @@ impl PerpClient {
                 original: stuck,
                 nonce,
                 replacement: None,
+                refused: false,
                 source: Some(Box::new(source)),
             }
             .into()
         };
         match self.market.era().await {
             Ok(Era::V1) => {}
-            Ok(era) => return Err(ContractError::UnsupportedEra { era, operation }.into()),
-            Err(refused @ PerpCityError::Contract(ContractError::UnknownBuild { .. })) => {
-                return Err(refused);
+            Ok(era) => {
+                return Err(unconfirmed(
+                    None,
+                    ContractError::UnsupportedEra { era, operation }.into(),
+                ));
             }
             // A transport failure of the era's contract calls is the
-            // node's, and transient.
-            Err(PerpCityError::Abi(CallError::TransportError(error))) => {
+            // node's, and transient; an execution revert is the contract's
+            // answer and stays as it is.
+            Err(PerpCityError::Abi(CallError::TransportError(error)))
+                if !is_execution_revert(&error) =>
+            {
                 return Err(unconfirmed(None, error.into()));
             }
             Err(error) => return Err(unconfirmed(None, error)),
@@ -509,8 +571,11 @@ impl PerpClient {
             Ok(None) => return Err(refuse(NotReplaceableReason::UnknownToNode)),
             Err(error) => return Err(unconfirmed(None, error.into())),
         };
-        if tx.from() != self.address || tx.to() != Some(perp) {
-            return Err(refuse(NotReplaceableReason::NotThisClientsTrade));
+        if tx.from() != self.address {
+            return Err(refuse(NotReplaceableReason::WrongSender));
+        }
+        if tx.to() != Some(perp) {
+            return Err(refuse(NotReplaceableReason::OtherMarket));
         }
         let (call, calldata) = decode(tx.input(), now_ms() / 1_000)
             .ok_or_else(|| refuse(NotReplaceableReason::UnsupportedCall))?;
@@ -565,7 +630,7 @@ impl PerpClient {
             .preflight_call(self.address, perp, &calldata, 0, Some(gas_limit))
             .await
         {
-            return match self.settled(&[stuck], nonce).await {
+            return match self.first_receipt(&[stuck], nonce, false).await {
                 Settled::Mined(receipt) => self.mined(call, *receipt, gas_limit, selector),
                 Settled::NonceUsed => Err(TransactionError::ReplacementNonceUsed {
                     original: stuck,
@@ -609,7 +674,10 @@ impl PerpClient {
             refused,
             "sent v1 trade replacement"
         );
-        match self.first_receipt(replacement, stuck, nonce, refused).await {
+        match self
+            .first_receipt(&[replacement, stuck], nonce, !refused)
+            .await
+        {
             Settled::Mined(receipt) => self.mined(call, *receipt, gas_limit, selector),
             Settled::NonceUsed => Err(TransactionError::ReplacementNonceUsed {
                 original: stuck,
@@ -621,6 +689,7 @@ impl PerpClient {
                 original: stuck,
                 nonce: Some(nonce),
                 replacement: Some(replacement),
+                refused,
                 source: broadcast_error.map(|source| {
                     Box::new(
                         TransactionError::BroadcastFailed {
@@ -680,32 +749,48 @@ impl PerpClient {
             .await
     }
 
-    /// The first receipt of either hash, or the nonce used by another
-    /// transaction, polled until [`RECEIPT_TIMEOUT`]; checked once when
-    /// `once`.
-    async fn first_receipt(
-        &self,
-        replacement: B256,
-        stuck: B256,
-        nonce: u64,
-        once: bool,
-    ) -> Settled {
+    /// The first receipt of any of `hashes`, polled every
+    /// [`RECEIPT_POLL_INTERVAL`] until [`RECEIPT_TIMEOUT`] when `poll`, else
+    /// checked once. Once the nonce is seen used, the receipts get
+    /// [`NONCE_USED_LOOKS`] more looks (one for a single check), whatever
+    /// the timeout, and the last look's answer is the outcome.
+    async fn first_receipt(&self, hashes: &[B256], nonce: u64, poll: bool) -> Settled {
         let deadline = tokio::time::Instant::now() + RECEIPT_TIMEOUT;
+        let mut looks_left = None;
         loop {
-            let settled = self.settled(&[replacement, stuck], nonce).await;
-            if !matches!(settled, Settled::Pending) || once {
+            let settled = self.settled(hashes, nonce).await;
+            if matches!(settled, Settled::Mined(_)) {
                 return settled;
             }
-            if tokio::time::Instant::now() >= deadline {
-                return Settled::Pending;
+            let left = match (looks_left, &settled) {
+                (Some(left), _) => left,
+                (None, Settled::NonceUsed) => {
+                    if poll {
+                        NONCE_USED_LOOKS
+                    } else {
+                        1
+                    }
+                }
+                _ => {
+                    if !poll || tokio::time::Instant::now() >= deadline {
+                        return settled;
+                    }
+                    tokio::time::sleep(RECEIPT_POLL_INTERVAL).await;
+                    continue;
+                }
+            };
+            if left == 0 {
+                return settled;
             }
+            looks_left = Some(left - 1);
             tokio::time::sleep(RECEIPT_POLL_INTERVAL).await;
         }
     }
 
     /// One look at the account nonce, then at the receipts of `hashes`. The
-    /// nonce is read first, so a nonce used before the receipt look-ups
-    /// means none of `hashes` mined. A failed RPC counts as no answer.
+    /// nonce is read first, so a nonce used before receipt reads that all
+    /// answered "none" means none of `hashes` mined by that endpoint's
+    /// view. A failed read is no answer: the look is pending.
     async fn settled(&self, hashes: &[B256], nonce: u64) -> Settled {
         let provider = self.chain().provider();
         let used = provider
@@ -713,12 +798,15 @@ impl PerpClient {
             .latest()
             .await
             .is_ok_and(|count| count > nonce);
+        let mut answered = true;
         for hash in hashes {
-            if let Ok(Some(receipt)) = provider.get_transaction_receipt(*hash).await {
-                return Settled::Mined(Box::new(receipt));
+            match provider.get_transaction_receipt(*hash).await {
+                Ok(Some(receipt)) => return Settled::Mined(Box::new(receipt)),
+                Ok(None) => {}
+                Err(_) => answered = false,
             }
         }
-        if used {
+        if used && answered {
             Settled::NonceUsed
         } else {
             Settled::Pending
@@ -765,16 +853,19 @@ mod tests {
     use alloy::consensus::transaction::Recovered;
     use alloy::consensus::{Receipt, ReceiptEnvelope};
     use alloy::eips::BlockId;
-    use alloy::network::TransactionBuilder;
+    use alloy::network::{EthereumWallet, TransactionBuilder};
     use alloy::primitives::{Address, B256, Bytes, I256, U256};
     use alloy::providers::bindings::IMulticall3 as Multicall;
+    use alloy::rpc::json_rpc::ErrorPayload;
     use alloy::rpc::types::{Log, Transaction, TransactionReceipt, TransactionRequest};
+    use alloy::signers::Signer;
     use alloy::sol_types::{SolCall, SolError, SolEvent};
+    use alloy::transports::{TransportError, TransportErrorKind};
 
     use super::{
-        MaxTotalFee, StuckCall, V1_TRADE_DEADLINE, V1TakerAdjustment, V1TakerReplacement,
-        adjust_call, check_reduce_only, close_call, open_call, replacement_calldata,
-        replacement_fees,
+        MaxTotalFee, NONCE_USED_LOOKS, StuckCall, V1_TRADE_DEADLINE, V1TakerAdjustment,
+        V1TakerReplacement, adjust_call, check_reduce_only, close_call, is_clear_refusal,
+        open_call, replacement_calldata, replacement_fees,
     };
     use crate::client::queries::Era;
     use crate::client::trades::{ExactAdjustTakerParams, ExactOpenTakerParams};
@@ -1059,10 +1150,30 @@ mod tests {
                             .close_taker_v1(adjust.pos_id, None, fee, Urgency::Normal)
                             .await
                             .unwrap_err(),
-                        _ => client
-                            .replace_v1_taker(B256::ZERO, Urgency::Normal)
-                            .await
-                            .unwrap_err(),
+                        // The given hash is kept, unresolved, with the
+                        // refusal as the cause.
+                        _ => {
+                            let stuck = B256::repeat_byte(0x5a);
+                            let err = client
+                                .replace_v1_taker(stuck, Urgency::Normal)
+                                .await
+                                .unwrap_err();
+                            assert!(err.is_unconfirmed() && !err.is_transient(), "{err}");
+                            assert_eq!(err.tx_hash(), Some(stuck));
+                            assert_eq!(err.hash_to_replace(), Some(stuck));
+                            match err {
+                                PerpCityError::Transaction(
+                                    TransactionError::ReplacementUnconfirmed {
+                                        original,
+                                        nonce: None,
+                                        replacement: None,
+                                        refused: false,
+                                        source: Some(source),
+                                    },
+                                ) if original == stuck => *source,
+                                other => panic!("expected the hash kept: {other}"),
+                            }
+                        }
                     };
                     match era {
                         Some(expected) => assert!(
@@ -1322,9 +1433,10 @@ mod tests {
         assert_ne!(replacement_hash, hash);
         assert!(
             matches!(err, PerpCityError::Transaction(TransactionError::ReplacementUnconfirmed {
-            original, nonce: Some(STUCK_NONCE), replacement: Some(replacement), source: Some(_),
+            original, nonce: Some(STUCK_NONCE), replacement: Some(replacement), refused: false, source: Some(_),
         }) if original == hash && replacement == replacement_hash)
         );
+        assert_eq!(err.hash_to_replace(), Some(replacement_hash));
         assert!(rpc.is_drained());
     }
 
@@ -1352,17 +1464,24 @@ mod tests {
             PerpCityError::Transaction(TransactionError::ReplacementUnconfirmed {
                 original,
                 replacement: Some(_),
+                refused: true,
                 source: Some(_),
                 ..
             }) if original == hash
         ));
+        assert_eq!(
+            err.hash_to_replace(),
+            Some(hash),
+            "replace the original again"
+        );
         assert!(rpc.is_drained());
     }
 
     /// S, then R1 replacing it, then R2 replacing R1, and S mines: the
     /// look-ups of R2 and R1 find nothing, but the account nonce passed
-    /// theirs, so the outcome is the used nonce, not a timeout.
-    #[tokio::test]
+    /// theirs, so after the first look and three more the outcome is the
+    /// used nonce, not a timeout.
+    #[tokio::test(start_paused = true)]
     async fn a_second_replacement_reports_the_nonce_an_earlier_signing_used() {
         let (client, rpc) = mock::client();
         client.chain().set_base_fee(100);
@@ -1371,7 +1490,10 @@ mod tests {
         rpc.response(&tx);
         rpc.raw(&[]);
         rpc.fails("already known");
-        nothing_settled(&rpc, STUCK_NONCE + 1, 2);
+        for _ in 0..=NONCE_USED_LOOKS {
+            nothing_settled(&rpc, STUCK_NONCE + 1, 2);
+        }
+        let started = tokio::time::Instant::now();
         let err = client
             .replace_v1_taker(r1, Urgency::Normal)
             .await
@@ -1384,8 +1506,19 @@ mod tests {
             }) if original == r1 && replacement == r2),
             "{err}"
         );
+        assert_eq!(
+            started.elapsed(),
+            RECEIPT_POLL_INTERVAL * NONCE_USED_LOOKS,
+            "three more looks, one poll interval apart"
+        );
         assert!(err.is_unconfirmed(), "the trade's effect is unknown");
         assert!(!err.is_transient(), "neither hash can land");
+        assert_eq!(err.hash_to_replace(), None);
+        assert!(
+            err.to_string()
+                .ends_with("advanced, but no receipt was found for either hash"),
+            "{err}"
+        );
         assert!(rpc.is_drained());
     }
 
@@ -1408,7 +1541,7 @@ mod tests {
                 .unwrap_err();
             assert!(
                 matches!(err, PerpCityError::Transaction(TransactionError::ReplacementUnconfirmed {
-                    original, nonce: None, replacement: None, source: Some(_),
+                    original, nonce: None, replacement: None, refused: false, source: Some(_),
                 }) if original == hash),
                 "{err}"
             );
@@ -1420,7 +1553,7 @@ mod tests {
 
     /// A preflight revert with no original receipt keeps the original's
     /// hash and nonce, and the revert's class, selector and transience.
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn a_preflight_revert_keeps_its_class_and_the_original() {
         for (selector, class) in [
             (v1::Perp::MaxAmtExceeded::SELECTOR, RevertClass::Answer),
@@ -1441,7 +1574,7 @@ mod tests {
                 .unwrap_err();
             assert!(
                 matches!(&err, PerpCityError::Transaction(TransactionError::ReplacementUnconfirmed {
-                    original, nonce: Some(STUCK_NONCE), replacement: None, source: Some(source),
+                    original, nonce: Some(STUCK_NONCE), replacement: None, refused: false, source: Some(source),
                 }) if *original == hash && source.is_simulation_revert()),
                 "{err}"
             );
@@ -1458,13 +1591,15 @@ mod tests {
             assert!(rpc.is_drained());
         }
 
-        // The same revert after the nonce was used by another transaction.
+        // The same revert after the nonce was used by another transaction:
+        // the original's receipt gets one more look.
         let (client, rpc) = mock::client();
         client.chain().set_base_fee(100);
         let (hash, tx) = pending_trade(&client, stuck_open(&client, NOW + 600).abi_encode()).await;
         rpc.immutables(Era::V1);
         rpc.response(&tx);
         rpc.reverts(&v1::Perp::MaxAmtExceeded::SELECTOR);
+        nothing_settled(&rpc, STUCK_NONCE + 1, 1);
         nothing_settled(&rpc, STUCK_NONCE + 1, 1);
         let err = client
             .replace_v1_taker(hash, Urgency::Normal)
@@ -1510,12 +1645,17 @@ mod tests {
             (
                 trade_request(&client, input.clone()),
                 other,
-                NotReplaceableReason::NotThisClientsTrade,
+                NotReplaceableReason::WrongSender,
+            ),
+            (
+                trade_request(&client, input.clone()).with_to(other),
+                other,
+                NotReplaceableReason::WrongSender,
             ),
             (
                 trade_request(&client, input.clone()).with_to(other),
                 client.address(),
-                NotReplaceableReason::NotThisClientsTrade,
+                NotReplaceableReason::OtherMarket,
             ),
             (
                 trade_request(&client, earlier),
@@ -1550,6 +1690,12 @@ mod tests {
                 .unwrap_err();
             assert_eq!(refusal(&err), expected, "{err}");
             assert_eq!(err.tx_hash(), Some(hash));
+            assert_eq!(err.hash_to_replace(), None);
+            assert_eq!(
+                err.is_unconfirmed(),
+                expected != NotReplaceableReason::WrongSender,
+                "only another sender's transaction cannot be this client's: {err}"
+            );
             assert_eq!(err.is_unconfirmed(), expected.original_can_land(), "{err}");
             assert!(!err.is_transient());
             assert!(rpc.is_drained(), "{expected}: nothing after the look-up");
@@ -1622,6 +1768,7 @@ mod tests {
             original,
             nonce: Some(STUCK_NONCE),
             replacement: None,
+            refused: false,
             source: Some(source),
         }) = &err
         else {
@@ -1737,6 +1884,280 @@ mod tests {
             "{err}"
         );
         assert!(rpc.is_drained());
+    }
+
+    /// The nonce read is ahead of the receipt reads (another endpoint), or
+    /// one receipt read fails. The replacement mined, and the next poll
+    /// finds its receipt: no used nonce is reported on the first look.
+    #[tokio::test(start_paused = true)]
+    async fn a_nonce_ahead_of_the_receipts_waits_for_the_receipt() {
+        for failing_receipt_read in [false, true] {
+            let (client, rpc) = mock::client();
+            client.chain().set_base_fee(100);
+            let (hash, tx) =
+                pending_trade(&client, stuck_open(&client, NOW + 600).abi_encode()).await;
+            let event = opened_event(&client);
+            let winner = B256::repeat_byte(0x7e);
+            rpc.immutables(Era::V1);
+            rpc.response(&tx);
+            rpc.raw(&[]);
+            rpc.fails("already known");
+            // Poll 1: the nonce is used; the receipt reads are behind or fail.
+            rpc.quantity(STUCK_NONCE + 1);
+            if failing_receipt_read {
+                rpc.fails("upstream timeout");
+            } else {
+                rpc.response(&None::<TransactionReceipt>);
+            }
+            rpc.response(&None::<TransactionReceipt>);
+            // Poll 2: the replacement's receipt.
+            rpc.quantity(STUCK_NONCE + 1);
+            rpc.response(&mined_trade_receipt(&client, winner, &event));
+            let result = client.replace_v1_taker(hash, Urgency::Normal).await;
+            let Ok(V1TakerReplacement::Opened(opened)) = result else {
+                panic!("failing_receipt_read={failing_receipt_read}: {result:?}");
+            };
+            assert_eq!(opened.tx_hash, winner);
+            assert!(rpc.is_drained());
+        }
+    }
+
+    /// A failed receipt read is no answer: with the nonce used and every
+    /// look failing a read, the outcome stays unconfirmed and transient,
+    /// never a used nonce.
+    #[tokio::test(start_paused = true)]
+    async fn failed_receipt_reads_never_report_the_nonce_used() {
+        let (client, rpc) = mock::client();
+        client.chain().set_base_fee(100);
+        let (hash, tx) = pending_trade(&client, stuck_open(&client, NOW + 600).abi_encode()).await;
+        rpc.immutables(Era::V1);
+        rpc.response(&tx);
+        rpc.raw(&[]);
+        rpc.fails("already known");
+        for _ in 0..=NONCE_USED_LOOKS {
+            rpc.quantity(STUCK_NONCE + 1);
+            rpc.response(&None::<TransactionReceipt>);
+            rpc.fails("upstream timeout");
+        }
+        let err = client
+            .replace_v1_taker(hash, Urgency::Normal)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                PerpCityError::Transaction(TransactionError::ReplacementUnconfirmed {
+                    refused: false,
+                    ..
+                })
+            ),
+            "{err}"
+        );
+        assert!(err.is_transient() && err.is_unconfirmed());
+        assert!(rpc.is_drained(), "four looks, then the answer");
+    }
+
+    /// After an explicit rejection, a used nonce gets one more look after
+    /// a poll interval: the receipt it finds, or else the used nonce.
+    #[tokio::test(start_paused = true)]
+    async fn a_rejected_replacement_looks_once_more_at_a_used_nonce() {
+        for found in [true, false] {
+            let (client, rpc) = mock::client();
+            client.chain().set_base_fee(100);
+            let (hash, tx) =
+                pending_trade(&client, stuck_open(&client, NOW + 600).abi_encode()).await;
+            let event = opened_event(&client);
+            rpc.immutables(Era::V1);
+            rpc.response(&tx);
+            rpc.raw(&[]);
+            rpc.fails("nonce too low");
+            nothing_settled(&rpc, STUCK_NONCE + 1, 2);
+            rpc.quantity(STUCK_NONCE + 1);
+            rpc.response(&None::<TransactionReceipt>);
+            if found {
+                rpc.response(&mined_trade_receipt(&client, hash, &event));
+            } else {
+                rpc.response(&None::<TransactionReceipt>);
+            }
+            let started = tokio::time::Instant::now();
+            let result = client.replace_v1_taker(hash, Urgency::Normal).await;
+            assert_eq!(started.elapsed(), RECEIPT_POLL_INTERVAL);
+            match result {
+                Ok(V1TakerReplacement::Opened(opened)) if found => {
+                    assert_eq!(opened.tx_hash, hash);
+                }
+                Err(PerpCityError::Transaction(TransactionError::ReplacementNonceUsed {
+                    original,
+                    nonce: STUCK_NONCE,
+                    replacement: Some(_),
+                })) if !found && original == hash => {}
+                other => panic!("found={found}: {other:?}"),
+            }
+            assert!(rpc.is_drained());
+        }
+    }
+
+    /// Only an explicit rejection stops the wait after one check. An
+    /// unknown answer and an upstream timeout can come after the node took
+    /// the replacement, so the receipts are polled, and the replacement is
+    /// the hash to replace next.
+    #[tokio::test(start_paused = true)]
+    async fn an_ambiguous_broadcast_answer_is_polled() {
+        for answer in ["unknown error", "upstream timeout", "already known"] {
+            let (client, rpc) = mock::client();
+            client.chain().set_base_fee(100);
+            let (hash, tx) =
+                pending_trade(&client, stuck_open(&client, NOW + 600).abi_encode()).await;
+            rpc.immutables(Era::V1);
+            rpc.response(&tx);
+            rpc.raw(&[]);
+            rpc.fails(answer);
+            nothing_settled(&rpc, STUCK_NONCE, 2);
+            let event = opened_event(&client);
+            let winner = B256::repeat_byte(0x7e);
+            rpc.quantity(STUCK_NONCE + 1);
+            rpc.response(&mined_trade_receipt(&client, winner, &event));
+            let result = client.replace_v1_taker(hash, Urgency::Normal).await;
+            assert!(
+                matches!(&result, Ok(V1TakerReplacement::Opened(opened)) if opened.tx_hash == winner),
+                "{answer}: {result:?}"
+            );
+            assert!(rpc.is_drained(), "{answer}");
+        }
+        for (answer, refused) in [
+            ("replacement transaction underpriced", true),
+            ("transaction underpriced", true),
+            ("nonce too low", true),
+            ("insufficient funds for gas * price + value", true),
+            ("max fee per gas less than block base fee", true),
+            ("already known", false),
+            ("unknown error", false),
+            ("upstream timeout", false),
+            ("Known transaction", false),
+        ] {
+            let error = TransportErrorKind::custom_str(answer);
+            assert!(!is_clear_refusal(&error), "no response: {answer}");
+            let response = TransportError::ErrorResp(ErrorPayload {
+                code: -32000,
+                message: answer.to_owned().into(),
+                data: None,
+            });
+            assert_eq!(is_clear_refusal(&response), refused, "{answer}");
+        }
+    }
+
+    /// The era read of a replacement: a connection failure or an upstream
+    /// timeout is the node's and transient; an execution revert of the
+    /// pool key is the contract's answer and is not.
+    #[tokio::test]
+    async fn the_era_read_tells_a_revert_from_no_answer() {
+        let stuck = B256::repeat_byte(0x5a);
+        for (failure, transient) in ["connection", "upstream timeout", "revert", "code 3"]
+            .into_iter()
+            .zip([true, true, false, false])
+        {
+            let (client, rpc) = mock::client();
+            match failure {
+                // Nothing queued: the transport fails with no response.
+                "connection" => {}
+                "upstream timeout" => rpc.fails("upstream timeout"),
+                "revert" => rpc.fails("execution reverted"),
+                _ => rpc.reverts(&[]),
+            }
+            let err = client
+                .replace_v1_taker(stuck, Urgency::Normal)
+                .await
+                .unwrap_err();
+            let PerpCityError::Transaction(TransactionError::ReplacementUnconfirmed {
+                original,
+                nonce: None,
+                source: Some(source),
+                ..
+            }) = &err
+            else {
+                panic!("{failure}: {err}");
+            };
+            assert_eq!(*original, stuck);
+            assert_eq!(err.is_transient(), transient, "{failure}: {err}");
+            assert_eq!(
+                matches!(source.as_ref(), PerpCityError::Rpc(_)),
+                transient,
+                "{failure}: {source:?}"
+            );
+            assert!(err.is_unconfirmed(), "{failure}");
+            assert!(rpc.is_drained(), "{failure}");
+        }
+    }
+
+    /// A pending transaction of this client to this market that is not a
+    /// taker call (a liquidation, a maker open) can still land, so its
+    /// refusal is unconfirmed.
+    #[tokio::test]
+    async fn a_pending_own_call_of_another_kind_is_unconfirmed() {
+        let (client, _) = mock::client();
+        let liquidation = v1::Perp::liquidateTakerCall {
+            posId: U256::from(2u8),
+            liquidationFeeRecipient: client.address(),
+            perpAmount: 400_000,
+        }
+        .abi_encode();
+        let mut maker_open = v1::Perp::openMakerCall::SELECTOR.to_vec();
+        maker_open.extend_from_slice(&[0; 64]);
+        for input in [liquidation, maker_open] {
+            let (client, rpc) = mock::client();
+            client.chain().set_base_fee(100);
+            let (hash, tx) = pending_trade(&client, input).await;
+            rpc.immutables(Era::V1);
+            rpc.response(&tx);
+            let err = client
+                .replace_v1_taker(hash, Urgency::Normal)
+                .await
+                .unwrap_err();
+            assert_eq!(refusal(&err), NotReplaceableReason::UnsupportedCall);
+            assert!(err.is_unconfirmed(), "{err}");
+            assert!(!err.is_transient());
+            assert_eq!(err.tx_hash(), Some(hash));
+            assert!(rpc.is_drained());
+        }
+    }
+
+    /// A signer that fails: nothing is broadcast, and the original is kept
+    /// with its nonce and the signing failure as the cause.
+    #[tokio::test]
+    async fn a_failing_signer_keeps_the_original() {
+        let (mut client, rpc) = mock::client();
+        client.chain().set_base_fee(100);
+        let (hash, tx) = pending_trade(&client, stuck_open(&client, NOW + 600).abi_encode()).await;
+        client.wallet = EthereumWallet::from(mock::signer().with_chain_id(Some(1)));
+        rpc.immutables(Era::V1);
+        rpc.response(&tx);
+        rpc.raw(&[]);
+        let err = client
+            .replace_v1_taker(hash, Urgency::Normal)
+            .await
+            .unwrap_err();
+        let PerpCityError::Transaction(TransactionError::ReplacementUnconfirmed {
+            original,
+            nonce: Some(STUCK_NONCE),
+            replacement: None,
+            refused: false,
+            source: Some(source),
+        }) = &err
+        else {
+            panic!("expected the original kept: {err}");
+        };
+        assert_eq!(*original, hash);
+        assert!(
+            matches!(
+                source.as_ref(),
+                PerpCityError::Transaction(TransactionError::SigningFailed { .. })
+            ),
+            "{source:?}"
+        );
+        assert!(err.is_unconfirmed());
+        assert!(!err.is_transient(), "the signer fails again");
+        assert_eq!(err.hash_to_replace(), Some(hash));
+        assert!(rpc.is_drained(), "nothing broadcast");
     }
 
     fn zero_swap() -> v1::SwapResult {

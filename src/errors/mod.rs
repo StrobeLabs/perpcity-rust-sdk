@@ -174,6 +174,15 @@ impl PerpCityError {
         matches!(self, Self::Transaction(e) if e.is_unconfirmed())
     }
 
+    /// The hash to replace the same trade again with; see
+    /// [`TransactionError::hash_to_replace`].
+    pub fn hash_to_replace(&self) -> Option<FixedBytes<32>> {
+        match self {
+            Self::Transaction(e) => e.hash_to_replace(),
+            _ => None,
+        }
+    }
+
     /// Hash of the signed transaction when the failure came at or after
     /// the broadcast; see [`TransactionError::tx_hash`].
     ///
