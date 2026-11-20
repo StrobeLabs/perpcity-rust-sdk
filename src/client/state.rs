@@ -2391,7 +2391,7 @@ mod tests {
     async fn empty_preview_batch_refuses_an_earlier_build() {
         let (state, rpc) = state().await;
         rpc.immutables(Era::Upgradeable);
-        let error = state.preview_positions(&[]).await.unwrap_err();
+        let error = state.preview_positions(&[]).await.err().unwrap();
         assert!(matches!(
             error,
             PerpCityError::Contract(ContractError::UnsupportedEra { operation, .. })
