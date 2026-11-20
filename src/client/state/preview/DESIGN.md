@@ -9,3 +9,5 @@ The [client](../../DESIGN.md) pins each read to the snapshot block. A position p
 ## Accepted structure
 
 `TvlCap` is a terminal read for the strategy layer. A caller checks a proposed deposit against the cap at the snapshot block.
+
+`allows_deposit` takes the proposed deposit as `UsdcAtoms`, the unit the cap is kept in, so the comparison needs no conversion. `physical_close_capacity_x64` returns the raw X64 depth as a `PerSide`, one word per side, because the removal check reads the two storage words without the view's rounding.
