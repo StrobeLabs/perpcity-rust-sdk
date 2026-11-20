@@ -128,7 +128,7 @@ fn is_unsupported(err: &PerpCityError, era: Era, operation: &str) -> bool {
 }
 
 /// A `v1.0.0` market's mark reads after the views multicall: the
-/// beacon's two words, the slot-23 word, then the module's answer.
+/// market's accepted index, the slot-23 word, then the module's answer.
 fn v1_mark_answers(rpc: &Rpc, block: u64) {
     rpc.aggregate(
         block,
@@ -137,13 +137,11 @@ fn v1_mark_answers(rpc: &Rpc, block: u64) {
             returns::<v1::Perp::poolStateCall>(&v1_pool_state()),
             returns::<v1::Perp::ratesCall>(&v1_rates()),
             returns::<v1::Perp::emaWindowCall>(&e6(WINDOW)),
-            returns::<v1::Perp::latencyCall>(&3600),
         ],
     );
-    rpc.call::<v1::IBeacon::indexCall>(&v1::IBeacon::indexReturn {
-        index: index(),
-        updatedAt: U256::from(NOW - 30),
-    });
+    rpc.aggregate3(vec![mock::ok_row(
+        returns::<v1::Perp::readBeaconIndexCall>(&index().to::<u128>()),
+    )]);
     rpc.storage(mock::emas_word(stored().amm, stored().index));
     rpc.call::<v1::IPricing::fairPriceCall>(&module_mark());
 }
@@ -512,10 +510,11 @@ async fn the_beacon_index_carries_its_time_and_the_markets_latency() {
                 returns::<v1::Perp::latencyCall>(&3_600),
             ],
         );
-        rpc.call::<v1::IBeacon::indexCall>(&v1::IBeacon::indexReturn {
+        let observation = v1::IBeacon::indexReturn {
             index: index(),
             updatedAt: U256::from(NOW - 3_600),
-        });
+        };
+        rpc.call::<v1::IBeacon::indexCall>(&observation);
 
         let reading = state.beacon_index().await.unwrap();
         assert_eq!(reading.block, state.block());
@@ -526,11 +525,9 @@ async fn the_beacon_index_carries_its_time_and_the_markets_latency() {
         assert!(reading.is_stale_at(NOW + 1));
         assert_eq!(reading.accepted_until(), NOW);
         assert!(reading.is_in_domain());
-        assert!(
-            rpc.calls()
-                .last()
-                .unwrap()
-                .starts_with(&v1::IBeacon::indexCall::SELECTOR)
+        assert_eq!(
+            rpc.selectors().last(),
+            Some(&v1::IBeacon::indexCall::SELECTOR)
         );
         assert!(rpc.is_drained());
 
@@ -639,13 +636,11 @@ async fn a_v1_snapshot_marks_by_the_pricing_module_at_the_lagged_block() {
                 returns::<v1::Perp::ratesCall>(&v1_rates()),
                 returns::<v1::Perp::openInterestCall>(&v1::OpenInterest { long: 3, short: 4 }),
                 returns::<v1::Perp::emaWindowCall>(&e6(WINDOW)),
-                returns::<v1::Perp::latencyCall>(&3600),
             ],
         );
-        rpc.call::<v1::IBeacon::indexCall>(&v1::IBeacon::indexReturn {
-            index: index(),
-            updatedAt: U256::from(NOW - 30),
-        });
+        rpc.aggregate3(vec![mock::ok_row(
+            returns::<v1::Perp::readBeaconIndexCall>(&index().to::<u128>()),
+        )]);
         rpc.storage(mock::emas_word(stored().amm, stored().index));
         rpc.call::<v1::IPricing::fairPriceCall>(&module_mark());
         v1_fees_answers(&rpc);

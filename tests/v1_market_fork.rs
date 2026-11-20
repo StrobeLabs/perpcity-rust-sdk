@@ -338,7 +338,8 @@ async fn market_reads_match_raw_views() {
         // PUSH32 price, MSTORE(0), PUSH32 updated, MSTORE(32), RETURN(0,64).
         let code = price.map_or_else(
             || code.to_owned(),
-            |price| format!("0x7f{price:064x}6000527f{updated:064x}60205260406000f3"),
+            // CALLER must equal the market, else revert. JUMPDEST is at byte 31.
+            |price| format!("0x3373{:040x}14601f5760006000fd5b7f{price:064x}6000527f{updated:064x}60205260406000f3", m.perp),
         );
         let _: Value = w
             .provider
