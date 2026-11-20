@@ -19,6 +19,9 @@ pub(crate) enum Answer {
     Status(u16),
     /// Nothing, until the caller times out.
     Silence,
+    /// A JSON-RPC result under the call's id written as a string: the
+    /// number `0` as `"0"`.
+    ResultUnderTextId(Value),
     /// This JSON as the whole response body, in place of the request's
     /// own answers: one error object for a whole batch, an answer under
     /// another id.
@@ -89,6 +92,13 @@ fn answer(script: &Script, call: &Value) -> Result<Value, (u16, String)> {
         Answer::Result(result) => Ok(json!({ "jsonrpc": "2.0", "id": id, "result": result })),
         Answer::Error(code, message) => {
             Ok(json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message } }))
+        }
+        Answer::ResultUnderTextId(result) => {
+            let id = match id {
+                Value::Number(number) => Value::String(number.to_string()),
+                id => id,
+            };
+            Ok(json!({ "jsonrpc": "2.0", "id": id, "result": result }))
         }
         Answer::Status(status) => Err((status, String::new())),
         Answer::Silence => Err((0, String::new())),

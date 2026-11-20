@@ -111,10 +111,14 @@ impl Default for ReadRetryConfig {
 /// identical bytes can only be that one transaction, so a resend cannot
 /// make a second; it can be answered `already known` or `nonce too low`.
 ///
-/// A request that holds an `eth_sendTransaction` is sent once whatever
-/// this says: the node signs it with a nonce it picks, so a resend could
-/// be a second transaction. A lost reply is a transport error, and the
-/// outcome is unknown.
+/// It applies only to a request that is a single `eth_sendRawTransaction`.
+/// A call the node signs (`eth_sendTransaction`,
+/// `personal_sendTransaction`) is sent once whatever this says: the node
+/// picks the nonce, so a resend could be a second transaction. A batch
+/// that holds any write is sent once too, and any error in its answer is
+/// a transport error with an unknown outcome, never the node's rejection
+/// of a write. The SDK sends neither: it signs locally and sends one
+/// `eth_sendRawTransaction`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WriteRetryConfig {
     /// Maximum number of retry attempts (0 = no retries, just the initial try).
