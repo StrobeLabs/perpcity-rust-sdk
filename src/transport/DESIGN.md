@@ -202,9 +202,9 @@ callers re-subscribe.
 | [`ReconnectConfig`](ws.rs#L43) | the backoff: initial, maximum, multiplier, attempts | the caller; `Default` is capped exponential | [`WsManager::connect`](ws.rs#L94). |
 
 An endpoint that refuses block overrides or lacks the block pinned by a
-simulation (an `eth_call` or `eth_estimateGas` with four params) produces
-a warning with its host and port, the RPC method and the error code, and
-nothing else of its URL. An execution answer (code `3`, an execution
+simulation (an `eth_call` or `eth_estimateGas` with four params) logs
+its host and port, RPC method and error code. Override refusals log at
+WARN. Missing blocks log at DEBUG. An execution answer (code `3`, an execution
 wording, revert data, under any code) is never such a refusal. The
 warning uses the same routing and health rules as other RPC answers.
 

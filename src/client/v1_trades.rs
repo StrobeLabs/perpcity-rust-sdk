@@ -347,6 +347,7 @@ impl PerpClient {
         );
         let receipt = self
             .tx(self.market.perp(), call.abi_encode().into())
+            .with_market_era(Era::V1)
             .with_urgency(urgency)
             .send()
             .await?;
@@ -759,6 +760,7 @@ impl PerpClient {
             "adjusting v1 taker position"
         );
         self.tx(self.market.perp(), call.abi_encode().into())
+            .with_market_era(Era::V1)
             .with_urgency(urgency)
             .send()
             .await
@@ -2289,12 +2291,9 @@ mod tests {
     /// What counts as no answer from the node for an era read: an
     /// execution error, by code `3` or by its wording, and a method the
     /// endpoint does not serve are answers whatever else the message says;
-    /// revert data of at least four bytes, under any code, as `data` or
-    /// along its `originalError` chain, is the contract's answer, and a hex
-    /// string under another key or in an object under `data` (`NESTED`) is
-    /// not; a bare internal error, a rate
-    /// limit, a gateway with no node to ask, a timeout and a quota are no
-    /// answer, and empty or shorter revert data does not change that.
+    /// revert data under `data` or in an error envelope is the contract's
+    /// answer. A bare internal error, a rate limit, a timeout and an
+    /// unavailable upstream are no answer.
     #[test]
     fn no_answer_is_a_failure_of_the_node_never_its_answer() {
         const REVERT: &str = r#""0x08c379a0""#;
@@ -2335,10 +2334,10 @@ mod tests {
             ),
             (-32_015, "VM execution error.", Some(r#""revert""#), false),
             (-32_603, "internal error", Some(r#""0xABCDEF01""#), false),
-            (-32_603, "internal error", Some(r#""0x08c379a0f""#), false),
+            (-32_603, "internal error", Some(r#""0x08c379a0f""#), true),
             (-32_603, "internal error", Some(r#""0xabc""#), true),
-            (-32_603, "internal error", Some(r#""0xABCDEF""#), true),
-            (-32_000, "upstream timeout", Some(r#""0x08c379""#), true),
+            (-32_603, "internal error", Some(r#""0xABCDEF""#), false),
+            (-32_000, "upstream timeout", Some(r#""0x08c379""#), false),
             (-32_000, "upstream timeout", Some(r#""0x08c379a""#), true),
             (
                 -32_000,
@@ -2439,13 +2438,13 @@ mod tests {
             (3, "execution reverted", None, false),
             (3, "execution reverted", Some(REVERT), false),
             (-32_603, "internal error", Some(REVERT), false),
-            (-32_603, "internal error", Some(NESTED), true),
+            (-32_603, "internal error", Some(NESTED), false),
             (-32_000, "upstream timeout", Some(REVERT), false),
             (
                 -32_011,
                 "no backends available for method",
                 Some(NESTED),
-                true,
+                false,
             ),
             (
                 -32_601,

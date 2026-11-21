@@ -13,7 +13,7 @@ use alloy::transports::{RpcError, TransportError, TransportErrorKind, TransportF
 use reqwest::header::{CONTENT_TYPE, HeaderValue};
 use serde_json::value::RawValue;
 
-use super::fault::simulation_needs_head;
+use super::fault::{is_execution_error, lacks_block};
 
 /// Label used when an endpoint string does not parse as a URL with a host.
 const UNPARSEABLE: &str = "<unparseable endpoint>";
@@ -241,16 +241,17 @@ impl UrlStrippingHttp {
             serde_json::from_slice(&body).map_err(|err| TransportError::deser_err(err, text()))?;
         if let RequestPacket::Single(request) = req
             && matches!(request.method(), "eth_call" | "eth_estimateGas")
-            && let Some(error) = response
-                .iter_errors()
-                .find(|error| simulation_needs_head(error))
+            && let Some(error) = response.iter_errors().find(|error| {
+                !is_execution_error(error)
+                    && (matches!(error.code, -32_602 | -32_004) || lacks_block(&error.message))
+            })
             && request
                 .params()
                 .is_some_and(|params| serde_json::from_str::<[&RawValue; 4]>(params.get()).is_ok())
         {
             // A refusal of the overrides is the endpoint's setting and
             // repeats; a missing pinned block is a replica behind the head.
-            if error.code == -32_602 {
+            if matches!(error.code, -32_602 | -32_004) {
                 tracing::warn!(
                     endpoint = %redact_url(self.url.as_str()),
                     method = request.method(),
