@@ -9,7 +9,6 @@ use std::time::Duration;
 
 use alloy::consensus::transaction::SignerRecoverable;
 use alloy::consensus::{Transaction as ConsensusTransaction, TxType};
-use alloy::contract::Error as CallError;
 use alloy::eips::eip2718::Encodable2718;
 use alloy::network::TransactionBuilder;
 use alloy::primitives::{Address, B256, Bytes, I256, U256, keccak256};
@@ -27,7 +26,7 @@ use crate::errors::{
 use crate::events::receipt::{V1TradeResult, parse_v1_receipt, parse_v1_receipt_for};
 use crate::hft::gas::{GasFees, Urgency, is_out_of_gas};
 use crate::math::swap::MAX_TOTAL_FEE_SLACK;
-use crate::transport::fault::{is_no_answer, is_rejection};
+use crate::transport::fault::is_rejection;
 use crate::units::{PerpDelta, UsdcAtoms, UsdcDelta};
 
 use super::queries::Era;
@@ -260,20 +259,6 @@ fn replacement_fees(max_fee: u128, priority: u128, current: GasFees) -> (u128, u
 /// the replacement, or it mined.
 fn is_clear_refusal(error: &TransportError) -> bool {
     error.as_error_resp().is_some_and(is_rejection)
-}
-
-/// An era read's failure as every `v1.0.0` write reports it. No answer
-/// from the node ([`is_no_answer`]) is the node's and transient, as
-/// [`PerpCityError::Rpc`]. An answer (an execution revert of `poolKey()`
-/// or `poolId()`, or a refusal of the request such as `-32601`) stays as
-/// it is, not transient.
-pub(super) fn era_read_error(error: PerpCityError) -> PerpCityError {
-    match error {
-        PerpCityError::Abi(CallError::TransportError(error)) if is_no_answer(&error) => {
-            error.into()
-        }
-        error => error,
-    }
 }
 
 /// The adjustment `receipt` mined for `pos_id` on `perp`.
@@ -556,7 +541,7 @@ impl PerpClient {
                     ContractError::UnsupportedEra { era, operation }.into(),
                 ));
             }
-            Err(error) => return Err(unconfirmed(None, era_read_error(error))),
+            Err(error) => return Err(unconfirmed(None, error)),
         }
         let perp = self.market.perp();
         let provider = self.chain().provider();
@@ -635,15 +620,12 @@ impl PerpClient {
         // At the stuck limit, in the next block: a trade in a second other
         // than the market's last touch accrues, and the replacement mines in
         // a later second than the head's.
-        let preflight = match self.chain().next_block().await {
-            Ok(next) => self
-                .chain()
-                .preflight_at_limit(self.address, perp, &calldata, 0, gas_limit, Some(&next))
-                .await
-                .map_err(PerpCityError::from),
-            Err(error) => Err(error),
-        };
-        if let Err(source) = preflight {
+        if let Err(error) = self
+            .chain()
+            .preflight_at_limit(self.address, perp, &calldata, 0, gas_limit, true)
+            .await
+        {
+            let source = error.into();
             return match self.first_receipt(&[stuck], nonce, false).await {
                 Settled::Mined(receipt) => self.mined(call, *receipt, gas_limit, selector),
                 Settled::NonceUsed => Err(TransactionError::ReplacementNonceUsed {
@@ -722,7 +704,7 @@ impl PerpClient {
 
     /// Refuse anything but a `v1.0.0` market, after its era read.
     async fn require_v1(&self, operation: &'static str) -> Result<()> {
-        match self.market.era().await.map_err(era_read_error)? {
+        match self.market.era().await? {
             Era::V1 => Ok(()),
             era => Err(ContractError::UnsupportedEra { era, operation }.into()),
         }
@@ -875,6 +857,7 @@ mod tests {
     use alloy::consensus::Transaction as ConsensusTransaction;
     use alloy::consensus::transaction::Recovered;
     use alloy::consensus::{Receipt, ReceiptEnvelope};
+    use alloy::contract::Error as CallError;
     use alloy::eips::BlockId;
     use alloy::hex;
     use alloy::network::{EthereumWallet, TransactionBuilder};
@@ -893,8 +876,9 @@ mod tests {
     use super::{
         MaxTotalFee, NONCE_USED_LOOKS, StuckCall, V1_TRADE_DEADLINE, V1TakerAdjustment,
         V1TakerReplacement, adjust_call, check_reduce_only, close_call, is_clear_refusal,
-        is_no_answer, open_call, replacement_calldata, replacement_fees,
+        open_call, replacement_calldata, replacement_fees,
     };
+    use crate::client::market::era_read_error;
     use crate::client::queries::Era;
     use crate::client::trades::{ExactAdjustTakerParams, ExactOpenTakerParams};
     use crate::client::{
@@ -1447,6 +1431,7 @@ mod tests {
         rpc.immutables(Era::V1);
         rpc.response(&tx);
         rpc.block(HEAD, NOW);
+        rpc.fails("execution reverted");
         rpc.fails("execution reverted");
         rpc.quantity(STUCK_NONCE + 1);
         rpc.response(&mined_trade_receipt(&client, hash, &event));
@@ -2219,10 +2204,8 @@ mod tests {
     }
 
     /// One era-read rule for every `v1.0.0` write: no answer (a dropped
-    /// connection, an upstream timeout) is the node's and transient; an
-    /// answer (an execution revert of the pool key, a method the endpoint
-    /// does not serve) is not. A replacement keeps the given hash either
-    /// way.
+    /// connection, a timeout or a quota) is transient. An execution revert
+    /// of the pool key is final. A replacement keeps the given hash.
     #[tokio::test]
     async fn the_era_read_tells_an_answer_from_no_answer() {
         let stuck = B256::repeat_byte(0x5a);
@@ -2233,7 +2216,8 @@ mod tests {
             ("revert", false),
             ("code 3", false),
             ("internal error with revert data", false),
-            ("method not found", false),
+            ("method not found", true),
+            ("request quota", true),
         ] {
             for replacing in [false, true] {
                 let (client, rpc) = mock::client();
@@ -2246,6 +2230,9 @@ mod tests {
                     "no backends" => rpc.answers_error(-32_011, "no backends available", None),
                     "internal error with revert data" => {
                         rpc.answers_error(-32_603, "internal error", Some(r#""0xbcffc83f""#));
+                    }
+                    "request quota" => {
+                        rpc.node_error(-32_005, "Exceeded max limit of 100 requests per second");
                     }
                     _ => rpc.method_not_found(),
                 }
@@ -2288,14 +2275,9 @@ mod tests {
         }
     }
 
-    /// What counts as no answer from the node for an era read: an
-    /// execution error, by code `3` or by its wording, and a method the
-    /// endpoint does not serve are answers whatever else the message says;
-    /// revert data under `data` or in an error envelope is the contract's
-    /// answer. A bare internal error, a rate limit, a timeout and an
-    /// unavailable upstream are no answer.
+    /// Identity reads require execution evidence to preserve an ABI error.
     #[test]
-    fn no_answer_is_a_failure_of_the_node_never_its_answer() {
+    fn an_identity_read_requires_execution_evidence() {
         const REVERT: &str = r#""0x08c379a0""#;
         const NESTED: &str = r#"{"message":"execution reverted","data":"0xbcffc83f"}"#;
         const ORIGINAL: &str =
@@ -2336,8 +2318,8 @@ mod tests {
             (-32_603, "internal error", Some(r#""0xABCDEF01""#), false),
             (-32_603, "internal error", Some(r#""0x08c379a0f""#), true),
             (-32_603, "internal error", Some(r#""0xabc""#), true),
-            (-32_603, "internal error", Some(r#""0xABCDEF""#), false),
-            (-32_000, "upstream timeout", Some(r#""0x08c379""#), false),
+            (-32_603, "internal error", Some(r#""0xABCDEF""#), true),
+            (-32_000, "upstream timeout", Some(r#""0x08c379""#), true),
             (-32_000, "upstream timeout", Some(r#""0x08c379a""#), true),
             (
                 -32_000,
@@ -2412,8 +2394,8 @@ mod tests {
             (-32_000, "invalid opcode: INVALID", None, false),
             (-32_000, "invalid jump destination", None, false),
             (-32_000, "stack limit reached 1024 (1023)", None, false),
-            (-32_601, "method eth_call is unavailable", None, false),
-            (-32_601, "method unavailable on this plan", None, false),
+            (-32_601, "method eth_call is unavailable", None, true),
+            (-32_601, "method unavailable on this plan", None, true),
             (-32_603, "upstream timeout", None, true),
             (-32_000, "request timed out", None, true),
             (-32_000, "upstream timeout", None, true),
@@ -2450,29 +2432,23 @@ mod tests {
                 -32_601,
                 "the method does not exist/is not available",
                 None,
-                false,
+                true,
             ),
-            (-32_602, "invalid params", None, false),
-            (-32_000, "missing trie node", None, false),
+            (-32_602, "invalid params", None, true),
+            (-32_000, "missing trie node", None, true),
         ] {
             let error = TransportError::ErrorResp(ErrorPayload {
                 code,
                 message: message.to_owned().into(),
                 data: data.map(|data| RawValue::from_string(data.to_owned()).unwrap()),
             });
-            assert_eq!(is_no_answer(&error), no_answer, "{code} {message} {data:?}");
+            let error = era_read_error(CallError::TransportError(error).into());
+            assert_eq!(error.is_transient(), no_answer, "{code} {message} {data:?}");
         }
-        assert!(is_no_answer(&TransportError::local_usage_str(
-            "request timed out"
-        )));
-        assert!(is_no_answer(&TransportErrorKind::http_error(
-            503,
-            String::new()
-        )));
-        assert!(!is_no_answer(&TransportErrorKind::http_error(
-            400,
-            String::new()
-        )));
+        for status in [400, 503] {
+            let error = TransportErrorKind::http_error(status, String::new());
+            assert!(era_read_error(CallError::TransportError(error).into()).is_transient());
+        }
     }
 
     /// A pending transaction of this client to this market that is not a

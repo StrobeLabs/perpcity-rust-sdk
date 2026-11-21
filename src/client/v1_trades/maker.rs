@@ -985,45 +985,29 @@ mod tests {
         assert!(rpc.is_drained());
     }
 
-    /// A confirmation whose node lacks the pinned block is the transient
-    /// `BlockUnavailable` a pinned read gives; pruned state is
-    /// `StateUnavailable`; an execution error whose message names a
-    /// missing block is the call's failure.
+    /// Rule B applies to a maker's refusal confirmation at its stated block.
     #[tokio::test]
-    async fn a_confirmation_without_the_pinned_block_is_typed_for_it() {
-        let (client, rpc) = mock::client();
-        answer_removal(&rpc, &client, shallow());
-        rpc.node_error(-32000, "header not found");
-        let err = client
-            .close_maker_v1(U256::ONE, Urgency::Normal)
-            .await
-            .unwrap_err();
-        assert!(
-            matches!(
-                err,
-                PerpCityError::Contract(ContractError::BlockUnavailable { number: 100 })
-            ),
-            "{err}"
-        );
-        assert!(err.is_transient());
-        assert!(rpc.is_drained());
-
-        let (client, rpc) = mock::client();
-        answer_removal(&rpc, &client, shallow());
-        rpc.node_error(-32000, "missing trie node 0xab (path )");
-        let err = client
-            .close_maker_v1(U256::ONE, Urgency::Normal)
-            .await
-            .unwrap_err();
-        assert!(
-            matches!(
-                err,
-                PerpCityError::Contract(ContractError::StateUnavailable { number: 100 })
-            ),
-            "{err}"
-        );
-        assert!(!err.is_transient());
-        assert!(rpc.is_drained());
+    async fn a_confirmation_requires_execution_evidence() {
+        for message in [
+            "header not found",
+            "missing trie node 0xab (path )",
+            "Exceeded max limit of 100 requests per second",
+        ] {
+            let (client, rpc) = mock::client();
+            answer_removal(&rpc, &client, shallow());
+            rpc.node_error(-32000, message);
+            let err = client
+                .close_maker_v1(U256::ONE, Urgency::Normal)
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(&err, PerpCityError::Transaction(TransactionError::GasUnavailable { reason })
+                    if reason.contains(message)),
+                "{err}"
+            );
+            assert!(err.is_transient());
+            assert!(rpc.is_drained());
+        }
 
         let (client, rpc) = mock::client();
         answer_removal(&rpc, &client, shallow());
@@ -1504,17 +1488,29 @@ mod tests {
         assert_eq!(rpc.sent().len(), 1);
         assert!(rpc.is_drained());
 
-        for case in ["head read fails", "too low", "overrides refused"] {
+        for case in [
+            "head read fails",
+            "too low",
+            "empty revert",
+            "overrides refused",
+        ] {
             let (client, rpc) = mock::client();
             client.chain().set_base_fee(100);
             let (hash, tx) = taker::pending_trade(&client, stuck_removal(taker::NOW + 600)).await;
             rpc.immutables(Era::V1);
             rpc.response(&tx);
             match case {
-                "head read fails" => rpc.fails("upstream timeout"),
-                "too low" => {
+                "head read fails" => {
+                    rpc.fails("upstream timeout");
+                    rpc.no_block();
+                }
+                "too low" | "empty revert" => {
                     rpc.block(taker::HEAD, taker::NOW);
-                    rpc.reverts(&TRANSFER_FROM_FAILED);
+                    if case == "empty revert" {
+                        rpc.reverts(&[]);
+                    } else {
+                        rpc.reverts(&TRANSFER_FROM_FAILED);
+                    }
                     rpc.raw(&[]);
                 }
                 _ => {
@@ -1555,7 +1551,7 @@ mod tests {
                     .collect();
                 assert_eq!(preflights, [4, 4]);
             }
-            if case != "too low" {
+            if matches!(case, "head read fails" | "overrides refused") {
                 assert!(err.is_transient(), "{err}");
             } else {
                 assert!(

@@ -18,7 +18,6 @@ use crate::units::{LDelta, LUnits, PerpAtoms, PerpDelta, UsdcAtoms, UsdcDelta};
 use super::market::{PositionRole, validate_fee_recipient};
 use super::queries::Era;
 use super::state::PositionRow;
-use super::v1_trades::era_read_error;
 use super::{MAX_APPROVAL, PerpClient, i32_to_i24};
 
 // ── Parameters ──────────────────────────────────────────────────────
@@ -368,6 +367,7 @@ impl PerpClient {
                 self.market.perp(),
                 contract.openTaker(wire_params).calldata().clone(),
             )
+            .with_market_era(self.market.cached_era())
             .with_urgency(urgency)
             .send()
             .await?;
@@ -442,6 +442,7 @@ impl PerpClient {
 
         let receipt = self
             .tx(self.market.perp(), calldata)
+            .with_market_era(self.market.cached_era())
             .with_urgency(urgency)
             .send()
             .await?;
@@ -484,7 +485,9 @@ impl PerpClient {
         params: &ExactAdjustTakerParams,
         urgency: Urgency,
     ) -> Result<AdjustTakerResult> {
-        let receipt = self.send_adjust_taker(params, urgency).await?;
+        let receipt = self
+            .send_adjust_taker(params, urgency, self.market.cached_era())
+            .await?;
         adjust_taker_result(&receipt)
     }
 
@@ -493,6 +496,7 @@ impl PerpClient {
         &self,
         params: &ExactAdjustTakerParams,
         urgency: Urgency,
+        era: Option<Era>,
     ) -> Result<TransactionReceipt> {
         let wire_params = crate::contracts::AdjustTakerParams {
             posId: params.pos_id,
@@ -515,6 +519,7 @@ impl PerpClient {
                 self.market.perp(),
                 contract.adjustTaker(wire_params).calldata().clone(),
             )
+            .with_market_era(era)
             .with_urgency(urgency)
             .send()
             .await?;
@@ -553,7 +558,8 @@ impl PerpClient {
     /// [`ContractError::PositionNotFound`] for a closed id;
     /// [`TransactionError::TakerNotClosed`] as above.
     pub async fn close_taker(&self, pos_id: U256, urgency: Urgency) -> Result<AdjustTakerResult> {
-        if self.market.era().await? == Era::V1 {
+        let era = self.market.era().await?;
+        if era == Era::V1 {
             return Err(ContractError::UnsupportedEra {
                 era: Era::V1,
                 operation: "close_taker",
@@ -570,7 +576,7 @@ impl PerpClient {
             // long receives it and accepts any amount.
             amt1_limit: UsdcAtoms::new(if perp_delta.atoms() > 0 { u128::MAX } else { 0 }),
         };
-        let receipt = self.send_adjust_taker(&params, urgency).await?;
+        let receipt = self.send_adjust_taker(&params, urgency, Some(era)).await?;
         if !closes_taker(receipt.inner.logs(), pos_id) {
             return Err(TransactionError::TakerNotClosed {
                 tx_hash: receipt.transaction_hash,
@@ -627,6 +633,7 @@ impl PerpClient {
 
         let receipt = self
             .tx(self.market.perp(), calldata)
+            .with_market_era(self.market.cached_era())
             .with_urgency(urgency)
             .send()
             .await?;
@@ -787,7 +794,7 @@ impl PerpClient {
         urgency: Urgency,
     ) -> Result<TransactionReceipt> {
         validate_fee_recipient(fee_recipient)?;
-        let era = self.market.era().await.map_err(era_read_error)?;
+        let era = self.market.era().await?;
         let calldata = self
             .market
             .liquidation_calldata_for(era, role, pos_id, fee_recipient)
@@ -929,7 +936,8 @@ impl PerpClient {
             .into());
         }
 
-        if self.market.era().await? == Era::V1 {
+        let era = self.market.era().await?;
+        if era == Era::V1 {
             return Err(ContractError::UnsupportedEra {
                 era: Era::V1,
                 operation: "transfer_position",
@@ -953,6 +961,7 @@ impl PerpClient {
             .clone();
         let receipt = self
             .tx(self.market.perp(), calldata)
+            .with_market_era(era)
             .with_urgency(urgency)
             .send()
             .await?;
