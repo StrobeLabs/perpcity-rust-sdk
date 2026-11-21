@@ -232,8 +232,8 @@ pub enum TransactionError {
 
     /// A call sent with a fixed gas limit (the caller's, or the stuck
     /// transaction's in a replacement) failed in its preflight at that
-    /// limit, as `error_name`, and succeeds without a cap in the same
-    /// block: the limit is too low, and the failure is the gas running out
+    /// limit, as `error_name`, and succeeds without a cap. On a pinned
+    /// send both calls use the same hash. The limit is too low and gas runs out
     /// (inside a token transfer, say). The transaction was **not**
     /// broadcast. Not transient: the same limit fails again.
     #[error("the call fails as {error_name} at gas limit {gas_limit} and succeeds without a cap")]
@@ -241,13 +241,13 @@ pub enum TransactionError {
     GasLimitTooLow {
         /// The fixed gas limit.
         gas_limit: u64,
-        /// The decoded revert at that limit, or `out of gas`.
+        /// The revert name or the gas failure at the fixed limit.
         error_name: String,
     },
 
     /// Gas price or base fee is unavailable, or the preflight simulation
-    /// could not determine the outcome. A pinned simulation retries once
-    /// at a fresh head.
+    /// could not determine the outcome. A pinned send or replacement
+    /// retries once, including a failed initial head read.
     /// Transient: the transaction was neither disproved nor broadcast.
     #[error("gas unavailable: {reason}")]
     GasUnavailable {

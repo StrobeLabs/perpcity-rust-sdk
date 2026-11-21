@@ -1,13 +1,15 @@
 //! One market's reads over a [`ChainReader`], [`MarketReader`].
 
+use alloy::contract::Error as CallError;
 use alloy::primitives::{Address, Bytes, U256};
 use alloy::sol_types::SolCall;
 use serde::{Deserialize, Serialize};
 
 use crate::contracts::{Perp, PerpV022, v1};
 use crate::convert::unpack_balance_delta;
-use crate::errors::{ContractError, Result, ValidationError};
+use crate::errors::{ContractError, PerpCityError, Result, ValidationError};
 use crate::hft::gas::GasLimits;
+use crate::transport::fault::is_execution_error;
 
 use super::chain::ChainReader;
 use super::queries::Era;
@@ -50,6 +52,18 @@ impl AsRef<MarketReader> for MarketReader {
 impl AsRef<ChainReader> for MarketReader {
     fn as_ref(&self) -> &ChainReader {
         &self.chain
+    }
+}
+
+/// Only execution evidence in an identity read makes an RPC reply final.
+pub(super) fn era_read_error(error: PerpCityError) -> PerpCityError {
+    match error {
+        PerpCityError::Abi(CallError::TransportError(error))
+            if !error.as_error_resp().is_some_and(is_execution_error) =>
+        {
+            error.into()
+        }
+        error => error,
     }
 }
 
@@ -149,7 +163,7 @@ impl MarketReader {
     /// [`ContractError::UnknownBuild`] for a hook the chain's deployments
     /// do not name; the transport error from either read.
     pub async fn era(&self) -> Result<Era> {
-        Ok(self.immutables().await?.era)
+        Ok(self.immutables().await.map_err(era_read_error)?.era)
     }
 
     /// Whether this market runs `v0.2.2-upgradeable`, the build the SDK's

@@ -28,10 +28,8 @@ use crate::storage::{perp_emas_slot, stored_emas, v1_perp_emas_slot};
 use crate::transport::provider::HftTransport;
 use crate::units::UsdcAtoms;
 
-use super::queries::{Era, MarketImmutables};
-use super::transactions::{
-    classify_pinned_failure, classify_simulation_failure, preflight_request,
-};
+use super::queries::{CachedMarket, Era};
+use super::transactions::{classify_simulation_failure, preflight_request, simulation_failure};
 use super::{
     ARBITRUM_CHAIN_ID, ARBITRUM_POOL_MANAGER, ARBITRUM_SEPOLIA_CHAIN_ID,
     ARBITRUM_SEPOLIA_POOL_MANAGER, ARBITRUM_SEPOLIA_USDC, ARBITRUM_SEPOLIA_V1_PERP_FACTORY,
@@ -147,10 +145,9 @@ struct Inner {
     fees: Mutex<FeeCache>,
     /// TTL cache over on-chain reads, keyed per market and per holder.
     state: Mutex<StateCache>,
-    /// Each market's deployment-fixed pool values, read once per market
-    /// by whichever reader asks first. Immutables never go stale, so
-    /// there is no TTL.
-    immutables: Mutex<HashMap<Address, MarketImmutables>>,
+    /// Deployment-fixed values. An identity is cached before a pool ID
+    /// is needed, and an immutables read fills in the ID.
+    markets: Mutex<HashMap<Address, CachedMarket>>,
 }
 
 impl fmt::Debug for ChainReader {
@@ -214,7 +211,7 @@ impl ChainReader {
                 history,
                 fees: Mutex::new(FeeCache::new(DEFAULT_GAS_TTL_MS, DEFAULT_PRIORITY_FEE)),
                 state: Mutex::new(StateCache::new(StateCacheConfig::default())),
-                immutables: Mutex::new(HashMap::new()),
+                markets: Mutex::new(HashMap::new()),
             }),
         }
     }
@@ -277,8 +274,8 @@ impl ChainReader {
     }
 
     /// The per-market immutables, for the market reads.
-    pub(super) fn immutables_cache(&self) -> &Mutex<HashMap<Address, MarketImmutables>> {
-        &self.inner.immutables
+    pub(super) fn market_cache(&self) -> &Mutex<HashMap<Address, CachedMarket>> {
+        &self.inner.markets
     }
 
     // ── Gas ──────────────────────────────────────────────────────────
@@ -294,7 +291,10 @@ impl ChainReader {
             .inner
             .provider
             .get_block_by_number(BlockNumberOrTag::Latest)
-            .await?
+            .await
+            .map_err(|error| TransactionError::GasUnavailable {
+                reason: format!("could not read the head: {error}"),
+            })?
             .ok_or_else(|| TransactionError::GasUnavailable {
                 reason: "latest block not found".into(),
             })?;
@@ -690,7 +690,7 @@ impl ChainReader {
         let tx = preflight_request(from, to, calldata, value, gas_limit);
         self.call_in(tx, None)
             .await
-            .map_err(|e| classify_simulation_failure(&e, "eth_call"))
+            .map_err(|e| simulation_failure(&e, "eth_call", gas_limit.is_some()).0)
     }
 
     /// The block after the head, read now, for a `v1.0.0` trade's
@@ -699,13 +699,16 @@ impl ChainReader {
     /// # Errors
     ///
     /// [`TransactionError::GasUnavailable`] (transient) when the endpoint
-    /// returns no head block, or the read's failure.
-    pub(super) async fn next_block(&self) -> Result<NextBlock> {
+    /// returns no head block or the read fails.
+    pub(super) async fn next_block(&self) -> std::result::Result<NextBlock, TransactionError> {
         let head = self
             .inner
             .provider
             .get_block_by_number(BlockNumberOrTag::Latest)
-            .await?
+            .await
+            .map_err(|error| TransactionError::GasUnavailable {
+                reason: format!("could not read the head: {error}"),
+            })?
             .ok_or_else(|| TransactionError::GasUnavailable {
                 reason: "the endpoint returned no head block".into(),
             })?;
@@ -754,8 +757,8 @@ impl ChainReader {
         .map(drop)
     }
 
-    /// Preflight a fixed limit. With a pin, check a possible gas
-    /// shortfall with an uncapped call at the same hash.
+    /// Preflight a fixed limit, then check a possible gas shortfall without
+    /// the cap. Both calls use the same hash on the pinned path.
     pub(super) async fn preflight_at_limit(
         &self,
         from: Address,
@@ -763,45 +766,47 @@ impl ChainReader {
         calldata: &Bytes,
         value: u128,
         gas_limit: u64,
-        next: Option<&NextBlock>,
+        pinned: bool,
     ) -> std::result::Result<(), TransactionError> {
-        let Some(next) = next else {
-            return self
-                .preflight_call(from, to, calldata, value, Some(gas_limit))
-                .await;
-        };
         let tx = |limit| preflight_request(from, to, calldata, value, limit);
-        self.in_next_block(next, |next| async move {
-            let capped = match self.call_in(tx(Some(gas_limit)), Some(next)).await {
+        let simulate = |next| async move {
+            let capped = match self.call_in(tx(Some(gas_limit)), next).await {
                 Ok(()) => return Ok(()),
                 Err(error) => error,
             };
-            let (failure, cap_failure) = classify_pinned_failure(&capped, "eth_call", true);
+            let (failure, cap_failure) = simulation_failure(&capped, "eth_call", true);
             let Some(error_name) = cap_failure else {
                 return Err(failure);
             };
-            match self.call_in(tx(None), Some(next)).await {
+            match self.call_in(tx(None), next).await {
                 Ok(()) => Err(TransactionError::GasLimitTooLow {
                     gas_limit,
                     error_name,
                 }),
-                Err(error) => Err(classify_pinned_failure(&error, "eth_call", false).0),
+                Err(error) => Err(classify_simulation_failure(&error, "eth_call")),
             }
-        })
-        .await
+        };
+        if pinned {
+            self.in_next_block(|next| simulate(Some(next))).await
+        } else {
+            simulate(None).await
+        }
     }
 
-    /// Retry an inconclusive simulation once with a fresh head pin.
+    /// Share one retry between reading the head and simulating at its hash.
     pub(super) async fn in_next_block<T, F, Fut>(
         &self,
-        next: &NextBlock,
         simulate: F,
     ) -> std::result::Result<T, TransactionError>
     where
         F: Fn(NextBlock) -> Fut,
         Fut: Future<Output = std::result::Result<T, TransactionError>>,
     {
-        match simulate(*next).await {
+        let first = match self.next_block().await {
+            Ok(head) => simulate(head).await,
+            Err(error) => Err(error),
+        };
+        match first {
             Err(TransactionError::GasUnavailable { reason }) => {
                 let head =
                     self.next_block()

@@ -290,6 +290,14 @@ pub(super) struct MarketImmutables {
     pub(super) era: Era,
 }
 
+/// A known market, with its pool ID once the full immutables are read.
+#[derive(Clone, Copy)]
+pub(super) struct CachedMarket {
+    era: Era,
+    tick_spacing: i32,
+    pool_id: Option<B256>,
+}
+
 /// Convert an `int88` per-day funding rate (scaled by 1e18) to a human-readable
 /// fraction. An 88-bit signed value always fits in `i128`.
 fn funding_per_day_to_f64(rate: alloy::primitives::Signed<88, 2>) -> f64 {
@@ -316,56 +324,70 @@ impl MarketReader {
     /// [`ContractError::UnknownBuild`] when the hook is none the chain's
     /// deployments name; it reads nothing more and caches nothing.
     pub(super) async fn immutables(&self) -> Result<MarketImmutables> {
-        {
-            let cached = self.chain.immutables_cache().lock().unwrap();
-            if let Some(immutables) = cached.get(&self.perp) {
-                return Ok(*immutables);
+        let identity = self.identity_at(BlockId::latest()).await?;
+        let pool_id = match identity.pool_id {
+            Some(pool_id) => pool_id,
+            None => {
+                let provider = self.chain.provider();
+                let pool_id = match identity.era {
+                    Era::Legacy | Era::Upgradeable => {
+                        Perp::new(self.perp, provider).POOL_ID().call().await?
+                    }
+                    Era::V1 => v1::Perp::new(self.perp, provider).poolId().call().await?,
+                };
+                if identity.tick_spacing <= 0 {
+                    return Err(ValidationError::InvalidConfig {
+                        reason: format!("invalid tick spacing {}", identity.tick_spacing),
+                    }
+                    .into());
+                }
+                self.chain.market_cache().lock().unwrap().insert(
+                    self.perp,
+                    CachedMarket {
+                        pool_id: Some(pool_id),
+                        ..identity
+                    },
+                );
+                pool_id
             }
-        }
-
-        let provider = self.chain.provider();
-        let pool_key = self.pool_key_at(BlockId::latest()).await?;
-        let era = self.era_of_hook(pool_key.hooks)?;
-        let pool_id = match era {
-            Era::Legacy | Era::Upgradeable => {
-                Perp::new(self.perp, provider).POOL_ID().call().await?
-            }
-            Era::V1 => v1::Perp::new(self.perp, provider).poolId().call().await?,
         };
-        let tick_spacing = i24_to_i32(pool_key.tickSpacing);
-        if tick_spacing <= 0 {
-            return Err(ValidationError::InvalidConfig {
-                reason: format!("invalid tick spacing {tick_spacing}"),
-            }
-            .into());
-        }
-        let immutables = MarketImmutables {
+        Ok(MarketImmutables {
             pool_id,
-            tick_spacing,
-            era,
-        };
-
-        self.chain
-            .immutables_cache()
-            .lock()
-            .unwrap()
-            .insert(self.perp, immutables);
-        Ok(immutables)
+            tick_spacing: identity.tick_spacing,
+            era: identity.era,
+        })
     }
 
-    /// For a shared-selector send, only the pool key is needed on a cache miss.
+    /// A known era needs no pool ID. Cache the identity from a cold read
+    /// so the next send or immutables read can use it without a pool-key call.
     pub(super) async fn era_at(&self, block: BlockId) -> Result<Era> {
-        let cached = self
-            .chain
-            .immutables_cache()
+        Ok(self.identity_at(block).await?.era)
+    }
+
+    pub(super) fn cached_era(&self) -> Option<Era> {
+        self.chain
+            .market_cache()
             .lock()
             .unwrap()
             .get(&self.perp)
-            .copied();
-        if let Some(immutables) = cached {
-            return Ok(immutables.era);
+            .map(|market| market.era)
+    }
+
+    async fn identity_at(&self, block: BlockId) -> Result<CachedMarket> {
+        if let Some(market) = self.chain.market_cache().lock().unwrap().get(&self.perp) {
+            return Ok(*market);
         }
-        self.era_of_hook(self.pool_key_at(block).await?.hooks)
+        let pool_key = self.pool_key_at(block).await?;
+        let market = CachedMarket {
+            era: self.era_of_hook(pool_key.hooks)?,
+            tick_spacing: i24_to_i32(pool_key.tickSpacing),
+            pool_id: None,
+        };
+        if market.tick_spacing <= 0 {
+            return Ok(market);
+        }
+        let mut cache = self.chain.market_cache().lock().unwrap();
+        Ok(*cache.entry(self.perp).or_insert(market))
     }
 
     async fn pool_key_at(&self, block: BlockId) -> Result<PoolKey> {

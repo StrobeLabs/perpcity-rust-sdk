@@ -16,6 +16,8 @@ use alloy::rpc::json_rpc::ErrorPayload;
 use alloy::transports::{RpcError, TransportError, TransportErrorKind};
 use serde_json::Value;
 
+use crate::errors::decode::extract_revert_data;
+
 /// What a failed request is evidence about.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Fault {
@@ -88,6 +90,10 @@ pub(crate) fn is_rate_limit(payload: &ErrorPayload) -> bool {
     if is_execution_error(payload) {
         return false;
     }
+    is_rate_limit_reply(payload)
+}
+
+fn is_rate_limit_reply(payload: &ErrorPayload) -> bool {
     let message = payload.message.to_ascii_lowercase();
     if payload.code == -32_005
         && ["block range", "query returned", "log response size"]
@@ -102,7 +108,9 @@ pub(crate) fn is_rate_limit(payload: &ErrorPayload) -> bool {
     let capacity_limit = message.contains("capacity exceeded")
         || message.contains("requests limited to")
         || message.contains("compute units per second capacity")
-        || message.contains("concurrent requests capacity")
+        || message.contains("concurrent requests")
+        || message.contains("daily request count exceeded")
+        || (message.contains("exceeded") && message.contains("requests per second"))
         || (payload.code == -32_005
             && ["limit exceeded", "exceeded the limit", "quota"]
                 .iter()
@@ -120,115 +128,148 @@ pub(crate) fn is_rate_limit(payload: &ErrorPayload) -> bool {
         .is_retry_err()
 }
 
-/// Parts of an error answer's message that report an execution error of
-/// the call: a revert, in the wordings of geth, Nitro, Hardhat and
-/// Erigon, or an exceptional halt.
-const EXECUTION_WORDINGS: [&str; 7] = [
-    "revert",
-    "vm exception",
-    "vm execution error",
-    "out of gas",
-    "invalid opcode",
-    "invalid jump",
-    "stack limit",
-];
-
-/// Whether a JSON-RPC error reports an execution error of the call: the
-/// execution error code `3`, a wording in [`EXECUTION_WORDINGS`], or
-/// revert data ([`execution_revert`]). The contract or the EVM declined the
-/// call, so the error is the request's, whatever else its message says.
-pub(crate) fn is_execution_error(payload: &ErrorPayload) -> bool {
-    let message = payload.message.to_ascii_lowercase();
-    is_execution_revert(payload) || EXECUTION_WORDINGS.iter().any(|w| message.contains(w))
+/// Evidence that a call ran or was stopped by the EVM.
+pub(crate) enum ExecutionEvidence {
+    Revert(Option<String>),
+    OutOfGas,
+    Halt,
 }
 
-/// Revert evidence in the RPC message and its error envelopes. Only
-/// follow `data` and `originalError`; request fields can contain calldata.
-pub(crate) fn execution_revert(resp: &ErrorPayload) -> (bool, Option<String>) {
+pub(crate) fn is_execution_error(payload: &ErrorPayload) -> bool {
+    execution_evidence(payload).is_some()
+}
+
+/// Read execution evidence from the answer and recognized error envelopes.
+pub(crate) fn execution_evidence(resp: &ErrorPayload) -> Option<ExecutionEvidence> {
     fn message_reverts(message: &str) -> bool {
         let message = message.to_ascii_lowercase();
         [
             "execution reverted",
+            "transaction reverted without a reason string",
             "reverted with reason string",
+            "reverted with custom error",
+            "reverted with panic code",
+            "vm exception while processing transaction: revert",
             "reverted 0x",
         ]
         .iter()
         .any(|marker| message.contains(marker))
     }
 
-    fn read_hex<'a>(text: &'a str, revert: &mut bool, data: &mut Option<&'a str>) {
-        let text = text.trim();
-        let hex = text
-            .get(..9)
-            .filter(|prefix| prefix.eq_ignore_ascii_case("reverted "))
-            .map_or(text, |_| text[9..].trim_start());
-        *revert |= hex != text && hex.starts_with("0x");
-        if let Some(digits) = hex.strip_prefix("0x")
-            && !digits.is_empty()
-            && digits.len().is_multiple_of(2)
-            && digits.bytes().all(|digit| digit.is_ascii_hexdigit())
-        {
-            *revert = true;
-            if digits.len() >= 8 && data.is_none_or(|old| hex.len() > old.len()) {
-                *data = Some(hex);
-            }
+    fn message_evidence(message: &str) -> Option<ExecutionEvidence> {
+        let message = message.to_ascii_lowercase();
+        if message.contains("out of gas") || message.contains("gas required exceeds") {
+            return Some(ExecutionEvidence::OutOfGas);
         }
+        [
+            "vm exception",
+            "vm execution error",
+            "invalid opcode",
+            "invalid jump",
+            "stack underflow",
+            "stack limit",
+            "write protection",
+            "return data out of bounds",
+        ]
+        .iter()
+        .any(|wording| message.contains(wording))
+        .then_some(ExecutionEvidence::Halt)
     }
 
-    fn read_message<'a>(message: &'a str, revert: &mut bool, data: &mut Option<&'a str>) {
-        if message_reverts(message) {
-            *revert = true;
-            read_hex(message, revert, data);
-        }
+    #[derive(Default)]
+    struct Evidence {
+        revert: bool,
+        data: Option<String>,
+        halt: Option<ExecutionEvidence>,
     }
 
-    fn visit<'a>(value: &'a Value, bare_data: bool, revert: &mut bool, data: &mut Option<&'a str>) {
-        match value {
-            Value::String(text) => read_hex(text, revert, data),
-            Value::Array(items) => {
-                for item in items {
-                    visit(item, false, revert, data);
-                }
-            }
-            Value::Object(fields)
-                if !["to", "from", "input", "gas", "value", "method", "params"]
-                    .iter()
-                    .any(|key| fields.contains_key(*key)) =>
+    impl Evidence {
+        fn read_hex(&mut self, text: &str, explicit_revert: bool) {
+            let text = text.trim();
+            let hex = text
+                .get(..9)
+                .filter(|prefix| prefix.eq_ignore_ascii_case("reverted "))
+                .map_or(text, |_| text[9..].trim_start());
+            let explicit_revert = explicit_revert || hex != text;
+            if let Some(digits) = hex.strip_prefix("0x")
+                && (explicit_revert || (digits.len() >= 8 && digits.len() != 64))
+                && digits.len().is_multiple_of(2)
+                && digits.bytes().all(|digit| digit.is_ascii_hexdigit())
             {
-                let code = fields.get("code").and_then(Value::as_i64);
-                let message = fields.get("message").and_then(Value::as_str);
-                *revert |= code == Some(3);
-                if let Some(message) = message {
-                    read_message(message, revert, data);
-                }
-                if let Some(value) = fields.get("data")
-                    && (bare_data || code.is_some() || message.is_some() || value.is_array())
+                self.revert = true;
+                if !digits.is_empty() && self.data.as_ref().is_none_or(|old| hex.len() > old.len())
                 {
-                    visit(value, false, revert, data);
-                }
-                if let Some(value) = fields.get("originalError") {
-                    visit(value, true, revert, data);
+                    self.data = Some(hex.to_owned());
                 }
             }
-            _ => {}
+        }
+
+        fn read_error(&mut self, code: Option<i64>, message: Option<&str>) -> bool {
+            let explicit_revert = code == Some(3) || message.is_some_and(message_reverts);
+            if explicit_revert {
+                self.revert = true;
+                if let Some(message) = message {
+                    self.read_hex(extract_revert_data(message).unwrap_or(message), true);
+                }
+            } else if self.halt.is_none() {
+                self.halt = message.and_then(message_evidence);
+            }
+            explicit_revert
+        }
+
+        fn visit(&mut self, value: &Value, bare_data: bool, explicit_revert: bool) {
+            match value {
+                Value::String(text) => self.read_hex(text, explicit_revert),
+                Value::Array(items) if !items.iter().any(request_shaped) => {
+                    for item in items {
+                        self.visit(item, false, explicit_revert);
+                    }
+                }
+                Value::Object(fields) if !request_shaped(value) => {
+                    let code = fields.get("code").and_then(Value::as_i64);
+                    let message = fields.get("message").and_then(Value::as_str);
+                    let explicit_revert = self.read_error(code, message) || explicit_revert;
+                    if let Some(value) = fields.get("data")
+                        && (bare_data || code.is_some() || message.is_some() || value.is_array())
+                    {
+                        self.visit(value, false, explicit_revert);
+                    }
+                    if let Some(value) = fields.get("originalError") {
+                        self.visit(value, true, explicit_revert);
+                    }
+                }
+                _ => {}
+            }
         }
     }
 
-    let mut revert = resp.code == 3;
-    let mut data = None;
-    let value = resp
+    fn request_shaped(value: &Value) -> bool {
+        value.as_object().is_some_and(|fields| {
+            ["to", "from", "input", "gas", "value", "method", "params"]
+                .iter()
+                .any(|key| fields.contains_key(*key))
+        })
+    }
+
+    let mut evidence = Evidence::default();
+    let explicit_revert = evidence.read_error(Some(resp.code), Some(&resp.message));
+    if let Some(value) = resp
         .data
         .as_ref()
-        .and_then(|data| serde_json::from_str(data.get()).ok());
-    read_message(&resp.message, &mut revert, &mut data);
-    if let Some(value) = &value {
-        visit(value, false, &mut revert, &mut data);
+        .and_then(|data| serde_json::from_str(data.get()).ok())
+        && (explicit_revert
+            || !matches!(value, Value::String(_))
+            || !(lacks_block(&resp.message)
+                || state_pruned(&resp.message)
+                || is_rate_limit_reply(resp)))
+    {
+        evidence.visit(&value, false, explicit_revert);
     }
-    (revert, data.map(str::to_owned))
-}
-
-pub(crate) fn is_execution_revert(resp: &ErrorPayload) -> bool {
-    execution_revert(resp).0
+    if evidence.revert {
+        Some(ExecutionEvidence::Revert(evidence.data))
+    } else {
+        evidence.halt
+    }
 }
 
 /// Parts of a node's answer to `eth_sendRawTransaction` that reject the
@@ -287,54 +328,6 @@ pub(crate) fn lacks_block(message: &str) -> bool {
         || message.contains("hash is not currently canonical")
         || message.contains("unknown block")
         || message.contains("block not found")
-}
-
-/// Parts of an error answer's message that report no answer from the
-/// node behind the endpoint: a timeout or a cancelled request, a gateway
-/// with no node to ask, a node behind the block asked for, or a quota.
-const NO_ANSWER_WORDINGS: &[&str] = &[
-    "timeout",
-    "timed out",
-    "deadline exceeded",
-    "context canceled",
-    "unexpected eof",
-    "no backend",
-    "no server available",
-    "unavailable",
-    "bad gateway",
-    "internal server error",
-    "upstream",
-    "overloaded",
-    "under too much load",
-    "connection",
-    "network error",
-    "block not found",
-    "failed to get block",
-    "quota",
-];
-
-/// Whether a failed read got no answer from the node.
-///
-/// An error answer is the node's answer first when it reports an
-/// execution error ([`is_execution_error`]: the code `3`, an execution
-/// wording, revert data) or a method the endpoint does not serve
-/// (`-32601`), whatever else its message says. Else it is no
-/// answer when it reports one: a wording in [`NO_ANSWER_WORDINGS`], a
-/// bare `EOF`, a rate limit ([`Fault::Endpoint`]) or a bare internal
-/// error (`-32603`), with or without empty revert data (`0x`). Any other
-/// failure is no answer when it is the endpoint's ([`Fault::Endpoint`]).
-pub(crate) fn is_no_answer(error: &TransportError) -> bool {
-    let Some(resp) = error.as_error_resp() else {
-        return fault(error) == Fault::Endpoint;
-    };
-    if resp.code == -32_601 || is_execution_error(resp) {
-        return false;
-    }
-    let message = resp.message.to_ascii_lowercase();
-    message.trim() == "eof"
-        || NO_ANSWER_WORDINGS.iter().any(|w| message.contains(w))
-        || fault(error) == Fault::Endpoint
-        || matches!(resp.code, -32_603 | 408 | 500..=599)
 }
 
 #[cfg(test)]
@@ -411,53 +404,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn busy_nodes_give_no_simulation_answer() {
-        for (code, message) in [
-            (
-                429,
-                "Your app has exceeded its compute units per second capacity",
-            ),
-            (-32_016, "Rate limit exceeded"),
-            (-32_000, "Capacity Exceeded"),
-            (-32_007, "Per-second request limit reached"),
-            (-32_008, "Per-minute request limit reached"),
-            (-32_011, "Method rate limit reached"),
-            (-32_012, "Credits limited to 6000/sec"),
-            (-32_005, "Exceeded project rate limit"),
-            (-32_005, "Too Many Requests"),
-            (-32_005, "Limit Exceeded"),
-            (-32_000, "context deadline exceeded"),
-            (-32_000, "Request timed out"),
-            (-32_000, "read: connection reset by peer"),
-            (-32_000, "No server available"),
-            (-32_000, "The node is under too much load"),
-            (500, "Internal Server Error"),
-            (502, "Bad Gateway"),
-            (503, "Service Unavailable"),
-            (504, "Gateway Timeout"),
-            (-32_603, "Internal error"),
-        ] {
-            assert!(is_no_answer(&rpc_error(code, message)), "{code} {message}");
-        }
-        for status in [408, 429, 500, 502, 503, 504] {
-            assert!(is_no_answer(&http(status)), "HTTP {status}");
-        }
-        for (code, message) in [
-            (-32_005, "Query returned more than 10000 results"),
-            (-32_005, "Block range limit exceeded"),
-            (-32_005, "Log response size limit exceeded"),
-            (-32_602, "Invalid params"),
-            (-32_601, "Method unavailable"),
-            (3, "execution reverted: Too Many Requests"),
-            (-32_000, "execution reverted: gateway timeout"),
-        ] {
-            let error = rpc_error(code, message);
-            assert_eq!(fault(&error), Fault::Request, "{code} {message}");
-            assert!(!is_no_answer(&error), "{code} {message}");
-        }
-    }
-
     /// A contract that reverts with the words "rate limit" declined the
     /// call; the endpoint did not limit it. Code 3, a revert wording and
     /// revert data each make the error the request's, before the rate-limit
@@ -477,11 +423,19 @@ mod tests {
             rpc_error(-32_000, "execution reverted: rate limit exceeded"),
             rpc_error(429, "VM Exception while processing transaction: revert"),
             rpc_error(-32_015, "VM execution error: too many requests"),
-            with_data(-32_000, "rate limit", r#""0x08c379a0""#),
+            with_data(
+                -32_000,
+                "rate limit",
+                r#"{"originalError":{"code":3,"data":"0x08c379a0"}}"#,
+            ),
         ] {
             assert_eq!(fault(&revert), Fault::Request, "{revert}");
         }
         assert_eq!(fault(&rpc_error(-32_000, "rate limit")), Fault::Endpoint);
+        assert_eq!(
+            fault(&with_data(-32_000, "rate limit", r#""0x08c379a0""#)),
+            Fault::Endpoint
+        );
         assert_eq!(
             fault(&with_data(-32_000, "rate limit", r#"{"see":"https://x"}"#)),
             Fault::Endpoint

@@ -27,7 +27,7 @@ use crate::contracts::{
     v1,
 };
 use crate::convert::unpack_balance_delta;
-use crate::errors::{ContractError, PerpCityError, Result, TransactionError, ValidationError};
+use crate::errors::{ContractError, PerpCityError, Result, ValidationError};
 use crate::events::{CumulativesInfo, V1Cumulatives};
 use crate::math::BlockContext;
 use crate::math::capacity::{Capacity, MarketCapacity};
@@ -35,7 +35,7 @@ use crate::math::pricing::{BeaconIndex, Emas, Mark, PricePair, calculate_emas};
 use crate::math::range::{MakerBand, TickRange};
 use crate::math::swap::{PoolSnapshot, TakerFeeRates, TickLiquidity, active_liquidity};
 use crate::storage::{v4_tick_bitmap_slot, v4_tick_slot};
-use crate::transport::fault::{is_execution_error, lacks_block, state_pruned};
+use crate::transport::fault::{lacks_block, state_pruned};
 use crate::units::{
     Funding, FundingRate, LDelta, LUnits, PerSide, PerpAtoms, PerpDelta, Price, Ratio, SqrtPrice,
     UsdcAtoms, UsdcDelta, UtilizationRate,
@@ -503,13 +503,8 @@ impl StateAt {
     ///
     /// # Errors
     ///
-    /// The contract's revert as [`TransactionError::SimulationReverted`],
-    /// and any other execution error ([`is_execution_error`]) as
-    /// [`classify_simulation_failure`] sorts it, whatever its message says;
-    /// else a node without this block or its state as
-    /// [`ContractError::BlockUnavailable`] (transient) or
-    /// [`ContractError::StateUnavailable`], as a pinned read types them;
-    /// any other failure as [`classify_simulation_failure`] sorts it.
+    /// Execution failures and node refusals follow the shared simulation
+    /// policy. An inconclusive reply is transient `GasUnavailable`.
     pub(super) async fn simulate_from(&self, from: Address, calldata: &Bytes) -> Result<()> {
         let tx = preflight_request(from, self.market.perp, calldata, 0, None);
         self.market
@@ -518,21 +513,7 @@ impl StateAt {
             .call(tx)
             .block(self.id())
             .await
-            .map_err(|e| -> PerpCityError {
-                let failure = classify_simulation_failure(&e, "eth_call");
-                if matches!(failure, TransactionError::SimulationReverted { .. })
-                    || e.as_error_resp().is_some_and(is_execution_error)
-                {
-                    return failure.into();
-                }
-                match e
-                    .as_error_resp()
-                    .and_then(|payload| pinned_block_failure(&payload.message, self.block.number))
-                {
-                    Some(block) => block.into(),
-                    None => failure.into(),
-                }
-            })?;
+            .map_err(|e| classify_simulation_failure(&e, "eth_call"))?;
         Ok(())
     }
 

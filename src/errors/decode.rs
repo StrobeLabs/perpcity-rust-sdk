@@ -322,22 +322,7 @@ pub(crate) fn parse_selector(hex_data: &str) -> Option<[u8; 4]> {
 /// Alloy uses for RPC error code 3 responses). Returns
 /// `(error_name, raw_selector, full_revert_data)`.
 pub fn try_extract_revert(error: &str) -> Option<(String, [u8; 4], Option<String>)> {
-    // Alloy format: `execution reverted, data: "0x...."`
-    let data = if let Some(idx) = error.find("data: \"0x") {
-        let start = idx + "data: \"".len();
-        let end = error[start..].find('"').map(|i| start + i)?;
-        &error[start..end]
-    } else {
-        let idx = error.find("data: 0x")?;
-        // Some RPC providers omit the quotes
-        let start = idx + "data: ".len();
-        let end = error[start..]
-            .find(|c: char| !c.is_ascii_hexdigit() && c != 'x')
-            .map(|i| start + i)
-            .unwrap_or(error.len());
-        &error[start..end]
-    };
-
+    let data = extract_revert_data(error)?;
     if data.len() < 10 {
         return None;
     }
@@ -350,6 +335,24 @@ pub fn try_extract_revert(error: &str) -> Option<(String, [u8; 4], Option<String
     };
 
     Some((name, selector, full_data))
+}
+
+pub(crate) fn extract_revert_data(error: &str) -> Option<&str> {
+    // Alloy format: `execution reverted, data: "0x...."`
+    Some(if let Some(idx) = error.find("data: \"0x") {
+        let start = idx + "data: \"".len();
+        let end = error[start..].find('"').map(|i| start + i)?;
+        &error[start..end]
+    } else {
+        let idx = error.find("data: 0x")?;
+        // Some RPC providers omit the quotes
+        let start = idx + "data: ".len();
+        let end = error[start..]
+            .find(|c: char| !c.is_ascii_hexdigit() && c != 'x')
+            .map(|i| start + i)
+            .unwrap_or(error.len());
+        &error[start..end]
+    })
 }
 
 #[cfg(test)]
