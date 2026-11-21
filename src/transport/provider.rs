@@ -10,17 +10,23 @@
 //!
 //! - **Per-endpoint circuit breaker**: automatically routes around dead endpoints
 //! - **Strategy-based selection**: round-robin, latency-based, or hedged reads
-//! - **Read/write classification**: a read is retried when the endpoint
-//!   failed to answer, never when it declined the request. An
-//!   `eth_sendRawTransaction` is retried as the same signed bytes after an
-//!   error answer and after no answer. The bytes are one transaction, so a
-//!   resend cannot make a second, but the outcome of an earlier attempt is
-//!   unknown, so a caller reconciling a send should trust the receipt
-//!   rather than the error
+//! - **Read/write classification**: only a method on an allowlist of
+//!   reads without side effects (`eth_call`, `eth_getLogs`,
+//!   `eth_blockNumber` and the other reads the SDK sends) is retried or
+//!   hedged.
+//!   A read is retried when the endpoint failed to answer, never when it
+//!   declined the request. Every other method, a new or unknown one
+//!   included, is a write. Only a single `eth_sendRawTransaction` is
+//!   retried, as the same signed bytes, after an error answer and after
+//!   no answer: the bytes are one transaction, so a resend cannot make a
+//!   second, but the outcome of an earlier attempt is unknown, so a
+//!   caller reconciling a send should trust the receipt rather than the
+//!   error
 //!   ([`TransactionError::tx_hash`](crate::errors::TransactionError::tx_hash)).
-//!   A request that holds an `eth_sendTransaction`, which the node signs
-//!   with a nonce it picks, is sent once: a lost reply is a transport
-//!   error, and the outcome is unknown
+//!   Every other write (`eth_sendTransaction`, a synchronous send, an
+//!   unknown method, a batch that holds a write) is sent once, and any
+//!   failure of it, an error answer included, is a transport error: the
+//!   outcome is unknown
 //! - **Hedged requests**: fan out reads to N endpoints, take the fastest response;
 //!   losing requests are **cancelled** via `JoinSet::abort_all` to save RPC rate limits
 //! - **Lock-free endpoint selection**: read path uses atomic mirrors, zero mutex
@@ -62,7 +68,7 @@ use alloy::transports::{TransportError, TransportErrorKind, TransportFut};
 use tower::Service;
 
 use super::config::{Strategy, TransportConfig};
-use super::fault::{Fault, fault, is_rejection};
+use super::fault::{Fault, fault, is_rate_limit, is_rejection};
 use super::health::{CircuitState, EndpointHealth, EndpointStatus, Reserved};
 
 // ── Packed atomic state constants ────────────────────────────────────
@@ -610,12 +616,43 @@ impl HftTransport {
 
 // ── JSON-RPC method classification ──────────────────────────────────
 
-/// Whether `req` holds a write: a call that sends a transaction.
+/// The methods this transport retries and hedges: reads without side
+/// effects, the SDK's own and the common ones next to them. Every other
+/// method, a new or unknown one included, is a write.
+pub(crate) const READ_METHODS: &[&str] = &[
+    "eth_blobBaseFee",
+    "eth_blockNumber",
+    "eth_call",
+    "eth_chainId",
+    "eth_estimateGas",
+    "eth_feeHistory",
+    "eth_gasPrice",
+    "eth_getBalance",
+    "eth_getBlockByHash",
+    "eth_getBlockByNumber",
+    "eth_getCode",
+    "eth_getLogs",
+    "eth_getProof",
+    "eth_getStorageAt",
+    "eth_getTransactionByHash",
+    "eth_getTransactionCount",
+    "eth_getTransactionReceipt",
+    "eth_maxPriorityFeePerGas",
+    "eth_syncing",
+    "net_version",
+    "web3_clientVersion",
+];
+
+/// The one write that is sent again, as the same signed bytes, and whose
+/// error answer is the node's rejection.
+const RAW_SEND: &str = "eth_sendRawTransaction";
+
+/// Whether `req` holds a write: any call to a method that is not in
+/// [`READ_METHODS`].
 ///
 /// A write is never hedged. Only a single `eth_sendRawTransaction` is
 /// sent again, as the same signed bytes; every other request that holds
-/// a write is sent once ([`sent_once`]). All other methods are reads,
-/// safe to retry and hedge.
+/// a write is sent once ([`sent_once`]).
 fn is_write_method(req: &RequestPacket) -> bool {
     match req {
         RequestPacket::Single(call) => is_write_method_name(call.method()),
@@ -624,26 +661,58 @@ fn is_write_method(req: &RequestPacket) -> bool {
 }
 
 fn is_write_method_name(method: &str) -> bool {
-    method == "eth_sendRawTransaction" || node_signs(method)
-}
-
-/// Whether `method` asks a node to sign and send a transaction. The node
-/// picks the nonce, so a resend after a lost reply can be signed with the
-/// next nonce as a second transaction.
-fn node_signs(method: &str) -> bool {
-    matches!(method, "eth_sendTransaction" | "personal_sendTransaction")
+    !READ_METHODS.contains(&method)
 }
 
 /// Whether `req` is a write that is sent once, whatever its answer and
-/// whatever [`WriteRetryConfig`](super::config::WriteRetryConfig) says: a
-/// call the node signs ([`node_signs`]), or a batch that holds any write.
-/// The SDK sends neither; it signs locally and sends one
-/// `eth_sendRawTransaction`.
+/// whatever [`WriteRetryConfig`](super::config::WriteRetryConfig) says:
+/// every write but a single `eth_sendRawTransaction`. A call the node
+/// signs picks its nonce at the node, so a resend after a lost reply can
+/// be a second transaction, and an unknown method may do the same.
 fn sent_once(req: &RequestPacket) -> bool {
     match req {
-        RequestPacket::Single(call) => node_signs(call.method()),
+        RequestPacket::Single(call) => {
+            call.method() != RAW_SEND && is_write_method_name(call.method())
+        }
         RequestPacket::Batch(calls) => calls.iter().any(|c| is_write_method_name(c.method())),
     }
+}
+
+/// Whether `method` answers with a transaction hash, so that any other
+/// success is no answer to it. A synchronous send
+/// (`eth_sendTransactionSync`, `eth_sendRawTransactionSync`) answers with
+/// a receipt and an unknown method with anything, so their success passes
+/// as it came.
+fn answers_with_hash(method: &str) -> bool {
+    matches!(
+        method,
+        RAW_SEND | "eth_sendTransaction" | "personal_sendTransaction"
+    )
+}
+
+/// The error that refuses the write `req` before it is sent, when its
+/// answer could not be told apart from another: a call with a null id,
+/// which alloy reads the same as an answer with no id, or a batch whose
+/// ids repeat. `None` when every call can be answered by its own id.
+fn uncorrelated_write(req: &RequestPacket) -> Option<TransportError> {
+    let calls: &[SerializedRequest] = match req {
+        RequestPacket::Single(call) => std::slice::from_ref(call),
+        RequestPacket::Batch(calls) => calls,
+    };
+    let reason = if calls.iter().any(|call| call.id().is_none()) {
+        "a request that holds a write has a null id"
+    } else if calls
+        .iter()
+        .enumerate()
+        .any(|(i, call)| calls[..i].iter().any(|earlier| earlier.id() == call.id()))
+    {
+        "a batch that holds a write repeats a request id"
+    } else {
+        return None;
+    };
+    Some(TransportError::local_usage_str(&format!(
+        "{reason}, so its answer could not be told apart: it was not sent"
+    )))
 }
 
 /// The transport error that replaces `response` to the write `req` when
@@ -652,22 +721,29 @@ fn sent_once(req: &RequestPacket) -> bool {
 ///
 /// A single write is answered only by one response with its own id,
 /// compared as typed (the number `0` is not the string `"0"`), on the
-/// error path and the success path alike, and a success only by a
-/// transaction hash. A batch that holds a write is answered only by a
-/// batch with one success for each call, each by its id, and a
-/// transaction hash for each write: the transport never reports an error
-/// inside such a batch as the node's rejection of a write, so any error
-/// in it, a lone error object for the whole batch included, is a
-/// transport error too.
+/// error path and the success path alike, and a success of a method that
+/// answers with a hash ([`answers_with_hash`]) only by a transaction hash.
+/// Only a single `eth_sendRawTransaction` is answered by an error: an
+/// error answer to any other write is a transport error. A batch that
+/// holds a write is answered only by a batch with one success for each
+/// call, each by its id, and a transaction hash for each write that
+/// answers with one: the transport never reports an error inside such a
+/// batch as the node's rejection of a write, so any error in it, a lone
+/// error object for the whole batch included, is a transport error too.
 fn unanswered_write(req: &RequestPacket, response: &ResponsePacket) -> Option<TransportError> {
     let reason = match (req, response) {
         (RequestPacket::Single(call), ResponsePacket::Single(answer))
             if answer.id == *call.id() =>
         {
-            if is_hash_or_error(&answer.payload) {
-                return None;
+            match &answer.payload {
+                ResponsePayload::Failure(error) if call.method() != RAW_SEND => format!(
+                    "the write was answered {} {:?}, and only an eth_sendRawTransaction is \
+                     rejected by an error answer",
+                    error.code, error.message
+                ),
+                payload if is_answer_to(call.method(), payload) => return None,
+                _ => "the write was answered with a result that is no transaction hash".to_owned(),
             }
-            "the write was answered with a result that is no transaction hash".to_owned()
         }
         (RequestPacket::Single(call), _) => {
             format!("the write was not answered under its id {}", call.id())
@@ -686,9 +762,7 @@ fn unanswered_write(req: &RequestPacket, response: &ResponsePacket) -> Option<Tr
                     .to_owned()
             } else if answers.iter().any(|answer| {
                 calls.iter().any(|call| {
-                    call.id() == &answer.id
-                        && is_write_method_name(call.method())
-                        && !is_hash_or_error(&answer.payload)
+                    call.id() == &answer.id && !is_answer_to(call.method(), &answer.payload)
                 })
             }) {
                 "a write in a batch was answered with a result that is no transaction hash"
@@ -703,13 +777,17 @@ fn unanswered_write(req: &RequestPacket, response: &ResponsePacket) -> Option<Tr
     )))
 }
 
-/// Whether `payload` is an error, or a success whose result reads as a
-/// transaction hash, so that the caller decodes it as one and never
-/// mistakes an error object in its place for the node's error answer.
-fn is_hash_or_error(payload: &ResponsePayload) -> bool {
+/// Whether `payload` answers a call to `method`: an error, or a success
+/// whose result reads as a transaction hash when `method` answers with
+/// one ([`answers_with_hash`]), so that the caller decodes it as one and
+/// never mistakes an error object in its place for the node's error
+/// answer.
+fn is_answer_to(method: &str, payload: &ResponsePayload) -> bool {
     match payload {
-        ResponsePayload::Success(result) => serde_json::from_str::<B256>(result.get()).is_ok(),
-        ResponsePayload::Failure(_) => true,
+        ResponsePayload::Success(result) if answers_with_hash(method) => {
+            serde_json::from_str::<B256>(result.get()).is_ok()
+        }
+        ResponsePayload::Success(_) | ResponsePayload::Failure(_) => true,
     }
 }
 
@@ -799,24 +877,30 @@ impl Router {
 
     /// Route a request through the best endpoint, with retry.
     ///
-    /// Reads retry on any transport or RPC error. A single
-    /// `eth_sendRawTransaction` retries on an error answer (e.g. `-32003
-    /// insufficient funds` from a stale read replica) and on no answer,
-    /// always as the same signed bytes; its last explicit rejection
-    /// ([`is_rejection`]) is returned as the node gave it only when no
-    /// earlier attempt may have left the transaction with a node, and
-    /// comes back as a transport error otherwise. Every other write (a
-    /// call the node signs, or a batch that holds a write) is sent once
-    /// ([`sent_once`]). A write's response that is no answer to it
-    /// ([`unanswered_write`]: another id, another shape, a success that is
-    /// no transaction hash, or for a batch any error) is a transport
-    /// error, the write's outcome unknown, and so is a body that is no
-    /// JSON-RPC response ([`undecoded_write`]).
+    /// Only a read on [`READ_METHODS`] retries, on any transport or RPC
+    /// error that is not the endpoint declining it, and is hedged. A
+    /// single `eth_sendRawTransaction` retries on an error answer (e.g.
+    /// `-32003 insufficient funds` from a stale read replica) and on no
+    /// answer, always as the same signed bytes; its last explicit
+    /// rejection ([`is_rejection`]) is returned as the node gave it only
+    /// when no earlier attempt may have left the transaction with a node,
+    /// and comes back as a transport error otherwise. Every other write
+    /// (any method not on the list, or a batch that holds one) is sent
+    /// once ([`sent_once`]). A write with a null or repeated request id is
+    /// refused before it is sent ([`uncorrelated_write`]). A write's
+    /// response that is no answer to it ([`unanswered_write`]: another id,
+    /// another shape, a success that is no transaction hash, an error to
+    /// any write but a single raw send, or for a batch any error) is a
+    /// transport error, the write's outcome unknown, and so is a body that
+    /// is no JSON-RPC response ([`undecoded_write`]).
     async fn route_request(
         self: &Arc<Self>,
         req: RequestPacket,
     ) -> Result<ResponsePacket, TransportError> {
         let is_write = is_write_method(&req);
+        if is_write && let Some(error) = uncorrelated_write(&req) {
+            return Err(error);
+        }
         let (max_attempts, base_delay) = if sent_once(&req) {
             (1, std::time::Duration::ZERO)
         } else if is_write {
@@ -858,10 +942,23 @@ impl Router {
             let start = Instant::now();
             let mut transport = pool.transport(idx);
 
+            // Whose fault a write's error answer was, when it is turned
+            // into a transport error: the endpoint answered, so only a
+            // rate limit counts against its health.
+            let mut answered = None;
             // Apply tower timeout
             let result = match tokio::time::timeout(timeout, transport.call(req.clone())).await {
                 Ok(Ok(response)) if is_write => match unanswered_write(&req, &response) {
-                    Some(error) => Ok(Err(error)),
+                    Some(error) => {
+                        answered = response.iter_errors().next().map(|e| {
+                            if is_rate_limit(e) {
+                                Fault::Endpoint
+                            } else {
+                                Fault::Request
+                            }
+                        });
+                        Ok(Err(error))
+                    }
                     None => Ok(Ok(response)),
                 },
                 Ok(Err(error)) if is_write => Ok(Err(undecoded_write(error))),
@@ -910,7 +1007,11 @@ impl Router {
                     }
                 }
                 Ok(Err(e)) => {
-                    pool.record_error(idx, now_ms, &e);
+                    match answered {
+                        Some(Fault::Request) => pool.endpoints[idx].record_answered(),
+                        Some(Fault::Endpoint) => pool.record_failure(idx, now_ms),
+                        None => pool.record_error(idx, now_ms, &e),
+                    }
                     permit.resolved();
                     tracing::warn!(
                         attempt = attempt + 1,
@@ -1108,11 +1209,11 @@ impl Service<RequestPacket> for HftTransport {
 
 #[cfg(test)]
 mod tests {
-    use alloy::primitives::{Address, Bytes};
+    use alloy::primitives::{Address, Bytes, U256};
     use serde_json::{Value, json};
 
     use super::*;
-    use crate::transport::config::{TransportConfig, WriteRetryConfig};
+    use crate::transport::config::{Strategy, TransportConfig, WriteRetryConfig};
     use crate::transport::scripted::{self, Answer};
 
     /// Helper to create a SerializedRequest for testing.
@@ -1136,10 +1237,24 @@ mod tests {
         assert!(is_write_method(&write));
         assert!(!sent_once(&write));
 
-        for method in ["eth_sendTransaction", "personal_sendTransaction"] {
-            let signed = RequestPacket::Single(make_request(method, 3));
-            assert!(is_write_method(&signed), "{method}");
-            assert!(sent_once(&signed), "{method}");
+        for method in [
+            "eth_sendTransaction",
+            "personal_sendTransaction",
+            "eth_sendTransactionSync",
+            "eth_sendRawTransactionSync",
+            "eth_sendRawTransactionConditional",
+            "eth_subscribe",
+            "eth_futureMethod",
+            "",
+        ] {
+            let other = RequestPacket::Single(make_request(method, 3));
+            assert!(is_write_method(&other), "{method}");
+            assert!(sent_once(&other), "{method}");
+        }
+        for method in READ_METHODS {
+            let read = RequestPacket::Single(make_request(method, 4));
+            assert!(!is_write_method(&read), "{method}");
+            assert!(!sent_once(&read), "{method}");
         }
     }
 
@@ -1158,6 +1273,13 @@ mod tests {
         ]);
         assert!(!is_write_method(&reads));
         assert!(!sent_once(&reads));
+
+        let unknown = RequestPacket::Batch(vec![
+            make_request("eth_getBalance", 1),
+            make_request("eth_futureMethod", 2),
+        ]);
+        assert!(is_write_method(&unknown));
+        assert!(sent_once(&unknown));
     }
 
     #[test]
@@ -1497,6 +1619,10 @@ mod tests {
         let signed = single("eth_sendTransaction", Id::Number(0));
         let signed_text = single("eth_sendTransaction", Id::String("0".into()));
         let personal = single("personal_sendTransaction", Id::Number(0));
+        let sync = single("eth_sendTransactionSync", Id::Number(0));
+        let raw_sync = single("eth_sendRawTransactionSync", Id::Number(0));
+        let unknown = single("eth_futureMethod", Id::Number(0));
+        let receipt = r#"{"transactionHash":"0x01","status":"0x1"}"#;
         let writes: RequestPacket = [
             make_request("eth_sendRawTransaction", 1),
             make_request("eth_sendRawTransaction", 2),
@@ -1530,7 +1656,19 @@ mod tests {
             (&signed, ok(r#""0""#), false),
             (&signed_text, ok(r#""0""#), true),
             (&signed_text, ok("0"), false),
-            (&signed, err("0"), true),
+            (&signed, err("0"), false),
+            (&sync, ok_with("0", receipt), true),
+            (&sync, ok("0"), true),
+            (&sync, ok_with("0", U), true),
+            (&sync, ok(r#""0""#), false),
+            (&sync, err("0"), false),
+            (&sync, err("null"), false),
+            (&raw_sync, ok_with("0", receipt), true),
+            (&raw_sync, err("0"), false),
+            (&raw_sync, ok_with("1", receipt), false),
+            (&unknown, ok_with("0", "null"), true),
+            (&unknown, err("0"), false),
+            (&unknown, ok_with("1", "null"), false),
             (&personal, ok(r#""0""#), false),
             (&personal, ok("0"), true),
             (&writes, format!("[{},{}]", ok("2"), ok("1")), true),
@@ -1664,28 +1802,38 @@ mod tests {
         }
     }
 
-    /// A call the node signs (`eth_sendTransaction`,
-    /// `personal_sendTransaction`) picks its nonce at the node, so it is
-    /// sent once: after an HTTP 503 or no answer, a resend could be signed
-    /// with the next nonce as a second trade. A lost reply is a transport
-    /// error; an error answer under the call's id is the node's; a success
-    /// under the id written as a string (`"0"` for `0`) is no answer.
+    /// Every write but a single `eth_sendRawTransaction` is sent once: a
+    /// call the node signs (`eth_sendTransaction`,
+    /// `personal_sendTransaction`, and their synchronous forms) picks its
+    /// nonce at the node, so after an HTTP 503 or no answer a resend could
+    /// be signed with the next nonce as a second trade, and an unknown
+    /// method may do as much. A lost reply, an error answer under the
+    /// call's own id and a success under the id written as a string (`"0"`
+    /// for `0`) are all transport errors, the outcome unknown; a success
+    /// under the id passes as it came.
     #[tokio::test]
-    async fn a_node_signed_send_is_sent_once() {
+    async fn every_write_but_a_raw_send_is_sent_once() {
         const U: &str = "replacement transaction underpriced";
-        for method in ["eth_sendTransaction", "personal_sendTransaction"] {
+        for method in [
+            "eth_sendTransaction",
+            "personal_sendTransaction",
+            "eth_sendTransactionSync",
+            "eth_sendRawTransactionSync",
+            "eth_sendRawTransactionConditional",
+            "eth_futureMethod",
+        ] {
             for first in ["HTTP 503", "no answer", U, "ok", "text id"] {
                 let requests = Arc::new(AtomicUsize::new(0));
                 let counter = Arc::clone(&requests);
                 let url = scripted::endpoint(move |asked, _| {
                     assert_eq!(asked, method);
                     if counter.fetch_add(1, Ordering::SeqCst) > 0 {
-                        return Answer::Result(json!(B256::repeat_byte(0xcc)));
+                        return Answer::Error(-32_000, U.into());
                     }
                     match first {
                         "HTTP 503" => Answer::Status(503),
                         "no answer" => Answer::Silence,
-                        "ok" => Answer::Result(json!(B256::repeat_byte(0xbb))),
+                        "ok" => Answer::Result(json!({ "status": "0x1" })),
                         "text id" => Answer::ResultUnderTextId(json!(B256::repeat_byte(0xbb))),
                         answer => Answer::Error(-32_000, answer.into()),
                     }
@@ -1694,26 +1842,230 @@ mod tests {
                 let call =
                     json!({ "from": Address::repeat_byte(0x11), "to": Address::repeat_byte(0x22) });
                 let sent = write_client(&url, 3)
-                    .request::<_, B256>(method, (call,))
+                    .request::<_, Value>(method, (call,))
                     .await;
                 let case = format!("{method}, {first}");
                 assert_eq!(requests.load(Ordering::SeqCst), 1, "{case}: {sent:?}");
-                if first == "ok" {
-                    assert_eq!(sent.unwrap(), B256::repeat_byte(0xbb), "{case}");
+                if first == "ok" && !answers_with_hash(method) {
+                    assert_eq!(sent.unwrap(), json!({ "status": "0x1" }), "{case}");
                     continue;
                 }
                 let error = sent.expect_err("one attempt, no success");
-                assert_eq!(
-                    error.as_error_resp().is_some_and(is_rejection),
-                    first == U,
-                    "{case}: {error}"
-                );
-                assert_eq!(
-                    error.as_error_resp().is_some(),
-                    first == U,
-                    "{case}: {error}"
-                );
+                assert!(error.as_error_resp().is_none(), "{case}: {error}");
             }
+        }
+    }
+
+    /// `send_transaction_sync` sends `eth_sendTransactionSync`, which the
+    /// node signs: after a lost reply it is not sent again, so a node's
+    /// rejection of a second attempt can never come back under another
+    /// id as the answer; the caller gets a transport error.
+    #[tokio::test]
+    async fn a_lost_sync_send_is_not_sent_again() {
+        let requests = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&requests);
+        let url = scripted::endpoint(move |method, _| {
+            assert_eq!(method, "eth_sendTransactionSync");
+            if counter.fetch_add(1, Ordering::SeqCst) == 0 {
+                Answer::Silence
+            } else {
+                Answer::Error(-32_000, "replacement transaction underpriced".into())
+            }
+        })
+        .await;
+        let tx = alloy::rpc::types::TransactionRequest::default()
+            .from(Address::repeat_byte(0x11))
+            .to(Address::repeat_byte(0x22));
+        let error = write_provider(&url, 3)
+            .send_transaction_sync(tx)
+            .await
+            .expect_err("the reply was lost");
+        assert_eq!(requests.load(Ordering::SeqCst), 1, "{error}");
+        assert!(error.as_error_resp().is_none(), "{error}");
+    }
+
+    /// A write whose answer could not be told apart is refused before it
+    /// is sent: a null id, which alloy reads the same as an answer with no
+    /// id, and a batch that holds a write and repeats an id. A read with a
+    /// null id is sent as before.
+    #[tokio::test]
+    async fn a_write_with_a_null_or_repeated_id_is_not_sent() {
+        use alloy::rpc::json_rpc::Id;
+        let requests = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&requests);
+        let url = scripted::endpoint(move |_, _| {
+            counter.fetch_add(1, Ordering::SeqCst);
+            Answer::Result(json!(B256::repeat_byte(0xbb)))
+        })
+        .await;
+        let transport = HftTransport::new(
+            TransportConfig::builder()
+                .shared_endpoint(&url)
+                .build()
+                .unwrap(),
+        )
+        .unwrap();
+        let refused: [RequestPacket; 5] = [
+            RequestPacket::Single(make_request_with("eth_sendRawTransaction", Id::None)),
+            RequestPacket::Single(make_request_with("eth_sendTransactionSync", Id::None)),
+            RequestPacket::Single(make_request_with("eth_futureMethod", Id::None)),
+            RequestPacket::Batch(vec![
+                make_request("eth_sendRawTransaction", 1),
+                make_request("eth_sendRawTransaction", 1),
+            ]),
+            RequestPacket::Batch(vec![
+                make_request("eth_chainId", 1),
+                make_request_with("eth_sendRawTransaction", Id::None),
+            ]),
+        ];
+        for req in refused {
+            let error = transport
+                .router
+                .route_request(req.clone())
+                .await
+                .expect_err("refused");
+            assert!(
+                error.to_string().contains("it was not sent"),
+                "{req:?}: {error}"
+            );
+        }
+        assert_eq!(requests.load(Ordering::SeqCst), 0);
+
+        let reads = RequestPacket::Batch(vec![
+            make_request("eth_chainId", 1),
+            make_request("eth_chainId", 1),
+        ]);
+        let read = RequestPacket::Single(make_request_with("eth_chainId", Id::None));
+        for req in [reads, read] {
+            let _ = transport.router.route_request(req).await;
+        }
+        // One count for each call: two in the batch, and the single read.
+        assert_eq!(requests.load(Ordering::SeqCst), 3);
+    }
+
+    /// With hedged reads, an allowlisted read goes to every endpoint, and
+    /// a write, a synchronous send and an unknown method included, goes to
+    /// one of them once, so no second node can submit a second
+    /// transaction.
+    #[tokio::test]
+    async fn only_an_allowlisted_read_is_hedged() {
+        for (method, expected) in [
+            ("eth_blockNumber", 2),
+            ("eth_call", 2),
+            ("eth_sendTransactionSync", 1),
+            ("eth_sendRawTransactionSync", 1),
+            ("eth_sendRawTransaction", 1),
+            ("eth_futureMethod", 1),
+        ] {
+            let requests = Arc::new(AtomicUsize::new(0));
+            let mut builder = TransportConfig::builder()
+                .strategy(Strategy::Hedged { fan_out: 2 })
+                .request_timeout(std::time::Duration::from_millis(300))
+                .write_retry(WriteRetryConfig {
+                    max_retries: 0,
+                    base_delay: std::time::Duration::from_millis(1),
+                });
+            for _ in 0..2 {
+                let counter = Arc::clone(&requests);
+                let url = scripted::endpoint(move |_, _| {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                    Answer::Silence
+                })
+                .await;
+                builder = builder.shared_endpoint(url);
+            }
+            let client = alloy::rpc::client::RpcClient::new(
+                alloy::transports::BoxTransport::new(
+                    HftTransport::new(builder.build().unwrap()).unwrap(),
+                ),
+                false,
+            );
+            let error = client
+                .request::<_, Value>(method, (json!({}),))
+                .await
+                .expect_err("no endpoint answers");
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            assert_eq!(
+                requests.load(Ordering::SeqCst),
+                expected,
+                "{method}: {error}"
+            );
+            assert!(error.as_error_resp().is_none(), "{method}: {error}");
+        }
+    }
+
+    /// Every read the SDK sends through alloy is on the allowlist, so it
+    /// is retried after an endpoint failed to answer, and the allowlist
+    /// holds nothing else: an HTTP 503 and then an error answer is two
+    /// requests for each, and the methods asked are exactly
+    /// [`READ_METHODS`].
+    #[tokio::test]
+    async fn every_read_the_sdk_sends_is_allowlisted_and_retried() {
+        use alloy::eips::BlockNumberOrTag;
+        use alloy::rpc::types::{Filter, TransactionRequest};
+        let asked = Arc::new(Mutex::new(Vec::<String>::new()));
+        let log = Arc::clone(&asked);
+        let url = scripted::endpoint(move |method, _| {
+            let mut log = log.lock().unwrap();
+            let first = !log.iter().any(|m| m == method);
+            log.push(method.to_owned());
+            if first {
+                Answer::Status(503)
+            } else {
+                Answer::Error(-32_000, "no".into())
+            }
+        })
+        .await;
+        let provider = alloy::providers::RootProvider::<alloy::network::Ethereum>::new(
+            alloy::rpc::client::RpcClient::new(
+                alloy::transports::BoxTransport::new(
+                    HftTransport::new(
+                        TransportConfig::builder()
+                            .shared_endpoint(url)
+                            .read_retry(crate::transport::config::ReadRetryConfig {
+                                max_retries: 2,
+                                base_delay: std::time::Duration::from_millis(1),
+                            })
+                            .build()
+                            .unwrap(),
+                    )
+                    .unwrap(),
+                ),
+                false,
+            ),
+        );
+        let (who, hash) = (Address::repeat_byte(0x11), B256::repeat_byte(0xbb));
+        let tx = TransactionRequest::default().from(who).to(who);
+        let _ = provider.get_blob_base_fee().await;
+        let _ = provider.get_block_number().await;
+        let _ = provider.call(tx.clone()).await;
+        let _ = provider.get_chain_id().await;
+        let _ = provider.estimate_gas(tx).await;
+        let _ = provider
+            .get_fee_history(4, BlockNumberOrTag::Latest, &[50.0])
+            .await;
+        let _ = provider.get_gas_price().await;
+        let _ = provider.get_balance(who).await;
+        let _ = provider.get_block_by_hash(hash).await;
+        let _ = provider.get_block_by_number(BlockNumberOrTag::Latest).await;
+        let _ = provider.get_code_at(who).await;
+        let _ = provider.get_logs(&Filter::new().address(who)).await;
+        let _ = provider.get_proof(who, vec![hash]).await;
+        let _ = provider.get_storage_at(who, U256::ZERO).await;
+        let _ = provider.get_transaction_by_hash(hash).await;
+        let _ = provider.get_transaction_count(who).await;
+        let _ = provider.get_transaction_receipt(hash).await;
+        let _ = provider.get_max_priority_fee_per_gas().await;
+        let _ = provider.syncing().await;
+        let _ = provider.get_net_version().await;
+        let _ = provider.get_client_version().await;
+        let asked = asked.lock().unwrap().clone();
+        let mut methods: Vec<&str> = asked.iter().map(String::as_str).collect();
+        methods.dedup();
+        assert_eq!(methods, READ_METHODS, "{asked:?}");
+        for method in READ_METHODS {
+            let times = asked.iter().filter(|m| m == method).count();
+            assert_eq!(times, 2, "{method} was sent {times} times");
         }
     }
 
