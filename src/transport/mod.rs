@@ -21,7 +21,7 @@
 //!                        │ tower::Service<RequestPacket>
 //! ┌──────────────────────▼──────────────────────────┐
 //! │               HftTransport                      │
-//! │  • Read/write classification                    │
+//! │  • Reads, single raw sends; all else refused    │
 //! │  • Retry for reads (with backoff)               │
 //! │  • Hedged requests (fan out, take fastest)      │
 //! │  • Endpoint selection (round-robin / latency)   │

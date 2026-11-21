@@ -26,9 +26,6 @@ pub(crate) enum Answer {
     /// own answers: one error object for a whole batch, an answer under
     /// another id.
     Body(Value),
-    /// A JSON-RPC result under the call's id as the whole response body:
-    /// for a batch, one object in place of the array.
-    Alone(Value),
 }
 
 /// The answer to a request, from its method and params.
@@ -106,10 +103,6 @@ fn answer(script: &Script, call: &Value) -> Result<Value, (u16, String)> {
         Answer::Status(status) => Err((status, String::new())),
         Answer::Silence => Err((0, String::new())),
         Answer::Body(body) => Err((200, body.to_string())),
-        Answer::Alone(result) => Err((
-            200,
-            json!({ "jsonrpc": "2.0", "id": id, "result": result }).to_string(),
-        )),
     }
 }
 
