@@ -15,8 +15,6 @@ pub(crate) enum Answer {
     Result(Value),
     /// A JSON-RPC error with this code and message.
     Error(i64, String),
-    /// A JSON-RPC error with this code, message and data.
-    ErrorData(i64, String, Value),
     /// An HTTP error status with an empty body.
     Status(u16),
     /// Nothing, until the caller times out.
@@ -111,9 +109,6 @@ fn render(answer: Answer, id: Value, late: &mut bool) -> Result<Value, (u16, Str
             };
             Ok(json!({ "jsonrpc": "2.0", "id": id, "result": result }))
         }
-        Answer::ErrorData(code, message, data) => Ok(
-            json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message, "data": data } }),
-        ),
         Answer::Status(status) => Err((status, String::new())),
         Answer::Silence => Err((0, String::new())),
         Answer::Body(body) => Err((200, body.to_string())),

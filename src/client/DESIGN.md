@@ -342,7 +342,7 @@ views it batches.
 
 Readers share the chain's per-market immutables cache. Concurrent cold reads can each fetch the same values.
 
-A send uses one simulation (`eth_estimateGas`, or `eth_call` for an explicit or cached limit, plus `eth_estimateGas` when a capped `eth_call` fails), no preparation requests, and one broadcast. A `v1.0.0` trade adds one `eth_getBlockByNumber` for the head its simulation pins; the transport repeats a simulation on another endpoint when one refuses the block overrides (once more without them, to the same endpoint) or lacks the head, and the client reads the head once more when none has it. A fixed limit's preflight that reverts adds one uncapped `eth_call`.
+A send uses one simulation (`eth_estimateGas`, or `eth_call` for an explicit or cached limit, plus `eth_estimateGas` when a capped `eth_call` fails), no preparation requests, and one broadcast. A `v1.0.0` trade adds one `eth_getBlockByNumber` for the head its simulation pins, through the normal read routing; when the node refuses the block overrides or lacks the head, the client reads the head once more and simulates once more. A fixed limit's preflight that reverts adds one uncapped `eth_call` in the same block.
 Receipt polling starts after 2 s and repeats every 2 s for up to 30 s. A sequence resync adds one `eth_getTransactionCount` before the next send.
 
 Two costs remain: `margin_ratios` makes three requests and could use one multicall. `get_positions_by_owner` scans every minted position.

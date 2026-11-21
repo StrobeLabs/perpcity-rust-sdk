@@ -181,20 +181,6 @@ two disagree. So a call whose body holds another method or id, compared
 as typed, or is no single call, is refused before endpoint selection
 with `RpcError::LocalUsageError`, and nothing is sent.
 
-A simulation with block overrides (an `eth_call` or `eth_estimateGas`
-with a fourth param, which a `v1.0.0` trade's gas needs) goes to one
-endpoint at a time and is never hedged, so an answer is known to be that
-endpoint's. An endpoint that answers `-32602` gets the same call without
-the overrides, at the same pinned block; only a result or a revert with
-data to that is evidence the overrides were refused, and records the
-endpoint as refusing them for that method for ten minutes, at error level
-in the log. A timeout, a rate limit or another refusal records nothing.
-An endpoint that lacks the pinned block (`unsupported block number`,
-`header not found`) is answered by another endpoint, as a lagging replica
-is. Either way the simulation goes to the next endpoint not yet asked and
-not recorded; with none left, the caller gets the last such answer, or a
-transport error when every endpoint was recorded before the request.
-
 The WebSocket manager is the subscription side of the same idea: one
 socket, many subscriptions, reconnect with capped backoff, and the
 callers re-subscribe.
@@ -282,9 +268,6 @@ trade is a setting a caller chose.
   one request's permit; **recovery cycle**: the group of probes whose
   slots name the same cycle. A late failure from a request sent while closed
   holds no slot, ends the current half-open cycle and costs one more recovery window.
-- **Simulation**: an `eth_call` or `eth_estimateGas` with block
-  overrides. **Override refusal**: an endpoint's recorded refusal of
-  them for one method, which expires.
 
 ## Accepted structure
 
@@ -311,9 +294,7 @@ trade is a setting a caller chose.
 - **Two edges in health accounting and selection** are known to be
   slightly wrong (SDK #108); neither has bitten.
 - **Whether an endpoint serves `eth_getProof` is learned by failing**,
-  once per process, rather than recorded (SDK #116). Block overrides are
-  recorded per endpoint and method; `eth_getProof` could use the same
-  record.
+  once per process, rather than recorded (SDK #116).
 - **The module doc still compares itself to the Zig SDK.** The comparison
   was true and is now history; the design should stand on its own
   reasons.
