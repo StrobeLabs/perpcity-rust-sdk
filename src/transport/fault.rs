@@ -184,23 +184,19 @@ pub(crate) fn execution_evidence(resp: &ErrorPayload) -> Option<ExecutionEvidenc
     }
 
     impl Evidence {
-        fn read_hex(&mut self, text: &str, explicit_revert: bool) {
+        fn read_hex(&mut self, text: &str) {
             let text = text.trim();
             let hex = text
                 .get(..9)
                 .filter(|prefix| prefix.eq_ignore_ascii_case("reverted "))
                 .map_or(text, |_| text[9..].trim_start());
-            let explicit_revert = explicit_revert || hex != text;
             if let Some(digits) = hex.strip_prefix("0x")
-                && (explicit_revert || (digits.len() >= 8 && digits.len() != 64))
+                && !digits.is_empty()
                 && digits.len().is_multiple_of(2)
                 && digits.bytes().all(|digit| digit.is_ascii_hexdigit())
+                && self.data.as_ref().is_none_or(|old| hex.len() > old.len())
             {
-                self.revert = true;
-                if !digits.is_empty() && self.data.as_ref().is_none_or(|old| hex.len() > old.len())
-                {
-                    self.data = Some(hex.to_owned());
-                }
+                self.data = Some(hex.to_owned());
             }
         }
 
@@ -209,7 +205,7 @@ pub(crate) fn execution_evidence(resp: &ErrorPayload) -> Option<ExecutionEvidenc
             if explicit_revert {
                 self.revert = true;
                 if let Some(message) = message {
-                    self.read_hex(extract_revert_data(message).unwrap_or(message), true);
+                    self.read_hex(extract_revert_data(message).unwrap_or(message));
                 }
             } else if self.halt.is_none() {
                 self.halt = message.and_then(message_evidence);
@@ -217,25 +213,32 @@ pub(crate) fn execution_evidence(resp: &ErrorPayload) -> Option<ExecutionEvidenc
             explicit_revert
         }
 
-        fn visit(&mut self, value: &Value, bare_data: bool, explicit_revert: bool) {
+        fn read_data(&mut self, value: &Value, explicit_revert: bool) {
+            if let Value::String(text) = value {
+                if explicit_revert {
+                    self.read_hex(text);
+                }
+            } else {
+                self.visit(value);
+            }
+        }
+
+        fn visit(&mut self, value: &Value) {
             match value {
-                Value::String(text) => self.read_hex(text, explicit_revert),
                 Value::Array(items) if !items.iter().any(request_shaped) => {
                     for item in items {
-                        self.visit(item, false, explicit_revert);
+                        self.visit(item);
                     }
                 }
                 Value::Object(fields) if !request_shaped(value) => {
                     let code = fields.get("code").and_then(Value::as_i64);
                     let message = fields.get("message").and_then(Value::as_str);
-                    let explicit_revert = self.read_error(code, message) || explicit_revert;
-                    if let Some(value) = fields.get("data")
-                        && (bare_data || code.is_some() || message.is_some() || value.is_array())
-                    {
-                        self.visit(value, false, explicit_revert);
+                    let explicit_revert = self.read_error(code, message);
+                    if let Some(value) = fields.get("data") {
+                        self.read_data(value, explicit_revert);
                     }
                     if let Some(value) = fields.get("originalError") {
-                        self.visit(value, true, explicit_revert);
+                        self.visit(value);
                     }
                 }
                 _ => {}
@@ -257,13 +260,8 @@ pub(crate) fn execution_evidence(resp: &ErrorPayload) -> Option<ExecutionEvidenc
         .data
         .as_ref()
         .and_then(|data| serde_json::from_str(data.get()).ok())
-        && (explicit_revert
-            || !matches!(value, Value::String(_))
-            || !(lacks_block(&resp.message)
-                || state_pruned(&resp.message)
-                || is_rate_limit_reply(resp)))
     {
-        evidence.visit(&value, false, explicit_revert);
+        evidence.read_data(&value, explicit_revert);
     }
     if evidence.revert {
         Some(ExecutionEvidence::Revert(evidence.data))

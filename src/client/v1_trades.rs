@@ -878,7 +878,7 @@ mod tests {
         V1TakerReplacement, adjust_call, check_reduce_only, close_call, is_clear_refusal,
         open_call, replacement_calldata, replacement_fees,
     };
-    use crate::client::market::era_read_error;
+    use crate::client::market::market_read_error;
     use crate::client::queries::Era;
     use crate::client::trades::{ExactAdjustTakerParams, ExactOpenTakerParams};
     use crate::client::{
@@ -2215,7 +2215,7 @@ mod tests {
             ("no backends", true),
             ("revert", false),
             ("code 3", false),
-            ("internal error with revert data", false),
+            ("internal error with nested revert", false),
             ("method not found", true),
             ("request quota", true),
         ] {
@@ -2228,8 +2228,12 @@ mod tests {
                     "revert" => rpc.fails("execution reverted"),
                     "code 3" => rpc.reverts(&[]),
                     "no backends" => rpc.answers_error(-32_011, "no backends available", None),
-                    "internal error with revert data" => {
-                        rpc.answers_error(-32_603, "internal error", Some(r#""0xbcffc83f""#));
+                    "internal error with nested revert" => {
+                        rpc.answers_error(
+                            -32_603,
+                            "internal error",
+                            Some(r#"{"originalError":{"code":3,"data":"0xbcffc83f"}}"#),
+                        );
                     }
                     "request quota" => {
                         rpc.node_error(-32_005, "Exceeded max limit of 100 requests per second");
@@ -2315,7 +2319,7 @@ mod tests {
                 false,
             ),
             (-32_015, "VM execution error.", Some(r#""revert""#), false),
-            (-32_603, "internal error", Some(r#""0xABCDEF01""#), false),
+            (-32_603, "internal error", Some(r#""0xABCDEF01""#), true),
             (-32_603, "internal error", Some(r#""0x08c379a0f""#), true),
             (-32_603, "internal error", Some(r#""0xabc""#), true),
             (-32_603, "internal error", Some(r#""0xABCDEF""#), true),
@@ -2361,19 +2365,19 @@ mod tests {
                 -32_000,
                 "upstream timeout",
                 Some(r#"{"data":"0x","originalError":{"data":"0xbcffc83f"}}"#),
-                false,
+                true,
             ),
             (
                 -32_000,
                 "upstream timeout",
                 Some(r#"["0x","0xbcffc83f"]"#),
-                false,
+                true,
             ),
             (
                 -32_000,
                 "upstream timeout",
                 Some(r#"{"originalError":"0xbcffc83f"}"#),
-                false,
+                true,
             ),
             (429, "Too Many Requests", Some(EMPTY), true),
             (-32_016, "over rate limit", Some(EMPTY), true),
@@ -2419,9 +2423,9 @@ mod tests {
             (-32_603, "execution reverted", None, false),
             (3, "execution reverted", None, false),
             (3, "execution reverted", Some(REVERT), false),
-            (-32_603, "internal error", Some(REVERT), false),
+            (-32_603, "internal error", Some(REVERT), true),
             (-32_603, "internal error", Some(NESTED), false),
-            (-32_000, "upstream timeout", Some(REVERT), false),
+            (-32_000, "upstream timeout", Some(REVERT), true),
             (
                 -32_011,
                 "no backends available for method",
@@ -2442,12 +2446,12 @@ mod tests {
                 message: message.to_owned().into(),
                 data: data.map(|data| RawValue::from_string(data.to_owned()).unwrap()),
             });
-            let error = era_read_error(CallError::TransportError(error).into());
+            let error = market_read_error(CallError::TransportError(error).into());
             assert_eq!(error.is_transient(), no_answer, "{code} {message} {data:?}");
         }
         for status in [400, 503] {
             let error = TransportErrorKind::http_error(status, String::new());
-            assert!(era_read_error(CallError::TransportError(error).into()).is_transient());
+            assert!(market_read_error(CallError::TransportError(error).into()).is_transient());
         }
     }
 

@@ -102,26 +102,14 @@ rotation until a probe succeeds.
    per endpoint:   ┌────────┐ failures ≥ threshold ┌──────┐ cooldown ┌──────────┐
                    │ CLOSED │─────────────────────►│ OPEN │─────────►│ HALF-OPEN│
                    └────────┘                      └──────┘          └────┬─────┘
-                        ▲   probe succeeds                                │ one probe
+                        ▲   probe succeeds                                │ probe slots
                         └─────────────────────────────────────────────────┘ (ProbePermit)
                                             probe fails → OPEN again
 ```
 
-The top is the decision every request goes through, and the two columns
-differ in exactly one way: what "try again" is allowed to mean. A read is
-stateless at the node, so it can be sent again to anyone, hedged across
-several, and retried with backoff when the endpoint failed to answer.
-A write is a signed transaction, so "again" can only ever be the same
-bytes, which the node treats as idempotent, and never a fresh
-transaction; and when the first attempt got no answer, its outcome is
-unknown, which is why the send path reports the hash and the caller
-reconciles by receipt. The middle distinction, declined versus no answer,
-is the one that keeps scans from tripping breakers: an endpoint that says
-no to a too-wide log request has done its job, and that answer goes back
-to the caller with the endpoint's health untouched. The bottom is the
-per-endpoint breaker: it takes an endpoint out of rotation on repeated
-failures, lets one probe through after the cooldown, and closes again
-only when the probe succeeds.
+An endpoint's breaker opens after repeated failures. After cooldown, the
+probe limit bounds in-flight recovery requests. A successful probe closes
+the circuit. A failure opens it again.
 
 A read retries with backoff when the endpoint failed to answer, never
 when it declined. A single `eth_sendRawTransaction` retries after an
@@ -166,13 +154,17 @@ alloy decodes as an error response, included), and a raw send's success
 that is no transaction hash. A read's answer that answers each call by
 its id counts against the endpoint when any answer in it is a rate
 limit, once for the whole batch; any other answer, an error under the
-call's own id included, is the endpoint working. An execution error
-(code `3`, a revert wording, revert data) is never a rate limit, even
-when the contract reverts with the words "rate limit". Capacity wording is matched without regard to case. An explicit block range or log size rejection keeps its request classification under `-32005`. The shared execution evidence comes from code 3, recognized VM messages or revert data in error envelopes. A nested error message can supply a revert selector. Request objects and arrays that contain them are skipped. An unmarked hex value must supply at least a selector and cannot be 32 bytes. An unmarked top-level string in a missing-block, unavailable-state or rate-limit reply is ignored. A read that got
-no answer under its id is asked again within the read retries, because
-alloy takes a single answer without reading its id and would hand the
-caller another call's result; a hedged read waits for an answer under
-its id from another endpoint.
+call's own id included, is the endpoint working. A contract can revert
+with the words "rate limit". Execution evidence takes precedence over
+the rate-limit wording. Capacity wording is matched without regard to
+case. An explicit block range or log size rejection keeps its request
+classification under `-32005`.
+
+An error's own code `3` or revert wording qualifies its hex data for
+decoding, even under `originalError` or in an array. The parser skips
+request objects and arrays that contain them. Recognized VM messages
+identify execution halts. Alloy can accept a single answer of the wrong
+id, so the transport retries it or waits for an answer from another hedge.
 
 Every check above reads a call's method and id from alloy's metadata,
 but the endpoint gets the call's serialized JSON body, and a packet built
@@ -189,6 +181,7 @@ callers re-subscribe.
 
 | Type | Invariant | Produced by | Consumed by |
 |---|---|---|---|
+| `ExecutionEvidence` (crate-private) | a recognized revert with optional data, an exceptional halt or gas exhaustion | `execution_evidence` reads the RPC error and its error envelopes | the simulation classifier and the transport classification of rate limits and override refusals |
 | [`HftTransport`](provider.rs#L599) | the provider's transport: many endpoints, one `tower::Service`; sends reads and single signed raw transactions, refuses every other request before routing | [`HftTransport::new`](provider.rs#L609) from a [`TransportConfig`](config.rs#L167) | [`ChainReader::new`](../client/DESIGN.md), [`ChainReader::arbitrum`](../client/DESIGN.md) and [`ChainReader::arbitrum_sepolia`](../client/DESIGN.md), which build the provider over it, so every read and send in the crate passes through it. The strategy layer builds one per process, and a second one for scans so their declines and timeouts never touch the trading endpoints' health. |
 | [`TransportConfig`](config.rs#L167), [`TransportConfigBuilder`](config.rs#L201) | the pools and their policies: shared, read and write pools; per-endpoint timeouts; the retry and breaker settings. [`build`](config.rs#L303) validates the configuration, and transport construction also checks the probe limit | the builder or a caller using the public fields | [`HftTransport::new`](provider.rs#L609). The strategy layer assembles one from its environment; the builder is where a keyed URL enters the crate. |
 | [`Strategy`](config.rs#L53) | how a read is routed: round robin, latency-based, or hedged; a caller's choice | the caller | [`TransportConfigBuilder::strategy`](config.rs#L275). Hedging costs N requests per read, which is why it is a choice and not a default. |
@@ -201,12 +194,9 @@ callers re-subscribe.
 | [`WsManager`](ws.rs#L69) | the subscription side: one socket; reconnect with capped backoff; re-subscription is the caller's | [`WsManager::connect`](ws.rs#L94) with a [`ReconnectConfig`](ws.rs#L43) | [`MarketFeed::subscribe`](../feeds/DESIGN.md), [`BlockHeaderFeed::subscribe`](../feeds/DESIGN.md) and [`LiveTakerMarket::subscribe`](../feeds/DESIGN.md), each one subscription over it. The strategy layer holds one per process. |
 | [`ReconnectConfig`](ws.rs#L43) | the backoff: initial, maximum, multiplier, attempts | the caller; `Default` is capped exponential | [`WsManager::connect`](ws.rs#L94). |
 
-An endpoint that refuses block overrides or lacks the block pinned by a
-simulation (an `eth_call` or `eth_estimateGas` with four params) logs
-its host and port, RPC method and error code. Override refusals log at
-WARN. Missing blocks log at DEBUG. An execution answer (code `3`, an execution
-wording, revert data, under any code) is never such a refusal. The
-warning uses the same routing and health rules as other RPC answers.
+For a pinned simulation, the transport logs host, port, method and error
+code at WARN for override refusals and at DEBUG for missing blocks.
+Execution evidence takes precedence. The usual routing and health rules apply.
 
 ## Efficiency
 

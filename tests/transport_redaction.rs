@@ -198,14 +198,14 @@ async fn estimate_with_overrides(url: &str) {
 /// and port, the method and the error code only: no userinfo, path or
 /// query. A missing pinned block, a replica behind the head, is logged at
 /// debug only. The same refusal of a call without overrides, and an
-/// execution answer (revert data under `-32602`, a revert under code 3
+/// execution answer (a nested revert under `-32602` or a code 3 revert
 /// that names a missing block), warn of nothing.
 #[tokio::test]
 async fn an_override_refusal_warns_with_the_host_only() {
     let captured = Captured::default();
     let _guard = tracing::subscriber::set_default(captured.clone());
 
-    let refusal = r#"{"code":-32602,"message":"too many arguments, want at most 3 (POST /v2/alch_secretkey123)"}"#;
+    let refusal = r#"{"code":-32602,"message":"too many arguments, want at most 3 (POST /v2/alch_secretkey123)","data":"0x08c379a0"}"#;
     for method in ["eth_call", "eth_estimateGas"] {
         let (url, addr) = answering_endpoint(refusal).await;
         match method {
@@ -243,7 +243,7 @@ async fn an_override_refusal_warns_with_the_host_only() {
     assert_eq!(captured.take_warnings(), Vec::<String>::new());
 
     for error in [
-        r#"{"code":-32602,"message":"invalid argument","data":"0x08c379a0"}"#,
+        r#"{"code":-32602,"message":"invalid argument","data":{"originalError":{"code":3,"data":"0x08c379a0"}}}"#,
         r#"{"code":3,"message":"execution reverted: unknown block","data":"0x08c379a0"}"#,
     ] {
         let (url, _) = answering_endpoint(error).await;

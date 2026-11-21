@@ -55,8 +55,8 @@ impl AsRef<ChainReader> for MarketReader {
     }
 }
 
-/// Only execution evidence in an identity read makes an RPC reply final.
-pub(super) fn era_read_error(error: PerpCityError) -> PerpCityError {
+/// Preserve execution errors from a binding and expose other RPC failures as transient.
+pub(super) fn market_read_error(error: PerpCityError) -> PerpCityError {
     match error {
         PerpCityError::Abi(CallError::TransportError(error))
             if !error.as_error_resp().is_some_and(is_execution_error) =>
@@ -87,12 +87,12 @@ impl MarketReader {
     /// why not — triage it with
     /// [`TransactionError::is_revert`](crate::errors::TransactionError::is_revert):
     /// `Perp::NotLiquidatable` is a healthy position, `Perp::NonMakerPosition`
-    /// the wrong role (route it to the taker twin). An empty revert or
-    /// out-of-gas inside the pinned limit
-    /// ([`SimulationFailed`](crate::errors::TransactionError::SimulationFailed))
-    /// is the node's answer and not transient; a transport failure
-    /// ([`GasUnavailable`](crate::errors::TransactionError::GasUnavailable))
-    /// is.
+    /// the wrong role (route it to the taker twin). If the cap can explain
+    /// the failure, the probe checks the call again without the cap. A pass
+    /// returns [`GasLimitTooLow`](crate::errors::TransactionError::GasLimitTooLow).
+    /// Otherwise the uncapped failure is returned. A node that fails to give
+    /// a simulation result returns transient
+    /// [`GasUnavailable`](crate::errors::TransactionError::GasUnavailable).
     ///
     /// `from` is what the contract sees as `msg.sender`, and it matters: on
     /// build `58b42b7` a liquidation whose margin was consumed by bad debt
@@ -100,12 +100,13 @@ impl MarketReader {
     /// address reverts `TransferFromFailed` where the funded, approved
     /// sender's transaction would succeed. Probe from the address that will
     /// send. The simulation is capped at [`GasLimits::LIQUIDATE`], exactly
-    /// like the send.
+    /// like the send. Both probe calls use pending state.
     ///
     /// The call is the market's era's: the 2-arg whole-position form on
     /// `58b42b7`, the 3-arg form with the position's whole size on `v0.2.2`
     /// and `v1.0.0`, which costs one `makerDetails` read of the build's own
-    /// row first. A position whose liquidity is already zero is
+    /// row first. A size read without an execution answer is transient.
+    /// A position whose liquidity is already zero is
     /// [`ContractError::PositionNotFound`].
     pub async fn simulate_liquidate_maker(
         &self,
@@ -136,7 +137,7 @@ impl MarketReader {
 
     /// Shared `eth_call` health probe behind the two public liquidation
     /// probes: validates the fee recipient, encodes the role's call, and
-    /// preflights from `from` at the pinned [`GasLimits::LIQUIDATE`] cap.
+    /// preflights from `from` at the [`GasLimits::LIQUIDATE`] cap.
     async fn simulate_liquidation(
         &self,
         from: Address,
@@ -149,7 +150,7 @@ impl MarketReader {
             .liquidation_calldata(role, pos_id, fee_recipient)
             .await?;
         self.chain
-            .preflight_call(from, self.perp, &calldata, 0, Some(GasLimits::LIQUIDATE))
+            .preflight_at_limit(from, self.perp, &calldata, 0, GasLimits::LIQUIDATE, false)
             .await?;
         Ok(())
     }
@@ -163,7 +164,7 @@ impl MarketReader {
     /// [`ContractError::UnknownBuild`] for a hook the chain's deployments
     /// do not name; the transport error from either read.
     pub async fn era(&self) -> Result<Era> {
-        Ok(self.immutables().await.map_err(era_read_error)?.era)
+        Ok(self.immutables().await.map_err(market_read_error)?.era)
     }
 
     /// Whether this market runs `v0.2.2-upgradeable`, the build the SDK's
@@ -225,11 +226,21 @@ impl MarketReader {
         let perp = v1::Perp::new(self.perp, self.chain.provider());
         let size = match role {
             PositionRole::Taker => {
-                let position = perp.positions(pos_id).call().await?;
+                let position = perp
+                    .positions(pos_id)
+                    .call()
+                    .await
+                    .map_err(|error| market_read_error(error.into()))?;
                 let (perp_atoms, _usd) = unpack_balance_delta(position.delta);
                 perp_atoms.unsigned_abs()
             }
-            PositionRole::Maker => perp.makerDetails(pos_id).call().await?.liquidity,
+            PositionRole::Maker => {
+                perp.makerDetails(pos_id)
+                    .call()
+                    .await
+                    .map_err(|error| market_read_error(error.into()))?
+                    .liquidity
+            }
         };
         if size == 0 {
             return Err(ContractError::PositionNotFound { pos_id }.into());
@@ -242,11 +253,21 @@ impl MarketReader {
         let perp = Perp::new(self.perp, self.chain.provider());
         let size = match role {
             PositionRole::Taker => {
-                let position = perp.positions(pos_id).call().await?;
+                let position = perp
+                    .positions(pos_id)
+                    .call()
+                    .await
+                    .map_err(|error| market_read_error(error.into()))?;
                 let (perp_atoms, _usd) = unpack_balance_delta(position.delta);
                 perp_atoms.unsigned_abs()
             }
-            PositionRole::Maker => perp.makerDetails(pos_id).call().await?.liquidity,
+            PositionRole::Maker => {
+                perp.makerDetails(pos_id)
+                    .call()
+                    .await
+                    .map_err(|error| market_read_error(error.into()))?
+                    .liquidity
+            }
         };
         if size == 0 {
             return Err(ContractError::PositionNotFound { pos_id }.into());

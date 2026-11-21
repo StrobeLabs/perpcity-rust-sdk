@@ -699,9 +699,8 @@ impl PerpClient {
     ///   id on the maker path; drop it (or route it to the taker twin).
     /// - other reverts (a utilization gate from capacity pinned under live
     ///   OI, …) — inspect `error_name`.
-    /// - an empty revert or out-of-gas inside the pinned limit
-    ///   ([`SimulationFailed`](crate::errors::TransactionError::SimulationFailed),
-    ///   not transient) — the node's answer; retrying reproduces it.
+    /// - [`TransactionError::GasLimitTooLow`] — the capped call failed
+    ///   and the uncapped call passed.
     /// - transport failures
     ///   ([`GasUnavailable`](crate::errors::TransactionError::GasUnavailable),
     ///   transient) — keep liquidating.
