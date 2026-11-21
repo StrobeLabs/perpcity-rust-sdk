@@ -132,13 +132,20 @@ fn has_revert_data(resp: &ErrorPayload) -> bool {
 }
 
 /// The revert data of an error answer: the longest `0x` hex string of at
-/// least [`MIN_REVERT_DIGITS`] digits in its `data` field, as the field
-/// itself or along its `data` / `originalError` chain (`originalError.data`,
-/// a nested `originalError`), as nodes and wallets nest it, and in an array
-/// directly under one of those. Every other object is skipped: a refusal
-/// that echoes the request (`{"request":{"data":"0x…"}}`) holds calldata,
-/// and other keys (`blockNumber`, `blockHash`, `requestId`) are not revert
-/// data.
+/// least [`MIN_REVERT_DIGITS`] digits in one of these places, as nodes and
+/// wallets put it:
+///
+/// - the `data` field itself, as a hex string;
+/// - along its `originalError` chain: an `originalError`'s own `data` hex
+///   string, and a nested `originalError`;
+/// - an array of hex strings or of error objects directly under `data`, or
+///   as an `originalError` or its `data`, each object read for its own
+///   `data` hex string.
+///
+/// No other object is followed, so a `data` key inside one is never read:
+/// a refusal whose `data` is the request (`{"to":…,"data":"0x…"}`) or
+/// echoes it (`{"request":{"data":"0x…"}}`) holds calldata, and other keys
+/// (`blockNumber`, `blockHash`, `requestId`) are not revert data.
 pub(crate) fn revert_data(resp: &ErrorPayload) -> Option<String> {
     fn hex(value: &Value) -> Option<&str> {
         let text = value.as_str()?;
@@ -146,21 +153,82 @@ pub(crate) fn revert_data(resp: &ErrorPayload) -> Option<String> {
             .is_some_and(|digits| digits.bytes().all(|digit| digit.is_ascii_hexdigit()))
             .then_some(text)
     }
-    fn longest(value: &Value) -> Option<&str> {
+    fn items(values: &[Value]) -> Option<&str> {
+        values
+            .iter()
+            .filter_map(|item| match item {
+                Value::Object(fields) => hex(fields.get("data")?),
+                item => hex(item),
+            })
+            .max_by_key(|text| text.len())
+    }
+    fn field(value: &Value) -> Option<&str> {
         match value {
-            Value::String(_) => hex(value),
-            Value::Array(items) => items.iter().filter_map(hex).max_by_key(|text| text.len()),
-            Value::Object(fields) => ["data", "originalError"]
-                .into_iter()
-                .filter_map(|key| longest(fields.get(key)?))
-                .max_by_key(|text| text.len()),
-            _ => None,
+            Value::Array(values) => items(values),
+            value => hex(value),
+        }
+    }
+    fn original_error(value: &Value) -> Option<&str> {
+        match value {
+            Value::Object(fields) => [
+                fields.get("data").and_then(field),
+                fields.get("originalError").and_then(original_error),
+            ]
+            .into_iter()
+            .flatten()
+            .max_by_key(|text| text.len()),
+            value => field(value),
         }
     }
     let value = serde_json::from_str::<Value>(resp.data.as_ref()?.get()).ok()?;
-    longest(&value)
-        .filter(|text| text.len() - 2 >= MIN_REVERT_DIGITS)
-        .map(str::to_owned)
+    match &value {
+        Value::Object(fields) => fields.get("originalError").and_then(original_error),
+        value => field(value),
+    }
+    .filter(|text| text.len() - 2 >= MIN_REVERT_DIGITS)
+    .map(str::to_owned)
+}
+
+/// Whether an error answer is the node's explicit report of an execution
+/// revert: the execution error code `3`, or `execution reverted` in its
+/// message. It is the call's answer before any gas words in the message.
+pub(crate) fn is_execution_revert(resp: &ErrorPayload) -> bool {
+    resp.code == 3
+        || resp
+            .message
+            .to_ascii_lowercase()
+            .contains("execution reverted")
+}
+
+/// The revert data of an explicit execution revert ([`is_execution_revert`])
+/// whose `data` string carries a vendor's prefix (`"Reverted 0x…"`), as
+/// [`revert_data`] reads the hex after it; `None` for any other answer.
+pub(crate) fn prefixed_revert_data(resp: &ErrorPayload) -> Option<String> {
+    if !is_execution_revert(resp) {
+        return None;
+    }
+    let value = serde_json::from_str::<Value>(resp.data.as_ref()?.get()).ok()?;
+    let text = value.as_str()?.trim();
+    let prefix = text.get(..8)?;
+    if !prefix.eq_ignore_ascii_case("reverted") {
+        return None;
+    }
+    let hex = text[8..].trim_start();
+    let normalized = ErrorPayload {
+        code: resp.code,
+        message: resp.message.clone(),
+        data: serde_json::value::to_raw_value(hex).ok(),
+    };
+    revert_data(&normalized)
+}
+
+/// Whether a capped call's error answer says its gas limit is under the
+/// intrinsic gas of the transaction: geth's `intrinsic gas too low: have
+/// N, want M`. Like running out of gas, it leaves the call itself untested.
+pub(crate) fn is_intrinsic_gas_too_low(resp: &ErrorPayload) -> bool {
+    resp.message
+        .to_ascii_lowercase()
+        .contains("intrinsic gas too low")
 }
 
 /// Parts of a node's answer to `eth_sendRawTransaction` that reject the
@@ -223,10 +291,13 @@ pub(crate) fn lacks_block(message: &str) -> bool {
 
 /// Whether an error answer reports the call running out of gas: geth's
 /// `out of gas` from a call, or `gas required exceeds allowance` from an
-/// estimate that found no limit under the node's cap.
+/// estimate that found no limit under the node's cap. An explicit
+/// execution revert ([`is_execution_revert`], such as `execution reverted:
+/// out of gas` under code `3`) is the call's answer, whatever its words.
 pub(crate) fn is_gas_exhaustion(resp: &ErrorPayload) -> bool {
     let message = resp.message.to_ascii_lowercase();
-    message.contains("out of gas") || message.contains("gas required exceeds")
+    !is_execution_revert(resp)
+        && (message.contains("out of gas") || message.contains("gas required exceeds"))
 }
 
 /// Parts of an error answer's message that report no answer from the
@@ -532,6 +603,28 @@ mod tests {
             ),
             (r#"{"data":[{"data":"0x12345678"}]}"#, None),
             (
+                r#"{"to":"0x0000000000000000000000000000000000000004","data":"0x12345678aabbccdd"}"#,
+                None,
+            ),
+            (
+                r#"{"message":"execution reverted","data":"0xbcffc83f"}"#,
+                None,
+            ),
+            (r#"[{"data":"0x12345678"}]"#, Some("0x12345678")),
+            (
+                r#"{"originalError":[{"code":3,"data":"0xdeadbeef"}]}"#,
+                Some("0xdeadbeef"),
+            ),
+            (
+                r#"{"originalError":{"data":[{"data":"0xdeadbeef"}]}}"#,
+                Some("0xdeadbeef"),
+            ),
+            (r#"[{"request":{"data":"0x12345678"}}]"#, None),
+            (
+                r#"{"originalError":{"request":{"data":"0x12345678"}}}"#,
+                None,
+            ),
+            (
                 r#"{"originalError":{"originalError":{"data":"0xb2c86a29"}}}"#,
                 Some("0xb2c86a29"),
             ),
@@ -546,8 +639,45 @@ mod tests {
         }
     }
 
+    /// A vendor's `Reverted` prefix is read past only on an explicit
+    /// execution revert.
+    #[test]
+    fn a_prefixed_revert_is_read_on_an_execution_revert() {
+        let data = Some(r#""Reverted 0xdeadbeef""#);
+        for (code, message, expected) in [
+            (3, "execution reverted", Some("0xdeadbeef")),
+            (-32000, "execution reverted", Some("0xdeadbeef")),
+            (-32015, "VM execution error.", None),
+            (-32603, "internal error", None),
+        ] {
+            assert_eq!(
+                prefixed_revert_data(&payload(code, message, data)).as_deref(),
+                expected,
+                "{code} {message}"
+            );
+        }
+        assert_eq!(
+            prefixed_revert_data(&payload(
+                3,
+                "execution reverted",
+                Some(r#""Reverted 0x12""#)
+            )),
+            None
+        );
+    }
+
     #[test]
     fn gas_exhaustion_is_named_by_the_message() {
+        assert!(!is_gas_exhaustion(&payload(
+            3,
+            "execution reverted: out of gas",
+            None
+        )));
+        assert!(!is_gas_exhaustion(&payload(
+            -32000,
+            "execution reverted: out of gas",
+            None
+        )));
         assert!(is_gas_exhaustion(&payload(-32000, "out of gas", None)));
         assert!(is_gas_exhaustion(&payload(
             -32000,

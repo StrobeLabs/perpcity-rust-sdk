@@ -2289,9 +2289,10 @@ mod tests {
     /// What counts as no answer from the node for an era read: an
     /// execution error, by code `3` or by its wording, and a method the
     /// endpoint does not serve are answers whatever else the message says;
-    /// revert data of at least four bytes, under any code and under `data`
-    /// or `originalError` at any depth, is the contract's answer, and a hex
-    /// string under another key is not; a bare internal error, a rate
+    /// revert data of at least four bytes, under any code, as `data` or
+    /// along its `originalError` chain, is the contract's answer, and a hex
+    /// string under another key or in an object under `data` (`NESTED`) is
+    /// not; a bare internal error, a rate
     /// limit, a gateway with no node to ask, a timeout and a quota are no
     /// answer, and empty or shorter revert data does not change that.
     #[test]
@@ -2438,13 +2439,13 @@ mod tests {
             (3, "execution reverted", None, false),
             (3, "execution reverted", Some(REVERT), false),
             (-32_603, "internal error", Some(REVERT), false),
-            (-32_603, "internal error", Some(NESTED), false),
+            (-32_603, "internal error", Some(NESTED), true),
             (-32_000, "upstream timeout", Some(REVERT), false),
             (
                 -32_011,
                 "no backends available for method",
                 Some(NESTED),
-                false,
+                true,
             ),
             (
                 -32_601,
