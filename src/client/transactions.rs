@@ -111,7 +111,7 @@ impl<'a> TxBuilder<'a> {
     /// # Errors
     ///
     /// - The era read's failure: no answer from the node is
-    ///   [`PerpCityError::Rpc`](crate::PerpCityError::Rpc) (transient).
+    ///   [`PerpCityError::Rpc`] (transient).
     /// - [`TransactionError::SimulationReverted`] for a decoded revert, and
     ///   [`TransactionError::SimulationFailed`] for the node's execution
     ///   failure without revert data.
@@ -483,7 +483,7 @@ impl PerpClient {
     /// [`RECEIPT_POLL_INTERVAL`] for up to [`RECEIPT_TIMEOUT`].
     ///
     /// Use it to resolve a send whose outcome is unknown, with the hash from
-    /// [`PerpCityError::tx_hash`](crate::PerpCityError::tx_hash). On timeout it returns
+    /// [`PerpCityError::tx_hash`]. On timeout it returns
     /// [`TransactionError::ReceiptTimeout`] for the same hash, so the call can
     /// repeat. A receipt the node gives for another hash is a failed poll.
     /// For one look-up with no wait, use
