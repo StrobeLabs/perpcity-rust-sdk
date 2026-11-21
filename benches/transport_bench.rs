@@ -10,7 +10,7 @@
 //! 3. Hedged fan-out (task spawn overhead per hedged request)
 //! 4. Struct sizes (cache-line analysis)
 
-use criterion::{Criterion, black_box, criterion_group, criterion_main};
+use criterion::{BatchSize, Criterion, black_box, criterion_group, criterion_main};
 use std::time::Duration;
 
 use perpcity_sdk::transport::config::{CircuitBreakerConfig, Strategy};
@@ -40,7 +40,8 @@ fn make_warm_pool(n: usize) -> EndpointPool {
             3 => 1_000_000,
             _ => unreachable!(),
         };
-        pool.record_success(i, latency_ns);
+        let permit = pool.reserve(i, 0).expect("a closed endpoint");
+        pool.record_success(i, latency_ns, permit);
     }
     pool
 }
@@ -62,7 +63,7 @@ fn bench_endpoint_health(c: &mut Criterion) {
 
     // Hot path: is_callable on Closed endpoint — should be ~1-5ns
     group.bench_function("is_callable/closed", |b| {
-        let mut h = EndpointHealth::new(default_cb_config());
+        let h = EndpointHealth::new(default_cb_config());
         b.iter(|| h.is_callable(black_box(1000)))
     });
 
@@ -75,9 +76,9 @@ fn bench_endpoint_health(c: &mut Criterion) {
         b.iter(|| h.is_callable(black_box(5000))) // within 30s recovery
     });
 
-    // is_callable on Open endpoint (past recovery) — transitions to HalfOpen
+    // reserve on Open endpoint (past recovery) — transitions to HalfOpen
     // Note: this mutates state, so we rebuild each iteration
-    group.bench_function("is_callable/open_to_halfopen", |b| {
+    group.bench_function("reserve/open_to_halfopen", |b| {
         b.iter_custom(|iters| {
             let mut total = Duration::ZERO;
             for _ in 0..iters {
@@ -86,7 +87,7 @@ fn bench_endpoint_health(c: &mut Criterion) {
                     h.record_failure(t * 1000);
                 }
                 let start = std::time::Instant::now();
-                let _ = h.is_callable(black_box(33_000));
+                let _ = h.reserve(black_box(33_000));
                 total += start.elapsed();
             }
             total
@@ -96,8 +97,8 @@ fn bench_endpoint_health(c: &mut Criterion) {
     // record_success with latency EMA update
     group.bench_function("record_success", |b| {
         let mut h = EndpointHealth::new(default_cb_config());
-        h.record_success(5_000_000); // seed EMA
-        b.iter(|| h.record_success(black_box(3_000_000)))
+        h.record_success(5_000_000, None); // seed EMA
+        b.iter(|| h.record_success(black_box(3_000_000), None))
     });
 
     // record_failure
@@ -109,14 +110,14 @@ fn bench_endpoint_health(c: &mut Criterion) {
     // avg_latency_ns read (just a field access)
     group.bench_function("avg_latency_ns", |b| {
         let mut h = EndpointHealth::new(default_cb_config());
-        h.record_success(5_000_000);
+        h.record_success(5_000_000, None);
         b.iter(|| h.avg_latency_ns())
     });
 
     // status snapshot (copies all fields)
     group.bench_function("status_snapshot", |b| {
         let mut h = EndpointHealth::new(default_cb_config());
-        h.record_success(5_000_000);
+        h.record_success(5_000_000, None);
         b.iter(|| h.status())
     });
 
@@ -201,7 +202,11 @@ fn bench_health_recording(c: &mut Criterion) {
     // record_success through pool (Mutex lock + EMA update + atomic sync)
     group.bench_function("record_success/through_pool", |b| {
         let pool = make_warm_pool(3);
-        b.iter(|| pool.record_success(black_box(1), black_box(3_000_000)))
+        b.iter_batched(
+            || pool.reserve(1, 1000).expect("a closed endpoint"),
+            |permit| pool.record_success(black_box(1), black_box(3_000_000), permit),
+            BatchSize::SmallInput,
+        )
     });
 
     // record_failure through pool
@@ -312,8 +317,7 @@ fn bench_request_cycle(c: &mut Criterion) {
             let (idx, permit) = pool
                 .select(Strategy::LatencyBased, black_box(1000))
                 .unwrap();
-            pool.record_success(black_box(idx), black_box(5_000_000));
-            permit.resolved();
+            pool.record_success(black_box(idx), black_box(5_000_000), permit);
         })
     });
 
@@ -326,8 +330,7 @@ fn bench_request_cycle(c: &mut Criterion) {
             // permits drop with `selected`, as they do after a real hedge.
             if !selected.is_empty() {
                 let (idx, permit) = selected.swap_remove(0);
-                pool.record_success(black_box(idx), black_box(2_000_000));
-                permit.resolved();
+                pool.record_success(black_box(idx), black_box(2_000_000), permit);
             }
         })
     });

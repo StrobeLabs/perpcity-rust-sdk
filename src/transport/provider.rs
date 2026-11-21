@@ -64,6 +64,7 @@
 //! # }
 //! ```
 
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
@@ -72,6 +73,8 @@ use std::time::Instant;
 use alloy::primitives::B256;
 use alloy::rpc::json_rpc::{RequestPacket, ResponsePacket, ResponsePayload, SerializedRequest};
 use alloy::transports::{TransportError, TransportErrorKind, TransportFut};
+use serde::Deserializer as _;
+use serde::de::Error as _;
 use tower::Service;
 
 use super::config::{Strategy, TransportConfig};
@@ -122,12 +125,13 @@ struct ManagedEndpoint {
 }
 
 impl ManagedEndpoint {
-    /// Record a successful request. Updates Mutex state + atomic mirrors.
+    /// Record a successful request, which held `slot`. Updates Mutex
+    /// state + atomic mirrors.
     #[inline]
-    fn record_success(&self, latency_ns: u64) {
+    fn record_success(&self, latency_ns: u64, slot: Option<ProbeSlot>) {
         let mut h = self.health.lock().unwrap();
         let old_state = h.state();
-        h.record_success(latency_ns);
+        h.record_success(latency_ns, slot);
         let new_state = h.state();
         // Sync atomic mirrors (Relaxed is sufficient: no cross-field ordering needed,
         // eventual consistency is acceptable for endpoint selection heuristics)
@@ -202,10 +206,12 @@ impl std::fmt::Debug for ManagedEndpoint {
 /// never given back stops the endpoint being probed again — with the
 /// default budget of one, forever. So the reservation is a value: drop it
 /// without sending, or drop it because the request was cancelled, and the
-/// slot comes back. [`Self::resolved`] says an outcome was recorded, and
-/// the outcome already settled the slot. The permit names its slot and the
-/// recovery cycle that gave it, so it gives back its own slot and no other
-/// request's, and a permit taken while the circuit was closed holds none.
+/// slot comes back. Recording the request's outcome
+/// ([`EndpointPool::record_success`], [`EndpointPool::record_error`])
+/// consumes the permit and settles the slot with it. The permit names its
+/// slot and the recovery cycle that gave it, so it gives back or closes
+/// with its own slot and no other request's, and a permit taken while the
+/// circuit was closed holds none.
 #[must_use = "dropping the permit releases the endpoint's probe slot; that is usually what you want, but say so"]
 #[derive(Debug)]
 pub struct ProbePermit<'a> {
@@ -221,15 +227,17 @@ impl ProbePermit<'_> {
         Self { held: None }
     }
 
-    /// The request was sent and its outcome recorded, which resolved the
-    /// slot; the permit has nothing left to give back.
-    pub fn resolved(mut self) {
-        self.held = None;
-    }
-
-    /// The probe slot this permit holds, `None` when it holds none.
-    fn slot(&self) -> Option<ProbeSlot> {
-        self.held.map(|(_, slot)| slot)
+    /// The probe slot this permit holds on `endpoint`, taken out for the
+    /// request's outcome to settle; `None` when it holds none there. A
+    /// slot on another endpoint is given back to it when the permit drops.
+    fn into_slot(mut self, endpoint: &ManagedEndpoint) -> Option<ProbeSlot> {
+        match self.held.take() {
+            Some((held, slot)) if std::ptr::eq(held, endpoint) => Some(slot),
+            other => {
+                self.held = other;
+                None
+            }
+        }
     }
 }
 
@@ -310,7 +318,7 @@ impl EndpointPool {
 
     /// Take the right to send one request to endpoint `idx`, or `None` if
     /// its circuit will not allow one.
-    fn reserve(&self, idx: usize, now_ms: u64) -> Option<ProbePermit<'_>> {
+    pub fn reserve(&self, idx: usize, now_ms: u64) -> Option<ProbePermit<'_>> {
         let endpoint = &self.endpoints[idx];
         let mut health = endpoint.health.lock().unwrap();
         let reserved = health.reserve(now_ms);
@@ -361,9 +369,9 @@ impl EndpointPool {
     /// Among Closed endpoints, pick the one with lowest latency. This is the
     /// steady-state hot path — zero mutex contention.
     ///
-    /// Slow path: no Closed endpoints available. Lock each non-Closed endpoint
-    /// and call `is_callable()` which may transition Open→HalfOpen. Only entered
-    /// when circuit breakers have tripped (error condition, rare).
+    /// Slow path: no Closed endpoints available. Reserve each non-Closed
+    /// endpoint, which may transition Open→HalfOpen. Only entered when
+    /// circuit breakers have tripped (error condition, rare).
     fn select_latency_based(&self, now_ms: u64) -> Option<(usize, ProbePermit<'_>)> {
         // Lock-free fast path: best Closed endpoint by latency. A closed
         // circuit reserves nothing, so no lock is needed.
@@ -415,6 +423,17 @@ impl EndpointPool {
     /// Uses a fixed-size stack buffer (max 16 endpoints) to avoid heap allocation
     /// in the common case.
     pub fn select_n(&self, n: usize, now_ms: u64) -> Vec<(usize, ProbePermit<'_>)> {
+        self.select_n_between(n, now_ms, |_| {})
+    }
+
+    /// [`Self::select_n`], running `between` after the lock-free scan, where
+    /// another request may change an endpoint's circuit.
+    fn select_n_between(
+        &self,
+        n: usize,
+        now_ms: u64,
+        between: impl FnOnce(&Self),
+    ) -> Vec<(usize, ProbePermit<'_>)> {
         let mut candidates: Vec<(usize, u64, ProbePermit<'_>)> = Vec::with_capacity(n);
         let mut any_non_closed = false;
 
@@ -429,12 +448,18 @@ impl EndpointPool {
             }
         }
 
+        between(self);
+
         // Only reserve elsewhere if the closed endpoints cannot fill the
         // fan-out: a reservation this function hands back is a probe slot
-        // spent on a request that never happens.
+        // spent on a request that never happens. An endpoint the first scan
+        // took is skipped even if its circuit has since opened, so no
+        // endpoint is selected twice.
         if candidates.len() < n && any_non_closed {
+            let taken = candidates.len();
             for idx in 0..self.endpoints.len() {
                 if self.endpoints[idx].atomic_state.load(Ordering::Relaxed) & TAG_MASK == TAG_CLOSED
+                    || candidates[..taken].iter().any(|&(held, _, _)| held == idx)
                 {
                     continue;
                 }
@@ -462,9 +487,12 @@ impl EndpointPool {
         self.endpoints.len()
     }
 
-    /// Record a successful request on endpoint `idx`.
-    pub fn record_success(&self, idx: usize, latency_ns: u64) {
-        self.endpoints[idx].record_success(latency_ns);
+    /// Record a successful request on endpoint `idx`, sent under `permit`:
+    /// the permit's probe slot closes a half-open circuit, and a success
+    /// under a permit that holds none leaves the circuit as it is.
+    pub fn record_success(&self, idx: usize, latency_ns: u64, permit: ProbePermit<'_>) {
+        let endpoint = &self.endpoints[idx];
+        endpoint.record_success(latency_ns, permit.into_slot(endpoint));
     }
 
     /// Record a failed request on endpoint `idx`.
@@ -472,18 +500,19 @@ impl EndpointPool {
         self.endpoints[idx].record_failure(now_ms);
     }
 
-    /// Record what `response`, an answer to a read ([`answered_read`]),
-    /// says about endpoint `idx`: a success, unless it holds a rate limit,
-    /// which is a failure.
+    /// Record what `response`, an answer to a read ([`answered_read`])
+    /// sent under `permit`, says about endpoint `idx`: a success, unless it
+    /// holds a rate limit, which is a failure.
     pub(crate) fn record_read(
         &self,
         idx: usize,
         now_ms: u64,
         latency_ns: u64,
         response: &ResponsePacket,
+        permit: ProbePermit<'_>,
     ) {
         if !response.iter_errors().any(is_rate_limit) {
-            self.record_success(idx, latency_ns);
+            self.record_success(idx, latency_ns, permit);
         } else {
             self.record_failure(idx, now_ms);
         }
@@ -508,14 +537,17 @@ impl EndpointPool {
         idx: usize,
         now_ms: u64,
         error: &TransportError,
-        permit: &ProbePermit<'_>,
+        permit: ProbePermit<'_>,
     ) {
         if error.as_error_resp().is_some() {
             return self.record_failure(idx, now_ms);
         }
         match fault(error) {
             Fault::Endpoint => self.record_failure(idx, now_ms),
-            Fault::Request => self.endpoints[idx].record_answered(permit.slot()),
+            Fault::Request => {
+                let endpoint = &self.endpoints[idx];
+                endpoint.record_answered(permit.into_slot(endpoint));
+            }
         }
     }
 
@@ -779,8 +811,6 @@ impl Envelope {
     /// repeated top-level key: a positional array, which serde reads into
     /// a struct as its fields in order, is no call.
     fn parse(body: &str) -> serde_json::Result<Self> {
-        use serde::Deserializer as _;
-        use serde::de::Error as _;
         struct Object;
         impl<'de> serde::de::Visitor<'de> for Object {
             type Value = Envelope;
@@ -791,7 +821,7 @@ impl Envelope {
                 self,
                 mut map: A,
             ) -> Result<Envelope, A::Error> {
-                let mut keys = std::collections::HashSet::new();
+                let mut keys = HashSet::new();
                 let (mut method, mut id) = (None, None);
                 while let Some(key) = map.next_key::<String>()? {
                     match key.as_str() {
@@ -1097,17 +1127,15 @@ impl Router {
                     } else {
                         let latency_ns = start.elapsed().as_nanos() as u64;
                         if is_write {
-                            pool.record_success(idx, latency_ns);
+                            pool.record_success(idx, latency_ns, permit);
                         } else {
-                            pool.record_read(idx, now_ms(), latency_ns, &response);
+                            pool.record_read(idx, now_ms(), latency_ns, &response, permit);
                         }
-                        permit.resolved();
                         return Ok(response);
                     }
                 }
                 Ok(Err(e)) => {
-                    pool.record_error(idx, now_ms(), &e, &permit);
-                    permit.resolved();
+                    pool.record_error(idx, now_ms(), &e, permit);
                     tracing::warn!(
                         attempt = attempt + 1,
                         max_attempts,
@@ -1131,8 +1159,10 @@ impl Router {
                     last_err = Some(e);
                 }
                 Err(_timeout) => {
+                    // The failure opened a half-open circuit, so the
+                    // permit's slot has nothing left to give back.
                     pool.record_failure(idx, now_ms());
-                    permit.resolved();
+                    drop(permit);
                     tracing::warn!(
                         attempt = attempt + 1,
                         max_attempts,
@@ -1193,18 +1223,17 @@ impl Router {
 
             return match result {
                 Ok(Ok(resp)) => {
-                    pool.record_read(idx, now_ms(), start.elapsed().as_nanos() as u64, &resp);
-                    permit.resolved();
+                    let latency_ns = start.elapsed().as_nanos() as u64;
+                    pool.record_read(idx, now_ms(), latency_ns, &resp, permit);
                     Ok(resp)
                 }
                 Ok(Err(e)) => {
-                    pool.record_error(idx, now_ms(), &e, &permit);
-                    permit.resolved();
+                    pool.record_error(idx, now_ms(), &e, permit);
                     Err(e)
                 }
                 Err(_) => {
                     pool.record_failure(idx, now_ms());
-                    permit.resolved();
+                    drop(permit);
                     Err(TransportError::local_usage_str("request timed out"))
                 }
             };
@@ -1243,8 +1272,8 @@ impl Router {
             match join_result {
                 Ok((idx, Ok(response), start)) => {
                     let latency_ns = start.elapsed().as_nanos() as u64;
-                    pool.record_read(idx, now_ms(), latency_ns, &response);
-                    take(&mut permits, idx).resolved();
+                    let permit = take(&mut permits, idx);
+                    pool.record_read(idx, now_ms(), latency_ns, &response, permit);
                     // Cancel remaining in-flight requests — saves RPC rate limits.
                     // JoinSet::drop also aborts, but explicit abort_all is clearer.
                     // The cancelled requests' permits drop with `permits`.
@@ -1253,8 +1282,7 @@ impl Router {
                 }
                 Ok((idx, Err(e), _start)) => {
                     let permit = take(&mut permits, idx);
-                    pool.record_error(idx, now_ms(), &e, &permit);
-                    permit.resolved();
+                    pool.record_error(idx, now_ms(), &e, permit);
                     last_err = Some(e);
                 }
                 // Task was aborted (by our abort_all or JoinSet::drop) — expected
@@ -1309,8 +1337,15 @@ impl Service<RequestPacket> for HftTransport {
 
 #[cfg(test)]
 mod tests {
+    use alloy::eips::BlockNumberOrTag;
     use alloy::primitives::{Address, Bytes, U256};
+    #[allow(unused_imports)]
+    use alloy::providers::Provider as _;
+    use alloy::rpc::json_rpc::Id;
+    use alloy::rpc::types::{Filter, TransactionRequest};
     use serde_json::{Value, json};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::sync::Notify;
 
     use super::*;
     use crate::transport::config::{Strategy, TransportConfig, WriteRetryConfig};
@@ -1526,8 +1561,8 @@ mod tests {
         )
         .unwrap();
 
-        pool.record_success(0, 10_000_000); // 10ms
-        pool.record_success(1, 1_000_000); // 1ms
+        pool.record_success(0, 10_000_000, ProbePermit::free()); // 10ms
+        pool.record_success(1, 1_000_000, ProbePermit::free()); // 1ms
 
         let (selected, _permit) = pool.select(Strategy::LatencyBased, now_ms()).unwrap();
         assert_eq!(selected, 1); // lower latency
@@ -1562,8 +1597,6 @@ mod tests {
     /// the search converged.
     #[test]
     fn declined_requests_leave_an_endpoint_in_service() {
-        use alloy::transports::TransportErrorKind;
-
         let pool =
             EndpointPool::from_urls(&["https://rpc1.example.com".into()], Default::default())
                 .unwrap();
@@ -1571,7 +1604,7 @@ mod tests {
 
         let declined = TransportErrorKind::http_error(400, String::new());
         for _ in 0..10 {
-            pool.record_error(0, now, &declined, &ProbePermit::free());
+            pool.record_error(0, now, &declined, ProbePermit::free());
         }
         assert_eq!(
             pool.select(Strategy::LatencyBased, now).map(|(idx, _)| idx),
@@ -1582,7 +1615,7 @@ mod tests {
         // An endpoint that cannot answer still loses its circuit.
         let overloaded = TransportErrorKind::http_error(503, String::new());
         for _ in 0..3 {
-            pool.record_error(0, now, &overloaded, &ProbePermit::free());
+            pool.record_error(0, now, &overloaded, ProbePermit::free());
         }
         assert!(pool.select(Strategy::LatencyBased, now).is_none());
     }
@@ -1601,8 +1634,6 @@ mod tests {
     /// asked. Answers on the same connection as often as it is asked, so
     /// the count is requests, not connections.
     async fn declining_endpoint() -> (String, Arc<AtomicUsize>) {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
         let served = Arc::new(AtomicUsize::new(0));
@@ -1625,9 +1656,6 @@ mod tests {
         });
         (url, served)
     }
-
-    #[allow(unused_imports)]
-    use alloy::providers::Provider as _;
 
     fn provider_over(url: &str) -> alloy::providers::RootProvider<alloy::network::Ethereum> {
         let transport = HftTransport::new(
@@ -1713,7 +1741,6 @@ mod tests {
     /// only as a transaction hash.
     #[test]
     fn a_write_is_answered_only_under_its_own_id() {
-        use alloy::rpc::json_rpc::Id;
         const U: &str = r#"{"code":-32000,"message":"replacement transaction underpriced"}"#;
         let hash = format!(r#""{}""#, B256::repeat_byte(0xbb));
         let ok_with =
@@ -1818,7 +1845,6 @@ mod tests {
     /// an answer with no id, is refused before it is sent.
     #[tokio::test]
     async fn a_call_with_a_null_id_is_not_sent() {
-        use alloy::rpc::json_rpc::Id;
         let requests = Arc::new(AtomicUsize::new(0));
         let counter = Arc::clone(&requests);
         let url = scripted::endpoint(move |_, _| {
@@ -2017,7 +2043,6 @@ mod tests {
     /// in a batch of reads. A packet whose body agrees is sent.
     #[tokio::test]
     async fn a_call_whose_body_disagrees_with_its_metadata_is_not_sent() {
-        use alloy::rpc::json_rpc::Id;
         let requests = Arc::new(AtomicUsize::new(0));
         let counter = Arc::clone(&requests);
         let url = scripted::endpoint(move |_, _| {
@@ -2068,7 +2093,6 @@ mod tests {
     /// or as text. A batch under the number 1 and the text "1" is sent.
     #[tokio::test]
     async fn a_read_whose_answers_could_not_be_told_apart_is_not_sent() {
-        use alloy::rpc::json_rpc::Id;
         let requests = Arc::new(AtomicUsize::new(0));
         let counter = Arc::clone(&requests);
         let url = scripted::endpoint(move |_, _| {
@@ -2119,8 +2143,9 @@ mod tests {
     /// The envelope check reads a call's body only as one JSON object with
     /// no repeated top-level key and both a method and an id: a positional
     /// array, which serde would read into the envelope's fields in order,
-    /// and an object that names its method, params, id or any other key
-    /// twice are no call.
+    /// and an object that names its method, params, id or any other key,
+    /// an unknown one included, twice are no call. A key repeated inside
+    /// the params is the method's business, not the envelope's.
     #[test]
     fn a_call_body_is_one_object_with_no_repeated_key() {
         let call = Envelope::parse(r#"{"jsonrpc":"2.0","method":"eth_call","params":[],"id":1}"#)
@@ -2136,8 +2161,15 @@ mod tests {
             r#"{"method":"eth_call"}"#,
             r#"{"id":1}"#,
             r#"{"method":"eth_call","id":1} {}"#,
+            r#"{"method":"eth_call","id":1,"x":1,"x":2}"#,
         ] {
             assert!(Envelope::parse(body).is_err(), "{body}");
+        }
+        for body in [
+            r#"{"jsonrpc":"2.0","method":"eth_call","params":[{"a":1,"a":2}],"id":1}"#,
+            r#"{"id":"x","method":"eth_call","x":1,"y":1}"#,
+        ] {
+            assert!(Envelope::parse(body).is_ok(), "{body}");
         }
     }
 
@@ -2199,30 +2231,346 @@ mod tests {
         }
     }
 
-    /// A read sent while the circuit was closed holds no probe slot, so its
-    /// late answer cannot free the slot of the probe now in flight: an
-    /// `eth_getLogs` sent before a 503 opened the circuit, declined with a
-    /// 413 while the recovery's `eth_blockNumber` probe waits, leaves the
-    /// next read refused, on the standard and the hedged path alike.
-    #[tokio::test]
-    async fn a_late_answer_from_before_the_circuit_opened_frees_no_probe_slot() {
-        use tokio::sync::Notify;
+    /// The three ways a read is routed: round robin and latency-based on
+    /// the standard path, and hedged.
+    const STRATEGIES: [Strategy; 3] = [
+        Strategy::RoundRobin,
+        Strategy::LatencyBased,
+        Strategy::Hedged { fan_out: 2 },
+    ];
 
-        for strategy in [Strategy::LatencyBased, Strategy::Hedged { fan_out: 2 }] {
+    /// A transport over `urls` with no read retries, whose breakers open on
+    /// the first failure, recover after `recovery_ms` and let `probes`
+    /// probes through at a time.
+    fn breaker_transport(
+        urls: Vec<String>,
+        strategy: Strategy,
+        recovery_ms: u64,
+        probes: u32,
+    ) -> HftTransport {
+        let mut builder = TransportConfig::builder()
+            .strategy(strategy)
+            .request_timeout(std::time::Duration::from_secs(5))
+            .read_retry(crate::transport::config::ReadRetryConfig {
+                max_retries: 0,
+                base_delay: std::time::Duration::from_millis(1),
+            })
+            .circuit_breaker(crate::transport::config::CircuitBreakerConfig {
+                failure_threshold: 1,
+                recovery_timeout: std::time::Duration::from_millis(recovery_ms),
+                half_open_max_requests: probes,
+            });
+        for url in urls {
+            builder = builder.shared_endpoint(url);
+        }
+        HftTransport::new(builder.build().unwrap()).unwrap()
+    }
+
+    /// Send `method` alone through `transport`'s public entry point.
+    fn call_through(
+        transport: &HftTransport,
+        method: &'static str,
+        id: u64,
+    ) -> TransportFut<'static> {
+        transport
+            .clone()
+            .call(RequestPacket::Single(make_request(method, id)))
+    }
+
+    /// The circuit states of `transport`'s endpoints.
+    fn circuits(transport: &HftTransport) -> Vec<CircuitState> {
+        transport
+            .health_status()
+            .into_iter()
+            .map(|status| status.state)
+            .collect()
+    }
+
+    const IDLE: CircuitState = CircuitState::HalfOpen {
+        probes_in_flight: 0,
+    };
+
+    const PROBING: CircuitState = CircuitState::HalfOpen {
+        probes_in_flight: 1,
+    };
+
+    /// A read sent while the circuit was closed holds no probe slot, so its
+    /// late answer neither frees the slot of the probe now in flight nor
+    /// closes the circuit under it: an `eth_getLogs` sent before a 503
+    /// opened the circuit, declined with a 413 or answered while the
+    /// recovery's `eth_blockNumber` probe waits, leaves the probe holding
+    /// the only slot and the next read refused, on every strategy.
+    #[tokio::test]
+    async fn a_late_answer_from_before_the_circuit_opened_leaves_the_probe_deciding() {
+        type Late = (&'static str, fn() -> Answer);
+        let answers: [Late; 2] = [
+            ("decline", || Answer::Status(413)),
+            ("success", || Answer::Result(json!([]))),
+        ];
+        for strategy in STRATEGIES {
+            for (answer, late_answer) in answers {
+                let case = format!("{strategy:?}, late {answer}");
+                let logs_arrived = Arc::new(Notify::new());
+                let probe_arrived = Arc::new(Notify::new());
+                let other_reads = Arc::new(AtomicUsize::new(0));
+                let (logs, probe, others) = (
+                    Arc::clone(&logs_arrived),
+                    Arc::clone(&probe_arrived),
+                    Arc::clone(&other_reads),
+                );
+                let url = scripted::endpoint(move |method, _| match method {
+                    "eth_getLogs" => {
+                        logs.notify_one();
+                        Answer::Late(Box::new(late_answer()))
+                    }
+                    "eth_chainId" => Answer::Status(503),
+                    "eth_blockNumber" => {
+                        probe.notify_one();
+                        Answer::Silence
+                    }
+                    _ => {
+                        others.fetch_add(1, Ordering::SeqCst);
+                        Answer::Result(json!("0x1"))
+                    }
+                })
+                .await;
+                let transport = breaker_transport(vec![url], strategy, 5, 1);
+
+                let late = tokio::spawn(call_through(&transport, "eth_getLogs", 1));
+                logs_arrived.notified().await;
+                assert!(
+                    call_through(&transport, "eth_chainId", 2).await.is_err(),
+                    "{case}"
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                let probe = tokio::spawn(call_through(&transport, "eth_blockNumber", 3));
+                probe_arrived.notified().await;
+                assert_eq!(late.await.unwrap().is_ok(), answer == "success", "{case}");
+                assert_eq!(circuits(&transport), [PROBING], "{case}");
+
+                let refused = call_through(&transport, "eth_gasPrice", 4)
+                    .await
+                    .expect_err("the probe holds the only slot");
+                assert!(
+                    refused.to_string().contains("circuits open"),
+                    "{case}: {refused}"
+                );
+                assert_eq!(other_reads.load(Ordering::SeqCst), 0, "{case}");
+                probe.abort();
+            }
+        }
+    }
+
+    /// A late success to a read sent while the circuit was closed leaves
+    /// an open circuit open: only a probe, after the recovery timeout,
+    /// closes it.
+    #[tokio::test]
+    async fn a_late_success_leaves_an_open_circuit_open() {
+        for strategy in STRATEGIES {
             let logs_arrived = Arc::new(Notify::new());
+            let other_reads = Arc::new(AtomicUsize::new(0));
+            let (logs, others) = (Arc::clone(&logs_arrived), Arc::clone(&other_reads));
+            let url = scripted::endpoint(move |method, _| match method {
+                "eth_getLogs" => {
+                    logs.notify_one();
+                    Answer::Late(Box::new(Answer::Result(json!([]))))
+                }
+                "eth_chainId" => Answer::Status(503),
+                _ => {
+                    others.fetch_add(1, Ordering::SeqCst);
+                    Answer::Result(json!("0x1"))
+                }
+            })
+            .await;
+            let transport = breaker_transport(vec![url], strategy, 60_000, 1);
+
+            let late = tokio::spawn(call_through(&transport, "eth_getLogs", 1));
+            logs_arrived.notified().await;
+            assert!(call_through(&transport, "eth_chainId", 2).await.is_err());
+            assert!(late.await.unwrap().is_ok(), "{strategy:?}");
+            assert!(
+                matches!(circuits(&transport)[..], [CircuitState::Open { .. }]),
+                "{strategy:?}: {:?}",
+                circuits(&transport)
+            );
+            assert!(call_through(&transport, "eth_gasPrice", 3).await.is_err());
+            assert_eq!(other_reads.load(Ordering::SeqCst), 0, "{strategy:?}");
+        }
+    }
+
+    /// A probe the endpoint declines (HTTP 413) gives its slot back through
+    /// the transport, on the standard path, the hedged path to one
+    /// endpoint and the hedged fan-out: every circuit is half-open with no
+    /// probe in flight after each declined probe, and the next read is
+    /// served.
+    #[tokio::test]
+    async fn a_declined_probe_gives_its_slot_back() {
+        for (strategy, endpoints) in [
+            (Strategy::RoundRobin, 1),
+            (Strategy::LatencyBased, 1),
+            (Strategy::Hedged { fan_out: 2 }, 1),
+            (Strategy::Hedged { fan_out: 2 }, 2),
+        ] {
+            let case = format!("{strategy:?}, {endpoints} endpoint(s)");
+            let mut urls = Vec::new();
+            for _ in 0..endpoints {
+                urls.push(
+                    scripted::endpoint(|method, _| match method {
+                        "eth_chainId" => Answer::Status(503),
+                        "eth_getLogs" => Answer::Status(413),
+                        _ => Answer::Result(json!("0x1")),
+                    })
+                    .await,
+                );
+            }
+            let transport = breaker_transport(urls, strategy, 5, 1);
+            for id in 0..endpoints as u64 {
+                let _ = call_through(&transport, "eth_chainId", id).await;
+            }
+            assert_eq!(transport.healthy_count(), 0, "{case}");
+
+            for round in 0..3 {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                assert!(
+                    call_through(&transport, "eth_getLogs", 10 + round)
+                        .await
+                        .is_err()
+                );
+                assert_eq!(
+                    circuits(&transport),
+                    vec![IDLE; endpoints],
+                    "{case}, round {round}"
+                );
+            }
+            assert!(
+                call_through(&transport, "eth_gasPrice", 20).await.is_ok(),
+                "{case}"
+            );
+            assert!(
+                circuits(&transport).contains(&CircuitState::Closed),
+                "{case}: {:?}",
+                circuits(&transport)
+            );
+        }
+    }
+
+    /// A probe whose request never reports an outcome gives its slot back
+    /// when its permit drops: a caller that goes away mid-probe, on every
+    /// path, and the losing request of a hedged read, which is cancelled.
+    #[tokio::test]
+    async fn a_probe_that_never_answers_gives_its_slot_back() {
+        for (strategy, endpoints) in [
+            (Strategy::RoundRobin, 1),
+            (Strategy::LatencyBased, 2),
+            (Strategy::Hedged { fan_out: 2 }, 1),
+            (Strategy::Hedged { fan_out: 2 }, 3),
+        ] {
+            let case = format!("{strategy:?}, {endpoints} endpoint(s)");
+            let arrived = Arc::new(AtomicUsize::new(0));
+            let mut urls = Vec::new();
+            for _ in 0..endpoints {
+                let arrived = Arc::clone(&arrived);
+                urls.push(
+                    scripted::endpoint(move |method, _| match method {
+                        "eth_chainId" => Answer::Status(503),
+                        "eth_blockNumber" => {
+                            arrived.fetch_add(1, Ordering::SeqCst);
+                            Answer::Silence
+                        }
+                        _ => Answer::Result(json!("0x1")),
+                    })
+                    .await,
+                );
+            }
+            let transport = breaker_transport(urls, strategy, 5, 1);
+            for id in 0..2 * endpoints as u64 {
+                let _ = call_through(&transport, "eth_chainId", id).await;
+            }
+            assert_eq!(transport.healthy_count(), 0, "{case}");
+
+            for round in 0..3 {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                let before = arrived.load(Ordering::SeqCst);
+                let probe = tokio::spawn(call_through(&transport, "eth_blockNumber", 10));
+                while arrived.load(Ordering::SeqCst) == before {
+                    tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+                }
+                probe.abort();
+                let _ = probe.await;
+                for state in circuits(&transport) {
+                    assert!(
+                        matches!(state, IDLE | CircuitState::Open { .. }),
+                        "{case}, round {round}: {state:?}"
+                    );
+                }
+            }
+            assert!(
+                call_through(&transport, "eth_gasPrice", 20).await.is_ok(),
+                "{case}"
+            );
+        }
+
+        let failing = Arc::new(AtomicBool::new(true));
+        let slow_reads = Arc::new(AtomicUsize::new(0));
+        let fast_failing = Arc::clone(&failing);
+        let fast = scripted::endpoint(move |_, _| match fast_failing.load(Ordering::SeqCst) {
+            true => Answer::Status(503),
+            false => Answer::Result(json!("0x1")),
+        })
+        .await;
+        let (slow_failing, slow_counter) = (Arc::clone(&failing), Arc::clone(&slow_reads));
+        let slow = scripted::endpoint(move |_, _| match slow_failing.load(Ordering::SeqCst) {
+            true => Answer::Status(503),
+            false => {
+                slow_counter.fetch_add(1, Ordering::SeqCst);
+                Answer::Silence
+            }
+        })
+        .await;
+        let transport = breaker_transport(vec![fast, slow], Strategy::Hedged { fan_out: 2 }, 5, 1);
+        assert!(call_through(&transport, "eth_chainId", 1).await.is_err());
+        assert_eq!(transport.healthy_count(), 0);
+        failing.store(false, Ordering::SeqCst);
+        for round in 0..3 {
+            tokio::time::sleep(std::time::Duration::from_millis(15)).await;
+            assert!(
+                call_through(&transport, "eth_blockNumber", 10 + round)
+                    .await
+                    .is_ok()
+            );
+            assert_eq!(
+                circuits(&transport),
+                [CircuitState::Closed, IDLE],
+                "round {round}: the loser's slot came back"
+            );
+            transport.router.shared.record_failure(0, now_ms());
+        }
+        assert_eq!(slow_reads.load(Ordering::SeqCst), 3, "probed once a round");
+    }
+
+    /// A probe of an earlier recovery cycle, declined late, frees no slot
+    /// of the current cycle's probe: a read sent while closed fails 200 ms
+    /// later and reopens the circuit under the first cycle's probe, and
+    /// that probe's 413, arriving while the second cycle's probe waits,
+    /// leaves the next read refused.
+    #[tokio::test]
+    async fn a_probe_of_an_earlier_cycle_frees_no_slot() {
+        for strategy in STRATEGIES {
+            let balance_arrived = Arc::new(Notify::new());
             let probe_arrived = Arc::new(Notify::new());
             let other_reads = Arc::new(AtomicUsize::new(0));
-            let (logs, probe, others) = (
-                Arc::clone(&logs_arrived),
+            let (balance, probe, others) = (
+                Arc::clone(&balance_arrived),
                 Arc::clone(&probe_arrived),
                 Arc::clone(&other_reads),
             );
             let url = scripted::endpoint(move |method, _| match method {
-                "eth_getLogs" => {
-                    logs.notify_one();
-                    Answer::Late(Box::new(Answer::Status(413)))
+                "eth_getBalance" => {
+                    balance.notify_one();
+                    Answer::Late(Box::new(Answer::Status(503)))
                 }
                 "eth_chainId" => Answer::Status(503),
+                "eth_getLogs" => Answer::Late(Box::new(Answer::Status(413))),
                 "eth_blockNumber" => {
                     probe.notify_one();
                     Answer::Silence
@@ -2233,65 +2581,104 @@ mod tests {
                 }
             })
             .await;
-            let transport = HftTransport::new(
-                TransportConfig::builder()
-                    .shared_endpoint(url)
-                    .strategy(strategy)
-                    .request_timeout(std::time::Duration::from_secs(2))
-                    .read_retry(crate::transport::config::ReadRetryConfig {
-                        max_retries: 0,
-                        base_delay: std::time::Duration::from_millis(1),
-                    })
-                    .circuit_breaker(one_probe_breaker(std::time::Duration::from_millis(5)))
-                    .build()
-                    .unwrap(),
-            )
-            .unwrap();
-            let call = |method: &'static str, id: u64| {
-                transport
-                    .clone()
-                    .call(RequestPacket::Single(make_request(method, id)))
-            };
+            let transport = breaker_transport(vec![url], strategy, 5, 1);
 
-            let late = tokio::spawn(call("eth_getLogs", 1));
-            logs_arrived.notified().await;
-            assert!(call("eth_chainId", 2).await.is_err(), "{strategy:?}");
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-            let probe = tokio::spawn(call("eth_blockNumber", 3));
+            let closed_read = tokio::spawn(call_through(&transport, "eth_getBalance", 1));
+            balance_arrived.notified().await;
+            assert!(call_through(&transport, "eth_chainId", 2).await.is_err());
+            tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+            let first_probe = tokio::spawn(call_through(&transport, "eth_getLogs", 3));
+            assert!(closed_read.await.unwrap().is_err());
+            assert!(
+                matches!(circuits(&transport)[..], [CircuitState::Open { .. }]),
+                "{strategy:?}: {:?}",
+                circuits(&transport)
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(15)).await;
+            let second_probe = tokio::spawn(call_through(&transport, "eth_blockNumber", 4));
             probe_arrived.notified().await;
-            assert!(late.await.unwrap().is_err(), "{strategy:?}: declined");
+            assert!(
+                first_probe.await.unwrap().is_err(),
+                "{strategy:?}: declined"
+            );
+            assert_eq!(circuits(&transport), [PROBING], "{strategy:?}");
 
-            let refused = call("eth_gasPrice", 4)
+            let refused = call_through(&transport, "eth_gasPrice", 5)
                 .await
-                .expect_err("the probe holds the only slot");
+                .expect_err("the second cycle's probe holds the slot");
             assert!(
                 refused.to_string().contains("circuits open"),
                 "{strategy:?}: {refused}"
             );
             assert_eq!(other_reads.load(Ordering::SeqCst), 0, "{strategy:?}");
-            probe.abort();
+            second_probe.abort();
         }
+    }
+
+    /// A hedged selection never names one endpoint twice: an endpoint the
+    /// lock-free scan took as closed, whose circuit opens before the
+    /// reserving scan with no recovery timeout, is not reserved again as a
+    /// probe. Endpoint 1's only probe slot is held, so the reserving scan
+    /// has nothing else to take.
+    #[test]
+    fn a_hedge_selects_an_endpoint_once() {
+        let pool = EndpointPool::from_urls(
+            &[
+                "https://rpc1.example.com".into(),
+                "https://rpc2.example.com".into(),
+            ],
+            crate::transport::config::CircuitBreakerConfig {
+                failure_threshold: 1,
+                recovery_timeout: std::time::Duration::ZERO,
+                half_open_max_requests: 1,
+            },
+        )
+        .unwrap();
+        let now = now_ms();
+        pool.record_failure(1, now);
+        let _held = pool.reserve(1, now).expect("endpoint 1's probe");
+
+        let selected = pool.select_n_between(2, now, |pool| pool.record_failure(0, now));
+        let selected: Vec<usize> = selected.into_iter().map(|(idx, _)| idx).collect();
+        assert_eq!(selected, [0]);
+        assert!(matches!(
+            pool.health_status()[0].state,
+            CircuitState::Open { .. }
+        ));
     }
 
     /// A circuit that a slow failure opens starts its recovery window when
     /// the failure arrives, not when the request left: after a read that
-    /// fails 200 ms or more after it was sent, by a late 503 or by timing
-    /// out at 300 ms, a recovery timeout of 100 ms still refuses the next
-    /// read, on the standard path, the hedged path to one endpoint and the
-    /// hedged fan-out; once the window has passed, the endpoint serves.
+    /// fails 200 ms or more after it was sent, by a late 503, a late
+    /// JSON-RPC rate limit under HTTP 200 or by timing out at 300 ms, a
+    /// recovery timeout of 100 ms still refuses the next read, on the
+    /// standard path, the hedged path to one endpoint and the hedged
+    /// fan-out; once the window has passed, the endpoint serves. A rate
+    /// limit is an answer, which ends a fan-out at once, so the fan-out
+    /// case leaves it out.
     #[tokio::test]
     async fn a_slow_failure_opens_the_circuit_when_it_arrives() {
         type Failure = (&'static str, fn() -> Answer);
-        let failures: [Failure; 2] = [
+        let failures: [Failure; 3] = [
             ("late 503", || Answer::Late(Box::new(Answer::Status(503)))),
+            ("late rate limit", || {
+                Answer::Late(Box::new(Answer::Error(
+                    -32_005,
+                    "rate limit exceeded".into(),
+                )))
+            }),
             ("timeout", || Answer::Silence),
         ];
         for (strategy, endpoints) in [
+            (Strategy::RoundRobin, 1),
             (Strategy::LatencyBased, 1),
             (Strategy::Hedged { fan_out: 2 }, 1),
             (Strategy::Hedged { fan_out: 2 }, 2),
         ] {
             for (failure, fail) in failures {
+                if endpoints > 1 && failure == "late rate limit" {
+                    continue;
+                }
                 let case = format!("{strategy:?}, {endpoints} endpoint(s), {failure}");
                 let hits = Arc::new(AtomicUsize::new(0));
                 let mut config = TransportConfig::builder()
@@ -2322,7 +2709,11 @@ mod tests {
                     transport.router.route_request(req)
                 };
 
-                assert!(read(1).await.is_err(), "{case}");
+                let first = read(1).await;
+                assert!(
+                    !first.is_ok_and(|answer| answer.first_error_code().is_none()),
+                    "{case}"
+                );
                 assert_eq!(hits.load(Ordering::SeqCst), endpoints, "{case}");
                 assert!(read(2).await.is_err(), "{case}: cooling down");
                 assert_eq!(
@@ -2458,8 +2849,6 @@ mod tests {
     /// [`READ_METHODS`].
     #[tokio::test]
     async fn every_read_the_sdk_sends_is_allowlisted_and_retried() {
-        use alloy::eips::BlockNumberOrTag;
-        use alloy::rpc::types::{Filter, TransactionRequest};
         let asked = Arc::new(Mutex::new(Vec::<String>::new()));
         let log = Arc::clone(&asked);
         let url = scripted::endpoint(move |method, _| {
@@ -2660,9 +3049,9 @@ mod tests {
         )
         .unwrap();
 
-        pool.record_success(0, 5_000_000);
-        pool.record_success(1, 1_000_000);
-        pool.record_success(2, 3_000_000);
+        pool.record_success(0, 5_000_000, ProbePermit::free());
+        pool.record_success(1, 1_000_000, ProbePermit::free());
+        pool.record_success(2, 3_000_000, ProbePermit::free());
 
         let selected = pool.select_n(2, now_ms());
         let selected: Vec<usize> = selected.into_iter().map(|(idx, _)| idx).collect();
@@ -2785,7 +3174,7 @@ mod tests {
         assert_eq!(ep.atomic_latency_ns.load(Ordering::Relaxed), 0);
 
         // After success: still Closed, latency updated
-        pool.record_success(0, 5_000_000);
+        pool.record_success(0, 5_000_000, ProbePermit::free());
         assert_eq!(
             ep.atomic_state.load(Ordering::Relaxed) & TAG_MASK,
             TAG_CLOSED
@@ -2830,8 +3219,8 @@ mod tests {
         )
         .unwrap();
 
-        pool.record_success(0, 10_000_000);
-        pool.record_success(1, 2_000_000);
+        pool.record_success(0, 10_000_000, ProbePermit::free());
+        pool.record_success(1, 2_000_000, ProbePermit::free());
 
         // Multiple selections should consistently pick endpoint 1 (lower latency)
         for _ in 0..100 {
@@ -2851,9 +3240,9 @@ mod tests {
         )
         .unwrap();
 
-        pool.record_success(0, 8_000_000);
-        pool.record_success(1, 2_000_000);
-        pool.record_success(2, 5_000_000);
+        pool.record_success(0, 8_000_000, ProbePermit::free());
+        pool.record_success(1, 2_000_000, ProbePermit::free());
+        pool.record_success(2, 5_000_000, ProbePermit::free());
 
         let selected = pool.select_n(2, 1000);
         let selected: Vec<usize> = selected.into_iter().map(|(idx, _)| idx).collect();
