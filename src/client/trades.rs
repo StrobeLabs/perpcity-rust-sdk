@@ -786,9 +786,10 @@ impl PerpClient {
         urgency: Urgency,
     ) -> Result<TransactionReceipt> {
         validate_fee_recipient(fee_recipient)?;
+        let era = self.market.era().await?;
         let calldata = self
             .market
-            .liquidation_calldata(role, pos_id, fee_recipient)
+            .liquidation_calldata_for(era, role, pos_id, fee_recipient)
             .await?;
 
         tracing::debug!(
@@ -801,6 +802,7 @@ impl PerpClient {
 
         let receipt = self
             .tx(self.market.perp(), calldata)
+            .with_market_era(era)
             .with_gas_limit(GasLimits::LIQUIDATE)
             .with_urgency(urgency)
             .send()

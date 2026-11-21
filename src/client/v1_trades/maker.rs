@@ -1058,7 +1058,7 @@ mod tests {
             now_ms(),
         );
         answer_removal(&rpc, &client, deep());
-        rpc.block(101, 1_795_141_002);
+        let head = rpc.block(101, 1_795_141_002);
         rpc.response(&Bytes::new());
         rpc.response(&mock::SENT);
         rpc.response(&adjusted_receipt(&client, mock::SENT, 20_000_000));
@@ -1078,7 +1078,7 @@ mod tests {
         assert_eq!(err.hash_to_replace(), None, "it mined");
         let preflight = rpc.calls().pop().unwrap();
         assert_eq!(removal_call(&preflight).liquidityDelta, -335_000_000);
-        assert_eq!(rpc.call_blocks().pop(), Some(BlockId::number(101)));
+        assert_eq!(rpc.call_blocks().pop(), Some(BlockId::hash(head)));
         assert_eq!(rpc.call_gas().pop(), Some(Some(750_000)));
         let sent = rpc.sent_txs();
         assert_eq!(sent.len(), 1);
@@ -1461,7 +1461,7 @@ mod tests {
         let (hash, tx) = taker::pending_trade(&client, stuck_removal(taker::NOW + 600)).await;
         rpc.immutables(Era::V1);
         rpc.response(&tx);
-        rpc.block(taker::HEAD, taker::NOW);
+        let head = rpc.block(taker::HEAD, taker::NOW);
         rpc.raw(&[]);
         rpc.fails("replacement transaction underpriced");
         taker::nothing_settled(&rpc, taker::STUCK_NONCE, 2);
@@ -1472,7 +1472,7 @@ mod tests {
         assert!(err.is_unconfirmed(), "{err}");
         let calls = rpc.params("eth_call");
         let preflight = calls.last().unwrap();
-        assert_eq!(preflight[1], format!("{:#x}", taker::HEAD));
+        assert_eq!(preflight[1], serde_json::json!({"blockHash": head}));
         assert_eq!(
             preflight[3],
             serde_json::json!({

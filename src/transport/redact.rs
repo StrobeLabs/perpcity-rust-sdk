@@ -11,6 +11,9 @@ use std::task::{Context, Poll};
 use alloy::rpc::json_rpc::{RequestPacket, ResponsePacket};
 use alloy::transports::{RpcError, TransportError, TransportErrorKind, TransportFut};
 use reqwest::header::{CONTENT_TYPE, HeaderValue};
+use serde_json::value::RawValue;
+
+use super::fault::simulation_needs_head;
 
 /// Label used when an endpoint string does not parse as a URL with a host.
 const UNPARSEABLE: &str = "<unparseable endpoint>";
@@ -234,7 +237,25 @@ impl UrlStrippingHttp {
         if !status.is_success() {
             return Err(TransportErrorKind::http_error(status.as_u16(), text()));
         }
-        serde_json::from_slice(&body).map_err(|err| TransportError::deser_err(err, text()))
+        let response: ResponsePacket =
+            serde_json::from_slice(&body).map_err(|err| TransportError::deser_err(err, text()))?;
+        if let RequestPacket::Single(request) = req
+            && matches!(request.method(), "eth_call" | "eth_estimateGas")
+            && let Some(error) = response
+                .iter_errors()
+                .find(|error| simulation_needs_head(error))
+            && request
+                .params()
+                .is_some_and(|params| serde_json::from_str::<[&RawValue; 4]>(params.get()).is_ok())
+        {
+            tracing::warn!(
+                endpoint = %redact_url(self.url.as_str()),
+                method = request.method(),
+                error_code = error.code,
+                "RPC endpoint refused block overrides or could not serve the pinned block"
+            );
+        }
+        Ok(response)
     }
 }
 

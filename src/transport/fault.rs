@@ -257,6 +257,11 @@ pub(crate) fn is_no_answer(error: &TransportError) -> bool {
         || resp.code == -32_603
 }
 
+/// Whether a pinned simulation should read the head again.
+pub(crate) fn simulation_needs_head(resp: &ErrorPayload) -> bool {
+    !is_execution_error(resp) && (resp.code == -32_602 || lacks_block(&resp.message))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
