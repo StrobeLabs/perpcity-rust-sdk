@@ -666,33 +666,6 @@ impl ChainReader {
         ))
     }
 
-    /// Run an `eth_call` simulation from `from` to verify a transaction
-    /// won't revert.
-    ///
-    /// `from` is a semantic input: the contract sees it as `msg.sender`, so
-    /// a probe from an unfunded address can fail where the funded sender's
-    /// transaction would succeed. When `gas_limit` is set, the simulation
-    /// is capped at exactly the limit the transaction will broadcast with,
-    /// so an execution that cannot finish inside a pinned limit fails
-    /// preflight instead of burning the gas on-chain — the one failure a
-    /// fixed limit like
-    /// [`GasLimits::LIQUIDATE`](crate::hft::gas::GasLimits::LIQUIDATE)
-    /// exists to prevent. Without a limit the node simulates with its
-    /// default gas cap.
-    pub(super) async fn preflight_call(
-        &self,
-        from: Address,
-        to: Address,
-        calldata: &Bytes,
-        value: u128,
-        gas_limit: Option<u64>,
-    ) -> std::result::Result<(), TransactionError> {
-        let tx = preflight_request(from, to, calldata, value, gas_limit);
-        self.call_in(tx, None)
-            .await
-            .map_err(|e| simulation_failure(&e, "eth_call", gas_limit.is_some()).0)
-    }
-
     /// The block after the head, read now, for a `v1.0.0` trade's
     /// simulation.
     ///

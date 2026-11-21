@@ -1609,7 +1609,7 @@ mod tests {
 
     /// The maker writes classify a failed era read by the taker writes'
     /// rule: no answer (a timeout, a bare internal error, a gateway with
-    /// no backend) is transient; revert data under any code is the
+    /// no backend) is transient; a nested execution revert preserves the
     /// contract's answer.
     #[tokio::test]
     async fn the_maker_era_read_tells_an_answer_from_no_answer() {
@@ -1617,7 +1617,7 @@ mod tests {
             ("upstream timeout", true),
             ("bare internal error", true),
             ("no backends", true),
-            ("internal error with revert data", false),
+            ("internal error with nested revert", false),
             ("code 3", false),
         ] {
             for write in ["open", "close", "replace"] {
@@ -1626,8 +1626,12 @@ mod tests {
                     "upstream timeout" => rpc.fails("upstream timeout"),
                     "bare internal error" => rpc.answers_error(-32_603, "internal error", None),
                     "no backends" => rpc.answers_error(-32_011, "no backends available", None),
-                    "internal error with revert data" => {
-                        rpc.answers_error(-32_603, "internal error", Some(r#""0xbcffc83f""#));
+                    "internal error with nested revert" => {
+                        rpc.answers_error(
+                            -32_603,
+                            "internal error",
+                            Some(r#"{"originalError":{"code":3,"data":"0xbcffc83f"}}"#),
+                        );
                     }
                     _ => rpc.reverts(&[]),
                 }

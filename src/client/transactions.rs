@@ -1205,6 +1205,67 @@ mod tests {
         }
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn wrapped_missing_blocks_and_quotas_retry_all_pinned_send_paths() {
+        for path in [Path::Estimate, Path::CacheHit, Path::Explicit] {
+            for data in WRAPPED_SIMULATION_FAILURES {
+                let (client, rpc) = v1_trade_on(path);
+                let old = rpc.block(500, 1_000);
+                rpc.answers_error(-32603, "Internal error", Some(data));
+                let new = rpc.block(501, 1_001);
+                let method = simulation_succeeds(path, &rpc);
+                answer_send(&rpc, &client);
+
+                send_on(path, &client).await.unwrap();
+
+                assert_eq!(
+                    rpc.params("eth_getBlockByNumber").len(),
+                    2,
+                    "{path:?}: {data}"
+                );
+                let params = rpc.params(method);
+                assert_eq!(params.len(), 2, "{path:?}: {data}");
+                assert_eq!(params[0][1], block_pin(old));
+                assert_eq!(params[1][1], block_pin(new));
+                if matches!(path, Path::CacheHit) {
+                    assert!(rpc.params("eth_estimateGas").is_empty());
+                }
+                assert!(rpc.is_drained());
+            }
+        }
+    }
+
+    const WRAPPED_SIMULATION_FAILURES: [&str; 4] = [
+        r#"{"originalError":{"code":-32000,"message":"header not found","data":"0x1f5cfa71"}}"#,
+        r#"{"originalError":{"code":-32005,"message":"rate limit exceeded","data":"0x000003e8"}}"#,
+        r#"{"originalError":{"code":-32005,"message":"Exceeded max limit of 100 requests per second","data":"0x12345678"}}"#,
+        r#"{"originalError":[{"code":-32005,"message":"rate limit exceeded","data":"0x000003e8"}]}"#,
+    ];
+
+    #[tokio::test(start_paused = true)]
+    async fn wrapped_missing_blocks_and_quotas_are_transient_on_ordinary_sends() {
+        for data in WRAPPED_SIMULATION_FAILURES {
+            let (client, rpc) = mock::client();
+            client.chain().set_base_fee(100);
+            rpc.answers_error(-32603, "Internal error", Some(data));
+
+            let result = client
+                .tx(mock::PERP, calldata(v1::Perp::adjustTakerCall::SELECTOR))
+                .with_market_era(Era::Upgradeable)
+                .send()
+                .await;
+            assert!(
+                matches!(&result,
+                    Err(PerpCityError::Transaction(TransactionError::GasUnavailable { reason }))
+                    if reason.contains("Internal error")),
+                "{data}: {result:?}"
+            );
+            assert!(rpc.params("eth_getBlockByNumber").is_empty());
+            assert_eq!(rpc.params("eth_estimateGas").len(), 1);
+            assert!(rpc.is_drained());
+        }
+    }
+
     /// A second miss, or a failed head read after the first, is no
     /// answer: transient, nothing sent, and a cached limit kept. Not the
     /// call's failure.
@@ -1734,10 +1795,10 @@ mod tests {
             alloy::hex::encode_prefixed(alloy::sol_types::Revert::from("out of gas").abi_encode())
         );
         for (path, code, message) in [
-            (Path::Estimate, 3, "execution reverted: out of gas"),
-            (Path::Explicit, 3, "execution reverted: out of gas"),
-            (Path::Estimate, -32000, "out of gas"),
-            (Path::Explicit, -32000, "out of gas"),
+            (Path::Estimate, 3, "out of gas"),
+            (Path::Explicit, 3, "out of gas"),
+            (Path::Estimate, -32000, "execution reverted: out of gas"),
+            (Path::Explicit, -32000, "execution reverted: out of gas"),
         ] {
             let (client, rpc) = v1_trade_on(path);
             rpc.block(500, 1_000);
@@ -2165,6 +2226,85 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn liquidation_probes_check_an_empty_revert_without_the_gas_cap() {
+        for maker in [true, false] {
+            for uncapped_passes in [true, false] {
+                let (client, rpc) = mock::client();
+                rpc.immutables(Era::Legacy);
+                rpc.reverts(&[]);
+                if uncapped_passes {
+                    rpc.response(&Bytes::new());
+                } else {
+                    rpc.reverts(&EarlierPerp::NotLiquidatable::SELECTOR);
+                }
+                let from = client.address();
+                let error = if maker {
+                    client.simulate_liquidate_maker(U256::ONE, from).await
+                } else {
+                    client.simulate_liquidate_taker(U256::ONE, from).await
+                }
+                .unwrap_err();
+
+                if uncapped_passes {
+                    assert!(
+                        matches!(&error,
+                            PerpCityError::Transaction(TransactionError::GasLimitTooLow {
+                                gas_limit: GasLimits::LIQUIDATE,
+                                error_name,
+                            }) if error_name == "execution reverted"),
+                        "{error:?}"
+                    );
+                } else {
+                    assert!(
+                        matches!(&error, PerpCityError::Transaction(error)
+                            if error.is_revert::<EarlierPerp::NotLiquidatable>()),
+                        "{error:?}"
+                    );
+                }
+                assert_eq!(rpc.call_gas()[2..], [Some(GasLimits::LIQUIDATE), None]);
+                assert!(
+                    rpc.params("eth_call")[2..]
+                        .iter()
+                        .all(|params| params[1] == "pending")
+                );
+                assert!(rpc.is_drained());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn liquidation_probes_keep_position_size_read_quotas_transient() {
+        for era in [Era::Upgradeable, Era::V1] {
+            for maker in [true, false] {
+                for execution in [false, true] {
+                    let (client, rpc) = mock::client();
+                    rpc.immutables(era);
+                    if execution {
+                        rpc.reverts(&EarlierPerp::NotLiquidatable::SELECTOR);
+                    } else {
+                        rpc.node_error(-32005, "Too Many Requests");
+                    }
+                    let from = client.address();
+                    let error = if maker {
+                        client.simulate_liquidate_maker(U256::ONE, from).await
+                    } else {
+                        client.simulate_liquidate_taker(U256::ONE, from).await
+                    }
+                    .unwrap_err();
+
+                    assert_eq!(
+                        error.is_transient(),
+                        !execution,
+                        "{era:?} maker={maker}: {error:?}"
+                    );
+                    assert_eq!(rpc.call_gas(), [None; 3]);
+                    assert!(rpc.is_drained());
+                }
+            }
+        }
+    }
+
     /// Arbitrum One's answers to a transfer from an empty account, as
     /// `eth_estimateGas` and `eth_call` give them.
     const INSUFFICIENT_FUNDS_ESTIMATE: &str = "failed with 50001848 gas: insufficient funds for gas * price + value: address 0x0000000000000000000000000000000000133723 have 0 want 1";
@@ -2458,21 +2598,18 @@ mod tests {
                 ),
                 Final,
             ),
-            (
-                (-32602, "invalid argument", Some(r#""0x08c379a0""#)),
-                Decoded([0x08, 0xc3, 0x79, 0xa0]),
-            ),
+            ((-32602, "invalid argument", Some(r#""0x08c379a0""#)), Retry),
             (
                 (
                     -32602,
                     "invalid argument",
                     Some(r#"{"originalError":{"data":"0xb2c86a29"}}"#),
                 ),
-                Decoded([0xb2, 0xc8, 0x6a, 0x29]),
+                Retry,
             ),
             (
                 (-32603, "Internal error", Some(r#""Reverted 0xdeadbeef""#)),
-                Decoded([0xde, 0xad, 0xbe, 0xef]),
+                Retry,
             ),
             (
                 (
@@ -2480,7 +2617,7 @@ mod tests {
                     "VM execution error.",
                     Some(r#""Reverted 0xdeadbeef""#),
                 ),
-                Decoded([0xde, 0xad, 0xbe, 0xef]),
+                Final,
             ),
             (
                 (3, "execution reverted", Some(r#""Reverted 0xdeadbeef""#)),
@@ -2607,7 +2744,7 @@ mod tests {
             ),
             (
                 r#"{"data":"0x01","originalError":{"data":["0xdeadbeef"]}}"#,
-                Some("0xdeadbeef"),
+                None,
             ),
             (r#"{"blockHash":"0xdeadbeefdeadbeef"}"#, None),
             (r#"{"requestId":"0xdeadbeefdeadbeef"}"#, None),
@@ -2653,7 +2790,11 @@ mod tests {
             ),
             (
                 r#"{"originalError":{"originalError":{"data":"0xb2c86a29"}}}"#,
-                Some("0xb2c86a29"),
+                None,
+            ),
+            (
+                r#"{"originalError":{"code":-32005,"message":"rate limit exceeded","data":"0xdeadbeef"}}"#,
+                None,
             ),
             (r#""0x1234""#, None),
             (r#""0xnothex00""#, None),
