@@ -163,50 +163,75 @@ fn provider(url: &str) -> RootProvider {
     RootProvider::new(RpcClient::new(BoxTransport::new(transport), false))
 }
 
-/// An `eth_call` at a block hash with the next block's overrides: four
-/// params.
-async fn call_with_overrides(url: &str) {
-    let overrides = BlockOverrides {
+fn next_block_overrides() -> BlockOverrides {
+    BlockOverrides {
         number: Some(U256::from(501)),
         time: Some(1_001),
         ..BlockOverrides::default()
-    };
+    }
+}
+
+/// An `eth_call` at a block hash with the next block's overrides: four
+/// params.
+async fn call_with_overrides(url: &str) {
     provider(url)
         .call(TransactionRequest::default().to(Address::ZERO))
         .block(BlockId::hash(B256::repeat_byte(7)))
-        .with_block_overrides(overrides)
+        .with_block_overrides(next_block_overrides())
         .await
         .unwrap_err();
 }
 
-/// A simulation with block overrides that the endpoint refuses (`-32602`)
-/// or answers without the pinned block warns with the endpoint's host and
-/// port, the method and the error code only: no userinfo, path or query.
-/// The same refusal of a call without overrides, and an execution answer
-/// (revert data under `-32602`, a revert under code 3 that names a
-/// missing block), warn of nothing.
+/// An `eth_estimateGas` at a block hash with the next block's overrides:
+/// four params.
+async fn estimate_with_overrides(url: &str) {
+    provider(url)
+        .estimate_gas(TransactionRequest::default().to(Address::ZERO))
+        .block(BlockId::hash(B256::repeat_byte(7)))
+        .with_block_overrides(next_block_overrides())
+        .await
+        .unwrap_err();
+}
+
+/// A simulation with block overrides that the endpoint refuses (`-32602`),
+/// an `eth_call` or an `eth_estimateGas`, warns with the endpoint's host
+/// and port, the method and the error code only: no userinfo, path or
+/// query. A missing pinned block, a replica behind the head, is logged at
+/// debug only. The same refusal of a call without overrides, and an
+/// execution answer (revert data under `-32602`, a revert under code 3
+/// that names a missing block), warn of nothing.
 #[tokio::test]
 async fn an_override_refusal_warns_with_the_host_only() {
     let captured = Captured::default();
     let _guard = tracing::subscriber::set_default(captured.clone());
 
-    for (error, code) in [
-        (
-            r#"{"code":-32602,"message":"too many arguments, want at most 3 (POST /v2/alch_secretkey123)"}"#,
-            -32602,
-        ),
-        (r#"{"code":-32000,"message":"header not found"}"#, -32000),
-    ] {
-        let (url, addr) = answering_endpoint(error).await;
-        call_with_overrides(&url).await;
+    let refusal = r#"{"code":-32602,"message":"too many arguments, want at most 3 (POST /v2/alch_secretkey123)"}"#;
+    for method in ["eth_call", "eth_estimateGas"] {
+        let (url, addr) = answering_endpoint(refusal).await;
+        match method {
+            "eth_call" => call_with_overrides(&url).await,
+            _ => estimate_with_overrides(&url).await,
+        }
         assert_eq!(
             captured.take_warnings(),
             [format!(
-                "message=RPC endpoint refused block overrides or could not serve the pinned \
-                 block endpoint={addr} method=\"eth_call\" error_code={code} "
+                "message=RPC endpoint refused block overrides endpoint={addr} \
+                 method=\"{method}\" error_code=-32602 "
             )]
         );
     }
+
+    let (url, addr) = answering_endpoint(r#"{"code":-32000,"message":"header not found"}"#).await;
+    call_with_overrides(&url).await;
+    assert_eq!(captured.take_warnings(), Vec::<String>::new());
+    assert!(
+        captured.all().contains(&format!(
+            "message=RPC endpoint could not serve the pinned block endpoint={addr} \
+             method=\"eth_call\" error_code=-32000 "
+        )),
+        "{}",
+        captured.all()
+    );
 
     let (url, _) =
         answering_endpoint(r#"{"code":-32602,"message":"too many arguments, want at most 3"}"#)

@@ -132,32 +132,33 @@ fn has_revert_data(resp: &ErrorPayload) -> bool {
 }
 
 /// The revert data of an error answer: the longest `0x` hex string of at
-/// least [`MIN_REVERT_DIGITS`] digits in its `data`, as `data` itself or
-/// under a `data` or `originalError` key at any depth, arrays included, as
-/// nodes and wallets nest it. Other keys (`blockNumber`, `blockHash`,
-/// `requestId`) are not revert data.
+/// least [`MIN_REVERT_DIGITS`] digits in its `data` field, as the field
+/// itself or along its `data` / `originalError` chain (`originalError.data`,
+/// a nested `originalError`), as nodes and wallets nest it, and in an array
+/// directly under one of those. Every other object is skipped: a refusal
+/// that echoes the request (`{"request":{"data":"0x…"}}`) holds calldata,
+/// and other keys (`blockNumber`, `blockHash`, `requestId`) are not revert
+/// data.
 pub(crate) fn revert_data(resp: &ErrorPayload) -> Option<String> {
-    fn longest(value: &Value, revert_field: bool) -> Option<&str> {
+    fn hex(value: &Value) -> Option<&str> {
+        let text = value.as_str()?;
+        text.strip_prefix("0x")
+            .is_some_and(|digits| digits.bytes().all(|digit| digit.is_ascii_hexdigit()))
+            .then_some(text)
+    }
+    fn longest(value: &Value) -> Option<&str> {
         match value {
-            Value::String(text) if revert_field => text
-                .strip_prefix("0x")
-                .is_some_and(|digits| digits.bytes().all(|digit| digit.is_ascii_hexdigit()))
-                .then_some(text.as_str()),
-            Value::Array(items) => items
-                .iter()
-                .filter_map(|item| longest(item, revert_field))
-                .max_by_key(|text| text.len()),
-            Value::Object(fields) => fields
-                .iter()
-                .filter_map(|(key, field)| {
-                    longest(field, matches!(key.as_str(), "data" | "originalError"))
-                })
+            Value::String(_) => hex(value),
+            Value::Array(items) => items.iter().filter_map(hex).max_by_key(|text| text.len()),
+            Value::Object(fields) => ["data", "originalError"]
+                .into_iter()
+                .filter_map(|key| longest(fields.get(key)?))
                 .max_by_key(|text| text.len()),
             _ => None,
         }
     }
     let value = serde_json::from_str::<Value>(resp.data.as_ref()?.get()).ok()?;
-    longest(&value, true)
+    longest(&value)
         .filter(|text| text.len() - 2 >= MIN_REVERT_DIGITS)
         .map(str::to_owned)
 }
@@ -478,6 +479,16 @@ mod tests {
                 "{message}"
             );
         }
+        // A refusal that echoes the request holds calldata, not revert data.
+        for data in [
+            r#"{"request":{"data":"0x12345678aabbccdd"}}"#,
+            r#"{"params":[{"data":"0x12345678aabbccdd"}],"requestId":"0x0123456789"}"#,
+        ] {
+            assert!(
+                simulation_needs_head(&payload(-32602, "invalid argument", Some(data))),
+                "{data}"
+            );
+        }
         for (code, message, data) in [
             (-32602, "invalid argument", Some(r#""0x08c379a0""#)),
             (
@@ -496,9 +507,10 @@ mod tests {
         }
     }
 
-    /// Revert data is the longest hex string under `data` or
-    /// `originalError` at any depth, of a selector or more; other keys and
-    /// shorter strings are not.
+    /// Revert data is the longest hex string, of a selector or more, in
+    /// the error's `data` and along its `data` / `originalError` chain;
+    /// other keys, objects under them (an echoed request) and shorter
+    /// strings are not.
     #[test]
     fn revert_data_is_read_under_data_and_original_error() {
         for (data, expected) in [
@@ -512,6 +524,17 @@ mod tests {
                 Some("0xdeadbeef"),
             ),
             (r#"{"blockHash":"0xdeadbeefdeadbeef"}"#, None),
+            (r#"{"requestId":"0xdeadbeefdeadbeef"}"#, None),
+            (r#"{"request":{"data":"0x12345678aabbccdd"}}"#, None),
+            (
+                r#"{"originalError":{"params":[{"data":"0x12345678aabbccdd"}]}}"#,
+                None,
+            ),
+            (r#"{"data":[{"data":"0x12345678"}]}"#, None),
+            (
+                r#"{"originalError":{"originalError":{"data":"0xb2c86a29"}}}"#,
+                Some("0xb2c86a29"),
+            ),
             (r#""0x1234""#, None),
             (r#""0xnothex00""#, None),
         ] {

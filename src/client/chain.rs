@@ -815,7 +815,9 @@ impl ChainReader {
                         error_name,
                     })),
                     Err(uncapped) => Ok(Err(classify_uncapped_failure(
-                        &uncapped, "eth_call", capped,
+                        &uncapped,
+                        "eth_call",
+                        Some(capped),
                     ))),
                 }
             })
