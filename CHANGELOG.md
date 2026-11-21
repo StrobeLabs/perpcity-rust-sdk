@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-11-21
+
+The v1 release: the client reads a market's era from its pool hook and
+writes to `v1.0.0` markets (taker and maker opens, adjusts and closes, stuck
+trade replacement, liquidations), and every send to a target that is not a
+confirmed v0.2.2 market simulates against the next block at a pinned head.
+The transport refuses every method but reads and a single signed raw
+transaction, and its circuit breaker gives a half-open probe slot only to
+the request that holds it. Breaking, so a minor bump, as for any breaking
+change before 1.0. No 0.13.0 was published; its changes are in this release.
+
 - Simulation decodes hex revert data only when the RPC error that carries it reports a revert. Wrapped missing-block and quota replies with hex metadata remain transient.
 - Liquidation probes report `GasLimitTooLow` when the capped call fails and the uncapped call passes. RPC failures without execution evidence during the position-size read are transient.
 
@@ -708,7 +719,8 @@ and why none of it changes a value on the wire.
 - Examples: quickstart, open_position, open_maker, market_maker, hft_bot
 - Benchmarks: math, HFT pipeline, transport
 
-[Unreleased]: https://github.com/StrobeLabs/perpcity-rust-sdk/compare/v0.12.0...HEAD
+[Unreleased]: https://github.com/StrobeLabs/perpcity-rust-sdk/compare/v0.14.0...HEAD
+[0.14.0]: https://github.com/StrobeLabs/perpcity-rust-sdk/compare/v0.12.0...v0.14.0
 [0.12.0]: https://github.com/StrobeLabs/perpcity-rust-sdk/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/StrobeLabs/perpcity-rust-sdk/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/StrobeLabs/perpcity-rust-sdk/compare/v0.9.0...v0.10.0
