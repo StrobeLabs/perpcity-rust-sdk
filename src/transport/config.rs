@@ -11,8 +11,9 @@
 //!   `eth_getBalance`, etc.). Falls back to the shared pool if all read endpoints
 //!   are unhealthy.
 //! - **Write** (`.write_endpoint()`) — dedicated to write operations
-//!   (`eth_sendRawTransaction`). Falls back to the shared pool if all write
-//!   endpoints are unhealthy.
+//!   (`eth_sendRawTransaction`, and every method that is not an allowlisted
+//!   read). Falls back to the shared pool if all write endpoints are
+//!   unhealthy.
 //!
 //! # Example
 //!
@@ -112,12 +113,15 @@ impl Default for ReadRetryConfig {
 /// make a second; it can be answered `already known` or `nonce too low`.
 ///
 /// It applies only to a request that is a single `eth_sendRawTransaction`.
-/// A call the node signs (`eth_sendTransaction`,
-/// `personal_sendTransaction`) is sent once whatever this says: the node
-/// picks the nonce, so a resend could be a second transaction. A batch
-/// that holds any write is sent once too, and any error in its answer is
-/// a transport error with an unknown outcome, never the node's rejection
-/// of a write. The SDK sends neither: it signs locally and sends one
+/// Only allowlisted read methods are retried or hedged; every other
+/// method is a write, sent once whatever this says, and its failure, an
+/// error answer included, is a transport error with an unknown outcome.
+/// That holds for a call the node signs (`eth_sendTransaction`,
+/// `personal_sendTransaction`, `eth_sendTransactionSync`), where the node
+/// picks the nonce and a resend could be a second transaction, for any
+/// other send (`eth_sendRawTransactionSync`, a conditional send), for an
+/// unknown method, and for a batch that holds any write. The SDK sends
+/// none of these: it signs locally and sends one
 /// `eth_sendRawTransaction`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WriteRetryConfig {
@@ -239,7 +243,8 @@ impl TransportConfigBuilder {
 
     /// Add a dedicated write endpoint.
     ///
-    /// Write requests (`eth_sendRawTransaction`) prefer these endpoints.
+    /// Write requests (`eth_sendRawTransaction`, and every method that is
+    /// not an allowlisted read) prefer these endpoints.
     /// If all write endpoints are unhealthy, writes fall back to the shared
     /// pool.
     pub fn write_endpoint(mut self, url: impl Into<String>) -> Self {
