@@ -2615,6 +2615,44 @@ mod tests {
         }
     }
 
+    /// A permit settles only the endpoint that gave it: recorded against
+    /// another endpoint, its probe's success closes neither circuit, and
+    /// its slot goes back to its own endpoint.
+    #[test]
+    fn a_permit_settles_only_its_own_endpoint() {
+        let pool = EndpointPool::from_urls(
+            &[
+                "https://rpc1.example.com".into(),
+                "https://rpc2.example.com".into(),
+            ],
+            crate::transport::config::CircuitBreakerConfig {
+                failure_threshold: 1,
+                recovery_timeout: std::time::Duration::ZERO,
+                half_open_max_requests: 1,
+            },
+        )
+        .unwrap();
+        let now = now_ms();
+        pool.record_failure(0, now);
+        pool.record_failure(1, now);
+        let _first = pool.reserve(0, now).expect("endpoint 0's probe");
+        let second = pool.reserve(1, now).expect("endpoint 1's probe");
+
+        pool.record_success(0, 1_000, second);
+        let states: Vec<CircuitState> = pool.health_status().iter().map(|s| s.state).collect();
+        assert_eq!(
+            states,
+            [
+                CircuitState::HalfOpen {
+                    probes_in_flight: 1
+                },
+                CircuitState::HalfOpen {
+                    probes_in_flight: 0
+                },
+            ]
+        );
+    }
+
     /// A hedged selection never names one endpoint twice: an endpoint the
     /// lock-free scan took as closed, whose circuit opens before the
     /// reserving scan with no recovery timeout, is not reserved again as a
