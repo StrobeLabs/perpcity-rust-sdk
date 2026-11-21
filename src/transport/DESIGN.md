@@ -189,15 +189,15 @@ callers re-subscribe.
 
 | Type | Invariant | Produced by | Consumed by |
 |---|---|---|---|
-| [`HftTransport`](provider.rs#L659) | the provider's transport: many endpoints, one `tower::Service`; sends reads and single signed raw transactions, refuses every other request before routing | [`HftTransport::new`](provider.rs#L669) from a [`TransportConfig`](config.rs#L167) | [`ChainReader::new`](../client/DESIGN.md), [`ChainReader::arbitrum`](../client/DESIGN.md) and [`ChainReader::arbitrum_sepolia`](../client/DESIGN.md), which build the provider over it, so every read and send in the crate passes through it. The strategy layer builds one per process, and a second one for scans so their declines and timeouts never touch the trading endpoints' health. |
-| [`TransportConfig`](config.rs#L167), [`TransportConfigBuilder`](config.rs#L201) | the pools and their policies: shared, read and write pools; per-endpoint timeouts; the retry and breaker settings; validated once at [`build`](config.rs#L303) | the builder, and only the builder | [`HftTransport::new`](provider.rs#L669). The strategy layer assembles one from its environment; the builder is where a keyed URL enters the crate. |
+| [`HftTransport`](provider.rs#L646) | the provider's transport: many endpoints, one `tower::Service`; sends reads and single signed raw transactions, refuses every other request before routing | [`HftTransport::new`](provider.rs#L656) from a [`TransportConfig`](config.rs#L167) | [`ChainReader::new`](../client/DESIGN.md), [`ChainReader::arbitrum`](../client/DESIGN.md) and [`ChainReader::arbitrum_sepolia`](../client/DESIGN.md), which build the provider over it, so every read and send in the crate passes through it. The strategy layer builds one per process, and a second one for scans so their declines and timeouts never touch the trading endpoints' health. |
+| [`TransportConfig`](config.rs#L167), [`TransportConfigBuilder`](config.rs#L201) | the pools and their policies: shared, read and write pools; per-endpoint timeouts; the retry and breaker settings; validated once at [`build`](config.rs#L303) | the builder, and only the builder | [`HftTransport::new`](provider.rs#L656). The strategy layer assembles one from its environment; the builder is where a keyed URL enters the crate. |
 | [`Strategy`](config.rs#L53) | how a read is routed: round robin, latency-based, or hedged; a caller's choice | the caller | [`TransportConfigBuilder::strategy`](config.rs#L275). Hedging costs N requests per read, which is why it is a choice and not a default. |
 | [`ReadRetryConfig`](config.rs#L101) | what a read retries: no answer only, with backoff | the caller; `Default` is 2 retries | [`TransportConfigBuilder::read_retry`](config.rs#L287). |
 | [`WriteRetryConfig`](config.rs#L134) | what a single `eth_sendRawTransaction`, the only write the transport sends, retries: an error answer or no answer, the same bytes; every other write is refused before it is sent | the caller; `Default` is 3 retries | [`TransportConfigBuilder::write_retry`](config.rs#L293). |
-| [`CircuitBreakerConfig`](config.rs#L69) | when a breaker trips: failure threshold, cooldown, positive probe limit | the caller; `Default` is the trading defaults | [`TransportConfigBuilder::circuit_breaker`](config.rs#L281); [`EndpointHealth::new`](health.rs#L113), one breaker per endpoint. |
-| [`EndpointHealth`](health.rs#L76), [`ProbePermit`](provider.rs#L220), [`Reserved`](health.rs#L31) | one endpoint's health: breaker, latency EMA, decaying error rate, readable without a lock, a failure dated when it arrives; a bounded number of probes; a permit for one request | [`EndpointHealth::new`](health.rs#L113), one per endpoint in a pool | the transport pools select over the tracker. |
-| [`ProbeSlot`](health.rs#L49) | a single-use slot bound to its issuing tracker and recovery cycle | issued by `reserve` in `Reserved::Probe`. [`EndpointHealth::record_answered`](health.rs#L238), [`EndpointHealth::record_success`](health.rs#L260) and [`EndpointHealth::release_probe`](health.rs#L211) return a foreign slot to its caller | [`EndpointHealth::record_answered`](health.rs#L238), [`EndpointHealth::record_success`](health.rs#L260) and [`EndpointHealth::release_probe`](health.rs#L211) settle the slot on its issuing tracker. |
-| [`EndpointStatus`](health.rs#L98), [`CircuitState`](health.rs#L56) | one endpoint's health, read out | [`HftTransport::health_status`](provider.rs#L688) | nothing in the crate. The strategy layer's metrics, which is why it is a plain value and not a handle. |
+| [`CircuitBreakerConfig`](config.rs#L69) | when a breaker trips: failure threshold, cooldown, positive probe limit | the caller; `Default` is the trading defaults | [`TransportConfigBuilder::circuit_breaker`](config.rs#L281); [`EndpointHealth::new`](health.rs#L115), one breaker per endpoint. |
+| [`EndpointHealth`](health.rs#L78), [`ProbePermit`](provider.rs#L220), [`Reserved`](health.rs#L32) | one endpoint's health: breaker, latency EMA, decaying error rate, readable without a lock, a failure dated when it arrives; a bounded number of probes; a permit for one request | [`EndpointHealth::new`](health.rs#L115), one per endpoint in a pool | the transport pools select over the tracker. |
+| [`ProbeSlot`](health.rs#L51) | a single-use slot bound to its issuing tracker and recovery cycle | issued by `reserve` in `Reserved::Probe`. [`EndpointHealth::record_answered`](health.rs#L259), [`EndpointHealth::record_success`](health.rs#L281) and [`EndpointHealth::release_probe`](health.rs#L232) return a foreign slot to its caller | [`EndpointHealth::record_answered`](health.rs#L259), [`EndpointHealth::record_success`](health.rs#L281) and [`EndpointHealth::release_probe`](health.rs#L232) settle the slot on its issuing tracker. |
+| [`EndpointStatus`](health.rs#L100), [`CircuitState`](health.rs#L58) | one endpoint's health, read out | [`HftTransport::health_status`](provider.rs#L675) | nothing in the crate. The strategy layer's metrics, which is why it is a plain value and not a handle. |
 | [`WsManager`](ws.rs#L69) | the subscription side: one socket; reconnect with capped backoff; re-subscription is the caller's | [`WsManager::connect`](ws.rs#L94) with a [`ReconnectConfig`](ws.rs#L43) | [`MarketFeed::subscribe`](../feeds/DESIGN.md), [`BlockHeaderFeed::subscribe`](../feeds/DESIGN.md) and [`LiveTakerMarket::subscribe`](../feeds/DESIGN.md), each one subscription over it. The strategy layer holds one per process. |
 | [`ReconnectConfig`](ws.rs#L43) | the backoff: initial, maximum, multiplier, attempts | the caller; `Default` is capped exponential | [`WsManager::connect`](ws.rs#L94). |
 
@@ -266,9 +266,9 @@ trade is a setting a caller chose.
   tests a half-open breaker.
 - **Reserved**: an endpoint held for one purpose.
 - **Probe slot**: one of the half-open breaker's probe places, held by
-  one request's permit and settled once; **recovery cycle**: one move of
-  the breaker from open to half-open, which names its slots. A request
-  sent while closed holds no slot: its outcome frees none, closes nothing.
+  one request's permit; **recovery cycle**: the group of probes whose
+  slots name the same cycle. A late failure from a request sent while closed
+  holds no slot, ends the current half-open cycle and costs one more recovery window.
 
 ## Accepted structure
 
@@ -277,12 +277,11 @@ trade is a setting a caller chose.
   issuing tracker's current cycle can use the slot to close the circuit
   or free a probe. A foreign tracker returns the slot unchanged.
 
-- **Single-endpoint selection gives recovery a turn.** Round robin
-  considers an eligible probe in rotation. Latency-based selection
-  gives recovering endpoints a rotating opportunity on alternate turns
-  while a closed endpoint can serve. Either strategy allows one probe in
-  flight on a recovering endpoint while a healthy peer is available.
-  Without a healthy peer, the configured concurrent probe budget applies.
+- **Single-endpoint selection gives recovery a turn.** Round robin considers an
+  eligible probe in rotation. Latency-based selection does so on alternate
+  turns. With a healthy peer, both reserve one probe per endpoint per cycle
+  and wait a recovery interval before starting a new cycle on an idle half-open
+  endpoint. Without a healthy peer, the configured concurrent probe budget applies.
 
 ## Debts
 
