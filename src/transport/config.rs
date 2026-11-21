@@ -57,7 +57,7 @@ pub enum Strategy {
     #[default]
     LatencyBased,
     /// Fan out reads to `fan_out` endpoints, take the fastest response.
-    /// Writes always go to a single best endpoint.
+    /// Each write attempt uses latency-based selection to choose one endpoint.
     Hedged {
         /// Number of endpoints to fan out reads to.
         fan_out: usize,

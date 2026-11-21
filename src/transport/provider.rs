@@ -323,19 +323,19 @@ impl EndpointPool {
     /// Take the right to send one request to endpoint `idx`, or `None` if
     /// its circuit will not allow one.
     pub fn reserve(&self, idx: usize, now_ms: u64) -> Option<ProbePermit<'_>> {
-        self.reserve_with_priority(idx, now_ms, false)
+        self.reserve_with_cooldown(idx, now_ms, false)
     }
 
-    fn reserve_with_priority(
+    fn reserve_with_cooldown(
         &self,
         idx: usize,
         now_ms: u64,
-        probe_only: bool,
+        limit_recovery: bool,
     ) -> Option<ProbePermit<'_>> {
         let endpoint = &self.endpoints[idx];
         let mut health = endpoint.health.lock().unwrap();
-        let reserved = if probe_only {
-            health.reserve_recovery_probe(now_ms)
+        let reserved = if limit_recovery {
+            health.reserve_for_hedge(now_ms)
         } else {
             health.reserve(now_ms)
         }?;
@@ -353,8 +353,8 @@ impl EndpointPool {
         }
     }
 
-    /// Round-robin selection gives each closed or recovering endpoint
-    /// a turn. A recovering endpoint gets one probe while peers can serve.
+    /// Select the first closed endpoint in round-robin order, or a probe
+    /// when no closed endpoint is available.
     fn select_round_robin(&self, now_ms: u64) -> Option<(usize, ProbePermit<'_>)> {
         let n = self.endpoints.len();
         let start = self.round_robin.fetch_add(1, Ordering::Relaxed) % n.max(1);
@@ -365,9 +365,6 @@ impl EndpointPool {
             if state & TAG_MASK == TAG_CLOSED {
                 return Some((idx, ProbePermit::free()));
             }
-            if let Some(permit) = self.reserve_recovering(idx, state, now_ms) {
-                return Some((idx, permit));
-            }
         }
 
         // With no closed endpoint, use the configured concurrent probe budget.
@@ -377,53 +374,22 @@ impl EndpointPool {
         })
     }
 
-    fn reserve_recovering(&self, idx: usize, state: u64, now_ms: u64) -> Option<ProbePermit<'_>> {
-        if state & TAG_MASK == TAG_OPEN || state == TAG_HALFOPEN {
-            self.reserve_with_priority(idx, now_ms, true)
-        } else {
-            None
-        }
-    }
-
-    /// Latency-based selection with a lock-free path when all endpoints
-    /// are closed. When a peer is recovering, alternate probe opportunities
-    /// with service by the fastest closed endpoint.
+    /// Select the fastest closed endpoint, or a probe when no closed
+    /// endpoint is available.
     fn select_latency_based(&self, now_ms: u64) -> Option<(usize, ProbePermit<'_>)> {
         // Lock-free fast path: best Closed endpoint by latency. A closed
         // circuit reserves nothing, so no lock is needed.
         let mut best: Option<(usize, u64)> = None;
-        let mut any_non_closed = false;
         for (i, endpoint) in self.endpoints.iter().enumerate() {
             if endpoint.atomic_state.load(Ordering::Relaxed) & TAG_MASK == TAG_CLOSED {
                 let latency = endpoint.atomic_latency_ns.load(Ordering::Relaxed);
                 if best.is_none_or(|(_, best_latency)| latency < best_latency) {
                     best = Some((i, latency));
                 }
-            } else {
-                any_non_closed = true;
             }
         }
         if let Some((idx, _)) = best {
-            if any_non_closed {
-                let turn = self.round_robin.fetch_add(1, Ordering::Relaxed);
-                if turn.is_multiple_of(2) {
-                    let n = self.endpoints.len();
-                    let start = (turn / 2) % n;
-                    for i in 0..n {
-                        let probe_idx = (start + i) % n;
-                        let state = self.endpoints[probe_idx]
-                            .atomic_state
-                            .load(Ordering::Relaxed);
-                        if let Some(permit) = self.reserve_recovering(probe_idx, state, now_ms) {
-                            return Some((probe_idx, permit));
-                        }
-                    }
-                }
-            }
             return Some((idx, ProbePermit::free()));
-        }
-        if !any_non_closed {
-            return None;
         }
 
         // Slow path: nothing is closed, so each candidate must be reserved
@@ -483,14 +449,15 @@ impl EndpointPool {
         // fan-out: a reservation this function hands back is a probe slot
         // spent on a request that never happens. An endpoint the first scan
         // took is skipped even if its circuit has since opened, so no
-        // endpoint is selected twice.
+        // endpoint is selected twice. With a closed candidate, limit
+        // recovery attempts so cancelled hedges cannot probe on every read.
         if candidates.len() < n {
             let taken = candidates.len();
             for idx in 0..self.endpoints.len() {
                 if candidates[..taken].iter().any(|&(held, _, _)| held == idx) {
                     continue;
                 }
-                if let Some(permit) = self.reserve(idx, now_ms) {
+                if let Some(permit) = self.reserve_with_cooldown(idx, now_ms, taken > 0) {
                     let latency = self.endpoints[idx]
                         .atomic_latency_ns
                         .load(Ordering::Relaxed);
@@ -1364,9 +1331,12 @@ impl Service<RequestPacket> for HftTransport {
 #[cfg(test)]
 mod tests {
     use alloy::eips::BlockNumberOrTag;
+    use alloy::network::Ethereum;
     use alloy::primitives::{Address, Bytes, U256};
     #[allow(unused_imports)]
     use alloy::providers::Provider as _;
+    use alloy::providers::RootProvider;
+    use alloy::rpc::client::RpcClient;
     use alloy::rpc::json_rpc::Id;
     use alloy::rpc::types::{Filter, TransactionRequest};
     use serde_json::{Value, json};
@@ -1465,6 +1435,30 @@ mod tests {
         let transport = HftTransport::new(config).unwrap();
         assert_eq!(transport.healthy_count(), 2);
         assert_eq!(transport.endpoint_urls().len(), 2);
+    }
+
+    #[test]
+    fn transport_rejects_a_struct_literal_with_zero_probe_slots() {
+        let config = TransportConfig {
+            shared_endpoints: vec!["https://rpc.example.com".into()],
+            read_endpoints: vec![],
+            write_endpoints: vec![],
+            ws_endpoint: None,
+            request_timeout: std::time::Duration::from_secs(1),
+            strategy: Strategy::LatencyBased,
+            circuit_breaker: crate::transport::config::CircuitBreakerConfig {
+                half_open_max_requests: 0,
+                ..Default::default()
+            },
+            read_retry: Default::default(),
+            write_retry: Default::default(),
+        };
+        let error = HftTransport::new(config).unwrap_err();
+        assert!(matches!(
+            error,
+            crate::errors::PerpCityError::Validation(crate::errors::ValidationError::InvalidConfig { reason })
+                if reason.contains("half_open_max_requests")
+        ));
     }
 
     #[test]
@@ -1616,53 +1610,32 @@ mod tests {
     }
 
     #[test]
-    fn rv2_open_endpoint_is_not_probed_while_another_is_closed() {
-        for strategy in [Strategy::RoundRobin, Strategy::LatencyBased] {
+    fn single_endpoint_routing_waits_for_all_closed_peers_to_fail_before_probing() {
+        for strategy in STRATEGIES {
             let pool = EndpointPool::from_urls(
                 &[
                     "https://rpc1.example.com".into(),
                     "https://rpc2.example.com".into(),
                 ],
-                crate::transport::config::CircuitBreakerConfig {
-                    half_open_max_requests: 2,
-                    ..Default::default()
-                },
+                one_probe_breaker(std::time::Duration::from_millis(30_000)),
             )
             .unwrap();
-            pool.record_success(0, 10_000_000, ProbePermit::free());
-            pool.record_success(1, 1_000_000, ProbePermit::free());
-            for _ in 0..3 {
-                pool.record_failure(0, 0);
-            }
+            pool.record_success(0, 1_000_000, ProbePermit::free());
+            pool.record_success(1, 10_000_000, ProbePermit::free());
+            pool.record_failure(0, 0);
 
-            assert_eq!(pool.select(strategy, 29_999).unwrap().0, 1);
-            let permit = (0..2)
-                .find_map(|_| {
-                    let (idx, permit) = pool.select(strategy, 30_000).unwrap();
-                    (idx == 0).then_some(permit)
-                })
-                .unwrap_or_else(|| panic!("{strategy:?} starved the recovering endpoint"));
-
-            // Keep the probe in flight even though there is room for
-            // another. The healthy peer serves the next calls.
             for _ in 0..4 {
-                assert_eq!(pool.select(strategy, 30_000).unwrap().0, 1);
+                assert_eq!(pool.select(strategy, 30_000).unwrap().0, 1, "{strategy:?}");
             }
-            // A decline gives back the slot without a recovery verdict.
-            let decline = TransportErrorKind::http_error(413, String::new());
-            pool.record_error(0, 30_000, &decline, permit);
-            assert_eq!(pool.health_status()[0].state, IDLE);
-            for _ in 0..4 {
-                assert_eq!(pool.select(strategy, 59_999).unwrap().0, 1);
-            }
+            assert_eq!(
+                pool.health_status()[0].state,
+                CircuitState::Open { since_ms: 0 }
+            );
 
-            let next = (0..2)
-                .find_map(|_| {
-                    let (idx, permit) = pool.select(strategy, 60_000).unwrap();
-                    (idx == 0).then_some(permit)
-                })
-                .expect("a probe in the next cycle");
-            pool.record_success(0, 10_000_000, next);
+            pool.record_failure(1, 30_000);
+            let (idx, probe) = pool.select(strategy, 30_000).unwrap();
+            assert_eq!(idx, 0);
+            pool.record_success(idx, 1_000_000, probe);
             assert_eq!(pool.health_status()[0].state, CircuitState::Closed);
         }
     }
@@ -2360,6 +2333,103 @@ mod tests {
         HftTransport::new(builder.build().unwrap()).unwrap()
     }
 
+    #[tokio::test]
+    async fn a_silent_recovering_endpoint_does_not_delay_a_read_with_a_closed_peer() {
+        let timeout = std::time::Duration::from_millis(300);
+        for strategy in STRATEGIES {
+            for max_retries in [0, 1] {
+                let silent = scripted::endpoint(|_, _| Answer::Silence).await;
+                let healthy = scripted::endpoint(|_, _| Answer::Result(json!("0x1"))).await;
+                let transport = HftTransport::new(
+                    TransportConfig::builder()
+                        .shared_endpoint(silent)
+                        .shared_endpoint(healthy)
+                        .strategy(strategy)
+                        .request_timeout(timeout)
+                        .read_retry(crate::transport::config::ReadRetryConfig {
+                            max_retries,
+                            base_delay: std::time::Duration::from_millis(150),
+                        })
+                        .circuit_breaker(one_probe_breaker(std::time::Duration::ZERO))
+                        .build()
+                        .unwrap(),
+                )
+                .unwrap();
+                transport.router.shared.record_failure(0, now_ms());
+
+                let start = Instant::now();
+                let answer =
+                    tokio::time::timeout(timeout, call_through(&transport, "eth_chainId", 1))
+                        .await
+                        .unwrap_or_else(|_| panic!("{strategy:?}: waited for the silent endpoint"))
+                        .unwrap();
+                assert_eq!(
+                    answer
+                        .as_single()
+                        .unwrap()
+                        .payload
+                        .as_success()
+                        .unwrap()
+                        .get(),
+                    r#""0x1""#
+                );
+                println!(
+                    "{strategy:?}, retries={max_retries}: healthy read in {:?}",
+                    start.elapsed()
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_raw_send_uses_a_closed_peer_instead_of_probing_a_silent_endpoint() {
+        let timeout = std::time::Duration::from_millis(300);
+        for strategy in STRATEGIES {
+            let silent_hits = Arc::new(AtomicUsize::new(0));
+            let silent = scripted::endpoint({
+                let hits = Arc::clone(&silent_hits);
+                move |_, _| {
+                    hits.fetch_add(1, Ordering::SeqCst);
+                    Answer::Silence
+                }
+            })
+            .await;
+            let hash = B256::repeat_byte(0xbb);
+            let healthy = scripted::endpoint(move |method, _| {
+                assert_eq!(method, RAW_SEND);
+                Answer::Result(json!(hash))
+            })
+            .await;
+            let transport = HftTransport::new(
+                TransportConfig::builder()
+                    .shared_endpoint(silent)
+                    .shared_endpoint(healthy)
+                    .strategy(strategy)
+                    .request_timeout(timeout)
+                    .write_retry(WriteRetryConfig {
+                        max_retries: 0,
+                        base_delay: std::time::Duration::ZERO,
+                    })
+                    .circuit_breaker(one_probe_breaker(std::time::Duration::ZERO))
+                    .build()
+                    .unwrap(),
+            )
+            .unwrap();
+            transport.router.shared.record_failure(0, now_ms());
+            let provider = RootProvider::<Ethereum>::new(RpcClient::new(transport, false));
+
+            let start = Instant::now();
+            let answer: B256 = provider
+                .client()
+                .request(RAW_SEND, (Bytes::from_static(&[2, 1]),))
+                .await
+                .unwrap();
+            assert_eq!(answer, hash);
+            assert_eq!(silent_hits.load(Ordering::SeqCst), 0, "{strategy:?}");
+            println!("{strategy:?}: healthy raw send in {:?}", start.elapsed());
+        }
+    }
+
     /// Liveness: while a probe is in flight, only slot-less late successes
     /// arrive; the probe then times out. The endpoint must still recover:
     /// the next probe after the window is served and closes the circuit.
@@ -2979,6 +3049,31 @@ mod tests {
             .collect();
         selected.sort_unstable();
         assert_eq!(selected, [0, 1]);
+    }
+
+    #[test]
+    fn a_cancelled_hedge_waits_a_recovery_interval_when_a_closed_peer_can_serve() {
+        let pool = EndpointPool::from_urls(
+            &[
+                "https://rpc1.example.com".into(),
+                "https://rpc2.example.com".into(),
+            ],
+            one_probe_breaker(std::time::Duration::from_secs(5)),
+        )
+        .unwrap();
+
+        pool.record_failure(0, 0);
+        assert_eq!(pool.select_n(2, 4_999).len(), 1);
+        assert_eq!(pool.select_n(2, 5_000).len(), 2);
+        assert_eq!(pool.health_status()[0].state, IDLE);
+
+        for now in 5_001..5_100 {
+            let selected = pool.select_n(2, now);
+            assert_eq!(selected.len(), 1, "probe admitted at {now} ms");
+            assert_eq!(selected[0].0, 1);
+        }
+        assert_eq!(pool.select_n(2, 9_999).len(), 1);
+        assert_eq!(pool.select_n(2, 10_000).len(), 2);
     }
 
     #[tokio::test]
