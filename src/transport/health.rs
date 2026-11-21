@@ -81,6 +81,7 @@ pub struct EndpointHealth {
     tracker_id: u64,
     /// The cycle that issued the current half-open probe slots.
     cycle: u64,
+    // Rate limit for recovery probes that supplement a closed hedge.
     cycle_started_ms: u64,
 
     // Latency tracking (EMA with alpha ~0.2: new = old*4/5 + sample/5)
@@ -111,8 +112,13 @@ pub struct EndpointStatus {
 }
 
 impl EndpointHealth {
-    /// Create a new healthy endpoint tracker.
+    /// Create a new healthy endpoint tracker. The probe limit must be at
+    /// least one.
     pub fn new(config: CircuitBreakerConfig) -> Self {
+        debug_assert!(
+            config.validate().is_ok(),
+            "half_open_max_requests must be at least one"
+        );
         Self {
             state: CircuitState::Closed,
             config,
@@ -158,7 +164,9 @@ impl EndpointHealth {
     /// `None` when the endpoint is not callable. `Some(Reserved::Probe)`
     /// means a slot was taken and **must** be resolved — by recording the
     /// request's outcome with its slot, or by [`Self::release_probe`] if it
-    /// is never sent. `Some(Reserved::Freely)` took nothing.
+    /// is cancelled or never sent. Settle the slot on this tracker. If
+    /// another tracker returns it, give it back to this tracker to avoid
+    /// holding a probe slot indefinitely. `Some(Reserved::Freely)` took nothing.
     ///
     /// Callers do not track this themselves: `EndpointPool` hands out a
     /// permit whose `Drop` releases an unresolved slot.
@@ -186,13 +194,14 @@ impl EndpointHealth {
         }
     }
 
-    /// Start a cycle with one probe while a closed peer can serve.
+    /// Reserve a hedge while a closed peer can serve. Admit a closed
+    /// circuit freely and start a recovery cycle with one probe.
     /// If the previous cycle ended without a verdict and has no slots
     /// left, wait a recovery interval between cycle starts.
     #[must_use = "settle the probe slot if the reservation took one"]
-    pub(super) fn reserve_recovery_probe(&mut self, now_ms: u64) -> Option<Reserved> {
+    pub(super) fn reserve_for_hedge(&mut self, now_ms: u64) -> Option<Reserved> {
         match self.state {
-            CircuitState::Open { .. } => self.reserve(now_ms),
+            CircuitState::Closed | CircuitState::Open { .. } => self.reserve(now_ms),
             CircuitState::HalfOpen {
                 probes_in_flight: 0,
             } if self.recovered(self.cycle_started_ms, now_ms) => Some(self.start_cycle(now_ms)),
