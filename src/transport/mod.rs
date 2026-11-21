@@ -40,12 +40,10 @@
 pub mod config;
 pub(crate) mod fault;
 pub mod health;
-mod overrides;
 pub mod provider;
 mod redact;
 #[cfg(test)]
 pub(crate) mod scripted;
 pub mod ws;
 
-pub use overrides::OverrideRefusal;
 pub use redact::{redact_text, redact_url};

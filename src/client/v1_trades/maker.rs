@@ -1451,8 +1451,9 @@ mod tests {
     /// A maker replacement is preflighted at the stuck limit in the block
     /// after the head, where it accrues as the mined replacement does. A
     /// revert at that limit that passes without the cap is a limit too
-    /// low; that and a failed head read are checked against the original's
-    /// receipt, and nothing is signed.
+    /// low; that, a failed head read and a refusal of the block overrides
+    /// twice (the preflight never runs without them) are checked against
+    /// the original's receipt, and nothing is signed.
     #[tokio::test]
     async fn a_maker_replacement_preflights_the_stuck_limit_in_the_next_block() {
         let (client, rpc) = mock::client();
@@ -1483,18 +1484,25 @@ mod tests {
         assert_eq!(rpc.sent().len(), 1);
         assert!(rpc.is_drained());
 
-        for head_read_fails in [false, true] {
+        for case in ["head read fails", "too low", "overrides refused"] {
             let (client, rpc) = mock::client();
             client.chain().set_base_fee(100);
             let (hash, tx) = taker::pending_trade(&client, stuck_removal(taker::NOW + 600)).await;
             rpc.immutables(Era::V1);
             rpc.response(&tx);
-            if head_read_fails {
-                rpc.fails("upstream timeout");
-            } else {
-                rpc.block(taker::HEAD, taker::NOW);
-                rpc.reverts(&TRANSFER_FROM_FAILED);
-                rpc.raw(&[]);
+            match case {
+                "head read fails" => rpc.fails("upstream timeout"),
+                "too low" => {
+                    rpc.block(taker::HEAD, taker::NOW);
+                    rpc.reverts(&TRANSFER_FROM_FAILED);
+                    rpc.raw(&[]);
+                }
+                _ => {
+                    for _ in 0..2 {
+                        rpc.block(taker::HEAD, taker::NOW);
+                        rpc.node_error(-32602, "too many arguments, want at most 3");
+                    }
+                }
             }
             taker::nothing_settled(&rpc, taker::STUCK_NONCE, 1);
             let err = client
@@ -1511,7 +1519,23 @@ mod tests {
                 panic!("{err}");
             };
             assert_eq!(*original, hash);
-            if head_read_fails {
+            if case == "overrides refused" {
+                assert!(
+                    matches!(
+                        source.as_ref(),
+                        PerpCityError::Transaction(TransactionError::GasUnavailable { .. })
+                    ),
+                    "{source}"
+                );
+                let preflights: Vec<usize> = rpc
+                    .params("eth_call")
+                    .iter()
+                    .filter(|call| call[0].get("gas").is_some())
+                    .map(|call| call.as_array().map_or(0, Vec::len))
+                    .collect();
+                assert_eq!(preflights, [4, 4]);
+            }
+            if case != "too low" {
                 assert!(err.is_transient(), "{err}");
             } else {
                 assert!(

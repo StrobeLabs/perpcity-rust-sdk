@@ -212,6 +212,51 @@ pub(crate) fn lacks_block(message: &str) -> bool {
         || message.contains("block not found")
 }
 
+/// Parts of an error answer's message that report no answer from the
+/// node behind the endpoint: a timeout or a cancelled request, a gateway
+/// with no node to ask, a node behind the block asked for, or a quota.
+const NO_ANSWER_WORDINGS: [&str; 15] = [
+    "timeout",
+    "timed out",
+    "deadline exceeded",
+    "context canceled",
+    "unexpected eof",
+    "no backend",
+    "unavailable",
+    "bad gateway",
+    "upstream",
+    "overloaded",
+    "connection",
+    "block not found",
+    "failed to get block",
+    "quota",
+    "limit exceeded",
+];
+
+/// Whether a failed read got no answer from the node.
+///
+/// An error answer is the node's answer first when it reports an
+/// execution error ([`is_execution_error`]: the code `3`, an execution
+/// wording, revert data) or a method the endpoint does not serve
+/// (`-32601`), whatever else its message says. Else it is no
+/// answer when it reports one: a wording in [`NO_ANSWER_WORDINGS`], a
+/// bare `EOF`, a rate limit ([`Fault::Endpoint`]) or a bare internal
+/// error (`-32603`), with or without empty revert data (`0x`). Any other
+/// failure is no answer when it is the endpoint's ([`Fault::Endpoint`]).
+pub(crate) fn is_no_answer(error: &TransportError) -> bool {
+    let Some(resp) = error.as_error_resp() else {
+        return fault(error) == Fault::Endpoint;
+    };
+    if resp.code == -32_601 || is_execution_error(resp) {
+        return false;
+    }
+    let message = resp.message.to_ascii_lowercase();
+    message.trim() == "eof"
+        || NO_ANSWER_WORDINGS.iter().any(|w| message.contains(w))
+        || fault(error) == Fault::Endpoint
+        || resp.code == -32_603
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
