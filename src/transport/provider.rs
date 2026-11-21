@@ -76,7 +76,7 @@ use tower::Service;
 
 use super::config::{Strategy, TransportConfig};
 use super::fault::{Fault, fault, is_rate_limit, is_rejection};
-use super::health::{CircuitState, EndpointHealth, EndpointStatus, Reserved};
+use super::health::{CircuitState, EndpointHealth, EndpointStatus, ProbeSlot, Reserved};
 
 // ── Packed atomic state constants ────────────────────────────────────
 //
@@ -148,19 +148,19 @@ impl ManagedEndpoint {
     /// Give back a half-open probe slot whose request was never sent.
     /// Updates Mutex state + atomic mirrors.
     #[inline]
-    fn release_probe(&self) {
+    fn release_probe(&self, slot: ProbeSlot) {
         let mut h = self.health.lock().unwrap();
-        h.release_probe();
+        h.release_probe(slot);
         self.atomic_state
             .store(pack_state(h.state()), Ordering::Relaxed);
     }
 
-    /// Record an answer that declined the request. Updates Mutex state +
-    /// atomic mirrors.
+    /// Record an answer that declined the request, which held `slot`.
+    /// Updates Mutex state + atomic mirrors.
     #[inline]
-    fn record_answered(&self) {
+    fn record_answered(&self, slot: Option<ProbeSlot>) {
         let mut h = self.health.lock().unwrap();
-        h.record_answered();
+        h.record_answered(slot);
         self.atomic_state
             .store(pack_state(h.state()), Ordering::Relaxed);
     }
@@ -203,13 +203,15 @@ impl std::fmt::Debug for ManagedEndpoint {
 /// default budget of one, forever. So the reservation is a value: drop it
 /// without sending, or drop it because the request was cancelled, and the
 /// slot comes back. [`Self::resolved`] says an outcome was recorded, and
-/// the outcome already settled the slot.
+/// the outcome already settled the slot. The permit names its slot and the
+/// recovery cycle that gave it, so it gives back its own slot and no other
+/// request's, and a permit taken while the circuit was closed holds none.
 #[must_use = "dropping the permit releases the endpoint's probe slot; that is usually what you want, but say so"]
 #[derive(Debug)]
 pub struct ProbePermit<'a> {
     /// `None` once resolved, or when the circuit was closed and no slot
     /// was taken.
-    held: Option<&'a ManagedEndpoint>,
+    held: Option<(&'a ManagedEndpoint, ProbeSlot)>,
 }
 
 impl ProbePermit<'_> {
@@ -224,12 +226,17 @@ impl ProbePermit<'_> {
     pub fn resolved(mut self) {
         self.held = None;
     }
+
+    /// The probe slot this permit holds, `None` when it holds none.
+    fn slot(&self) -> Option<ProbeSlot> {
+        self.held.map(|(_, slot)| slot)
+    }
 }
 
 impl Drop for ProbePermit<'_> {
     fn drop(&mut self) {
-        if let Some(endpoint) = self.held.take() {
-            endpoint.release_probe();
+        if let Some((endpoint, slot)) = self.held.take() {
+            endpoint.release_probe(slot);
         }
     }
 }
@@ -314,8 +321,8 @@ impl EndpointPool {
             .atomic_latency_ns
             .store(health.avg_latency_ns(), Ordering::Relaxed);
         match reserved? {
-            Reserved::Probe => Some(ProbePermit {
-                held: Some(endpoint),
+            Reserved::Probe(slot) => Some(ProbePermit {
+                held: Some((endpoint, slot)),
             }),
             Reserved::Freely => Some(ProbePermit::free()),
         }
@@ -482,26 +489,33 @@ impl EndpointPool {
         }
     }
 
-    /// Record what a failed request says about endpoint `idx`.
+    /// Record what a failed request, sent under `permit`, says about
+    /// endpoint `idx`.
     ///
     /// A request the endpoint declined is not held against it — it
     /// answered, and every endpoint would decline the same request — but
     /// the answer is still evidence it is alive, which ends its failure
-    /// streak and releases the probe slot a half-open request took. See
-    /// [`Fault`](super::fault::Fault).
+    /// streak and releases the probe slot `permit` holds, and no other.
+    /// See [`Fault`](super::fault::Fault).
     ///
     /// An error response out of the transport is never an answer: an
     /// endpoint's error under a request's id comes back inside the
     /// response, so alloy returns one only for a body that is no JSON-RPC
     /// response, such as a bare error object with no id. It answers no
     /// request, so it counts against the endpoint.
-    pub fn record_error(&self, idx: usize, now_ms: u64, error: &TransportError) {
+    pub fn record_error(
+        &self,
+        idx: usize,
+        now_ms: u64,
+        error: &TransportError,
+        permit: &ProbePermit<'_>,
+    ) {
         if error.as_error_resp().is_some() {
             return self.record_failure(idx, now_ms);
         }
         match fault(error) {
             Fault::Endpoint => self.record_failure(idx, now_ms),
-            Fault::Request => self.endpoints[idx].record_answered(),
+            Fault::Request => self.endpoints[idx].record_answered(permit.slot()),
         }
     }
 
@@ -752,29 +766,49 @@ fn refused(req: &RequestPacket) -> Option<TransportError> {
     )))
 }
 
-/// The method and id that a call's JSON body holds. A repeated key is an
-/// error, so a body cannot name one method to this check and another to
-/// the node.
-#[derive(serde::Deserialize)]
+/// The method and id that a call's JSON body holds. A repeated top-level
+/// key is an error, so a body cannot name one method, id or params to this
+/// check and another to the node.
 struct Envelope {
     method: String,
     id: alloy::rpc::json_rpc::Id,
 }
 
 impl Envelope {
-    /// The envelope of `body`, which must be one JSON object: a positional
-    /// array, which serde reads into a struct as its fields in order, is
-    /// no call.
+    /// The envelope of `body`, which must be one JSON object with no
+    /// repeated top-level key: a positional array, which serde reads into
+    /// a struct as its fields in order, is no call.
     fn parse(body: &str) -> serde_json::Result<Self> {
         use serde::Deserializer as _;
+        use serde::de::Error as _;
         struct Object;
         impl<'de> serde::de::Visitor<'de> for Object {
             type Value = Envelope;
             fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
                 f.write_str("a JSON-RPC call object")
             }
-            fn visit_map<A: serde::de::MapAccess<'de>>(self, map: A) -> Result<Envelope, A::Error> {
-                serde::Deserialize::deserialize(serde::de::value::MapAccessDeserializer::new(map))
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> Result<Envelope, A::Error> {
+                let mut keys = std::collections::HashSet::new();
+                let (mut method, mut id) = (None, None);
+                while let Some(key) = map.next_key::<String>()? {
+                    match key.as_str() {
+                        "method" => method = Some(map.next_value::<String>()?),
+                        "id" => id = Some(map.next_value::<alloy::rpc::json_rpc::Id>()?),
+                        _ => {
+                            map.next_value::<serde::de::IgnoredAny>()?;
+                        }
+                    }
+                    if !keys.insert(key) {
+                        return Err(A::Error::custom("a repeated key"));
+                    }
+                }
+                Ok(Envelope {
+                    method: method.ok_or_else(|| A::Error::missing_field("method"))?,
+                    id: id.ok_or_else(|| A::Error::missing_field("id"))?,
+                })
             }
         }
         let mut de = serde_json::Deserializer::from_str(body);
@@ -1000,12 +1034,10 @@ impl Router {
         let mut may_be_held = false;
 
         for attempt in 0..max_attempts {
-            // Per attempt, not per call: a retry sequence spans its
-            // backoffs, and a circuit opened on the last attempt would
-            // otherwise be stamped with the time of the first — starting
-            // its recovery window early.
-            let now_ms = now_ms();
-            let Some((pool, idx, permit)) = self.select_for(is_write, now_ms) else {
+            // An outcome is stamped with the time it arrived, not the time
+            // its request left: a circuit a slow failure opens would
+            // otherwise start its recovery window early.
+            let Some((pool, idx, permit)) = self.select_for(is_write, now_ms()) else {
                 tracing::error!("all RPC endpoints unavailable (circuits open)");
                 return Err(TransportError::local_usage_str(
                     "all RPC endpoints unavailable (circuits open)",
@@ -1067,14 +1099,14 @@ impl Router {
                         if is_write {
                             pool.record_success(idx, latency_ns);
                         } else {
-                            pool.record_read(idx, now_ms, latency_ns, &response);
+                            pool.record_read(idx, now_ms(), latency_ns, &response);
                         }
                         permit.resolved();
                         return Ok(response);
                     }
                 }
                 Ok(Err(e)) => {
-                    pool.record_error(idx, now_ms, &e);
+                    pool.record_error(idx, now_ms(), &e, &permit);
                     permit.resolved();
                     tracing::warn!(
                         attempt = attempt + 1,
@@ -1099,7 +1131,7 @@ impl Router {
                     last_err = Some(e);
                 }
                 Err(_timeout) => {
-                    pool.record_failure(idx, now_ms);
+                    pool.record_failure(idx, now_ms());
                     permit.resolved();
                     tracing::warn!(
                         attempt = attempt + 1,
@@ -1136,8 +1168,7 @@ impl Router {
         fan_out: usize,
         timeout: std::time::Duration,
     ) -> Result<ResponsePacket, TransportError> {
-        let now_ms = now_ms();
-        let (pool, selected) = self.select_hedged(fan_out, now_ms);
+        let (pool, selected) = self.select_hedged(fan_out, now_ms());
 
         if selected.is_empty() {
             return Err(TransportError::local_usage_str(
@@ -1162,17 +1193,17 @@ impl Router {
 
             return match result {
                 Ok(Ok(resp)) => {
-                    pool.record_read(idx, now_ms, start.elapsed().as_nanos() as u64, &resp);
+                    pool.record_read(idx, now_ms(), start.elapsed().as_nanos() as u64, &resp);
                     permit.resolved();
                     Ok(resp)
                 }
                 Ok(Err(e)) => {
-                    pool.record_error(idx, now_ms, &e);
+                    pool.record_error(idx, now_ms(), &e, &permit);
                     permit.resolved();
                     Err(e)
                 }
                 Err(_) => {
-                    pool.record_failure(idx, now_ms);
+                    pool.record_failure(idx, now_ms());
                     permit.resolved();
                     Err(TransportError::local_usage_str("request timed out"))
                 }
@@ -1197,12 +1228,13 @@ impl Router {
             });
         }
 
-        /// Hand back the permit of the endpoint that just reported, so its
+        /// Take out the permit of the endpoint that just reported, so its
         /// outcome — not its drop — settles the probe slot.
-        fn resolve(permits: &mut Vec<(usize, ProbePermit<'_>)>, idx: usize) {
-            if let Some(at) = permits.iter().position(|&(held, _)| held == idx) {
-                permits.swap_remove(at).1.resolved();
-            }
+        fn take<'p>(permits: &mut Vec<(usize, ProbePermit<'p>)>, idx: usize) -> ProbePermit<'p> {
+            permits
+                .iter()
+                .position(|&(held, _)| held == idx)
+                .map_or_else(ProbePermit::free, |at| permits.swap_remove(at).1)
         }
 
         let mut last_err = None;
@@ -1211,8 +1243,8 @@ impl Router {
             match join_result {
                 Ok((idx, Ok(response), start)) => {
                     let latency_ns = start.elapsed().as_nanos() as u64;
-                    pool.record_read(idx, now_ms, latency_ns, &response);
-                    resolve(&mut permits, idx);
+                    pool.record_read(idx, now_ms(), latency_ns, &response);
+                    take(&mut permits, idx).resolved();
                     // Cancel remaining in-flight requests — saves RPC rate limits.
                     // JoinSet::drop also aborts, but explicit abort_all is clearer.
                     // The cancelled requests' permits drop with `permits`.
@@ -1220,8 +1252,9 @@ impl Router {
                     return Ok(response);
                 }
                 Ok((idx, Err(e), _start)) => {
-                    pool.record_error(idx, now_ms, &e);
-                    resolve(&mut permits, idx);
+                    let permit = take(&mut permits, idx);
+                    pool.record_error(idx, now_ms(), &e, &permit);
+                    permit.resolved();
                     last_err = Some(e);
                 }
                 // Task was aborted (by our abort_all or JoinSet::drop) — expected
@@ -1538,7 +1571,7 @@ mod tests {
 
         let declined = TransportErrorKind::http_error(400, String::new());
         for _ in 0..10 {
-            pool.record_error(0, now, &declined);
+            pool.record_error(0, now, &declined, &ProbePermit::free());
         }
         assert_eq!(
             pool.select(Strategy::LatencyBased, now).map(|(idx, _)| idx),
@@ -1549,7 +1582,7 @@ mod tests {
         // An endpoint that cannot answer still loses its circuit.
         let overloaded = TransportErrorKind::http_error(503, String::new());
         for _ in 0..3 {
-            pool.record_error(0, now, &overloaded);
+            pool.record_error(0, now, &overloaded, &ProbePermit::free());
         }
         assert!(pool.select(Strategy::LatencyBased, now).is_none());
     }
@@ -2084,8 +2117,9 @@ mod tests {
     }
 
     /// The envelope check reads a call's body only as one JSON object with
-    /// no repeated key: a positional array, which serde would read into
-    /// the envelope's fields in order, and an object that names the method
+    /// no repeated top-level key and both a method and an id: a positional
+    /// array, which serde would read into the envelope's fields in order,
+    /// and an object that names its method, params, id or any other key
     /// twice are no call.
     #[test]
     fn a_call_body_is_one_object_with_no_repeated_key() {
@@ -2096,6 +2130,11 @@ mod tests {
         for body in [
             r#"["eth_call",1]"#,
             r#"{"method":"eth_call","method":"eth_sendTransaction","id":1}"#,
+            r#"{"method":"eth_call","params":[],"params":[{"to":"0x01"}],"id":1}"#,
+            r#"{"method":"eth_call","id":1,"id":2}"#,
+            r#"{"jsonrpc":"2.0","jsonrpc":"2.0","method":"eth_call","id":1}"#,
+            r#"{"method":"eth_call"}"#,
+            r#"{"id":1}"#,
             r#"{"method":"eth_call","id":1} {}"#,
         ] {
             assert!(Envelope::parse(body).is_err(), "{body}");
@@ -2146,6 +2185,155 @@ mod tests {
         assert_eq!(read_hits.load(Ordering::SeqCst), 1);
         assert_eq!(shared_hits.load(Ordering::SeqCst), 0);
         assert_eq!(router.read.healthy_count(), 1);
+    }
+
+    /// A breaker that opens on the first failure, recovers after
+    /// `recovery` and lets one probe through at a time.
+    fn one_probe_breaker(
+        recovery: std::time::Duration,
+    ) -> crate::transport::config::CircuitBreakerConfig {
+        crate::transport::config::CircuitBreakerConfig {
+            failure_threshold: 1,
+            recovery_timeout: recovery,
+            half_open_max_requests: 1,
+        }
+    }
+
+    /// A read sent while the circuit was closed holds no probe slot, so its
+    /// late answer cannot free the slot of the probe now in flight: an
+    /// `eth_getLogs` sent before a 503 opened the circuit, declined with a
+    /// 413 while the recovery's `eth_blockNumber` probe waits, leaves the
+    /// next read refused, on the standard and the hedged path alike.
+    #[tokio::test]
+    async fn a_late_answer_from_before_the_circuit_opened_frees_no_probe_slot() {
+        use tokio::sync::Notify;
+
+        for strategy in [Strategy::LatencyBased, Strategy::Hedged { fan_out: 2 }] {
+            let logs_arrived = Arc::new(Notify::new());
+            let probe_arrived = Arc::new(Notify::new());
+            let other_reads = Arc::new(AtomicUsize::new(0));
+            let (logs, probe, others) = (
+                Arc::clone(&logs_arrived),
+                Arc::clone(&probe_arrived),
+                Arc::clone(&other_reads),
+            );
+            let url = scripted::endpoint(move |method, _| match method {
+                "eth_getLogs" => {
+                    logs.notify_one();
+                    Answer::Late(Box::new(Answer::Status(413)))
+                }
+                "eth_chainId" => Answer::Status(503),
+                "eth_blockNumber" => {
+                    probe.notify_one();
+                    Answer::Silence
+                }
+                _ => {
+                    others.fetch_add(1, Ordering::SeqCst);
+                    Answer::Result(json!("0x1"))
+                }
+            })
+            .await;
+            let transport = HftTransport::new(
+                TransportConfig::builder()
+                    .shared_endpoint(url)
+                    .strategy(strategy)
+                    .request_timeout(std::time::Duration::from_secs(2))
+                    .read_retry(crate::transport::config::ReadRetryConfig {
+                        max_retries: 0,
+                        base_delay: std::time::Duration::from_millis(1),
+                    })
+                    .circuit_breaker(one_probe_breaker(std::time::Duration::from_millis(5)))
+                    .build()
+                    .unwrap(),
+            )
+            .unwrap();
+            let call = |method: &'static str, id: u64| {
+                transport
+                    .clone()
+                    .call(RequestPacket::Single(make_request(method, id)))
+            };
+
+            let late = tokio::spawn(call("eth_getLogs", 1));
+            logs_arrived.notified().await;
+            assert!(call("eth_chainId", 2).await.is_err(), "{strategy:?}");
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            let probe = tokio::spawn(call("eth_blockNumber", 3));
+            probe_arrived.notified().await;
+            assert!(late.await.unwrap().is_err(), "{strategy:?}: declined");
+
+            let refused = call("eth_gasPrice", 4)
+                .await
+                .expect_err("the probe holds the only slot");
+            assert!(
+                refused.to_string().contains("circuits open"),
+                "{strategy:?}: {refused}"
+            );
+            assert_eq!(other_reads.load(Ordering::SeqCst), 0, "{strategy:?}");
+            probe.abort();
+        }
+    }
+
+    /// A circuit that a slow failure opens starts its recovery window when
+    /// the failure arrives, not when the request left: after a read that
+    /// fails 200 ms or more after it was sent, by a late 503 or by timing
+    /// out at 300 ms, a recovery timeout of 100 ms still refuses the next
+    /// read, on the standard path, the hedged path to one endpoint and the
+    /// hedged fan-out; once the window has passed, the endpoint serves.
+    #[tokio::test]
+    async fn a_slow_failure_opens_the_circuit_when_it_arrives() {
+        type Failure = (&'static str, fn() -> Answer);
+        let failures: [Failure; 2] = [
+            ("late 503", || Answer::Late(Box::new(Answer::Status(503)))),
+            ("timeout", || Answer::Silence),
+        ];
+        for (strategy, endpoints) in [
+            (Strategy::LatencyBased, 1),
+            (Strategy::Hedged { fan_out: 2 }, 1),
+            (Strategy::Hedged { fan_out: 2 }, 2),
+        ] {
+            for (failure, fail) in failures {
+                let case = format!("{strategy:?}, {endpoints} endpoint(s), {failure}");
+                let hits = Arc::new(AtomicUsize::new(0));
+                let mut config = TransportConfig::builder()
+                    .strategy(strategy)
+                    .request_timeout(std::time::Duration::from_millis(300))
+                    .read_retry(crate::transport::config::ReadRetryConfig {
+                        max_retries: 0,
+                        base_delay: std::time::Duration::from_millis(1),
+                    })
+                    .circuit_breaker(one_probe_breaker(std::time::Duration::from_millis(100)));
+                for _ in 0..endpoints {
+                    let served = AtomicUsize::new(0);
+                    let hits = Arc::clone(&hits);
+                    config = config.shared_endpoint(
+                        scripted::endpoint(move |_, _| {
+                            hits.fetch_add(1, Ordering::SeqCst);
+                            match served.fetch_add(1, Ordering::SeqCst) {
+                                0 => fail(),
+                                _ => Answer::Result(json!("0x1")),
+                            }
+                        })
+                        .await,
+                    );
+                }
+                let transport = HftTransport::new(config.build().unwrap()).unwrap();
+                let read = |id| {
+                    let req = RequestPacket::Single(make_request("eth_blockNumber", id));
+                    transport.router.route_request(req)
+                };
+
+                assert!(read(1).await.is_err(), "{case}");
+                assert_eq!(hits.load(Ordering::SeqCst), endpoints, "{case}");
+                assert!(read(2).await.is_err(), "{case}: cooling down");
+                assert_eq!(
+                    hits.load(Ordering::SeqCst),
+                    endpoints,
+                    "{case}: nothing sent"
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+                assert!(read(3).await.is_ok(), "{case}: recovered");
+            }
+        }
     }
 
     /// A contract that reverts with the words "rate limit" under the
