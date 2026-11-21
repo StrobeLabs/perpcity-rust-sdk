@@ -61,8 +61,9 @@ is the standing example.
 
 ## The mental model
 
-A request enters as a packet, is refused unless it is a read (or a batch
-of reads) or a single raw send, and is routed. Reads go to the read pool if one is configured and healthy, else
+A request enters as a packet, is refused unless the serialized body of
+each call holds the method and id of its metadata and it is a read (or a
+batch of reads) or a single raw send, and is routed. Reads go to the read pool if one is configured and healthy, else
 the shared pool, by round robin, latency, or hedged fan-out. Writes go to
 the write pool, else shared. Each endpoint is a boxed HTTP transport
 behind its own breaker; a breaker that opens takes the endpoint out of
@@ -84,8 +85,9 @@ rotation until a probe succeeds.
         │  round robin         │             │ same signed bytes    │
         │  latency-based       │             │ typed id, tx hash    │
         │  hedged: fan out,    │             │ checked              │
-        │   first answer wins, │             └──────────┬───────────┘
-        │   others cancelled   │              answered?
+        │   first answer under │             └──────────┬───────────┘
+        │   its id wins, others│                        │
+        │   cancelled          │              answered?
         └──────────┬───────────┘           no │        │ error answer
                    │                          │        │ (underpriced, funds, …)
              answered?                        │        ▼
@@ -160,7 +162,20 @@ alloy decodes as an error response, included), and a raw send's success
 that is no transaction hash. A read's answer that answers each call by
 its id counts against the endpoint when any answer in it is a rate
 limit, once for the whole batch; any other answer, an error under the
-call's own id included, is the endpoint working.
+call's own id included, is the endpoint working. An execution error
+(code `3`, a revert wording, revert data) is never a rate limit, even
+when the contract reverts with the words "rate limit". A read that got
+no answer under its id is asked again within the read retries, because
+alloy takes a single answer without reading its id and would hand the
+caller another call's result; a hedged read waits for an answer under
+its id from another endpoint.
+
+Every check above reads a call's method and id from alloy's metadata,
+but the endpoint gets the call's serialized JSON body, and a packet built
+by hand at the public `Service<RequestPacket>` entry point can make the
+two disagree. So a call whose body holds another method or id, compared
+as typed, or is no single call, is refused before endpoint selection
+with `RpcError::LocalUsageError`, and nothing is sent.
 
 The WebSocket manager is the subscription side of the same idea: one
 socket, many subscriptions, reconnect with capped backoff, and the

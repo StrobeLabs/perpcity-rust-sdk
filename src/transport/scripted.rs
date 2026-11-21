@@ -26,6 +26,8 @@ pub(crate) enum Answer {
     /// own answers: one error object for a whole batch, an answer under
     /// another id.
     Body(Value),
+    /// This answer, 200 ms late.
+    Late(Box<Answer>),
 }
 
 /// The answer to a request, from its method and params.
@@ -55,20 +57,24 @@ async fn serve(mut socket: TcpStream, script: Arc<Script>) {
         let Some(request) = read_request(&mut socket, &mut buffer).await else {
             return;
         };
+        let mut late = false;
         let (status, body) = match &request {
             Value::Array(calls) => match calls
                 .iter()
-                .map(|call| answer(script.as_ref(), call))
+                .map(|call| answer(script.as_ref(), call, &mut late))
                 .collect()
             {
                 Ok(bodies) => (200, Value::Array(bodies).to_string()),
                 Err(whole) => whole,
             },
-            call => match answer(script.as_ref(), call) {
+            call => match answer(script.as_ref(), call, &mut late) {
                 Ok(body) => (200, body.to_string()),
                 Err(whole) => whole,
             },
         };
+        if late {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
         if status == 0 {
             tokio::time::sleep(Duration::from_secs(30)).await;
             return;
@@ -84,11 +90,14 @@ async fn serve(mut socket: TcpStream, script: Arc<Script>) {
 }
 
 /// The JSON-RPC answer to one call, or the HTTP status (`0` for silence)
-/// and body that answer its whole request.
-fn answer(script: &Script, call: &Value) -> Result<Value, (u16, String)> {
-    let id = call["id"].clone();
+/// and body that answer its whole request; `late` is set for a late one.
+fn answer(script: &Script, call: &Value, late: &mut bool) -> Result<Value, (u16, String)> {
     let method = call["method"].as_str().unwrap_or_default();
-    match script(method, &call["params"]) {
+    render(script(method, &call["params"]), call["id"].clone(), late)
+}
+
+fn render(answer: Answer, id: Value, late: &mut bool) -> Result<Value, (u16, String)> {
+    match answer {
         Answer::Result(result) => Ok(json!({ "jsonrpc": "2.0", "id": id, "result": result })),
         Answer::Error(code, message) => {
             Ok(json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message } }))
@@ -103,6 +112,10 @@ fn answer(script: &Script, call: &Value) -> Result<Value, (u16, String)> {
         Answer::Status(status) => Err((status, String::new())),
         Answer::Silence => Err((0, String::new())),
         Answer::Body(body) => Err((200, body.to_string())),
+        Answer::Late(answer) => {
+            *late = true;
+            render(*answer, id, late)
+        }
     }
 }
 
