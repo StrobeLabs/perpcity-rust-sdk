@@ -18,14 +18,17 @@ use alloy::network::TransactionBuilder;
 use alloy::primitives::{Address, B256, Bytes, U256};
 use alloy::providers::Provider;
 use alloy::rpc::types::{TransactionReceipt, TransactionRequest};
+use alloy::transports::TransportError;
 
 use crate::constants::{RECEIPT_POLL_INTERVAL, RECEIPT_TIMEOUT};
-use crate::errors::{PerpCityError, Result, TransactionError, ValidationError, decode};
+use crate::errors::{Result, TransactionError, ValidationError, decode};
 use crate::hft::gas::{Urgency, is_out_of_gas, is_v1_trade};
 use crate::hft::pipeline::TxRequest;
+use crate::transport::fault::is_execution_error;
 
 use super::PerpClient;
-use super::chain::{NextBlock, classify_after_capped_revert};
+use super::chain::{NextBlock, wants_new_head};
+use super::queries::Era;
 
 /// Delay before the first receipt poll — a just-broadcast transaction
 /// rarely has a receipt sooner, so an earlier poll is a wasted call.
@@ -45,9 +48,16 @@ pub struct TxBuilder<'a> {
     value: u128,
     gas_limit: Option<u64>,
     urgency: Urgency,
+    market_era: Option<Era>,
 }
 
 impl<'a> TxBuilder<'a> {
+    /// Use the known market era for calls that share selectors across eras.
+    pub(super) fn with_market_era(mut self, era: Era) -> Self {
+        self.market_era = Some(era);
+        self
+    }
+
     /// Attach ETH value to the transaction.
     pub fn with_value(mut self, value: u128) -> Self {
         self.value = value;
@@ -131,11 +141,14 @@ impl<'a> TxBuilder<'a> {
             }
             .into());
         }
-        let next = match selector {
-            Some(selector) if is_v1_trade(&selector) => {
-                Some(self.client.chain().next_block().await?)
-            }
-            _ => None,
+        let v1 = self.market_era.map_or_else(
+            || selector.as_ref().is_some_and(is_v1_trade),
+            |era| era == Era::V1,
+        );
+        let next = if v1 {
+            Some(self.client.chain().next_block().await?)
+        } else {
+            None
         };
 
         // Simulate + resolve gas limit. An explicit gas_limit skips only the
@@ -404,6 +417,7 @@ impl PerpClient {
             value: 0,
             gas_limit: None,
             urgency: Urgency::Normal,
+            market_era: None,
         }
     }
 
@@ -441,9 +455,9 @@ impl PerpClient {
     /// the uncapped answer tells a revert from a stale limit. An uncapped
     /// estimate that the node answers with an execution error but no
     /// revert data leaves the capped call's decoded revert as the answer;
-    /// one that gets no execution answer at all (a timeout, a rate limit,
-    /// an upstream error) is [`TransactionError::GasUnavailable`]
-    /// ([`classify_after_capped_revert`]).
+    /// one that gets no execution answer at all is
+    /// [`TransactionError::GasUnavailable`]. When either RPC needs a new
+    /// head, repeat the simulation from the capped call.
     ///
     /// Every code path guarantees the transaction has been simulated.
     async fn simulate(
@@ -454,134 +468,90 @@ impl PerpClient {
         now: u64,
         next: Option<&NextBlock>,
     ) -> Result<u64> {
-        // Transactions with fewer than 4 bytes of calldata carry no function
-        // selector to key the estimate cache on — in practice plain value
-        // transfers, which cannot revert from contract logic. Estimate their
-        // gas directly rather than assuming a fixed 21_000: on Arbitrum the
-        // intrinsic gas folds in an L1 data component, so a hardcoded 21_000 is
-        // rejected as "intrinsic gas too low". Apply the same 20% buffer the
-        // cache uses.
-        if calldata.len() < 4 {
-            let raw = self
-                .estimate_gas(to, calldata, value, next, classify_simulation_failure)
-                .await?;
-            return Ok(raw + raw / 5);
-        }
-        let selector: [u8; 4] = calldata[..4].try_into().unwrap();
-
-        // Check cache — if hit, simulate via eth_call to verify still valid.
-        // Drop the guard before the async preflight call.
-        let mut capped_revert = None;
-        let cached = {
+        let selector: Option<[u8; 4]> = calldata.get(..4).map(|bytes| bytes.try_into().unwrap());
+        let cached = selector.and_then(|selector| {
             let cache = self.gas_limit_cache.lock().unwrap();
             cache
                 .get(&selector, now)
                 .map(|limit| (limit, cache.preflight_limit(limit)))
-        };
-        if let Some((limit, preflight_limit)) = cached {
-            tracing::trace!(selector = %alloy::primitives::hex::encode(selector), limit, preflight_limit, "gas estimate cache hit");
-            // Cap the preflight below the cached limit by the cache's
-            // buffer, so a stale (too-small) cached estimate surfaces as a
-            // failed preflight rather than an on-chain out-of-gas, and the
-            // buffer stays for the gas the simulation does not see.
-            match self
-                .chain()
-                .preflight_call_in(
-                    self.address,
-                    to,
-                    calldata,
-                    value,
-                    Some(preflight_limit),
-                    next,
-                )
-                .await
-            {
-                Ok(()) => return Ok(limit),
-                Err(
-                    error @ (TransactionError::SimulationReverted { .. }
-                    | TransactionError::SimulationFailed { .. }),
-                ) => {
-                    // The node ran the call and it failed inside the cached
-                    // limit: out of gas, or a revert that may be the gas
-                    // running out in a transfer. The estimate below answers
-                    // without the cap; a success there replaces the stale
-                    // limit, and a revert there is the call's own.
-                    tracing::debug!(
-                        selector = %alloy::primitives::hex::encode(selector),
-                        limit,
-                        %error,
-                        "cached gas limit failed preflight; re-estimating"
-                    );
-                    match error {
-                        TransactionError::SimulationReverted { .. } => capped_revert = Some(error),
-                        _ => self.gas_limit_cache.lock().unwrap().invalidate(&selector),
-                    }
+        });
+        let chain = self.chain();
+        let simulate = |next| async move {
+            let mut capped_failure = None;
+            if let Some((limit, cap)) = cached {
+                // Leave the buffer for the gas the simulation does not see.
+                let tx = preflight_request(self.address, to, calldata, value, Some(cap));
+                let error = match chain.call_in(tx, next).await {
+                    Ok(()) => return Ok(Ok((limit, false))),
+                    Err(error) if next.is_some() && wants_new_head(&error) => return Err(error),
+                    Err(error) => classify_simulation_failure(&error, "eth_call"),
+                };
+                if matches!(error, TransactionError::GasUnavailable { .. }) {
+                    return Ok(Err(error));
                 }
-                // The call never reached the node (a timeout, a rate limit):
-                // nothing disproved the cached estimate, so keep it and let
-                // the caller retry instead of paying for a re-estimate.
-                Err(transient) => return Err(transient.into()),
+                tracing::debug!(limit, %error, "cached gas limit failed preflight; re-estimating");
+                capped_failure = Some(error);
             }
-        }
 
-        // Cache miss, or a failed capped preflight — call eth_estimateGas
-        let classify = if capped_revert.is_some() {
-            classify_after_capped_revert
-        } else {
-            classify_simulation_failure
-        };
-        let raw_estimate = match self.estimate_gas(to, calldata, value, next, classify).await {
-            Ok(raw) => raw,
-            Err(PerpCityError::Transaction(TransactionError::SimulationFailed { .. }))
-                if let Some(revert) = capped_revert =>
+            let tx = preflight_request(self.address, to, calldata, value, None);
+            let estimate = match chain.estimate_gas_in(tx, next).await {
+                Err(error) if next.is_some() && wants_new_head(&error) => return Err(error),
+                estimate => estimate,
+            };
+            if matches!(
+                capped_failure,
+                Some(TransactionError::SimulationFailed { .. })
+            ) && let Some(selector) = selector
             {
-                return Err(revert.into());
+                self.gas_limit_cache.lock().unwrap().invalidate(&selector);
             }
-            Err(error) => return Err(error),
+            let resolved = match estimate {
+                Ok(raw) => Ok((raw, true)),
+                Err(error) => match (
+                    classify_simulation_failure(&error, "eth_estimateGas"),
+                    capped_failure,
+                ) {
+                    (
+                        TransactionError::SimulationFailed { .. },
+                        Some(revert @ TransactionError::SimulationReverted { .. }),
+                    ) => Err(revert),
+                    (error, _) => Err(error),
+                },
+            };
+            Ok(resolved)
         };
 
-        // Cache with buffer
+        let (limit, estimated) = match next {
+            Some(next) => {
+                chain
+                    .in_next_block("gas simulation", next, |next| simulate(Some(next)))
+                    .await?
+            }
+            None => simulate(None).await,
+        }
+        .map_err(|e| classify_simulation_failure(&e, "gas simulation"))??;
+
+        if !estimated {
+            return Ok(limit);
+        }
+        let raw_estimate = limit;
+        let Some(selector) = selector else {
+            // A plain value transfer has no cache key. Keep the same buffer.
+            return Ok(raw_estimate + raw_estimate / 5);
+        };
         let buffered = {
             let mut cache = self.gas_limit_cache.lock().unwrap();
             cache.put(selector, raw_estimate, now);
             cache.get(&selector, now).unwrap()
         };
-
         tracing::debug!(
             selector = %alloy::primitives::hex::encode(selector),
             raw_estimate,
             buffered,
             "gas estimate cached"
         );
-
         Ok(buffered)
     }
-
-    /// Run `eth_estimateGas`, in `next` when it is given, its failure
-    /// sorted by `classify`.
-    async fn estimate_gas(
-        &self,
-        to: Address,
-        calldata: &Bytes,
-        value: u128,
-        next: Option<&NextBlock>,
-        classify: fn(&alloy::transports::TransportError, &str) -> TransactionError,
-    ) -> Result<u64> {
-        Ok(self
-            .chain()
-            .estimate_gas_in(self.address, to, calldata, value, next, classify)
-            .await?)
-    }
-}
-
-/// JSON-RPC error codes a node answers an execution failure with: `3`
-/// (geth's `execution reverted`, data attached when the contract supplied
-/// any) and `-32000` (the generic server error geth-lineage nodes use for
-/// `out of gas` and data-less reverts). Rate limits and replica hiccups
-/// use other codes (`-32005`, `-32029`, `429`, …) or are transport-level,
-/// and stay transient.
-fn is_execution_outcome(resp: &alloy::rpc::json_rpc::ErrorPayload) -> bool {
-    matches!(resp.code, 3 | -32000)
 }
 
 /// Sort a failed `eth_call` / `eth_estimateGas` into the three things it
@@ -590,10 +560,7 @@ fn is_execution_outcome(resp: &alloy::rpc::json_rpc::ErrorPayload) -> bool {
 /// execution failure without revert data
 /// ([`TransactionError::SimulationFailed`], not transient), or a failure to
 /// get an answer at all ([`TransactionError::GasUnavailable`], transient).
-pub(super) fn classify_simulation_failure(
-    e: &alloy::transports::TransportError,
-    what: &str,
-) -> TransactionError {
+pub(super) fn classify_simulation_failure(e: &TransportError, what: &str) -> TransactionError {
     let error_str = e.to_string();
     if let Some((name, selector, data)) = decode::try_extract_revert(&error_str) {
         return TransactionError::SimulationReverted {
@@ -602,7 +569,7 @@ pub(super) fn classify_simulation_failure(
             revert_data: data,
         };
     }
-    if e.as_error_resp().is_some_and(is_execution_outcome) {
+    if e.as_error_resp().is_some_and(is_execution_error) {
         TransactionError::SimulationFailed {
             reason: format!("{what} failed: {e}"),
         }
@@ -616,6 +583,7 @@ pub(super) fn classify_simulation_failure(
 #[cfg(test)]
 mod tests {
     use alloy::consensus::{Receipt, ReceiptEnvelope, Transaction as _};
+    use alloy::primitives::{I256, aliases::I24};
     use alloy::providers::ProviderBuilder;
     use alloy::sol_types::{SolCall, SolError};
     use alloy::transports::mock::Asserter;
@@ -625,9 +593,10 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use super::*;
-    use crate::client::{mock, now_ms};
-    use crate::contracts::{Perp as EarlierPerp, v1};
-    use crate::errors::RevertClass;
+    use crate::client::{PositionRole, mock, now_ms};
+    use crate::contracts::{Maker, Perp as EarlierPerp, Position, v1};
+    use crate::convert::pack_balance_delta;
+    use crate::errors::{PerpCityError, RevertClass};
     use crate::hft::gas::GasLimits;
 
     /// Solady's `TransferFromFailed()`, which a transfer that runs out of
@@ -751,6 +720,102 @@ mod tests {
         &params[3]
     }
 
+    fn block_pin(hash: B256) -> Value {
+        serde_json::json!({"blockHash": hash})
+    }
+
+    /// Both liquidation roles use their resolved era when they preflight.
+    #[tokio::test(start_paused = true)]
+    async fn liquidation_sends_preflight_on_the_market_era() {
+        let recipient = Address::repeat_byte(0x51);
+        let pos_id = U256::from(7);
+        for era in [Era::V1, Era::Upgradeable] {
+            for role in [PositionRole::Taker, PositionRole::Maker] {
+                let (client, rpc) = mock::client();
+                client.chain().set_base_fee(100);
+                rpc.immutables(era);
+                let delta = pack_balance_delta(-2_500_000, 3_000_000);
+                match (era, role) {
+                    (Era::V1, PositionRole::Taker) => {
+                        rpc.call::<v1::Perp::positionsCall>(&v1::Position {
+                            delta,
+                            margin: 1_000_000,
+                            lastCumlFundingX96: I256::ZERO,
+                        });
+                    }
+                    (Era::V1, PositionRole::Maker) => {
+                        rpc.call::<v1::Perp::makerDetailsCall>(&v1::Maker {
+                            tickLower: I24::try_from(-60).unwrap(),
+                            tickUpper: I24::try_from(60).unwrap(),
+                            liquidity: 335_000_000,
+                            lastLpFeeGrowthInsideX128: U256::ZERO,
+                            lastCumlFunding: v1::MakerFunding {
+                                belowX96: I256::ZERO,
+                                withinInventoryX192: I256::ZERO,
+                            },
+                            lastFundingCorrectionX128: I256::ZERO,
+                        });
+                    }
+                    (Era::Upgradeable, PositionRole::Taker) => {
+                        rpc.call::<EarlierPerp::positionsCall>(&Position {
+                            delta,
+                            ..mock::position(1_000_000)
+                        });
+                    }
+                    (Era::Upgradeable, PositionRole::Maker) => {
+                        rpc.call::<EarlierPerp::makerDetailsCall>(&Maker {
+                            liquidity: 335_000_000,
+                            ..mock::maker(-60, 60, 0)
+                        });
+                    }
+                    (Era::Legacy, _) => unreachable!(),
+                }
+                let head = (era == Era::V1).then(|| rpc.block(500, 1_000));
+                rpc.response(&Bytes::new());
+                answer_send(&rpc, &client);
+
+                let receipt = match role {
+                    PositionRole::Taker => {
+                        client
+                            .liquidate_taker(pos_id, recipient, Urgency::Normal)
+                            .await
+                    }
+                    PositionRole::Maker => {
+                        client
+                            .liquidate_maker(pos_id, recipient, Urgency::Normal)
+                            .await
+                    }
+                }
+                .unwrap();
+                assert!(receipt.status());
+                let calls = rpc.params("eth_call");
+                let preflight = calls.last().unwrap();
+                assert_eq!(rpc.call_gas().last(), Some(&Some(GasLimits::LIQUIDATE)));
+                assert_eq!(
+                    &rpc.methods()[rpc.methods().len() - 3..],
+                    [
+                        "eth_call",
+                        "eth_sendRawTransaction",
+                        "eth_getTransactionReceipt"
+                    ]
+                );
+                if let Some(hash) = head {
+                    assert_eq!(preflight[1], block_pin(hash));
+                    assert_eq!(preflight.as_array().unwrap().len(), 4);
+                    assert_eq!(
+                        overrides(preflight),
+                        &serde_json::json!({"number": "0x1f5", "time": "0x3e9"})
+                    );
+                } else {
+                    assert_eq!(preflight.as_array().unwrap().len(), 2);
+                    assert_eq!(preflight[1], "pending");
+                    assert!(rpc.params("eth_getBlockByNumber").is_empty());
+                }
+                assert!(rpc.is_drained());
+            }
+        }
+    }
+
     /// A v1 trade is estimated and preflighted at the head's state in the
     /// next second, where it accrues as a mined trade does, and a cache
     /// hit sends the cached limit, not the preflight's.
@@ -759,7 +824,7 @@ mod tests {
         let selector = v1::Perp::adjustTakerCall::SELECTOR;
         let (client, rpc) = mock::client();
         client.chain().set_base_fee(100);
-        rpc.block(500, 1_000);
+        let head = rpc.block(500, 1_000);
         rpc.quantity(1_300_000);
         answer_send(&rpc, &client);
         client
@@ -768,14 +833,15 @@ mod tests {
             .await
             .unwrap();
         let estimate = &rpc.params("eth_estimateGas")[0];
-        assert_eq!(estimate[1], "0x1f4");
+        assert_eq!(rpc.params("eth_getBlockByNumber")[0][0], "latest");
+        assert_eq!(estimate[1], block_pin(head));
         assert_eq!(
             overrides(estimate),
             &serde_json::json!({"number": "0x1f5", "time": "0x3e9"})
         );
         assert_eq!(rpc.sent_txs()[0].gas_limit(), 1_560_000);
 
-        rpc.block(501, 1_000);
+        let head = rpc.block(501, 1_000);
         rpc.response(&Bytes::new());
         answer_send(&rpc, &client);
         client
@@ -784,7 +850,7 @@ mod tests {
             .await
             .unwrap();
         let preflight = &rpc.params("eth_call")[0];
-        assert_eq!(preflight[1], "0x1f5");
+        assert_eq!(preflight[1], block_pin(head));
         assert_eq!(
             overrides(preflight),
             &serde_json::json!({"number": "0x1f6", "time": "0x3e9"})
@@ -934,7 +1000,7 @@ mod tests {
             .await
             .unwrap();
         let preflight = &rpc.params("eth_call")[0];
-        assert_eq!(preflight[1], "0x1f4");
+        assert_eq!(preflight[1], block_pin(mock::block(500, 1_000).header.hash));
         assert_eq!(overrides(preflight)["time"], "0x3e9");
         assert_eq!(rpc.call_gas(), [Some(2_000_000)]);
         assert_eq!(rpc.sent_txs()[0].gas_limit(), 2_000_000);
@@ -1031,9 +1097,9 @@ mod tests {
         for path in [Path::Estimate, Path::CacheHit, Path::Explicit] {
             for (code, message) in NEW_HEAD {
                 let (client, rpc) = v1_trade_on(path);
-                rpc.block(500, 1_000);
+                let old = rpc.block(500, 1_000);
                 rpc.node_error(code, message);
-                rpc.block(498, 996);
+                let new = rpc.block(498, 996);
                 let method = simulation_succeeds(path, &rpc);
                 answer_send(&rpc, &client);
                 send_on(path, &client).await.unwrap();
@@ -1045,8 +1111,8 @@ mod tests {
                 assert_eq!(
                     pins,
                     [
-                        ("0x1f4".into(), "0x3e9".into()),
-                        ("0x1f2".into(), "0x3e5".into())
+                        (block_pin(old), "0x3e9".into()),
+                        (block_pin(new), "0x3e5".into())
                     ],
                     "{path:?}"
                 );
@@ -1120,7 +1186,7 @@ mod tests {
                 .await
                 .unwrap();
             let estimate = &rpc.params("eth_estimateGas")[0];
-            assert_eq!(estimate[1], "0x1f4");
+            assert_eq!(estimate[1], block_pin(mock::block(500, 1_000).header.hash));
             assert_eq!(
                 overrides(estimate),
                 &serde_json::json!({"number": "0x1f5", "time": "0x3e9"})
@@ -1129,6 +1195,81 @@ mod tests {
             assert_eq!(cached_limit(&client, selector), Some(2_040_000));
             assert!(rpc.is_drained());
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_cached_limit_repeats_the_pair_if_the_capped_call_misses() {
+        let (client, rpc) = v1_trade_on(Path::CacheHit);
+        let old = rpc.block(500, 1_000);
+        rpc.node_error(-32000, NITRO_MISSING);
+        let new = rpc.block(501, 1_002);
+        rpc.reverts(&TRANSFER_FROM_FAILED);
+        rpc.quantity(1_700_000);
+        answer_send(&rpc, &client);
+        send_on(Path::CacheHit, &client).await.unwrap();
+
+        let calls = rpc.params("eth_call");
+        assert_eq!(calls[0][1], block_pin(old));
+        assert_eq!(calls[1][1], block_pin(new));
+        assert_eq!(rpc.params("eth_estimateGas")[0][1], block_pin(new));
+        assert_eq!(rpc.sent_txs()[0].gas_limit(), 2_040_000);
+        assert!(rpc.is_drained());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_cached_limit_repeats_the_pair_if_the_estimate_misses() {
+        let (client, rpc) = v1_trade_on(Path::CacheHit);
+        let old = rpc.block(500, 1_000);
+        rpc.reverts(&TRANSFER_FROM_FAILED);
+        rpc.node_error(-32000, NITRO_MISSING);
+        let new = rpc.block(501, 1_002);
+        rpc.response(&Bytes::new());
+        answer_send(&rpc, &client);
+        send_on(Path::CacheHit, &client).await.unwrap();
+
+        let calls = rpc.params("eth_call");
+        assert_eq!(calls[0][1], block_pin(old));
+        assert_eq!(calls[1][1], block_pin(new));
+        let estimates = rpc.params("eth_estimateGas");
+        assert_eq!(estimates.len(), 1);
+        assert_eq!(estimates[0][1], block_pin(old));
+        assert_eq!(rpc.sent_txs()[0].gas_limit(), 1_560_000);
+        assert!(rpc.is_drained());
+    }
+
+    #[tokio::test]
+    async fn missing_block_words_in_a_revert_do_not_request_another_head() {
+        let (client, rpc) = v1_trade_on(Path::Estimate);
+        rpc.block(500, 1_000);
+        rpc.node_error(3, "execution reverted: unknown block");
+        let err = send_on(Path::Estimate, &client).await.unwrap_err();
+        assert!(
+            matches!(
+                err,
+                PerpCityError::Transaction(TransactionError::SimulationFailed { .. })
+            ),
+            "{err}"
+        );
+        assert_eq!(rpc.methods(), ["eth_getBlockByNumber", "eth_estimateGas"]);
+        assert!(rpc.is_drained());
+    }
+
+    #[tokio::test]
+    async fn an_estimate_gateway_timeout_is_transient() {
+        let (client, rpc) = v1_trade_on(Path::Estimate);
+        rpc.block(500, 1_000);
+        rpc.node_error(-32000, "upstream timeout");
+        let err = send_on(Path::Estimate, &client).await.unwrap_err();
+        assert!(
+            matches!(
+                err,
+                PerpCityError::Transaction(TransactionError::GasUnavailable { .. })
+            ),
+            "{err}"
+        );
+        assert!(err.is_transient());
+        assert_eq!(rpc.methods(), ["eth_getBlockByNumber", "eth_estimateGas"]);
+        assert!(rpc.is_drained());
     }
 
     /// After a capped revert, an uncapped estimate the node answers with
@@ -1170,7 +1311,7 @@ mod tests {
         let (client, rpc) = cached(selector, 1_300_000);
         rpc.block(500, 1_000);
         rpc.reverts(&TRANSFER_FROM_FAILED);
-        rpc.node_error(-32000, "execution reverted");
+        rpc.node_error(-32603, "execution reverted");
         let err = client
             .tx(mock::PERP, calldata(selector))
             .send()
@@ -1227,13 +1368,17 @@ mod tests {
         assert!(!err.is_transient());
         assert_eq!(rpc.call_gas(), [Some(400_000), None]);
         for call in rpc.params("eth_call") {
-            assert_eq!(call[1], "0x1f4");
+            assert_eq!(call[1], block_pin(mock::block(500, 1_000).header.hash));
             assert_eq!(overrides(&call)["time"], "0x3e9");
         }
         assert!(rpc.sent_txs().is_empty());
         assert!(rpc.is_drained());
 
-        for (code, message) in [(3, "execution reverted"), (-32000, "out of gas")] {
+        for (code, message) in [
+            (3, "execution reverted"),
+            (-32000, "out of gas"),
+            (-32603, "execution reverted"),
+        ] {
             let (client, rpc) = mock::client();
             client.chain().set_base_fee(100);
             rpc.block(500, 1_000);
@@ -1254,6 +1399,25 @@ mod tests {
             assert_eq!(rpc.call_gas(), [Some(400_000), None]);
             assert!(rpc.is_drained());
         }
+    }
+
+    #[tokio::test]
+    async fn an_uncapped_decoded_revert_takes_precedence() {
+        let (client, rpc) = v1_trade_on(Path::Explicit);
+        rpc.block(500, 1_000);
+        rpc.reverts(&TRANSFER_FROM_FAILED);
+        let real_revert = v1::Perp::DeadlineExpired::SELECTOR;
+        rpc.reverts(&real_revert);
+        let err = send_on(Path::Explicit, &client).await.unwrap_err();
+        assert!(
+            matches!(&err, PerpCityError::Transaction(TransactionError::SimulationReverted {
+                selector, ..
+            }) if selector.0 == real_revert),
+            "{err}"
+        );
+        assert_eq!(rpc.call_gas(), [Some(2_000_000), None]);
+        assert!(rpc.sent_txs().is_empty());
+        assert!(rpc.is_drained());
     }
 
     /// After a capped revert of an explicit limit, a call without the cap
@@ -1293,7 +1457,7 @@ mod tests {
     /// asked, so a call that passes in a later block is never typed
     /// GasLimitTooLow.
     #[tokio::test]
-    async fn an_earlier_builds_capped_revert_stands_unchecked() {
+    async fn a_legacy_capped_revert_at_pending_stands_unchecked() {
         let (client, rpc) = mock::client();
         client.chain().set_base_fee(100);
         rpc.reverts(&TRANSFER_FROM_FAILED);
@@ -1336,36 +1500,34 @@ mod tests {
                 .map(|call| (call[1].clone(), overrides(call)["time"].clone()))
                 .collect::<Vec<_>>()
         };
-        let at = |block: &str, time: &str| (Value::from(block), Value::from(time));
+        let at = |hash, time: &str| (block_pin(hash), Value::from(time));
 
-        // The uncapped call misses block 500; the capped one passes in 501.
+        // A reorg at height 500 drops the old hash. The capped call passes at the new hash.
         let (client, rpc) = mock::client();
         client.chain().set_base_fee(100);
-        rpc.block(500, 1_000);
+        let old = rpc.block(500, 1_000);
         rpc.reverts(&TRANSFER_FROM_FAILED);
         rpc.node_error(-32000, NITRO_MISSING);
-        rpc.block(501, 1_002);
+        let new = rpc.block(500, 1_002);
+        assert_ne!(old, new);
         rpc.response(&Bytes::new());
         answer_send(&rpc, &client);
         send(&client).await.unwrap();
         assert_eq!(rpc.call_gas(), [Some(400_000), None, Some(400_000)]);
         assert_eq!(
             pins(&rpc),
-            [
-                at("0x1f4", "0x3e9"),
-                at("0x1f4", "0x3e9"),
-                at("0x1f5", "0x3eb")
-            ]
+            [at(old, "0x3e9"), at(old, "0x3e9"), at(new, "0x3eb")]
         );
         assert!(rpc.is_drained());
 
-        // The pair again in 501: GasLimitTooLow there, from one block.
+        // Both calls run at the new hash before the SDK reports GasLimitTooLow.
         let (client, rpc) = mock::client();
         client.chain().set_base_fee(100);
-        rpc.block(500, 1_000);
+        let old = rpc.block(500, 1_000);
         rpc.reverts(&TRANSFER_FROM_FAILED);
         rpc.node_error(-32602, "too many arguments, want at most 3");
-        rpc.block(501, 1_002);
+        let new = rpc.block(500, 1_002);
+        assert_ne!(old, new);
         rpc.reverts(&TRANSFER_FROM_FAILED);
         rpc.response(&Bytes::new());
         let err = send(&client).await.unwrap_err();
@@ -1379,10 +1541,10 @@ mod tests {
         assert_eq!(
             pins(&rpc),
             [
-                at("0x1f4", "0x3e9"),
-                at("0x1f4", "0x3e9"),
-                at("0x1f5", "0x3eb"),
-                at("0x1f5", "0x3eb")
+                at(old, "0x3e9"),
+                at(old, "0x3e9"),
+                at(new, "0x3eb"),
+                at(new, "0x3eb")
             ]
         );
         assert!(rpc.is_drained());

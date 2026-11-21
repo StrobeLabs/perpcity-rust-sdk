@@ -178,7 +178,20 @@ impl MarketReader {
         fee_recipient: Address,
     ) -> Result<Bytes> {
         validate_fee_recipient(fee_recipient)?;
-        match self.immutables().await?.era {
+        let era = self.era().await?;
+        self.liquidation_calldata_for(era, role, pos_id, fee_recipient)
+            .await
+    }
+
+    /// Build the liquidation call for an era already resolved by the caller.
+    pub(super) async fn liquidation_calldata_for(
+        &self,
+        era: Era,
+        role: PositionRole,
+        pos_id: U256,
+        fee_recipient: Address,
+    ) -> Result<Bytes> {
+        match era {
             Era::Legacy => Ok(role.whole_calldata(pos_id, fee_recipient)),
             Era::Upgradeable => {
                 let amount = self.liquidation_size(role, pos_id).await?;
