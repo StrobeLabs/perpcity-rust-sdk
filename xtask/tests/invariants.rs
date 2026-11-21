@@ -6,6 +6,7 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::OnceLock;
 
 use xtask::design::{self, Graph, TypeRow};
 use xtask::index::{Index, Kind};
@@ -13,8 +14,14 @@ use xtask::invariants;
 use xtask::nodes::{Link, Node};
 use xtask::rustdoc;
 
+/// Generate and load the shared fixture once for the parallel tests.
+fn fixture() -> &'static Index {
+    static FIXTURE: OnceLock<Index> = OnceLock::new();
+    FIXTURE.get_or_init(document_fixture)
+}
+
 /// Document the fixture with rustdoc and load it.
-fn fixture() -> Index {
+fn document_fixture() -> Index {
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
     let source = manifest.join("tests/fixture/lib.rs");
     let out = manifest.join("../target/design/fixture");
@@ -105,9 +112,9 @@ fn every_invariant_fires_on_its_plant_and_nowhere_else() {
             .any(|e| e.name == "MarketReader" && e.kind == Kind::Struct),
         "the fixture indexed"
     );
-    let (graph, nodes) = tables(&index);
+    let (graph, nodes) = tables(index);
     let mut problems = Vec::new();
-    invariants::enforced(&index, &graph, &nodes, &mut problems);
+    invariants::enforced(index, &graph, &nodes, &mut problems);
 
     let expected = [
         (
@@ -168,11 +175,11 @@ fn a_predicate_without_its_sentence_is_reported() {
         text: "# root\n\n## Invariants\n\n- Every snapshot in `math` carries a `BlockContext`.\n\n## Efficiency\n".into(),
     };
     let index = fixture();
-    let (graph, mut nodes) = tables(&index);
+    let (graph, mut nodes) = tables(index);
     nodes.retain(|n| !n.is_root());
     nodes.push(root);
     let mut problems = Vec::new();
-    invariants::enforced(&index, &graph, &nodes, &mut problems);
+    invariants::enforced(index, &graph, &nodes, &mut problems);
     let missing = problems
         .iter()
         .filter(|p| p.contains("has no bullet opening with"))
@@ -369,7 +376,7 @@ fn a_design_md_link_names_the_top_level_module() {
         span: (0, 0),
         line: 1,
     };
-    let found = design::resolve(&link, &node, &index).expect("the link resolves");
+    let found = design::resolve(&link, &node, index).expect("the link resolves");
     assert_eq!(found.item, module.id);
     assert_eq!(found.member, None);
 }
