@@ -887,7 +887,7 @@ pub(super) struct NextBlock {
 
 impl NextBlock {
     /// The head, whose state the simulation reads.
-    fn state(&self) -> BlockId {
+    pub(super) fn state(&self) -> BlockId {
         BlockId::hash(self.head.hash)
     }
 

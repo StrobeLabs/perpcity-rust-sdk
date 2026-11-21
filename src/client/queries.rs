@@ -25,7 +25,7 @@ use crate::constants::{
     MAX_PROTOCOL_FEE, MAX_SWAP_SQRT_PRICE_X96, MIN_SWAP_SQRT_PRICE_X96, V1_MAX_PROTOCOL_FEE,
     V1_MAX_SWAP_SQRT_PRICE_X96, V1_MIN_SWAP_SQRT_PRICE_X96,
 };
-use crate::contracts::{self, IFees, IMarginRatios, Perp, v1};
+use crate::contracts::{self, IFees, IMarginRatios, Perp, PoolKey, v1};
 use crate::convert::{price_x96_to_f64, scale_from_6dec};
 use crate::errors::{ContractError, PerpCityError, Result, ValidationError};
 use crate::hft::state_cache::{CachedBounds, CachedFees};
@@ -324,15 +324,8 @@ impl MarketReader {
         }
 
         let provider = self.chain.provider();
-        let pool_key = Perp::new(self.perp, provider).poolKey().call().await?;
-        let era =
-            self.chain
-                .deployments()
-                .era_of(pool_key.hooks)
-                .ok_or(ContractError::UnknownBuild {
-                    perp: self.perp,
-                    hook: pool_key.hooks,
-                })?;
+        let pool_key = self.pool_key_at(BlockId::latest()).await?;
+        let era = self.era_of_hook(pool_key.hooks)?;
         let pool_id = match era {
             Era::Legacy | Era::Upgradeable => {
                 Perp::new(self.perp, provider).POOL_ID().call().await?
@@ -358,6 +351,39 @@ impl MarketReader {
             .unwrap()
             .insert(self.perp, immutables);
         Ok(immutables)
+    }
+
+    /// For a shared-selector send, only the pool key is needed on a cache miss.
+    pub(super) async fn era_at(&self, block: BlockId) -> Result<Era> {
+        let cached = self
+            .chain
+            .immutables_cache()
+            .lock()
+            .unwrap()
+            .get(&self.perp)
+            .copied();
+        if let Some(immutables) = cached {
+            return Ok(immutables.era);
+        }
+        self.era_of_hook(self.pool_key_at(block).await?.hooks)
+    }
+
+    async fn pool_key_at(&self, block: BlockId) -> Result<PoolKey> {
+        Ok(Perp::new(self.perp, self.chain.provider())
+            .poolKey()
+            .block(block)
+            .call()
+            .await?)
+    }
+
+    fn era_of_hook(&self, hook: Address) -> Result<Era> {
+        self.chain.deployments().era_of(hook).ok_or_else(|| {
+            ContractError::UnknownBuild {
+                perp: self.perp,
+                hook,
+            }
+            .into()
+        })
     }
 
     /// The three addresses this market's tape is read from

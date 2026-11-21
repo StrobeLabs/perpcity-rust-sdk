@@ -14,6 +14,7 @@
 
 use std::time::Duration;
 
+use alloy::eips::BlockId;
 use alloy::network::TransactionBuilder;
 use alloy::primitives::{Address, B256, Bytes, U256};
 use alloy::providers::Provider;
@@ -25,7 +26,7 @@ use crate::errors::{PerpCityError, Result, TransactionError, ValidationError, de
 use crate::hft::gas::{Urgency, is_era_shared, is_out_of_gas, is_v1_trade};
 use crate::hft::pipeline::TxRequest;
 use crate::transport::fault::{
-    is_execution_error, is_gas_exhaustion, is_no_answer, prefixed_revert_data, revert_data,
+    is_execution_revert, is_gas_exhaustion, is_no_answer, prefixed_revert_data, revert_data,
 };
 
 use super::PerpClient;
@@ -104,9 +105,9 @@ impl<'a> TxBuilder<'a> {
     /// number and time, where it accrues as the mined call does. Calldata
     /// of a liquidation or `touch()`, whose selectors an earlier build
     /// shares, sends the era read of the market at `to` first, unless the
-    /// typed method that built it knows the era. A contract at `to` that
-    /// reverts the era read, or answers it with no data, is not a market:
-    /// the call is simulated as any other, at the endpoint's block.
+    /// typed method that built it knows the era. The pool key alone names
+    /// the era. A revert or empty pool key is checked at a pinned head
+    /// before the call can use the ordinary non-market simulation.
     ///
     /// # Errors
     ///
@@ -175,11 +176,24 @@ impl<'a> TxBuilder<'a> {
         // A liquidation's and `touch()`'s selectors are the same on an
         // earlier build and `v1.0.0`, so calldata built for either is told
         // apart by the market's era.
+        let chain = self.client.chain();
+        let mut head = None;
         let market_era = match self.market_era {
             None if selector.as_ref().is_some_and(is_era_shared) => {
-                match self.client.chain().market(self.to).era().await {
+                let market = chain.market(self.to);
+                match market.era_at(BlockId::latest()).await {
                     Ok(era) => Some(era),
-                    Err(error) if is_not_a_market(&error) => None,
+                    Err(error) if is_not_a_market(&error) => {
+                        // A replica behind a new market's deployment can
+                        // return empty data for a real market at latest.
+                        let pinned = chain.next_block().await?;
+                        head = Some(pinned);
+                        match market.era_at(pinned.state()).await {
+                            Ok(era) => Some(era),
+                            Err(error) if is_not_a_market(&error) => None,
+                            Err(error) => return Err(era_read_error(error)),
+                        }
+                    }
                     Err(error) => return Err(era_read_error(error)),
                 }
             }
@@ -189,10 +203,10 @@ impl<'a> TxBuilder<'a> {
             || selector.as_ref().is_some_and(is_v1_trade),
             |era| era == Era::V1,
         );
-        let next = if v1 {
-            Some(self.client.chain().next_block().await?)
-        } else {
-            None
+        let next = match (v1, head) {
+            (true, Some(head)) => Some(head),
+            (true, None) => Some(chain.next_block().await?),
+            (false, _) => None,
         };
 
         // Simulate + resolve gas limit. An explicit gas_limit skips only the
@@ -382,16 +396,13 @@ impl<'a> TxBuilder<'a> {
     }
 }
 
-/// Whether an era read's failure says the contract at the address is no
-/// market: its getter reverted ([`is_execution_error`]), or it answered
-/// with no data (no code there). No answer, and an answer of a market
-/// with an unknown hook, are not.
+/// Whether a pool key probe returned empty data or an explicit revert.
 fn is_not_a_market(error: &PerpCityError) -> bool {
     match error {
         PerpCityError::Abi(alloy::contract::Error::ZeroData(..)) => true,
-        PerpCityError::Abi(alloy::contract::Error::TransportError(error)) => {
-            error.as_error_resp().is_some_and(is_execution_error)
-        }
+        PerpCityError::Abi(alloy::contract::Error::TransportError(error)) => error
+            .as_error_resp()
+            .is_some_and(|resp| is_execution_revert(resp) || revert_data(resp).is_some()),
         _ => false,
     }
 }
@@ -1573,7 +1584,7 @@ mod tests {
             let (client, rpc) = mock::client();
             client.chain().set_base_fee(100);
             if let Some(era) = era {
-                rpc.immutables(era);
+                rpc.era_probe(era);
             }
             rpc.reverts(&TRANSFER_FROM_FAILED);
             let err = client
@@ -1591,7 +1602,7 @@ mod tests {
             let preflight = rpc.params("eth_call").pop().unwrap();
             assert_eq!(preflight[1], "pending");
             assert_eq!(preflight.as_array().unwrap().len(), 2);
-            let reads = if era.is_some() { 2 } else { 0 };
+            let reads = usize::from(era.is_some());
             assert_eq!(rpc.methods().len(), reads + 1);
             assert_eq!(rpc.call_gas().last(), Some(&Some(GasLimits::LIQUIDATE)));
             assert!(rpc.is_drained());
@@ -1613,7 +1624,7 @@ mod tests {
             ] {
                 let (client, rpc) = mock::client();
                 client.chain().set_base_fee(100);
-                rpc.immutables(era);
+                rpc.era_probe(era);
                 let head = (era == Era::V1).then(|| rpc.block(500, 1_000));
                 rpc.response(&Bytes::new());
                 answer_send(&rpc, &client);
@@ -1687,7 +1698,7 @@ mod tests {
                 rpc.immutables(own);
                 assert_eq!(client.market().era().await.unwrap(), own);
                 let own_reads = rpc.call_routes().len();
-                rpc.immutables(other);
+                rpc.era_probe(other);
                 let head = (other == Era::V1).then(|| rpc.block(500, 1_000));
                 let method = if explicit {
                     rpc.response(&Bytes::new());
@@ -1705,7 +1716,7 @@ mod tests {
                 };
                 tx.send().await.unwrap();
 
-                let era_reads = &rpc.call_routes()[own_reads..own_reads + 2];
+                let era_reads = &rpc.call_routes()[own_reads..own_reads + 1];
                 assert!(
                     era_reads.iter().all(|(_, to)| *to == Some(target)),
                     "{case}: {era_reads:?}"
@@ -1749,7 +1760,7 @@ mod tests {
         for era in [Era::V1, Era::Upgradeable] {
             let (client, rpc) = mock::client();
             client.chain().set_base_fee(100);
-            rpc.immutables(era);
+            rpc.era_probe(era);
             let head = (era == Era::V1).then(|| rpc.block(500, 1_000));
             rpc.quantity(60_000);
             answer_send(&rpc, &client);
@@ -1772,7 +1783,7 @@ mod tests {
                     assert!(rpc.params("eth_getBlockByNumber").is_empty());
                 }
             }
-            assert_eq!(rpc.calls().len(), 2, "{era:?}: the era read");
+            assert_eq!(rpc.calls().len(), 1, "{era:?}: the era read");
             assert_eq!(rpc.sent_txs().len(), 1);
             assert!(rpc.is_drained(), "{era:?}");
         }
@@ -2630,10 +2641,6 @@ mod tests {
         }
     }
 
-    /// A liquidation's or `touch()`'s selector sent through
-    /// [`PerpClient::tx`] to a contract that is no market — its era read
-    /// reverts, or answers with no data — is simulated as any other call:
-    /// at the endpoint's block, with no head read, and sent.
     #[tokio::test(start_paused = true)]
     async fn a_shared_selector_to_a_non_market_is_simulated_as_any_other() {
         let target = Address::repeat_byte(0x77);
@@ -2645,11 +2652,16 @@ mod tests {
                 let case = format!("{selector:?}, reverts {reverts}");
                 let (client, rpc) = mock::client();
                 client.chain().set_base_fee(100);
-                if reverts {
-                    rpc.node_error(3, "execution reverted");
-                } else {
-                    rpc.raw(&[]);
-                }
+                let absent = || {
+                    if reverts {
+                        rpc.node_error(3, "execution reverted");
+                    } else {
+                        rpc.raw(&[]);
+                    }
+                };
+                absent();
+                let hash = rpc.block(500, 1_000);
+                absent();
                 rpc.response(&Bytes::new());
                 answer_send(&rpc, &client);
                 client
@@ -2658,14 +2670,161 @@ mod tests {
                     .send()
                     .await
                     .unwrap_or_else(|err| panic!("{case}: {err:?}"));
-                let preflight = rpc.params("eth_call").pop().unwrap();
-                assert_eq!(preflight[1], "pending", "{case}");
-                assert_eq!(preflight.as_array().unwrap().len(), 2, "{case}");
-                assert!(rpc.params("eth_getBlockByNumber").is_empty(), "{case}");
+                let calls = rpc.params("eth_call");
+                assert_eq!(calls[1][1], block_pin(hash), "{case}: confirmation");
+                assert_eq!(calls[2][1], "pending", "{case}");
+                assert_eq!(calls[2].as_array().unwrap().len(), 2, "{case}");
+                assert_eq!(rpc.params("eth_getBlockByNumber").len(), 1, "{case}");
                 assert_eq!(rpc.sent_txs()[0].to(), Some(target), "{case}");
                 assert!(rpc.is_drained(), "{case}");
             }
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_negative_latest_probe_is_checked_at_the_simulation_head() {
+        let (client, rpc) = mock::client();
+        client.chain().set_base_fee(100);
+        rpc.raw(&[]);
+        let hash = rpc.block(500, 1_000);
+        rpc.era_probe(Era::V1);
+        rpc.response(&Bytes::new());
+        answer_send(&rpc, &client);
+
+        client
+            .tx(mock::PERP, calldata(v1::Perp::touchCall::SELECTOR))
+            .with_gas_limit(GasLimits::LIQUIDATE)
+            .send()
+            .await
+            .unwrap();
+
+        let calls = rpc.params("eth_call");
+        assert_eq!(calls[1][1], block_pin(hash));
+        assert_eq!(calls[2][1], block_pin(hash));
+        assert_eq!(
+            overrides(&calls[2]),
+            &serde_json::json!({"number": "0x1f5", "time": "0x3e9"})
+        );
+        assert_eq!(rpc.params("eth_getBlockByNumber").len(), 1);
+        assert_eq!(rpc.sent_txs().len(), 1);
+        assert!(rpc.is_drained());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn astra_known_v1_then_empty_id() {
+        let (client, rpc) = mock::client();
+        client.chain().set_base_fee(100);
+        rpc.era_probe(Era::V1);
+        rpc.raw(&[]);
+        rpc.response(&Bytes::new());
+        answer_send(&rpc, &client);
+
+        let error = client
+            .tx(mock::PERP, calldata(v1::Perp::touchCall::SELECTOR))
+            .with_gas_limit(900_000)
+            .send()
+            .await
+            .unwrap_err();
+        assert!(error.is_transient(), "{error:?}");
+        assert!(rpc.sent_txs().is_empty());
+        assert_eq!(rpc.selectors(), [EarlierPerp::poolKeyCall::SELECTOR]);
+        assert_eq!(rpc.params("eth_getBlockByNumber").len(), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn astra_echoed_params_array() {
+        let (client, rpc) = v1_trade_on(Path::Estimate);
+        let hashes = [500, 501].map(|height| {
+            let hash = rpc.block(height, 1_000);
+            rpc.answers_error(
+                -32602,
+                "invalid argument",
+                Some(r#"[{"to":"0x0000000000000000000000000000000000000004","data":"0x12345678aabbccdd"}]"#),
+            );
+            hash
+        });
+
+        let error = send_on(Path::Estimate, &client).await.unwrap_err();
+        assert!(
+            matches!(
+                error,
+                PerpCityError::Transaction(TransactionError::GasUnavailable { .. })
+            ),
+            "{error:?}"
+        );
+        assert!(error.is_transient());
+        assert_eq!(rpc.params("eth_getBlockByNumber").len(), 2);
+        let estimates = rpc.params("eth_estimateGas");
+        assert_eq!(estimates.len(), 2);
+        for (estimate, hash) in estimates.iter().zip(hashes) {
+            assert_eq!(estimate[1], block_pin(hash));
+            assert_eq!(estimate.as_array().unwrap().len(), 4);
+        }
+        assert!(rpc.sent_txs().is_empty());
+        assert!(rpc.is_drained());
+    }
+
+    #[tokio::test]
+    async fn astra_wrapped_execution_error() {
+        let (client, rpc) = v1_trade_on(Path::Estimate);
+        rpc.block(500, 1_000);
+        rpc.answers_error(
+            -32603,
+            "Internal error",
+            Some(r#"{"code":3,"message":"execution reverted","data":"0x7939f424"}"#),
+        );
+
+        let error = send_on(Path::Estimate, &client).await.unwrap_err();
+        assert!(
+            matches!(&error, PerpCityError::Transaction(TransactionError::SimulationReverted {
+            error_name, selector, ..
+        }) if error_name == "TransferFromFailed" && selector.0 == TRANSFER_FROM_FAILED),
+            "{error:?}"
+        );
+        assert!(!error.is_transient());
+        assert!(rpc.sent_txs().is_empty());
+        assert!(rpc.is_drained());
+    }
+
+    #[tokio::test]
+    async fn astra_capacity_reply() {
+        let (client, rpc) = v1_trade_on(Path::Estimate);
+        rpc.block(500, 1_000);
+        rpc.node_error(-32005, "Too Many Requests");
+
+        let error = send_on(Path::Estimate, &client).await.unwrap_err();
+        assert!(
+            matches!(
+                error,
+                PerpCityError::Transaction(TransactionError::GasUnavailable { .. })
+            ),
+            "{error:?}"
+        );
+        assert!(error.is_transient());
+        assert!(rpc.sent_txs().is_empty());
+        assert!(rpc.is_drained());
+    }
+
+    #[tokio::test]
+    async fn astra_reason_string_with_gas_words() {
+        let (client, rpc) = v1_trade_on(Path::Estimate);
+        rpc.block(500, 1_000);
+        rpc.node_error(
+            -32000,
+            "VM Exception while processing transaction: reverted with reason string 'out of gas'",
+        );
+
+        let error = send_on(Path::Estimate, &client).await.unwrap_err();
+        assert!(
+            matches!(
+                error,
+                PerpCityError::Transaction(TransactionError::SimulationFailed { .. })
+            ),
+            "{error:?}"
+        );
+        assert!(!error.is_transient());
+        assert!(rpc.sent_txs().is_empty());
+        assert!(rpc.is_drained());
     }
 
     /// A vendor's `Reverted` prefix on the revert data of an explicit

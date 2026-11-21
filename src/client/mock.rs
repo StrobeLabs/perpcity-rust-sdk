@@ -362,16 +362,25 @@ impl Rpc {
     }
 
     pub(super) fn immutables_with_hooks(&self, era: Era, v022_hook: Address, v1_hook: Address) {
+        self.market_pool_key(era, v022_hook, v1_hook);
+        match era {
+            Era::Legacy | Era::Upgradeable => self.call::<Perp::POOL_IDCall>(&POOL_ID),
+            Era::V1 => self.call::<v1::Perp::poolIdCall>(&POOL_ID),
+        }
+    }
+
+    /// The pool key for a shared-selector send on the mocked chain.
+    pub(super) fn era_probe(&self, era: Era) {
+        self.market_pool_key(era, V022_HOOK, V1_HOOK);
+    }
+
+    fn market_pool_key(&self, era: Era, v022_hook: Address, v1_hook: Address) {
         let hook = match era {
             Era::Legacy => Address::ZERO,
             Era::Upgradeable => v022_hook,
             Era::V1 => v1_hook,
         };
         self.call::<Perp::poolKeyCall>(&pool_key_with_hook(30, hook));
-        match era {
-            Era::Legacy | Era::Upgradeable => self.call::<Perp::POOL_IDCall>(&POOL_ID),
-            Era::V1 => self.call::<v1::Perp::poolIdCall>(&POOL_ID),
-        }
     }
 
     /// The calldata of every `eth_call` asked so far, in order; a

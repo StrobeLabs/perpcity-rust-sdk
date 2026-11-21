@@ -180,11 +180,11 @@ that carries it, the invariant it holds, and the node that owns it.
 
 | Concept | Type | Invariant | Home |
 |---|---|---|---|
-| A chain | [`ChainReader`](src/client/chain.rs#L128) | one transport, one deployment set, shared caches | [`client`](src/client/DESIGN.md) |
+| A chain | [`ChainReader`](src/client/chain.rs#L130) | one transport, one deployment set, shared caches | [`client`](src/client/DESIGN.md) |
 | A market, now | [`MarketReader`](src/client/market.rs#L26) | one `Perp` over a `ChainReader`; every read is current | [`client`](src/client/DESIGN.md) |
 | A market, at a block | [`StateAt`](src/client/state.rs#L76) | the handle is the block; every read pinned to its hash | [`client`](src/client/DESIGN.md) |
 | A market with a signer | [`PerpClient`](src/client/mod.rs#L234) | a `MarketReader` plus the send pipeline | [`client`](src/client/DESIGN.md) |
-| A send | [`TxBuilder`](src/client/transactions.rs#L41) | one transaction, one nonce, one outcome | [`client`](src/client/DESIGN.md) |
+| A send | [`TxBuilder`](src/client/transactions.rs#L48) | one transaction, one nonce, one outcome | [`client`](src/client/DESIGN.md) |
 | A tick interval | [`TickRange`](src/math/range.rs#L25) | `lower < upper`, both in the V4 domain, checked at construction | [`math::range`](src/math/range.rs#L1) |
 | A maker's geometry | [`MakerBand`](src/math/range.rs#L140) | a `TickRange` with liquidity | [`math::range`](src/math/range.rs#L1) |
 | The mark's inputs | [`Mark`](src/math/pricing.rs#L128) | pool price, index and EMAs from one block, advanced to it | [`math::pricing`](src/math/pricing.rs#L1) |
