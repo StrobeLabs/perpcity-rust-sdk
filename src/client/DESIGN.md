@@ -174,9 +174,10 @@ only success.
      ▼
  simulate      gas limit known;    contract reverts (typed)
    estimate    a revert would      └─► SimulationReverted          no          untouched  none
-   or cached   have been decoded   empty revert, or out of gas at the cap
-   + preflight                     └─► SimulationFailed            no          untouched  none
-                                   node unreachable, fee stale
+   or cached   have been decoded   empty revert, any other refusal
+   + preflight                     (funds, intrinsic gas, unknown words)
+                                   └─► SimulationFailed            no          untouched  none
+                                   no answer, out of gas uncapped, fee stale
      │                             └─► GasUnavailable              yes         untouched  none
      ▼
  prepare       nonce acquired,     pipeline full

@@ -25,7 +25,7 @@ use crate::history::History;
 use crate::math::BlockContext;
 use crate::math::pricing::PricePair;
 use crate::storage::{perp_emas_slot, stored_emas, v1_perp_emas_slot};
-use crate::transport::fault::{is_gas_exhaustion, simulation_needs_head};
+use crate::transport::fault::{is_gas_exhaustion, is_intrinsic_gas_too_low, simulation_needs_head};
 use crate::transport::provider::HftTransport;
 use crate::units::UsdcAtoms;
 
@@ -759,7 +759,8 @@ impl ChainReader {
     /// by the stuck transaction a replacement signs again: capped at
     /// `gas_limit`, in `next` when it is given. A capped call that reverts
     /// may only have run short of gas inside a token transfer, and one that
-    /// runs out of gas may pass with more, so in `next` either is run once
+    /// runs out of gas, or whose limit is under its intrinsic gas
+    /// (`intrinsic gas too low`), may pass with more, so in `next` each is run once
     /// more without the cap, in the same block: when either call finds the
     /// block missing or its overrides refused, the pair is run again once
     /// in a head read again. Without `next` (an earlier build's send, at
@@ -802,6 +803,9 @@ impl ChainReader {
                             }
                             _ if capped.as_error_resp().is_some_and(is_gas_exhaustion) => {
                                 "out of gas".to_owned()
+                            }
+                            _ if capped.as_error_resp().is_some_and(is_intrinsic_gas_too_low) => {
+                                "intrinsic gas too low".to_owned()
                             }
                             _ => return Ok(Err(failure)),
                         };
