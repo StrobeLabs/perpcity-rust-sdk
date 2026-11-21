@@ -112,17 +112,13 @@ impl Default for ReadRetryConfig {
 /// identical bytes can only be that one transaction, so a resend cannot
 /// make a second; it can be answered `already known` or `nonce too low`.
 ///
-/// It applies only to a request that is a single `eth_sendRawTransaction`.
-/// Only allowlisted read methods are retried or hedged; every other
-/// method is a write, sent once whatever this says, and its failure, an
-/// error answer included, is a transport error with an unknown outcome.
-/// That holds for a call the node signs (`eth_sendTransaction`,
-/// `personal_sendTransaction`, `eth_sendTransactionSync`), where the node
-/// picks the nonce and a resend could be a second transaction, for any
-/// other send (`eth_sendRawTransactionSync`, a conditional send), for an
-/// unknown method, and for a batch that holds any write. The SDK sends
-/// none of these: it signs locally and sends one
-/// `eth_sendRawTransaction`.
+/// A single `eth_sendRawTransaction` is the only write `HftTransport`
+/// sends: it is a trading transport for transactions signed locally, as
+/// the SDK signs them. Every other method off the read allowlist (a call
+/// the node signs, such as `eth_sendTransaction` or
+/// `personal_sendTransaction`, a synchronous or conditional send, an
+/// unknown method) and any batch that holds one is refused before it is
+/// sent, so this setting has nothing else to apply to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WriteRetryConfig {
     /// Maximum number of retry attempts (0 = no retries, just the initial try).
@@ -243,8 +239,8 @@ impl TransportConfigBuilder {
 
     /// Add a dedicated write endpoint.
     ///
-    /// Write requests (`eth_sendRawTransaction`, and every method that is
-    /// not an allowlisted read) prefer these endpoints.
+    /// Writes (a single `eth_sendRawTransaction`, the only write the
+    /// transport sends) prefer these endpoints.
     /// If all write endpoints are unhealthy, writes fall back to the shared
     /// pool.
     pub fn write_endpoint(mut self, url: impl Into<String>) -> Self {

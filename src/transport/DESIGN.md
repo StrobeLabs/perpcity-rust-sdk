@@ -8,8 +8,9 @@ is where a transport failure's meaning is decided.
 ## Purpose
 
 This module turns several RPC endpoints of varying health into one
-provider the rest of the crate can treat as reliable. It classifies
-every request as a read or a write, retries what is safe to retry,
+provider the rest of the crate can treat as reliable. It sends reads and
+signed raw transactions only, refuses every other request before it
+leaves, retries what is safe to retry,
 routes around endpoints that are failing, hedges reads that are worth
 racing, and reconnects the WebSocket the feeds live on. It is the layer
 where "the node did not answer" is turned into a decision rather than a
@@ -21,20 +22,19 @@ strategy.
 
 ## What matters
 
-**Reads and writes are different acts.** A read that fails can be sent
-again to any endpoint with no consequence. A write that fails after the
-transaction was signed may already be in a mempool, and sending it again
-is either idempotent (the same bytes) or catastrophic (a new nonce). So
-the transport classifies every request by a fail-safe rule: only a method
-on an allowlist of reads without side effects is retried or hedged, and
-every other method, an unknown or new one included, is a write. It
-retries reads freely, retries a single `eth_sendRawTransaction` only as
-the same signed bytes, after an error answer or no answer, sends every
-other write (a call the node signs with a nonce it picks, a synchronous
-send, an unknown method, or a batch that holds a write) once, with any
-failure of it an unknown outcome, and never invents a second
-transaction. The execution model is: reads are cheap to repeat,
-writes are cheap to repeat only as the same bytes, and the caller
+**Reads and writes are different acts, and this transport sends one
+kind of write.** A read that fails can be sent again to any endpoint with
+no consequence. A write that fails after the transaction was signed may
+already be in a mempool, and sending it again is either idempotent (the
+same bytes) or catastrophic (a new nonce). So `HftTransport` is a trading
+transport: it sends a method on an allowlist of reads without side
+effects, alone or in a batch of reads, and a single
+`eth_sendRawTransaction`, and nothing else. Every other method, an
+unknown or new one included, and any batch that holds one is refused
+before it is sent. It retries reads freely, retries the raw send only as
+the same signed bytes, after an error answer or no answer, and never
+invents a second transaction. The execution model is: reads are cheap to
+repeat, writes are cheap to repeat only as the same bytes, and the caller
 reconciles a doubtful write by its receipt.
 
 **A declined request is not a failing endpoint.** A provider that
@@ -61,8 +61,8 @@ is the standing example.
 
 ## The mental model
 
-A request enters as a packet, is classified read or write, and is
-routed. Reads go to the read pool if one is configured and healthy, else
+A request enters as a packet, is refused unless it is a read (or a batch
+of reads) or a single raw send, and is routed. Reads go to the read pool if one is configured and healthy, else
 the shared pool, by round robin, latency, or hedged fan-out. Writes go to
 the write pool, else shared. Each endpoint is a boxed HTTP transport
 behind its own breaker; a breaker that opens takes the endpoint out of
@@ -71,9 +71,10 @@ rotation until a probe succeeds.
 ```text
                         a request (tower::Service<RequestPacket>)
                                         │
-                              classify: read or write?
+           read, batch of reads, or one eth_sendRawTransaction?
+                     anything else → refused, nothing sent
                           ┌─────────────┴──────────────┐
-                        READ                          WRITE
+                        READ                       RAW SEND
                           │                             │
              read pool healthy?                 write pool healthy?
               yes │    │ no → shared pool          yes │    │ no → shared pool
@@ -81,8 +82,8 @@ rotation until a probe succeeds.
         ┌──────────────────────┐             ┌──────────────────────┐
         │ Strategy             │             │ one endpoint         │
         │  round robin         │             │ same signed bytes    │
-        │  latency-based       │             │ (node-signed call or │
-        │  hedged: fan out,    │             │  batch: sent once)   │
+        │  latency-based       │             │ typed id, tx hash    │
+        │  hedged: fan out,    │             │ checked              │
         │   first answer wins, │             └──────────┬───────────┘
         │   others cancelled   │              answered?
         └──────────┬───────────┘           no │        │ error answer
@@ -135,37 +136,31 @@ success whose result is no transaction hash, such as an error object in
 its place: a write's rejection is only an error response under its own
 id.
 
-Only allowlisted read methods are retried or hedged; every other method
-is sent once and its failure is an unknown outcome; only a single
-`eth_sendRawTransaction` keeps retry and rejection evidence. The list
+Every other request is refused before it is sent, with a local error
+(`RpcError::LocalUsageError`): `HftTransport sends only single signed
+eth_sendRawTransaction writes; <method> is not supported`, and for a
+batch `; a batch may hold only reads` after it. That covers a call the node signs
+(`eth_sendTransaction`, `personal_sendTransaction`), whose nonce the node
+picks, so that a resend after a lost reply could be a second trade; a
+synchronous or conditional send; `eth_subscribe` over HTTP; an unknown
+method; and a batch with any of them, a raw send included. The read list
 names the reads the SDK sends and the common reads next to them, and a
 test sends each read the SDK uses through alloy and checks that the list
-is exactly those. Anything else is a write, because a list of writes
-grows a hole with every new send method (`eth_sendTransactionSync`,
-`eth_sendRawTransactionSync`, a conditional send), while a list of reads
-fails safe: a read left off it is only sent once. A call the node signs
-(`eth_sendTransaction`, `personal_sendTransaction`, the synchronous
-sends) picks its nonce at the node, so a resend after a lost reply could
-be signed with the next nonce as a second transaction, and an unknown
-method may do as much. Any failure of such a write (a lost reply, an
-error answer even under its own id, a response under another id, a body
-that is no JSON-RPC response, a success that is no transaction hash for
-a method that answers with one) is a transport error with an unknown
-outcome. A synchronous send answers with its receipt, which passes as it
-came. A write with a null request id, which alloy cannot tell from an
-answer with no id, and a batch that holds a write and repeats an id, are
-refused before they are sent. A batch that holds any write is never
-retried or hedged, and the transport never claims that the node
-rejected a write inside it: any error in its answer (a read's, a
-write's, or one error object for the whole batch), and any answer that
-is not a batch (one object for a batch of one included), does not answer
-each call once by its id, or answers a write that answers with a hash
-with no transaction hash, fails the whole batch as a transport error
-with an unknown outcome. An error answer turned into a transport error
-counts against the endpoint's health only when it is a rate limit. The
-SDK sends none of these: it signs locally and sends one
-`eth_sendRawTransaction`, so these rules keep a path the product does
-not use simple and safe rather than precise.
+is exactly those. A list of reads fails safe: a new send method is
+refused, not retried as a read. Earlier rounds sent these writes once and
+checked their answers; each check added a case on a path the SDK never
+uses, so the transport now sends only what the SDK sends: it signs
+locally and sends one `eth_sendRawTransaction`. A raw send with a null
+id, which alloy cannot tell from an answer with no id, is refused too.
+
+An answer that does not answer its request counts against the
+endpoint's health: an answer under another id or of another shape, a
+body that is no JSON-RPC response (a bare error object with no id, which
+alloy decodes as an error response, included), and a raw send's success
+that is no transaction hash. A read's answer that answers each call by
+its id counts against the endpoint when any answer in it is a rate
+limit, once for the whole batch; any other answer, an error under the
+call's own id included, is the endpoint working.
 
 The WebSocket manager is the subscription side of the same idea: one
 socket, many subscriptions, reconnect with capped backoff, and the
@@ -175,11 +170,11 @@ callers re-subscribe.
 
 | Type | Invariant | Produced by | Consumed by |
 |---|---|---|---|
-| [`HftTransport`](provider.rs#L529) | the provider's transport: many endpoints, one `tower::Service`; every request classified read or write before routing | [`HftTransport::new`](provider.rs#L539) from a [`TransportConfig`](config.rs#L146) | [`ChainReader::new`](../client/DESIGN.md), [`ChainReader::arbitrum`](../client/DESIGN.md) and [`ChainReader::arbitrum_sepolia`](../client/DESIGN.md), which build the provider over it, so every read and send in the crate passes through it. The strategy layer builds one per process, and a second one for scans so their declines and timeouts never touch the trading endpoints' health. |
+| [`HftTransport`](provider.rs#L529) | the provider's transport: many endpoints, one `tower::Service`; sends reads and single signed raw transactions, refuses every other request before routing | [`HftTransport::new`](provider.rs#L539) from a [`TransportConfig`](config.rs#L146) | [`ChainReader::new`](../client/DESIGN.md), [`ChainReader::arbitrum`](../client/DESIGN.md) and [`ChainReader::arbitrum_sepolia`](../client/DESIGN.md), which build the provider over it, so every read and send in the crate passes through it. The strategy layer builds one per process, and a second one for scans so their declines and timeouts never touch the trading endpoints' health. |
 | [`TransportConfig`](config.rs#L146), [`TransportConfigBuilder`](config.rs#L180) | the pools and their policies: shared, read and write pools; per-endpoint timeouts; the retry and breaker settings; validated once at [`build`](config.rs#L280) | the builder, and only the builder | [`HftTransport::new`](provider.rs#L539). The strategy layer assembles one from its environment; the builder is where a keyed URL enters the crate. |
 | [`Strategy`](config.rs#L52) | how a read is routed: round robin, latency-based, or hedged; a caller's choice | the caller | [`TransportConfigBuilder::strategy`](config.rs#L253). Hedging costs N requests per read, which is why it is a choice and not a default. |
 | [`ReadRetryConfig`](config.rs#L89) | what a read retries: no answer only, with backoff | the caller; `Default` is 2 retries | [`TransportConfigBuilder::read_retry`](config.rs#L265). |
-| [`WriteRetryConfig`](config.rs#L114) | what a single `eth_sendRawTransaction` retries: an error answer or no answer, the same bytes; every other write (any method off the read allowlist, or a batch that holds one) is sent once | the caller; `Default` is 3 retries | [`TransportConfigBuilder::write_retry`](config.rs#L271). |
+| [`WriteRetryConfig`](config.rs#L114) | what a single `eth_sendRawTransaction`, the only write the transport sends, retries: an error answer or no answer, the same bytes; every other write is refused before it is sent | the caller; `Default` is 3 retries | [`TransportConfigBuilder::write_retry`](config.rs#L271). |
 | [`CircuitBreakerConfig`](config.rs#L68) | when a breaker trips: failure threshold, cooldown, probe | the caller; `Default` is the trading defaults | [`TransportConfigBuilder::circuit_breaker`](config.rs#L259); [`EndpointHealth::new`](health.rs#L90), one breaker per endpoint. |
 | [`EndpointHealth`](health.rs#L57), [`ProbePermit`](provider.rs#L190), [`Reserved`](health.rs#L27) | one endpoint's health: breaker, latency EMA, decaying error rate, readable without a lock; one half-open probe at a time; an endpoint held for a purpose | [`EndpointHealth::new`](health.rs#L90), one per endpoint in a pool | the pools inside the transport, which select over it. Internal: nothing outside this module selects an endpoint, and the pool type is hidden from the documentation for that reason, which is why this row draws no edge. |
 | [`EndpointStatus`](health.rs#L75), [`CircuitState`](health.rs#L37) | one endpoint's health, read out | [`HftTransport::health_status`](provider.rs#L558) | nothing in the crate. The strategy layer's metrics, which is why it is a plain value and not a handle. |
