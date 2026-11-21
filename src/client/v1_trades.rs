@@ -2367,7 +2367,13 @@ mod tests {
                 -32_000,
                 "gateway timeout",
                 Some(r#"{"errors":[{"data":"0x08c379a0"}]}"#),
-                false,
+                true,
+            ),
+            (
+                -32_000,
+                "gateway timeout",
+                Some(r#"{"request":{"data":"0x08c379a0"}}"#),
+                true,
             ),
             (
                 -32_000,

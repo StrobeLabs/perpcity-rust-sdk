@@ -248,12 +248,23 @@ impl UrlStrippingHttp {
                 .params()
                 .is_some_and(|params| serde_json::from_str::<[&RawValue; 4]>(params.get()).is_ok())
         {
-            tracing::warn!(
-                endpoint = %redact_url(self.url.as_str()),
-                method = request.method(),
-                error_code = error.code,
-                "RPC endpoint refused block overrides or could not serve the pinned block"
-            );
+            // A refusal of the overrides is the endpoint's setting and
+            // repeats; a missing pinned block is a replica behind the head.
+            if error.code == -32_602 {
+                tracing::warn!(
+                    endpoint = %redact_url(self.url.as_str()),
+                    method = request.method(),
+                    error_code = error.code,
+                    "RPC endpoint refused block overrides"
+                );
+            } else {
+                tracing::debug!(
+                    endpoint = %redact_url(self.url.as_str()),
+                    method = request.method(),
+                    error_code = error.code,
+                    "RPC endpoint could not serve the pinned block"
+                );
+            }
         }
         Ok(response)
     }

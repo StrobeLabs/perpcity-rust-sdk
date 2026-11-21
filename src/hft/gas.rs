@@ -104,13 +104,17 @@ pub(crate) fn is_v1_trade(selector: &Selector) -> bool {
     )
 }
 
-/// Whether `selector` is a liquidation whose selector `v0.2.2` and
-/// `v1.0.0` share, taker or maker, so only the market's era says which
-/// build the call is for.
-pub(crate) fn is_shared_liquidation(selector: &Selector) -> bool {
+/// Whether `selector` is a `v1.0.0` call that accrues the market and
+/// whose selector an earlier build shares, so only the market's era says
+/// which build the call is for: a liquidation, taker or maker (shared with
+/// `v0.2.2`), and `touch()` (shared with build `58b42b7`). `donate()` is
+/// shared too but does not accrue, so its simulation needs no next block.
+pub(crate) fn is_era_shared(selector: &Selector) -> bool {
     matches!(
         *selector,
-        v1::Perp::liquidateTakerCall::SELECTOR | v1::Perp::liquidateMakerCall::SELECTOR
+        v1::Perp::liquidateTakerCall::SELECTOR
+            | v1::Perp::liquidateMakerCall::SELECTOR
+            | v1::Perp::touchCall::SELECTOR
     )
 }
 
@@ -464,15 +468,18 @@ mod tests {
             PerpV022::liquidateMakerCall::SELECTOR,
             v1::Perp::liquidateTakerCall::SELECTOR,
             v1::Perp::liquidateMakerCall::SELECTOR,
+            v1::Perp::touchCall::SELECTOR,
+            Perp::touchCall::SELECTOR,
         ] {
-            assert!(is_shared_liquidation(&selector));
+            assert!(is_era_shared(&selector));
         }
         for selector in [
             Perp::liquidateTakerCall::SELECTOR,
             Perp::liquidateMakerCall::SELECTOR,
             v1::Perp::openTakerCall::SELECTOR,
+            v1::Perp::donateCall::SELECTOR,
         ] {
-            assert!(!is_shared_liquidation(&selector));
+            assert!(!is_era_shared(&selector));
         }
     }
 

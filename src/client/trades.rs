@@ -18,6 +18,7 @@ use crate::units::{LDelta, LUnits, PerpAtoms, PerpDelta, UsdcAtoms, UsdcDelta};
 use super::market::{PositionRole, validate_fee_recipient};
 use super::queries::Era;
 use super::state::PositionRow;
+use super::v1_trades::era_read_error;
 use super::{MAX_APPROVAL, PerpClient, i32_to_i24};
 
 // ── Parameters ──────────────────────────────────────────────────────
@@ -786,7 +787,7 @@ impl PerpClient {
         urgency: Urgency,
     ) -> Result<TransactionReceipt> {
         validate_fee_recipient(fee_recipient)?;
-        let era = self.market.era().await?;
+        let era = self.market.era().await.map_err(era_read_error)?;
         let calldata = self
             .market
             .liquidation_calldata_for(era, role, pos_id, fee_recipient)
