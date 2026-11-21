@@ -81,8 +81,6 @@ pub struct EndpointHealth {
     tracker_id: u64,
     /// The cycle that issued the current half-open probe slots.
     cycle: u64,
-    // Rate limit for recovery probes that supplement a closed hedge.
-    cycle_started_ms: u64,
 
     // Latency tracking (EMA with alpha ~0.2: new = old*4/5 + sample/5)
     avg_latency_ns: u64,
@@ -124,7 +122,6 @@ impl EndpointHealth {
             config,
             tracker_id: NEXT_TRACKER_ID.fetch_add(1, Ordering::Relaxed),
             cycle: 0,
-            cycle_started_ms: 0,
             avg_latency_ns: 0,
             total_requests: 0,
             consecutive_failures: 0,
@@ -176,7 +173,7 @@ impl EndpointHealth {
             CircuitState::Closed => Some(Reserved::Freely),
             CircuitState::Open { since_ms } => {
                 if self.recovered(since_ms, now_ms) {
-                    Some(self.start_cycle(now_ms))
+                    Some(self.start_cycle())
                 } else {
                     None
                 }
@@ -194,24 +191,8 @@ impl EndpointHealth {
         }
     }
 
-    /// Reserve a hedge while a closed peer can serve. Admit a closed
-    /// circuit freely and start a recovery cycle with one probe.
-    /// If the previous cycle ended without a verdict and has no slots
-    /// left, wait a recovery interval between cycle starts.
-    #[must_use = "settle the probe slot if the reservation took one"]
-    pub(super) fn reserve_for_hedge(&mut self, now_ms: u64) -> Option<Reserved> {
-        match self.state {
-            CircuitState::Closed | CircuitState::Open { .. } => self.reserve(now_ms),
-            CircuitState::HalfOpen {
-                probes_in_flight: 0,
-            } if self.recovered(self.cycle_started_ms, now_ms) => Some(self.start_cycle(now_ms)),
-            _ => None,
-        }
-    }
-
-    fn start_cycle(&mut self, now_ms: u64) -> Reserved {
+    fn start_cycle(&mut self) -> Reserved {
         self.cycle += 1;
-        self.cycle_started_ms = now_ms;
         self.state = CircuitState::HalfOpen {
             probes_in_flight: 1,
         };

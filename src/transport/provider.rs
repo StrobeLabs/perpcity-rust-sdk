@@ -323,22 +323,9 @@ impl EndpointPool {
     /// Take the right to send one request to endpoint `idx`, or `None` if
     /// its circuit will not allow one.
     pub fn reserve(&self, idx: usize, now_ms: u64) -> Option<ProbePermit<'_>> {
-        self.reserve_with_cooldown(idx, now_ms, false)
-    }
-
-    fn reserve_with_cooldown(
-        &self,
-        idx: usize,
-        now_ms: u64,
-        limit_recovery: bool,
-    ) -> Option<ProbePermit<'_>> {
         let endpoint = &self.endpoints[idx];
         let mut health = endpoint.health.lock().unwrap();
-        let reserved = if limit_recovery {
-            health.reserve_for_hedge(now_ms)
-        } else {
-            health.reserve(now_ms)
-        }?;
+        let reserved = health.reserve(now_ms)?;
         endpoint
             .atomic_state
             .store(pack_state(health.state()), Ordering::Relaxed);
@@ -449,15 +436,14 @@ impl EndpointPool {
         // fan-out: a reservation this function hands back is a probe slot
         // spent on a request that never happens. An endpoint the first scan
         // took is skipped even if its circuit has since opened, so no
-        // endpoint is selected twice. With a closed candidate, limit
-        // recovery attempts so cancelled hedges cannot probe on every read.
+        // endpoint is selected twice.
         if candidates.len() < n {
             let taken = candidates.len();
             for idx in 0..self.endpoints.len() {
                 if candidates[..taken].iter().any(|&(held, _, _)| held == idx) {
                     continue;
                 }
-                if let Some(permit) = self.reserve_with_cooldown(idx, now_ms, taken > 0) {
+                if let Some(permit) = self.reserve(idx, now_ms) {
                     let latency = self.endpoints[idx]
                         .atomic_latency_ns
                         .load(Ordering::Relaxed);
@@ -3052,28 +3038,34 @@ mod tests {
     }
 
     #[test]
-    fn a_cancelled_hedge_waits_a_recovery_interval_when_a_closed_peer_can_serve() {
+    fn overlapping_hedges_can_use_the_next_recovering_endpoint() {
         let pool = EndpointPool::from_urls(
             &[
                 "https://rpc1.example.com".into(),
                 "https://rpc2.example.com".into(),
+                "https://rpc3.example.com".into(),
             ],
             one_probe_breaker(std::time::Duration::from_secs(5)),
         )
         .unwrap();
-
-        pool.record_failure(0, 0);
-        assert_eq!(pool.select_n(2, 4_999).len(), 1);
-        assert_eq!(pool.select_n(2, 5_000).len(), 2);
-        assert_eq!(pool.health_status()[0].state, IDLE);
-
-        for now in 5_001..5_100 {
-            let selected = pool.select_n(2, now);
-            assert_eq!(selected.len(), 1, "probe admitted at {now} ms");
-            assert_eq!(selected[0].0, 1);
+        for idx in 0..3 {
+            pool.record_success(idx, 1_000 * (idx as u64 + 1), ProbePermit::free());
         }
-        assert_eq!(pool.select_n(2, 9_999).len(), 1);
-        assert_eq!(pool.select_n(2, 10_000).len(), 2);
+        pool.record_failure(1, 0);
+        pool.record_failure(2, 0);
+
+        let first = pool.select_n(2, 5_000);
+        assert_eq!(
+            first.iter().map(|(idx, _)| *idx).collect::<Vec<_>>(),
+            [0, 1]
+        );
+        // Keep the first hedge's permits live. Its second endpoint has
+        // the only probe slot, so the next hedge needs the third endpoint.
+        let second = pool.select_n(2, 5_001);
+        assert_eq!(
+            second.iter().map(|(idx, _)| *idx).collect::<Vec<_>>(),
+            [0, 2]
+        );
     }
 
     #[tokio::test]
