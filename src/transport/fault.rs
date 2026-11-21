@@ -126,36 +126,40 @@ pub(crate) fn is_execution_error(payload: &ErrorPayload) -> bool {
 /// The fewest hex digits that count as revert data: a 4-byte selector.
 const MIN_REVERT_DIGITS: usize = 8;
 
-/// Whether an error answer's `data` holds revert data: a `0x` hex string
-/// of at least [`MIN_REVERT_DIGITS`] digits, as `data` itself or under a
-/// `data` or `originalError` key at any depth, arrays included, as nodes
-/// and wallets nest it. Other keys (`blockNumber`, `blockHash`,
-/// `requestId`) are not revert data.
+/// Whether an error answer's `data` holds revert data ([`revert_data`]).
 fn has_revert_data(resp: &ErrorPayload) -> bool {
-    fn longest(value: &Value, revert_field: bool) -> Option<usize> {
+    revert_data(resp).is_some()
+}
+
+/// The revert data of an error answer: the longest `0x` hex string of at
+/// least [`MIN_REVERT_DIGITS`] digits in its `data`, as `data` itself or
+/// under a `data` or `originalError` key at any depth, arrays included, as
+/// nodes and wallets nest it. Other keys (`blockNumber`, `blockHash`,
+/// `requestId`) are not revert data.
+pub(crate) fn revert_data(resp: &ErrorPayload) -> Option<String> {
+    fn longest(value: &Value, revert_field: bool) -> Option<&str> {
         match value {
             Value::String(text) if revert_field => text
                 .strip_prefix("0x")
-                .filter(|digits| digits.bytes().all(|digit| digit.is_ascii_hexdigit()))
-                .map(str::len),
+                .is_some_and(|digits| digits.bytes().all(|digit| digit.is_ascii_hexdigit()))
+                .then_some(text.as_str()),
             Value::Array(items) => items
                 .iter()
                 .filter_map(|item| longest(item, revert_field))
-                .max(),
+                .max_by_key(|text| text.len()),
             Value::Object(fields) => fields
                 .iter()
                 .filter_map(|(key, field)| {
                     longest(field, matches!(key.as_str(), "data" | "originalError"))
                 })
-                .max(),
+                .max_by_key(|text| text.len()),
             _ => None,
         }
     }
-    resp.data
-        .as_ref()
-        .and_then(|data| serde_json::from_str::<Value>(data.get()).ok())
-        .and_then(|value| longest(&value, true))
-        .is_some_and(|digits| digits >= MIN_REVERT_DIGITS)
+    let value = serde_json::from_str::<Value>(resp.data.as_ref()?.get()).ok()?;
+    longest(&value, true)
+        .filter(|text| text.len() - 2 >= MIN_REVERT_DIGITS)
+        .map(str::to_owned)
 }
 
 /// Parts of a node's answer to `eth_sendRawTransaction` that reject the
@@ -200,16 +204,28 @@ pub(crate) fn state_pruned(message: &str) -> bool {
 
 /// Whether a node's error `message` says it does not have the block a
 /// call was pinned to: Nitro's "unsupported block number N" for a number
-/// above its head, geth's "header not found" for a hash or number it has
-/// not seen, and the "unknown block" / "block not found" wordings of other
-/// clients and gateways. Another node, or the same one a moment later, can
+/// above its head and "requested block ahead of current block and the
+/// hash is not currently canonical" for a hash it has not seen, geth's
+/// "header not found" for a hash or number it has not seen and "header
+/// for hash not found", and the "unknown block" / "block not found"
+/// wordings of other clients and gateways. Another node, or the same one a moment later, can
 /// have it.
 pub(crate) fn lacks_block(message: &str) -> bool {
     let message = message.to_ascii_lowercase();
     message.contains("unsupported block number")
         || message.contains("header not found")
+        || message.contains("header for hash not found")
+        || message.contains("hash is not currently canonical")
         || message.contains("unknown block")
         || message.contains("block not found")
+}
+
+/// Whether an error answer reports the call running out of gas: geth's
+/// `out of gas` from a call, or `gas required exceeds allowance` from an
+/// estimate that found no limit under the node's cap.
+pub(crate) fn is_gas_exhaustion(resp: &ErrorPayload) -> bool {
+    let message = resp.message.to_ascii_lowercase();
+    message.contains("out of gas") || message.contains("gas required exceeds")
 }
 
 /// Parts of an error answer's message that report no answer from the
@@ -431,5 +447,90 @@ mod tests {
             };
             assert_eq!(is_rejection(&payload), rejected, "{answer}");
         }
+    }
+    fn payload(code: i64, message: &str, data: Option<&str>) -> ErrorPayload {
+        ErrorPayload {
+            code,
+            message: message.to_string().into(),
+            data: data.map(|data| serde_json::value::RawValue::from_string(data.into()).unwrap()),
+        }
+    }
+
+    /// A pinned simulation reads the head again for a refusal of its
+    /// params or a missing block, by the wordings of geth and Nitro for a
+    /// number or a hash, and never for an execution answer: revert data
+    /// under `-32602`, or a revert that names a missing block.
+    #[test]
+    fn only_a_refusal_or_a_missing_block_asks_for_a_new_head() {
+        for (code, message) in [
+            (-32602, "too many arguments, want at most 3"),
+            (-32000, "header not found"),
+            (-32000, "header for hash not found"),
+            (
+                -32000,
+                "requested block ahead of current block and the hash is not currently canonical",
+            ),
+            (-32000, "unsupported block number 500"),
+            (-32000, "unknown block"),
+        ] {
+            assert!(
+                simulation_needs_head(&payload(code, message, None)),
+                "{message}"
+            );
+        }
+        for (code, message, data) in [
+            (-32602, "invalid argument", Some(r#""0x08c379a0""#)),
+            (
+                -32602,
+                "invalid argument",
+                Some(r#"{"originalError":{"data":"0xb2c86a29"}}"#),
+            ),
+            (3, "execution reverted: unknown block", None),
+            (-32000, "execution reverted: header not found", None),
+            (-32000, "out of gas", None),
+        ] {
+            assert!(
+                !simulation_needs_head(&payload(code, message, data)),
+                "{message} {data:?}"
+            );
+        }
+    }
+
+    /// Revert data is the longest hex string under `data` or
+    /// `originalError` at any depth, of a selector or more; other keys and
+    /// shorter strings are not.
+    #[test]
+    fn revert_data_is_read_under_data_and_original_error() {
+        for (data, expected) in [
+            (r#""0x08c379a0""#, Some("0x08c379a0")),
+            (
+                r#"{"originalError":{"code":3,"data":"0xb2c86a2900"}}"#,
+                Some("0xb2c86a2900"),
+            ),
+            (
+                r#"{"data":"0x01","originalError":{"data":["0xdeadbeef"]}}"#,
+                Some("0xdeadbeef"),
+            ),
+            (r#"{"blockHash":"0xdeadbeefdeadbeef"}"#, None),
+            (r#""0x1234""#, None),
+            (r#""0xnothex00""#, None),
+        ] {
+            assert_eq!(
+                revert_data(&payload(3, "execution reverted", Some(data))).as_deref(),
+                expected,
+                "{data}"
+            );
+        }
+    }
+
+    #[test]
+    fn gas_exhaustion_is_named_by_the_message() {
+        assert!(is_gas_exhaustion(&payload(-32000, "out of gas", None)));
+        assert!(is_gas_exhaustion(&payload(
+            -32000,
+            "gas required exceeds allowance (30000000)",
+            None
+        )));
+        assert!(!is_gas_exhaustion(&payload(3, "execution reverted", None)));
     }
 }

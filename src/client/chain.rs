@@ -25,12 +25,14 @@ use crate::history::History;
 use crate::math::BlockContext;
 use crate::math::pricing::PricePair;
 use crate::storage::{perp_emas_slot, stored_emas, v1_perp_emas_slot};
-use crate::transport::fault::simulation_needs_head;
+use crate::transport::fault::{is_gas_exhaustion, simulation_needs_head};
 use crate::transport::provider::HftTransport;
 use crate::units::UsdcAtoms;
 
 use super::queries::{Era, MarketImmutables};
-use super::transactions::{classify_simulation_failure, preflight_request};
+use super::transactions::{
+    classify_simulation_failure, classify_uncapped_failure, preflight_request,
+};
 use super::{
     ARBITRUM_CHAIN_ID, ARBITRUM_POOL_MANAGER, ARBITRUM_SEPOLIA_CHAIN_ID,
     ARBITRUM_SEPOLIA_POOL_MANAGER, ARBITRUM_SEPOLIA_USDC, ARBITRUM_SEPOLIA_V1_PERP_FACTORY,
@@ -756,20 +758,21 @@ impl ChainReader {
     /// The preflight of a call whose gas limit is fixed, by the caller or
     /// by the stuck transaction a replacement signs again: capped at
     /// `gas_limit`, in `next` when it is given. A capped call that reverts
-    /// may only have run short of gas inside a token transfer, so in `next`
-    /// it is run once more without the cap, in the same block: when either
-    /// call finds the block missing or its overrides refused, the pair is
-    /// run again once in a head read again. Without `next` (an earlier
-    /// build's send, at the endpoint's `pending` block) there is no one
-    /// block for the pair, and the capped call's failure stands.
+    /// may only have run short of gas inside a token transfer, and one that
+    /// runs out of gas may pass with more, so in `next` either is run once
+    /// more without the cap, in the same block: when either call finds the
+    /// block missing or its overrides refused, the pair is run again once
+    /// in a head read again. Without `next` (an earlier build's send, at
+    /// the endpoint's `pending` block) there is no one block for the pair,
+    /// and the capped call's failure stands.
     ///
     /// # Errors
     ///
     /// [`TransactionError::GasLimitTooLow`] when the call succeeds without
     /// the cap; [`TransactionError::GasUnavailable`] (transient) when the
-    /// call without the cap gets no execution answer
+    /// call without the cap gets no execution answer, runs out of gas too,
     /// or the pair finds no block; an uncapped decoded revert takes
-    /// precedence over the capped revert.
+    /// precedence over the capped failure ([`classify_uncapped_failure`]).
     pub(super) async fn preflight_at_limit(
         &self,
         from: Address,
@@ -787,26 +790,33 @@ impl ChainReader {
         let tx = |limit| preflight_request(from, to, calldata, value, limit);
         let pair = self
             .in_next_block("eth_call", next, |next| async move {
-                let capped = match self.call_in(tx(Some(gas_limit)), Some(next)).await {
+                let (capped, error_name) = match self.call_in(tx(Some(gas_limit)), Some(next)).await
+                {
                     Err(capped) if wants_new_head(&capped) => return Err(capped),
-                    Err(capped) => classify_simulation_failure(&capped, "eth_call"),
                     Ok(()) => return Ok(Ok(())),
-                };
-                let TransactionError::SimulationReverted { error_name, .. } = &capped else {
-                    return Ok(Err(capped));
+                    Err(capped) => {
+                        let failure = classify_simulation_failure(&capped, "eth_call");
+                        let name = match &failure {
+                            TransactionError::SimulationReverted { error_name, .. } => {
+                                error_name.clone()
+                            }
+                            _ if capped.as_error_resp().is_some_and(is_gas_exhaustion) => {
+                                "out of gas".to_owned()
+                            }
+                            _ => return Ok(Err(failure)),
+                        };
+                        (failure, name)
+                    }
                 };
                 match self.call_in(tx(None), Some(next)).await {
                     Err(uncapped) if wants_new_head(&uncapped) => Err(uncapped),
                     Ok(()) => Ok(Err(TransactionError::GasLimitTooLow {
                         gas_limit,
-                        error_name: error_name.clone(),
+                        error_name,
                     })),
-                    Err(uncapped) => Ok(Err(
-                        match classify_simulation_failure(&uncapped, "eth_call") {
-                            TransactionError::SimulationFailed { .. } => capped,
-                            error => error,
-                        },
-                    )),
+                    Err(uncapped) => Ok(Err(classify_uncapped_failure(
+                        &uncapped, "eth_call", capped,
+                    ))),
                 }
             })
             .await?;

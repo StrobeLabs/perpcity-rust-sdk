@@ -104,6 +104,16 @@ pub(crate) fn is_v1_trade(selector: &Selector) -> bool {
     )
 }
 
+/// Whether `selector` is a liquidation whose selector `v0.2.2` and
+/// `v1.0.0` share, taker or maker, so only the market's era says which
+/// build the call is for.
+pub(crate) fn is_shared_liquidation(selector: &Selector) -> bool {
+    matches!(
+        *selector,
+        v1::Perp::liquidateTakerCall::SELECTOR | v1::Perp::liquidateMakerCall::SELECTOR
+    )
+}
+
 /// Lower bound on a cached estimate for the known Perp entrypoints.
 ///
 /// Arbitrum charges execution costs — an L1 data component, the reentrancy
@@ -448,6 +458,21 @@ mod tests {
             [0xaa, 0xbb, 0xcc, 0xdd],
         ] {
             assert!(!is_v1_trade(&selector));
+        }
+        for selector in [
+            PerpV022::liquidateTakerCall::SELECTOR,
+            PerpV022::liquidateMakerCall::SELECTOR,
+            v1::Perp::liquidateTakerCall::SELECTOR,
+            v1::Perp::liquidateMakerCall::SELECTOR,
+        ] {
+            assert!(is_shared_liquidation(&selector));
+        }
+        for selector in [
+            Perp::liquidateTakerCall::SELECTOR,
+            Perp::liquidateMakerCall::SELECTOR,
+            v1::Perp::openTakerCall::SELECTOR,
+        ] {
+            assert!(!is_shared_liquidation(&selector));
         }
     }
 

@@ -985,7 +985,8 @@ mod tests {
 
     /// A confirmation whose node lacks the pinned block is the transient
     /// `BlockUnavailable` a pinned read gives; pruned state is
-    /// `StateUnavailable`.
+    /// `StateUnavailable`; an execution error whose message names a
+    /// missing block is the call's failure.
     #[tokio::test]
     async fn a_confirmation_without_the_pinned_block_is_typed_for_it() {
         let (client, rpc) = mock::client();
@@ -1016,6 +1017,23 @@ mod tests {
             matches!(
                 err,
                 PerpCityError::Contract(ContractError::StateUnavailable { number: 100 })
+            ),
+            "{err}"
+        );
+        assert!(!err.is_transient());
+        assert!(rpc.is_drained());
+
+        let (client, rpc) = mock::client();
+        answer_removal(&rpc, &client, shallow());
+        rpc.node_error(3, "execution reverted: unknown block");
+        let err = client
+            .close_maker_v1(U256::ONE, Urgency::Normal)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                PerpCityError::Transaction(TransactionError::SimulationFailed { .. })
             ),
             "{err}"
         );

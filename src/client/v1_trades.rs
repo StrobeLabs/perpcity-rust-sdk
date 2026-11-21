@@ -267,7 +267,7 @@ fn is_clear_refusal(error: &TransportError) -> bool {
 /// [`PerpCityError::Rpc`]. An answer (an execution revert of `poolKey()`
 /// or `poolId()`, or a refusal of the request such as `-32601`) stays as
 /// it is, not transient.
-fn era_read_error(error: PerpCityError) -> PerpCityError {
+pub(super) fn era_read_error(error: PerpCityError) -> PerpCityError {
     match error {
         PerpCityError::Abi(CallError::TransportError(error)) if is_no_answer(&error) => {
             error.into()
