@@ -63,7 +63,8 @@ is the standing example.
 
 A request enters as a packet, is refused unless the serialized body of
 each call holds the method and id of its metadata and it is a read (or a
-batch of reads) or a single raw send, and is routed. Reads go to the read pool if one is configured and healthy, else
+batch of reads) or a single raw send, and is routed. Reads go to the read pool if one is configured and its breakers
+give an endpoint (a closed circuit, or a probe of an open one whose recovery timeout has passed), else
 the shared pool, by round robin, latency, or hedged fan-out. Writes go to
 the write pool, else shared. Each endpoint is a boxed HTTP transport
 behind its own breaker; a breaker that opens takes the endpoint out of
@@ -152,8 +153,11 @@ is exactly those. A list of reads fails safe: a new send method is
 refused, not retried as a read. Earlier rounds sent these writes once and
 checked their answers; each check added a case on a path the SDK never
 uses, so the transport now sends only what the SDK sends: it signs
-locally and sends one `eth_sendRawTransaction`. A raw send with a null
-id, which alloy cannot tell from an answer with no id, is refused too.
+locally and sends one `eth_sendRawTransaction`. A raw send or a read
+with a null id, which alloy cannot tell from an answer with no id, is
+refused too, and so are a batch whose calls repeat an id, whose answers
+could not be told apart, and an empty batch, which a node answers with
+one error and not a batch.
 
 An answer that does not answer its request counts against the
 endpoint's health: an answer under another id or of another shape, a

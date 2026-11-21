@@ -690,17 +690,45 @@ fn is_read(method: &str) -> bool {
 /// sent: a request is sent only when the JSON body of each call holds the
 /// method and id of its metadata ([`body_disagrees`]), and it is a single
 /// call to a method on [`READ_METHODS`], a batch of such calls, or a
-/// single `eth_sendRawTransaction` with an id. A raw send with a null id
-/// is refused because alloy reads it the same as an answer with no id;
-/// every other method, a write or an unknown method, and any batch that
-/// holds one, because this transport sends only signed raw transactions.
+/// single `eth_sendRawTransaction` with an id. A raw send or a read with a
+/// null id is refused because alloy reads it the same as an answer with no
+/// id, a batch whose calls repeat an id because its answers could not be
+/// told apart, and an empty batch because a node answers it with one error
+/// and not a batch; every other method, a write or an unknown method, and
+/// any batch that holds one, because this transport sends only signed raw
+/// transactions.
 fn refused(req: &RequestPacket) -> Option<TransportError> {
     let calls = match req {
         RequestPacket::Single(call) => std::slice::from_ref(call),
         RequestPacket::Batch(calls) => calls.as_slice(),
     };
+    if calls.is_empty() {
+        return Some(TransportError::local_usage_str(
+            "an empty batch has no answer under an id: it was not sent",
+        ));
+    }
     if let Some(error) = calls.iter().find_map(body_disagrees) {
         return Some(error);
+    }
+    if let Some(call) = calls
+        .iter()
+        .find(|call| is_read(call.method()) && call.id().is_none())
+    {
+        return Some(TransportError::local_usage_str(&format!(
+            "a {} read with a null id has an answer that could not be told apart: it was not sent",
+            call.method()
+        )));
+    }
+    if let Some((at, call)) = calls
+        .iter()
+        .enumerate()
+        .find(|(at, call)| calls[..*at].iter().any(|c| c.id() == call.id()))
+    {
+        return Some(TransportError::local_usage_str(&format!(
+            "the batch repeats id {} at call {at}, so its answers could not be told apart: it \
+             was not sent",
+            call.id()
+        )));
     }
     let (method, batch) = match req {
         RequestPacket::Single(call) if call.method() == RAW_SEND => {
@@ -733,12 +761,35 @@ struct Envelope {
     id: alloy::rpc::json_rpc::Id,
 }
 
+impl Envelope {
+    /// The envelope of `body`, which must be one JSON object: a positional
+    /// array, which serde reads into a struct as its fields in order, is
+    /// no call.
+    fn parse(body: &str) -> serde_json::Result<Self> {
+        use serde::Deserializer as _;
+        struct Object;
+        impl<'de> serde::de::Visitor<'de> for Object {
+            type Value = Envelope;
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("a JSON-RPC call object")
+            }
+            fn visit_map<A: serde::de::MapAccess<'de>>(self, map: A) -> Result<Envelope, A::Error> {
+                serde::Deserialize::deserialize(serde::de::value::MapAccessDeserializer::new(map))
+            }
+        }
+        let mut de = serde_json::Deserializer::from_str(body);
+        let envelope = (&mut de).deserialize_map(Object)?;
+        de.end()?;
+        Ok(envelope)
+    }
+}
+
 /// The error that refuses `call` when its JSON body, which is what the
 /// endpoint gets, does not hold its metadata's method and id (compared as
 /// typed), or is no single call: every check here reads the metadata, so
 /// a call whose body says otherwise is not sent.
 fn body_disagrees(call: &SerializedRequest) -> Option<TransportError> {
-    match serde_json::from_str::<Envelope>(call.serialized().get()) {
+    match Envelope::parse(call.serialized().get()) {
         Ok(body) if body.method == call.method() && body.id == *call.id() => None,
         _ => Some(TransportError::local_usage_str(&format!(
             "the JSON body of a {} call with id {} does not hold that method and id: it was not \
@@ -880,14 +931,21 @@ impl Router {
             .map(|(idx, permit)| (&self.shared, idx, permit))
     }
 
-    /// Select the pool for hedged reads. Prefers the read pool if it has
-    /// healthy endpoints, otherwise falls back to shared.
-    fn read_pool(&self) -> &EndpointPool {
-        if self.read.healthy_count() > 0 {
-            &self.read
-        } else {
-            &self.shared
+    /// Select up to `fan_out` endpoints for a hedged read, with their
+    /// permits: from the read pool when it gives any, a half-open endpoint
+    /// whose recovery timeout has passed included, else from the shared
+    /// pool. Asking the read pool's breakers, not counting its closed
+    /// circuits, is what lets a read endpoint that recovers serve again.
+    fn select_hedged(
+        &self,
+        fan_out: usize,
+        now_ms: u64,
+    ) -> (&EndpointPool, Vec<(usize, ProbePermit<'_>)>) {
+        let selected = self.read.select_n(fan_out, now_ms);
+        if !selected.is_empty() {
+            return (&self.read, selected);
         }
+        (&self.shared, self.shared.select_n(fan_out, now_ms))
     }
 
     /// Route a request through the best endpoint, with retry.
@@ -934,8 +992,7 @@ impl Router {
 
         // Handle hedged reads
         if !is_write && let Strategy::Hedged { fan_out } = self.strategy {
-            let pool = self.read_pool();
-            return self.hedged_request(pool, req, fan_out, timeout).await;
+            return self.hedged_request(req, fan_out, timeout).await;
         }
 
         // Standard path: select endpoint from appropriate pool, try with retry
@@ -1066,22 +1123,21 @@ impl Router {
         Err(last_err.unwrap_or_else(|| TransportError::local_usage_str("no endpoints available")))
     }
 
-    /// Fan out a read request to multiple endpoints in a pool, return the
-    /// fastest answer ([`read_result`]): a response under another id is an
-    /// endpoint failure, and the other requests run on.
+    /// Fan out a read request to the endpoints [`Self::select_hedged`]
+    /// gives, return the fastest answer ([`read_result`]): a response under
+    /// another id is an endpoint failure, and the other requests run on.
     ///
     /// Uses [`JoinSet`] to properly cancel losing requests via `abort_all()`,
     /// saving RPC rate limits and network bandwidth. Health is recorded for all
     /// endpoints that complete before cancellation.
     async fn hedged_request(
         &self,
-        pool: &EndpointPool,
         req: RequestPacket,
         fan_out: usize,
         timeout: std::time::Duration,
     ) -> Result<ResponsePacket, TransportError> {
         let now_ms = now_ms();
-        let selected = pool.select_n(fan_out, now_ms);
+        let (pool, selected) = self.select_hedged(fan_out, now_ms);
 
         if selected.is_empty() {
             return Err(TransportError::local_usage_str(
@@ -1725,11 +1781,10 @@ mod tests {
         assert_eq!(requests.load(Ordering::SeqCst), 0);
     }
 
-    /// A raw send with a null id, which alloy reads the same as an answer
-    /// with no id, is refused before it is sent; a read with a null id is
-    /// sent as before.
+    /// A raw send or a read with a null id, which alloy reads the same as
+    /// an answer with no id, is refused before it is sent.
     #[tokio::test]
-    async fn a_raw_send_with_a_null_id_is_not_sent() {
+    async fn a_call_with_a_null_id_is_not_sent() {
         use alloy::rpc::json_rpc::Id;
         let requests = Arc::new(AtomicUsize::new(0));
         let counter = Arc::clone(&requests);
@@ -1739,17 +1794,18 @@ mod tests {
         })
         .await;
         let transport = health_transport(&url);
-        let error = transport
-            .router
-            .route_request(RequestPacket::Single(make_request_with(RAW_SEND, Id::None)))
-            .await
-            .expect_err("refused");
-        assert!(error.to_string().contains("it was not sent"), "{error}");
+        for method in [RAW_SEND, "eth_chainId"] {
+            let error = transport
+                .router
+                .route_request(RequestPacket::Single(make_request_with(method, Id::None)))
+                .await
+                .expect_err("refused");
+            assert!(
+                error.to_string().contains("it was not sent"),
+                "{method}: {error}"
+            );
+        }
         assert_eq!(requests.load(Ordering::SeqCst), 0);
-
-        let read = RequestPacket::Single(make_request_with("eth_chainId", Id::None));
-        let _ = transport.router.route_request(read).await;
-        assert_eq!(requests.load(Ordering::SeqCst), 1);
     }
 
     /// A transport over one endpoint that sends each request once.
@@ -1969,6 +2025,127 @@ mod tests {
         let agrees = RequestPacket::Single(make_request("eth_chainId", 1));
         transport.call(agrees).await.expect("sent");
         assert_eq!(requests.load(Ordering::SeqCst), 1);
+    }
+
+    /// A read packet whose answers alloy could not tell apart is refused
+    /// at the public entry point with a local error and nothing sent: an
+    /// empty batch, which a node answers with one error and not a batch, a
+    /// read with a null id, which alloy reads the same as an answer with no
+    /// id, alone or in a batch, and a batch that repeats an id, as a number
+    /// or as text. A batch under the number 1 and the text "1" is sent.
+    #[tokio::test]
+    async fn a_read_whose_answers_could_not_be_told_apart_is_not_sent() {
+        use alloy::rpc::json_rpc::Id;
+        let requests = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&requests);
+        let url = scripted::endpoint(move |_, _| {
+            counter.fetch_add(1, Ordering::SeqCst);
+            Answer::Result(json!("0x1"))
+        })
+        .await;
+        let mut transport = health_transport(&url);
+        let text = |id: &str| Id::String(id.into());
+        let packets = [
+            RequestPacket::Batch(vec![]),
+            RequestPacket::Single(make_request_with("eth_chainId", Id::None)),
+            RequestPacket::Batch(vec![
+                make_request("eth_chainId", 1),
+                make_request_with("eth_blockNumber", Id::None),
+            ]),
+            RequestPacket::Batch(vec![
+                make_request("eth_chainId", 1),
+                make_request("eth_blockNumber", 2),
+                make_request("eth_gasPrice", 1),
+            ]),
+            RequestPacket::Batch(vec![
+                make_request_with("eth_chainId", text("a")),
+                make_request_with("eth_blockNumber", text("a")),
+            ]),
+        ];
+        for packet in packets {
+            let case = format!("{packet:?}");
+            let error = transport.call(packet).await.expect_err("refused");
+            assert!(
+                matches!(error, alloy::transports::RpcError::LocalUsageError(_)),
+                "{case}: {error:?}"
+            );
+            assert!(
+                error.to_string().contains("it was not sent"),
+                "{case}: {error}"
+            );
+        }
+        assert_eq!(requests.load(Ordering::SeqCst), 0);
+        let distinct = RequestPacket::Batch(vec![
+            make_request("eth_chainId", 1),
+            make_request_with("eth_blockNumber", text("1")),
+        ]);
+        transport.call(distinct).await.expect("sent");
+        assert_eq!(requests.load(Ordering::SeqCst), 2);
+    }
+
+    /// The envelope check reads a call's body only as one JSON object with
+    /// no repeated key: a positional array, which serde would read into
+    /// the envelope's fields in order, and an object that names the method
+    /// twice are no call.
+    #[test]
+    fn a_call_body_is_one_object_with_no_repeated_key() {
+        let call = Envelope::parse(r#"{"jsonrpc":"2.0","method":"eth_call","params":[],"id":1}"#)
+            .expect("an object");
+        assert_eq!(call.method, "eth_call");
+        assert_eq!(call.id, alloy::rpc::json_rpc::Id::Number(1));
+        for body in [
+            r#"["eth_call",1]"#,
+            r#"{"method":"eth_call","method":"eth_sendTransaction","id":1}"#,
+            r#"{"method":"eth_call","id":1} {}"#,
+        ] {
+            assert!(Envelope::parse(body).is_err(), "{body}");
+        }
+    }
+
+    /// A dedicated read endpoint whose circuit opened serves hedged reads
+    /// again once its recovery timeout has passed: the read pool's breaker
+    /// gives the read a probe, the read goes there and not to the shared
+    /// pool, and its answer closes the circuit.
+    #[tokio::test]
+    async fn a_read_endpoint_serves_hedged_reads_again_after_recovery() {
+        let hits = |answer: &'static str| {
+            let requests = Arc::new(AtomicUsize::new(0));
+            let counter = Arc::clone(&requests);
+            let script = move |_: &str, _: &serde_json::Value| {
+                counter.fetch_add(1, Ordering::SeqCst);
+                Answer::Result(json!(answer))
+            };
+            (requests, script)
+        };
+        let (read_hits, read_script) = hits("0x1");
+        let (shared_hits, shared_script) = hits("0x2");
+        let transport = HftTransport::new(
+            TransportConfig::builder()
+                .strategy(Strategy::Hedged { fan_out: 2 })
+                .request_timeout(std::time::Duration::from_secs(2))
+                .read_endpoint(scripted::endpoint(read_script).await)
+                .shared_endpoint(scripted::endpoint(shared_script).await)
+                .build()
+                .unwrap(),
+        )
+        .unwrap();
+        let router = &transport.router;
+        let opened = now_ms() - 31_000;
+        for _ in 0..3 {
+            router.read.record_failure(0, opened);
+        }
+        assert_eq!(router.read.healthy_count(), 0);
+
+        let req = RequestPacket::Single(make_request("eth_blockNumber", 1));
+        let response = router.route_request(req).await.expect("an answer");
+        let answer = response.as_single().expect("a single answer");
+        assert_eq!(
+            answer.payload.as_success().map(|r| r.get()),
+            Some(r#""0x1""#)
+        );
+        assert_eq!(read_hits.load(Ordering::SeqCst), 1);
+        assert_eq!(shared_hits.load(Ordering::SeqCst), 0);
+        assert_eq!(router.read.healthy_count(), 1);
     }
 
     /// A contract that reverts with the words "rate limit" under the
@@ -2395,9 +2572,9 @@ mod tests {
         router.read.record_failure(0, now);
         router.read.record_failure(0, now);
 
-        // read_pool() should fall back to shared when read pool is unhealthy
-        let pool = router.read_pool();
+        let (pool, selected) = router.select_hedged(2, now);
         assert_eq!(pool.endpoint_urls()[0], "https://shared.example.com");
+        assert_eq!(selected.len(), 1);
     }
 
     // ── Lock-free verification tests ─────────────────────────────────
