@@ -29,7 +29,17 @@ pub enum Reserved {
     Freely,
     /// A half-open probe slot was taken, and has to be resolved — by the
     /// request's outcome, or by giving it back.
-    Probe,
+    Probe(ProbeSlot),
+}
+
+/// One half-open probe slot, named by the recovery cycle that gave it.
+///
+/// Only the slot's owner gives it back, and only within its own cycle: an
+/// outcome or a release that carries no slot, or a slot of an earlier
+/// cycle, leaves the probes now in flight alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProbeSlot {
+    cycle: u64,
 }
 
 /// Circuit breaker state for an endpoint.
@@ -57,6 +67,9 @@ pub enum CircuitState {
 pub struct EndpointHealth {
     state: CircuitState,
     config: CircuitBreakerConfig,
+    /// The recovery cycle: counts the circuit's moves from open to
+    /// half-open, so a probe slot names the cycle it belongs to.
+    cycle: u64,
 
     // Latency tracking (EMA with alpha ~0.2: new = old*4/5 + sample/5)
     avg_latency_ns: u64,
@@ -91,6 +104,7 @@ impl EndpointHealth {
         Self {
             state: CircuitState::Closed,
             config,
+            cycle: 0,
             avg_latency_ns: 0,
             total_requests: 0,
             consecutive_failures: 0,
@@ -117,8 +131,8 @@ impl EndpointHealth {
     ///
     /// `None` when the endpoint is not callable. `Some(Reserved::Probe)`
     /// means a slot was taken and **must** be resolved — by recording the
-    /// request's outcome, or by [`Self::release_probe`] if it is never
-    /// sent. `Some(Reserved::Freely)` took nothing.
+    /// request's outcome with its slot, or by [`Self::release_probe`] if it
+    /// is never sent. `Some(Reserved::Freely)` took nothing.
     ///
     /// Callers do not track this themselves: `EndpointPool` hands out a
     /// permit whose `Drop` releases an unresolved slot.
@@ -128,11 +142,12 @@ impl EndpointHealth {
             CircuitState::Open { since_ms } => {
                 let elapsed = now_ms.saturating_sub(since_ms);
                 if elapsed >= self.config.recovery_timeout.as_millis() as u64 {
-                    // Recovery elapsed: the first probe may go.
+                    // Recovery elapsed: a new cycle, whose first probe may go.
+                    self.cycle += 1;
                     self.state = CircuitState::HalfOpen {
                         probes_in_flight: 1,
                     };
-                    Some(Reserved::Probe)
+                    Some(Reserved::Probe(self.slot()))
                 } else {
                     None
                 }
@@ -142,7 +157,7 @@ impl EndpointHealth {
                     self.state = CircuitState::HalfOpen {
                         probes_in_flight: probes_in_flight + 1,
                     };
-                    Some(Reserved::Probe)
+                    Some(Reserved::Probe(self.slot()))
                 } else {
                     None
                 }
@@ -150,13 +165,21 @@ impl EndpointHealth {
         }
     }
 
-    /// Give back a half-open probe slot taken by [`Self::reserve`] for a
-    /// request that was never sent, or whose outcome never arrived.
+    /// A slot of the current recovery cycle.
+    fn slot(&self) -> ProbeSlot {
+        ProbeSlot { cycle: self.cycle }
+    }
+
+    /// Give back `slot`, a half-open probe slot taken by [`Self::reserve`]
+    /// for a request that was never sent, or whose outcome never arrived.
     ///
     /// Leaves the circuit half-open: the endpoint has still not shown
-    /// whether it recovered.
-    pub fn release_probe(&mut self) {
-        if let CircuitState::HalfOpen { probes_in_flight } = self.state {
+    /// whether it recovered. A slot of an earlier recovery cycle gives back
+    /// nothing: its cycle ended when the circuit left half-open.
+    pub fn release_probe(&mut self, slot: ProbeSlot) {
+        if let CircuitState::HalfOpen { probes_in_flight } = self.state
+            && slot.cycle == self.cycle
+        {
             self.state = CircuitState::HalfOpen {
                 probes_in_flight: probes_in_flight.saturating_sub(1),
             };
@@ -166,14 +189,18 @@ impl EndpointHealth {
     /// Record that the endpoint answered by declining the request.
     ///
     /// Evidence that it is reachable and responsive, so the failure streak
-    /// ends and a half-open probe gives its slot back — but not evidence
+    /// ends and a half-open probe gives its `slot` back — but not evidence
     /// that it can serve a request, so a half-open circuit stays half-open
     /// and the latency average is left alone. Without the slot release, a
     /// probe answered this way would hold its slot forever and the
-    /// endpoint would never be probed again.
-    pub fn record_answered(&mut self) {
+    /// endpoint would never be probed again. A request sent while the
+    /// circuit was closed holds no slot (`None`), so its answer gives back
+    /// none of the probes in flight.
+    pub fn record_answered(&mut self, slot: Option<ProbeSlot>) {
         self.consecutive_failures = 0;
-        self.release_probe();
+        if let Some(slot) = slot {
+            self.release_probe(slot);
+        }
     }
 
     /// Record a successful request with its latency.
@@ -328,10 +355,12 @@ mod tests {
         for t in 1..=3 {
             h.record_failure(t * 1000);
         }
-        assert!(h.is_callable(33_000), "recovery elapsed: one probe allowed");
+        let Some(Reserved::Probe(slot)) = h.reserve(33_000) else {
+            panic!("recovery elapsed: one probe allowed");
+        };
         assert!(!h.is_callable(33_001), "the probe is in flight");
 
-        h.record_answered();
+        h.record_answered(Some(slot));
         assert!(
             h.is_callable(33_002),
             "the answered probe released its slot"
@@ -349,10 +378,52 @@ mod tests {
         let mut h = EndpointHealth::new(default_config());
         h.record_failure(1_000);
         h.record_failure(2_000);
-        h.record_answered();
+        h.record_answered(None);
         assert_eq!(h.status().consecutive_failures, 0);
         h.record_failure(3_000);
         assert_eq!(h.state(), CircuitState::Closed, "one failure, not three");
+    }
+
+    /// A request sent while the circuit was closed holds no probe slot, so
+    /// its late answer, which ends the failure streak, gives back none of
+    /// the probes in flight.
+    #[test]
+    fn an_answer_without_a_slot_keeps_the_probe_in_flight() {
+        let mut h = EndpointHealth::new(default_config());
+        assert_eq!(h.reserve(0), Some(Reserved::Freely));
+        for t in 1..=3 {
+            h.record_failure(t * 1000);
+        }
+        assert!(matches!(h.reserve(33_000), Some(Reserved::Probe(_))));
+
+        h.record_answered(None);
+        assert!(!h.is_callable(33_001), "the probe still holds the slot");
+    }
+
+    /// A slot names its recovery cycle: once the circuit has opened again
+    /// and a new probe is in flight, the old probe's slot gives back
+    /// nothing.
+    #[test]
+    fn a_slot_of_an_earlier_cycle_releases_nothing() {
+        let mut h = EndpointHealth::new(default_config());
+        for t in 1..=3 {
+            h.record_failure(t * 1000);
+        }
+        let Some(Reserved::Probe(old)) = h.reserve(33_000) else {
+            panic!("first cycle's probe");
+        };
+        h.record_failure(33_500);
+        let Some(Reserved::Probe(new)) = h.reserve(64_000) else {
+            panic!("second cycle's probe");
+        };
+        assert_ne!(old, new);
+
+        h.release_probe(old);
+        h.record_answered(Some(old));
+        assert!(!h.is_callable(64_001), "the new probe still holds the slot");
+
+        h.release_probe(new);
+        assert!(h.is_callable(64_002), "its owner gave the slot back");
     }
 
     #[test]
