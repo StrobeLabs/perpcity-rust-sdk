@@ -54,7 +54,10 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::Instant;
 
-use alloy::rpc::json_rpc::{RequestPacket, ResponsePacket, SerializedRequest};
+use alloy::primitives::B256;
+use alloy::rpc::json_rpc::{
+    RequestPacket, Response, ResponsePacket, ResponsePayload, SerializedRequest,
+};
 use alloy::transports::{TransportError, TransportErrorKind, TransportFut};
 use tower::Service;
 
@@ -649,32 +652,49 @@ fn sent_once(req: &RequestPacket) -> bool {
 ///
 /// A single write is answered only by one response with its own id,
 /// compared as typed (the number `0` is not the string `"0"`), on the
-/// error path and the success path alike. A batch that holds a write is
-/// answered only by one success for each call, each by its id: the
-/// transport never reports an error inside such a batch as the node's
-/// rejection of a write, so any error in it, a lone error object for the
-/// whole batch included, is a transport error too.
+/// error path and the success path alike, and a success only by a
+/// transaction hash. A batch that holds a write is answered only by a
+/// batch with one success for each call, each by its id, and a
+/// transaction hash for each write: the transport never reports an error
+/// inside such a batch as the node's rejection of a write, so any error
+/// in it, a lone error object for the whole batch included, is a
+/// transport error too.
 fn unanswered_write(req: &RequestPacket, response: &ResponsePacket) -> Option<TransportError> {
     let reason = match (req, response) {
         (RequestPacket::Single(call), ResponsePacket::Single(answer))
             if answer.id == *call.id() =>
         {
-            return None;
+            if is_hash_or_error(&answer.payload) {
+                return None;
+            }
+            "the write was answered with a result that is no transaction hash".to_owned()
         }
         (RequestPacket::Single(call), _) => {
             format!("the write was not answered under its id {}", call.id())
         }
-        (RequestPacket::Batch(calls), _) => {
+        (RequestPacket::Batch(_), ResponsePacket::Single(_)) => {
+            "a batch that holds a write was answered with one response, not a batch".to_owned()
+        }
+        (RequestPacket::Batch(calls), ResponsePacket::Batch(answers)) => {
             if let Some(error) = response.iter_errors().next() {
                 format!(
                     "a batch that holds a write was answered {} {:?}",
                     error.code, error.message
                 )
-            } else if answers_each_once(calls, response) {
-                return None;
-            } else {
+            } else if !answers_each_once(calls, answers) {
                 "a batch that holds a write was not answered once for each call by its id"
                     .to_owned()
+            } else if answers.iter().any(|answer| {
+                calls.iter().any(|call| {
+                    call.id() == &answer.id
+                        && is_write_method_name(call.method())
+                        && !is_hash_or_error(&answer.payload)
+                })
+            }) {
+                "a write in a batch was answered with a result that is no transaction hash"
+                    .to_owned()
+            } else {
+                return None;
             }
         }
     };
@@ -683,9 +703,18 @@ fn unanswered_write(req: &RequestPacket, response: &ResponsePacket) -> Option<Tr
     )))
 }
 
-/// Whether `response` answers each of `calls` once, by its id.
-fn answers_each_once(calls: &[SerializedRequest], response: &ResponsePacket) -> bool {
-    let answers = response.responses();
+/// Whether `payload` is an error, or a success whose result reads as a
+/// transaction hash, so that the caller decodes it as one and never
+/// mistakes an error object in its place for the node's error answer.
+fn is_hash_or_error(payload: &ResponsePayload) -> bool {
+    match payload {
+        ResponsePayload::Success(result) => serde_json::from_str::<B256>(result.get()).is_ok(),
+        ResponsePayload::Failure(_) => true,
+    }
+}
+
+/// Whether `answers` answer each of `calls` once, by its id.
+fn answers_each_once(calls: &[SerializedRequest], answers: &[Response]) -> bool {
     answers.len() == calls.len()
         && calls.iter().all(|call| {
             answers
@@ -694,6 +723,22 @@ fn answers_each_once(calls: &[SerializedRequest], response: &ResponsePacket) -> 
                 .count()
                 == 1
         })
+}
+
+/// The transport error that replaces `error`, the transport's failure on
+/// a write. A body that does not read as a JSON-RPC response is no
+/// answer, even when alloy reads it as an error object (an `ErrorResp`
+/// with no id): only an error response under the write's own id
+/// ([`unanswered_write`]) is the node's rejection.
+fn undecoded_write(error: TransportError) -> TransportError {
+    match error.as_error_resp() {
+        Some(body) => TransportErrorKind::custom_str(&format!(
+            "the write's response is no JSON-RPC response, and its body reads {} {:?}: the \
+             outcome of the write is unknown",
+            body.code, body.message
+        )),
+        None => error,
+    }
 }
 
 /// The error that replaces the last answer to a single
@@ -763,8 +808,10 @@ impl Router {
     /// comes back as a transport error otherwise. Every other write (a
     /// call the node signs, or a batch that holds a write) is sent once
     /// ([`sent_once`]). A write's response that is no answer to it
-    /// ([`unanswered_write`]: another id, another shape, or for a batch
-    /// any error) is a transport error, the write's outcome unknown.
+    /// ([`unanswered_write`]: another id, another shape, a success that is
+    /// no transaction hash, or for a batch any error) is a transport
+    /// error, the write's outcome unknown, and so is a body that is no
+    /// JSON-RPC response ([`undecoded_write`]).
     async fn route_request(
         self: &Arc<Self>,
         req: RequestPacket,
@@ -817,6 +864,7 @@ impl Router {
                     Some(error) => Ok(Err(error)),
                     None => Ok(Ok(response)),
                 },
+                Ok(Err(error)) if is_write => Ok(Err(undecoded_write(error))),
                 result => result,
             };
 
@@ -1060,7 +1108,7 @@ impl Service<RequestPacket> for HftTransport {
 
 #[cfg(test)]
 mod tests {
-    use alloy::primitives::{Address, B256, Bytes};
+    use alloy::primitives::{Address, Bytes};
     use serde_json::{Value, json};
 
     use super::*;
@@ -1370,7 +1418,7 @@ mod tests {
     #[tokio::test]
     async fn a_write_rejection_is_the_nodes_answer_only_when_every_attempt_got_one() {
         const U: &str = "replacement transaction underpriced";
-        let scripts: [(&[&str], bool); 19] = [
+        let scripts: [(&[&str], bool); 22] = [
             (&[U, U], true),
             (&["already known", U], false),
             (&["nonce too low", U], false),
@@ -1393,6 +1441,9 @@ mod tests {
                 &[U, "insufficient funds", "Transaction Underpriced", U],
                 true,
             ),
+            (&["no answer", "bare error"], false),
+            (&["bare error", "bare error"], false),
+            (&[U, "bare error"], false),
         ];
         for (script, passed_on) in scripts {
             let attempts = Arc::new(AtomicUsize::new(0));
@@ -1403,6 +1454,7 @@ mod tests {
                     "no answer" => Answer::Silence,
                     "HTTP 503" => Answer::Status(503),
                     "text id" => Answer::ResultUnderTextId(json!(B256::repeat_byte(0xbb))),
+                    "bare error" => Answer::Body(json!({ "code": -32_000, "message": U })),
                     answer => Answer::Error(-32_000, answer.into()),
                 }
             })
@@ -1423,15 +1475,20 @@ mod tests {
     }
 
     /// The answer to a write counts only under the write's own id,
-    /// compared as typed, on the error path and the success path alike; a
-    /// batch that holds a write counts as answered only by one success for
-    /// each call, by its id, so any error in it (a read's, a write's, or
-    /// one error object for the whole batch) leaves the outcome unknown.
+    /// compared as typed, on the error path and the success path alike,
+    /// and a success only as a transaction hash; a batch that holds a
+    /// write counts as answered only by a batch with one success for each
+    /// call, by its id, and a hash for each write, so any error in it (a
+    /// read's, a write's, or one error object for the whole batch) leaves
+    /// the outcome unknown.
     #[test]
     fn a_write_is_answered_only_under_its_own_id() {
         use alloy::rpc::json_rpc::Id;
         const U: &str = r#"{"code":-32000,"message":"replacement transaction underpriced"}"#;
-        let ok = |id: &str| format!(r#"{{"jsonrpc":"2.0","id":{id},"result":"0x01"}}"#);
+        let hash = format!(r#""{}""#, B256::repeat_byte(0xbb));
+        let ok_with =
+            |id: &str, result: &str| format!(r#"{{"jsonrpc":"2.0","id":{id},"result":{result}}}"#);
+        let ok = |id: &str| ok_with(id, &hash);
         let err = |id: &str| format!(r#"{{"jsonrpc":"2.0","id":{id},"error":{U}}}"#);
         let single =
             |method: &'static str, id: Id| RequestPacket::Single(make_request_with(method, id));
@@ -1446,6 +1503,9 @@ mod tests {
         ]
         .into_iter()
         .collect();
+        let one: RequestPacket = [make_request("eth_sendRawTransaction", 1)]
+            .into_iter()
+            .collect();
         let mixed: RequestPacket = [
             make_request("eth_chainId", 1),
             make_request("eth_sendRawTransaction", 2),
@@ -1462,6 +1522,10 @@ mod tests {
             (&raw, ok("null"), false),
             (&raw, ok("1"), false),
             (&raw, format!("[{}]", ok("0")), false),
+            (&raw, ok_with("0", U), false),
+            (&raw, ok_with("0", r#""0x01""#), false),
+            (&signed, ok_with("0", U), false),
+            (&personal, ok_with("0", "null"), false),
             (&signed, ok("0"), true),
             (&signed, ok(r#""0""#), false),
             (&signed_text, ok(r#""0""#), true),
@@ -1489,7 +1553,21 @@ mod tests {
             (&writes, err("null"), false),
             (&writes, err("1"), false),
             (&writes, ok("1"), false),
+            (&writes, format!("[{},{}]", ok("1"), ok_with("2", U)), false),
+            (&one, format!("[{}]", ok("1")), true),
+            (&one, ok("1"), false),
+            (&one, format!("[{}]", ok_with("1", U)), false),
             (&mixed, format!("[{},{}]", ok("1"), ok("2")), true),
+            (
+                &mixed,
+                format!("[{},{}]", ok_with("1", r#""0x1""#), ok("2")),
+                true,
+            ),
+            (
+                &mixed,
+                format!("[{},{}]", ok("1"), ok_with("2", r#""0x1""#)),
+                false,
+            ),
             (&mixed, format!("[{},{}]", err("1"), ok("2")), false),
             (&mixed, format!("[{},{}]", ok("1"), err("2")), false),
             (&mixed, err("2"), false),
@@ -1673,6 +1751,80 @@ mod tests {
                     assert!(error.as_error_resp().is_none(), "{script:?}: {error}");
                     assert!(error.to_string().contains("not answered under its id"));
                 }
+            }
+        }
+    }
+
+    /// A write answered under its id with a success that is no transaction
+    /// hash (an error object in the result's place, or a short number) got
+    /// no answer: a transport error, never the node's rejection, whether
+    /// the write is sent again or sent once.
+    #[tokio::test]
+    async fn a_write_answered_with_no_hash_got_no_answer() {
+        let error_object =
+            json!({ "code": -32_000, "message": "replacement transaction underpriced" });
+        for (method, result) in [
+            ("eth_sendRawTransaction", error_object.clone()),
+            ("eth_sendRawTransaction", json!("0x01")),
+            ("eth_sendTransaction", error_object),
+        ] {
+            let requests = Arc::new(AtomicUsize::new(0));
+            let counter = Arc::clone(&requests);
+            let answer = result.clone();
+            let url = scripted::endpoint(move |_, _| {
+                counter.fetch_add(1, Ordering::SeqCst);
+                Answer::Result(answer.clone())
+            })
+            .await;
+            let error = write_client(&url, 1)
+                .request::<_, B256>(method, (Bytes::from_static(&[2, 1]),))
+                .await
+                .expect_err("no hash, no answer");
+            let case = format!("{method}, {result}");
+            let attempts = if method == "eth_sendRawTransaction" {
+                2
+            } else {
+                1
+            };
+            assert_eq!(requests.load(Ordering::SeqCst), attempts, "{case}");
+            assert!(error.as_error_resp().is_none(), "{case}: {error}");
+            assert!(
+                error.to_string().contains("no transaction hash"),
+                "{case}: {error}"
+            );
+        }
+    }
+
+    /// A batch of one write is answered only by a batch: the same success
+    /// as one object, not in an array, is a transport error.
+    #[tokio::test]
+    async fn a_batch_of_one_write_is_answered_only_by_a_batch() {
+        for alone in [false, true] {
+            let url = scripted::endpoint(move |_, _| {
+                let hash = json!(B256::repeat_byte(0xbb));
+                if alone {
+                    Answer::Alone(hash)
+                } else {
+                    Answer::Result(hash)
+                }
+            })
+            .await;
+            let client = write_client(&url, 3);
+            let mut batch = client.new_batch();
+            let sent = batch
+                .add_call::<_, B256>("eth_sendRawTransaction", &(Bytes::from_static(&[2, 1]),))
+                .unwrap();
+            let result = batch.send().await;
+            let sent = sent.await;
+            if alone {
+                let error = result.expect_err("one object answers no batch");
+                assert!(error.as_error_resp().is_none(), "{error}");
+                assert!(error.to_string().contains("not a batch"), "{error}");
+                let error = sent.expect_err("the write is not answered");
+                assert!(error.as_error_resp().is_none(), "{error}");
+            } else {
+                result.unwrap();
+                assert_eq!(sent.unwrap(), B256::repeat_byte(0xbb));
             }
         }
     }
