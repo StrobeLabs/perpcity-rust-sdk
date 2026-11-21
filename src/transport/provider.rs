@@ -131,7 +131,8 @@ impl ManagedEndpoint {
     fn record_success(&self, latency_ns: u64, slot: Option<ProbeSlot>) {
         let mut h = self.health.lock().unwrap();
         let old_state = h.state();
-        h.record_success(latency_ns, slot);
+        let rejected = h.record_success(latency_ns, slot);
+        debug_assert!(rejected.is_none(), "permit belongs to this endpoint");
         let new_state = h.state();
         // Sync atomic mirrors (Relaxed is sufficient: no cross-field ordering needed,
         // eventual consistency is acceptable for endpoint selection heuristics)
@@ -154,7 +155,8 @@ impl ManagedEndpoint {
     #[inline]
     fn release_probe(&self, slot: ProbeSlot) {
         let mut h = self.health.lock().unwrap();
-        h.release_probe(slot);
+        let rejected = h.release_probe(slot);
+        debug_assert!(rejected.is_none(), "permit belongs to this endpoint");
         self.atomic_state
             .store(pack_state(h.state()), Ordering::Relaxed);
     }
@@ -164,7 +166,8 @@ impl ManagedEndpoint {
     #[inline]
     fn record_answered(&self, slot: Option<ProbeSlot>) {
         let mut h = self.health.lock().unwrap();
-        h.record_answered(slot);
+        let rejected = h.record_answered(slot);
+        debug_assert!(rejected.is_none(), "permit belongs to this endpoint");
         self.atomic_state
             .store(pack_state(h.state()), Ordering::Relaxed);
     }
@@ -268,6 +271,7 @@ impl EndpointPool {
         urls: &[String],
         cb_config: super::config::CircuitBreakerConfig,
     ) -> crate::Result<Self> {
+        cb_config.validate()?;
         let endpoints = urls
             .iter()
             .map(|url| {
@@ -319,8 +323,28 @@ impl EndpointPool {
     /// Take the right to send one request to endpoint `idx`, or `None` if
     /// its circuit will not allow one.
     pub fn reserve(&self, idx: usize, now_ms: u64) -> Option<ProbePermit<'_>> {
+        self.reserve_with_priority(idx, now_ms, false)
+    }
+
+    fn reserve_with_priority(
+        &self,
+        idx: usize,
+        now_ms: u64,
+        probe_only: bool,
+    ) -> Option<ProbePermit<'_>> {
         let endpoint = &self.endpoints[idx];
         let mut health = endpoint.health.lock().unwrap();
+        if probe_only
+            && !matches!(
+                health.state(),
+                CircuitState::Open { .. }
+                    | CircuitState::HalfOpen {
+                        probes_in_flight: 0
+                    }
+            )
+        {
+            return None;
+        }
         let reserved = health.reserve(now_ms);
         endpoint
             .atomic_state
@@ -336,42 +360,41 @@ impl EndpointPool {
         }
     }
 
-    /// Round-robin selection with lock-free fast path.
-    ///
-    /// Fast path: scan atomic state tags — if a Closed endpoint is found,
-    /// return it immediately without locking. Only falls back to Mutex
-    /// when all endpoints are non-Closed (rare: circuit breaker tripped).
+    /// Round-robin selection gives each closed or recovering endpoint
+    /// a turn. A recovering endpoint gets one probe while peers can serve.
     fn select_round_robin(&self, now_ms: u64) -> Option<(usize, ProbePermit<'_>)> {
         let n = self.endpoints.len();
-        let start = self.round_robin.fetch_add(1, Ordering::Relaxed);
+        let start = self.round_robin.fetch_add(1, Ordering::Relaxed) % n.max(1);
 
-        // Lock-free fast path: first Closed endpoint in round-robin order.
-        // A closed circuit reserves nothing, so no lock is needed.
         for i in 0..n {
             let idx = (start + i) % n;
-            if self.endpoints[idx].atomic_state.load(Ordering::Relaxed) & TAG_MASK == TAG_CLOSED {
+            let state = self.endpoints[idx].atomic_state.load(Ordering::Relaxed);
+            if state & TAG_MASK == TAG_CLOSED {
                 return Some((idx, ProbePermit::free()));
+            }
+            if let Some(permit) = self.reserve_recovering(idx, state, now_ms) {
+                return Some((idx, permit));
             }
         }
 
-        // Slow path: all non-Closed, so a reservation may transition
-        // Open→HalfOpen and take a probe slot. The first that allows one
-        // wins, and nothing else was reserved.
+        // With no closed endpoint, use the configured concurrent probe budget.
         (0..n).find_map(|i| {
             let idx = (start + i) % n;
             Some((idx, self.reserve(idx, now_ms)?))
         })
     }
 
-    /// Latency-based selection with lock-free fast path.
-    ///
-    /// Fast path: scan atomic latency + state for all endpoints without locking.
-    /// Among Closed endpoints, pick the one with lowest latency. This is the
-    /// steady-state hot path — zero mutex contention.
-    ///
-    /// Slow path: no Closed endpoints available. Reserve each non-Closed
-    /// endpoint, which may transition Open→HalfOpen. Only entered when
-    /// circuit breakers have tripped (error condition, rare).
+    fn reserve_recovering(&self, idx: usize, state: u64, now_ms: u64) -> Option<ProbePermit<'_>> {
+        if state & TAG_MASK == TAG_OPEN || state == TAG_HALFOPEN {
+            self.reserve_with_priority(idx, now_ms, true)
+        } else {
+            None
+        }
+    }
+
+    /// Latency-based selection with a lock-free path when all endpoints
+    /// are closed. When a peer is recovering, alternate probe opportunities
+    /// with service by the fastest closed endpoint.
     fn select_latency_based(&self, now_ms: u64) -> Option<(usize, ProbePermit<'_>)> {
         // Lock-free fast path: best Closed endpoint by latency. A closed
         // circuit reserves nothing, so no lock is needed.
@@ -388,6 +411,22 @@ impl EndpointPool {
             }
         }
         if let Some((idx, _)) = best {
+            if any_non_closed {
+                let turn = self.round_robin.fetch_add(1, Ordering::Relaxed);
+                if turn.is_multiple_of(2) {
+                    let n = self.endpoints.len();
+                    let start = (turn / 2) % n;
+                    for i in 0..n {
+                        let probe_idx = (start + i) % n;
+                        let state = self.endpoints[probe_idx]
+                            .atomic_state
+                            .load(Ordering::Relaxed);
+                        if let Some(permit) = self.reserve_recovering(probe_idx, state, now_ms) {
+                            return Some((probe_idx, permit));
+                        }
+                    }
+                }
+            }
             return Some((idx, ProbePermit::free()));
         }
         if !any_non_closed {
@@ -1587,6 +1626,44 @@ mod tests {
 
         let (selected, _permit) = pool.select(Strategy::LatencyBased, now).unwrap();
         assert_eq!(selected, 1); // only healthy endpoint
+    }
+
+    #[test]
+    fn a_recovering_endpoint_gets_a_probe_even_with_a_healthy_peer() {
+        for strategy in [Strategy::RoundRobin, Strategy::LatencyBased] {
+            let pool = EndpointPool::from_urls(
+                &[
+                    "https://rpc1.example.com".into(),
+                    "https://rpc2.example.com".into(),
+                ],
+                crate::transport::config::CircuitBreakerConfig {
+                    half_open_max_requests: 2,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            pool.record_success(0, 10_000_000, ProbePermit::free());
+            pool.record_success(1, 1_000_000, ProbePermit::free());
+            for _ in 0..3 {
+                pool.record_failure(0, 0);
+            }
+
+            assert_eq!(pool.select(strategy, 29_999).unwrap().0, 1);
+            let permit = (0..2)
+                .find_map(|_| {
+                    let (idx, permit) = pool.select(strategy, 30_000).unwrap();
+                    (idx == 0).then_some(permit)
+                })
+                .unwrap_or_else(|| panic!("{strategy:?} starved the recovering endpoint"));
+
+            // Keep the probe in flight even though there is room for
+            // another. The healthy peer serves the next calls.
+            for _ in 0..4 {
+                assert_eq!(pool.select(strategy, 30_000).unwrap().0, 1);
+            }
+            pool.record_success(0, 10_000_000, permit);
+            assert_eq!(pool.health_status()[0].state, CircuitState::Closed);
+        }
     }
 
     /// A provider that declines a request — a block range it considers

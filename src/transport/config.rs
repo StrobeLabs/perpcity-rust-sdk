@@ -71,8 +71,19 @@ pub struct CircuitBreakerConfig {
     pub failure_threshold: u32,
     /// Time to wait in Open state before probing (HalfOpen).
     pub recovery_timeout: Duration,
-    /// Maximum concurrent probe requests allowed in HalfOpen state.
+    /// Maximum concurrent probe requests allowed in HalfOpen state. At least one.
     pub half_open_max_requests: u32,
+}
+
+impl CircuitBreakerConfig {
+    pub(crate) fn validate(self) -> Result<(), ValidationError> {
+        if self.half_open_max_requests == 0 {
+            return Err(ValidationError::InvalidConfig {
+                reason: "circuit breaker requires half_open_max_requests >= 1".into(),
+            });
+        }
+        Ok(())
+    }
 }
 
 impl Default for CircuitBreakerConfig {
@@ -288,6 +299,7 @@ impl TransportConfigBuilder {
     ///
     /// Returns an error if no endpoints are configured across any pool, or
     /// if writes have no reachable endpoint (write + shared pools both empty).
+    /// Also rejects a hedged fan-out below two and a zero probe limit.
     pub fn build(self) -> Result<TransportConfig, ValidationError> {
         let total =
             self.shared_endpoints.len() + self.read_endpoints.len() + self.write_endpoints.len();
@@ -310,6 +322,7 @@ impl TransportConfigBuilder {
                 reason: "hedged strategy requires fan_out >= 2".into(),
             });
         }
+        self.circuit_breaker.validate()?;
         Ok(TransportConfig {
             shared_endpoints: self.shared_endpoints,
             read_endpoints: self.read_endpoints,
@@ -343,6 +356,22 @@ mod tests {
         assert_eq!(config.circuit_breaker.failure_threshold, 3);
         assert_eq!(config.read_retry.max_retries, 2);
         assert_eq!(config.write_retry.max_retries, 3);
+    }
+
+    #[test]
+    fn builder_rejects_a_zero_probe_limit() {
+        let result = TransportConfig::builder()
+            .shared_endpoint("https://rpc.example.com")
+            .circuit_breaker(CircuitBreakerConfig {
+                half_open_max_requests: 0,
+                ..Default::default()
+            })
+            .build();
+        assert!(matches!(
+            result,
+            Err(ValidationError::InvalidConfig { reason })
+                if reason.contains("half_open_max_requests")
+        ));
     }
 
     #[test]

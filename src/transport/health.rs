@@ -20,7 +20,11 @@
 //!     └─────────────────────────────────────────────────────────────── ┘
 //! ```
 
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use super::config::CircuitBreakerConfig;
+
+static NEXT_TRACKER_ID: AtomicU64 = AtomicU64::new(0);
 
 /// What sending one request to an endpoint cost.
 #[derive(Debug, PartialEq, Eq)]
@@ -32,10 +36,10 @@ pub enum Reserved {
     Probe(ProbeSlot),
 }
 
-/// One half-open probe slot, named by the recovery cycle that gave it.
+/// One half-open probe slot, bound to its issuing tracker and recovery cycle.
 ///
-/// Single-use: it is neither `Clone` nor `Copy`, and every call that takes
-/// it consumes it. Its owner resolves it once — a success closes the
+/// Only its issuing tracker can consume the slot. A different tracker
+/// returns it for settlement by its owner. Its owner resolves it once — a success closes the
 /// circuit ([`EndpointHealth::record_success`]), a decline
 /// ([`EndpointHealth::record_answered`]) or a request never sent
 /// ([`EndpointHealth::release_probe`]) gives it back — and only within its
@@ -43,6 +47,7 @@ pub enum Reserved {
 /// cycle, neither closes the circuit nor frees a probe now in flight.
 #[derive(Debug, PartialEq, Eq)]
 pub struct ProbeSlot {
+    tracker_id: u64,
     cycle: u64,
 }
 
@@ -71,6 +76,7 @@ pub enum CircuitState {
 pub struct EndpointHealth {
     state: CircuitState,
     config: CircuitBreakerConfig,
+    tracker_id: u64,
     /// The recovery cycle: counts the circuit's moves from open to
     /// half-open, so a probe slot names the cycle it belongs to.
     cycle: u64,
@@ -108,6 +114,7 @@ impl EndpointHealth {
         Self {
             state: CircuitState::Closed,
             config,
+            tracker_id: NEXT_TRACKER_ID.fetch_add(1, Ordering::Relaxed),
             cycle: 0,
             avg_latency_ns: 0,
             total_requests: 0,
@@ -183,7 +190,14 @@ impl EndpointHealth {
 
     /// A slot of the current recovery cycle.
     fn slot(&self) -> ProbeSlot {
-        ProbeSlot { cycle: self.cycle }
+        ProbeSlot {
+            tracker_id: self.tracker_id,
+            cycle: self.cycle,
+        }
+    }
+
+    fn owns(&self, slot: &ProbeSlot) -> bool {
+        slot.tracker_id == self.tracker_id
     }
 
     /// Give back `slot`, a half-open probe slot taken by [`Self::reserve`]
@@ -192,7 +206,12 @@ impl EndpointHealth {
     /// Leaves the circuit half-open: the endpoint has still not shown
     /// whether it recovered. A slot of an earlier recovery cycle gives back
     /// nothing: its cycle ended when the circuit left half-open.
-    pub fn release_probe(&mut self, slot: ProbeSlot) {
+    /// Returns the slot unchanged if it belongs to another tracker.
+    #[must_use = "return a rejected probe slot to its issuing tracker"]
+    pub fn release_probe(&mut self, slot: ProbeSlot) -> Option<ProbeSlot> {
+        if !self.owns(&slot) {
+            return Some(slot);
+        }
         if let CircuitState::HalfOpen { probes_in_flight } = self.state
             && slot.cycle == self.cycle
         {
@@ -200,6 +219,7 @@ impl EndpointHealth {
                 probes_in_flight: probes_in_flight.saturating_sub(1),
             };
         }
+        None
     }
 
     /// Record that the endpoint answered by declining the request.
@@ -212,11 +232,17 @@ impl EndpointHealth {
     /// endpoint would never be probed again. A request sent while the
     /// circuit was closed holds no slot (`None`), so its answer gives back
     /// none of the probes in flight.
-    pub fn record_answered(&mut self, slot: Option<ProbeSlot>) {
-        self.consecutive_failures = 0;
-        if let Some(slot) = slot {
-            self.release_probe(slot);
+    ///
+    /// Returns a slot from another tracker without recording the answer.
+    #[must_use = "return a rejected probe slot to its issuing tracker"]
+    pub fn record_answered(&mut self, slot: Option<ProbeSlot>) -> Option<ProbeSlot> {
+        if let Some(slot) = slot
+            && let Some(rejected) = self.release_probe(slot)
+        {
+            return Some(rejected);
         }
+        self.consecutive_failures = 0;
+        None
     }
 
     /// Record a successful request with its latency, and `slot`, the probe
@@ -228,7 +254,17 @@ impl EndpointHealth {
     /// holds no slot, such as the late answer to a request sent while the
     /// circuit was closed, or a slot of an earlier cycle, leaves an open
     /// or half-open circuit as it is, so the probe in flight still decides.
-    pub fn record_success(&mut self, latency_ns: u64, slot: Option<ProbeSlot>) {
+    ///
+    /// Returns a slot from another tracker without recording the success.
+    #[must_use = "return a rejected probe slot to its issuing tracker"]
+    pub fn record_success(
+        &mut self,
+        latency_ns: u64,
+        slot: Option<ProbeSlot>,
+    ) -> Option<ProbeSlot> {
+        if slot.as_ref().is_some_and(|slot| !self.owns(slot)) {
+            return slot;
+        }
         // Update EMA latency (alpha ≈ 0.2)
         if self.total_requests == 0 {
             self.avg_latency_ns = latency_ns;
@@ -250,6 +286,7 @@ impl EndpointHealth {
         {
             self.state = CircuitState::Closed;
         }
+        None
     }
 
     /// Record a failed request.
@@ -374,7 +411,7 @@ mod tests {
         };
         assert!(!h.is_callable(33_001), "the probe is in flight");
 
-        h.record_answered(Some(slot));
+        assert!(h.record_answered(Some(slot)).is_none());
         assert!(
             h.is_callable(33_002),
             "the answered probe released its slot"
@@ -392,7 +429,7 @@ mod tests {
         let mut h = EndpointHealth::new(default_config());
         h.record_failure(1_000);
         h.record_failure(2_000);
-        h.record_answered(None);
+        assert!(h.record_answered(None).is_none());
         assert_eq!(h.status().consecutive_failures, 0);
         h.record_failure(3_000);
         assert_eq!(h.state(), CircuitState::Closed, "one failure, not three");
@@ -410,8 +447,43 @@ mod tests {
         }
         assert!(matches!(h.reserve(33_000), Some(Reserved::Probe(_))));
 
-        h.record_answered(None);
+        assert!(h.record_answered(None).is_none());
         assert!(!h.is_callable(33_001), "the probe still holds the slot");
+    }
+
+    #[test]
+    fn a_foreign_probe_slot_is_returned_without_changing_either_tracker() {
+        let mut owner = EndpointHealth::new(default_config());
+        let mut other = EndpointHealth::new(default_config());
+        for now in 1..=3 {
+            owner.record_failure(now);
+            other.record_failure(now);
+        }
+        let Some(Reserved::Probe(slot)) = owner.reserve(30_003) else {
+            panic!("owner's probe");
+        };
+        let Some(Reserved::Probe(other_slot)) = other.reserve(30_003) else {
+            panic!("other tracker's probe in the same cycle");
+        };
+        let owner_before = owner.status();
+        let other_before = other.status();
+
+        let slot = other
+            .record_success(1_000, Some(slot))
+            .expect("return foreign slot");
+        assert_eq!(other.status(), other_before);
+        let slot = other
+            .record_answered(Some(slot))
+            .expect("return foreign slot");
+        assert_eq!(other.status(), other_before);
+        let slot = other.release_probe(slot).expect("return foreign slot");
+        assert_eq!(other.status(), other_before);
+        assert_eq!(owner.status(), owner_before);
+
+        assert!(owner.release_probe(slot).is_none());
+        assert!(owner.is_callable(30_003));
+        assert!(other.record_success(1_000, Some(other_slot)).is_none());
+        assert_eq!(other.state(), CircuitState::Closed);
     }
 
     /// A slot names its recovery cycle: once the circuit has opened again
@@ -439,15 +511,15 @@ mod tests {
         assert_ne!(released, new);
         let in_flight = |probes_in_flight| CircuitState::HalfOpen { probes_in_flight };
 
-        h.release_probe(released);
-        h.record_answered(Some(answered));
+        assert!(h.release_probe(released).is_none());
+        assert!(h.record_answered(Some(answered)).is_none());
         assert_eq!(
             h.state(),
             in_flight(1),
             "the new probe still holds its slot"
         );
 
-        h.release_probe(new);
+        assert!(h.release_probe(new).is_none());
         assert_eq!(h.state(), in_flight(0), "its owner gave the slot back");
     }
 
@@ -483,12 +555,12 @@ mod tests {
                 } else {
                     let slot = live.swap_remove((next() % live.len() as u64) as usize);
                     match next() % 8 {
-                        0 | 1 => h.record_success(1_000, slot),
+                        0 | 1 => assert!(h.record_success(1_000, slot).is_none()),
                         2 | 3 => h.record_failure(now),
-                        4 | 5 => h.record_answered(slot),
+                        4 | 5 => assert!(h.record_answered(slot).is_none()),
                         _ => {
                             if let Some(slot) = slot {
-                                h.release_probe(slot);
+                                assert!(h.release_probe(slot).is_none());
                             }
                         }
                     }
@@ -536,7 +608,7 @@ mod tests {
         let Some(Reserved::Probe(slot)) = h.reserve(33_000) else {
             panic!("recovery elapsed: one probe allowed");
         };
-        h.record_success(500_000, Some(slot)); // probe succeeds
+        assert!(h.record_success(500_000, Some(slot)).is_none()); // probe succeeds
         assert_eq!(h.state(), CircuitState::Closed);
         assert!(h.is_callable(33_001));
     }
@@ -580,7 +652,7 @@ mod tests {
         for t in 1..=3 {
             h.record_failure(t * 1000);
         }
-        h.record_success(1_000, None);
+        assert!(h.record_success(1_000, None).is_none());
         assert!(matches!(h.state(), CircuitState::Open { since_ms: 3000 }));
         assert_eq!(h.status().consecutive_failures, 0);
         assert_eq!(h.status().total_requests, 1);
@@ -588,7 +660,7 @@ mod tests {
         let Some(Reserved::Probe(old)) = h.reserve(33_000) else {
             panic!("first cycle's probe");
         };
-        h.record_success(1_000, None);
+        assert!(h.record_success(1_000, None).is_none());
         assert_eq!(
             h.state(),
             CircuitState::HalfOpen {
@@ -601,7 +673,7 @@ mod tests {
         let Some(Reserved::Probe(new)) = h.reserve(64_000) else {
             panic!("second cycle's probe");
         };
-        h.record_success(1_000, Some(old));
+        assert!(h.record_success(1_000, Some(old)).is_none());
         assert_eq!(
             h.state(),
             CircuitState::HalfOpen {
@@ -610,7 +682,7 @@ mod tests {
             "a slot of an earlier cycle closes nothing"
         );
 
-        h.record_success(1_000, Some(new));
+        assert!(h.record_success(1_000, Some(new)).is_none());
         assert_eq!(h.state(), CircuitState::Closed);
     }
 
@@ -631,7 +703,7 @@ mod tests {
         };
         assert!(matches!(h.reserve(33_001), Some(Reserved::Probe(_))));
         h.record_failure(33_500);
-        h.record_success(1_000, Some(first));
+        assert!(h.record_success(1_000, Some(first)).is_none());
         assert!(matches!(h.state(), CircuitState::Open { since_ms: 33_500 }));
     }
 
@@ -651,17 +723,17 @@ mod tests {
     #[test]
     fn first_sample_sets_latency_directly() {
         let mut h = EndpointHealth::new(default_config());
-        h.record_success(10_000, None);
+        assert!(h.record_success(10_000, None).is_none());
         assert_eq!(h.avg_latency_ns(), 10_000);
     }
 
     #[test]
     fn ema_converges_toward_new_value() {
         let mut h = EndpointHealth::new(default_config());
-        h.record_success(10_000, None); // EMA = 10_000
-        h.record_success(20_000, None); // EMA = 10_000*4/5 + 20_000/5 = 12_000
+        assert!(h.record_success(10_000, None).is_none()); // EMA = 10_000
+        assert!(h.record_success(20_000, None).is_none()); // EMA = 10_000*4/5 + 20_000/5 = 12_000
         assert_eq!(h.avg_latency_ns(), 12_000);
-        h.record_success(20_000, None); // EMA = 12_000*4/5 + 20_000/5 = 13_600
+        assert!(h.record_success(20_000, None).is_none()); // EMA = 12_000*4/5 + 20_000/5 = 13_600
         assert_eq!(h.avg_latency_ns(), 13_600);
     }
 
@@ -671,7 +743,7 @@ mod tests {
         h.record_failure(1000);
         h.record_failure(2000);
         assert_eq!(h.status().consecutive_failures, 2);
-        h.record_success(1000, None);
+        assert!(h.record_success(1000, None).is_none());
         assert_eq!(h.status().consecutive_failures, 0);
     }
 
@@ -693,7 +765,7 @@ mod tests {
     fn error_rate_decays_on_success() {
         let mut h = EndpointHealth::new(default_config());
         h.record_failure(1000); // rate = 0.1
-        h.record_success(1000, None); // rate = 0.1 * 0.9 = 0.09
+        assert!(h.record_success(1000, None).is_none()); // rate = 0.1 * 0.9 = 0.09
         assert!((h.status().error_rate - 0.09).abs() < 1e-10);
     }
 
@@ -702,8 +774,8 @@ mod tests {
     #[test]
     fn status_reflects_current_state() {
         let mut h = EndpointHealth::new(default_config());
-        h.record_success(5000, None);
-        h.record_success(15000, None);
+        assert!(h.record_success(5000, None).is_none());
+        assert!(h.record_success(15000, None).is_none());
         let s = h.status();
         assert_eq!(s.state, CircuitState::Closed);
         assert_eq!(s.total_requests, 2);
@@ -776,7 +848,7 @@ mod tests {
         assert!(matches!(h.state(), CircuitState::HalfOpen { .. }));
 
         // Probe succeeds → Closed
-        h.record_success(1_000_000, Some(slot));
+        assert!(h.record_success(1_000_000, Some(slot)).is_none());
         assert_eq!(h.state(), CircuitState::Closed);
     }
 }

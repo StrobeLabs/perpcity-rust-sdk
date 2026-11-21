@@ -97,8 +97,10 @@ fn bench_endpoint_health(c: &mut Criterion) {
     // record_success with latency EMA update
     group.bench_function("record_success", |b| {
         let mut h = EndpointHealth::new(default_cb_config());
-        h.record_success(5_000_000, None); // seed EMA
-        b.iter(|| h.record_success(black_box(3_000_000), None))
+        assert!(h.record_success(5_000_000, None).is_none()); // seed EMA
+        b.iter(|| {
+            let _ = h.record_success(black_box(3_000_000), None);
+        })
     });
 
     // record_failure
@@ -110,14 +112,14 @@ fn bench_endpoint_health(c: &mut Criterion) {
     // avg_latency_ns read (just a field access)
     group.bench_function("avg_latency_ns", |b| {
         let mut h = EndpointHealth::new(default_cb_config());
-        h.record_success(5_000_000, None);
+        assert!(h.record_success(5_000_000, None).is_none());
         b.iter(|| h.avg_latency_ns())
     });
 
     // status snapshot (copies all fields)
     group.bench_function("status_snapshot", |b| {
         let mut h = EndpointHealth::new(default_cb_config());
-        h.record_success(5_000_000, None);
+        assert!(h.record_success(5_000_000, None).is_none());
         b.iter(|| h.status())
     });
 
