@@ -189,14 +189,14 @@ callers re-subscribe.
 
 | Type | Invariant | Produced by | Consumed by |
 |---|---|---|---|
-| [`HftTransport`](provider.rs#L588) | the provider's transport: many endpoints, one `tower::Service`; sends reads and single signed raw transactions, refuses every other request before routing | [`HftTransport::new`](provider.rs#L598) from a [`TransportConfig`](config.rs#L156) | [`ChainReader::new`](../client/DESIGN.md), [`ChainReader::arbitrum`](../client/DESIGN.md) and [`ChainReader::arbitrum_sepolia`](../client/DESIGN.md), which build the provider over it, so every read and send in the crate passes through it. The strategy layer builds one per process, and a second one for scans so their declines and timeouts never touch the trading endpoints' health. |
-| [`TransportConfig`](config.rs#L156), [`TransportConfigBuilder`](config.rs#L190) | the pools and their policies: shared, read and write pools; per-endpoint timeouts; the retry and breaker settings; validated once at [`build`](config.rs#L291) | the builder, and only the builder | [`HftTransport::new`](provider.rs#L598). The strategy layer assembles one from its environment; the builder is where a keyed URL enters the crate. |
+| [`HftTransport`](provider.rs#L620) | the provider's transport: many endpoints, one `tower::Service`; sends reads and single signed raw transactions, refuses every other request before routing | [`HftTransport::new`](provider.rs#L630) from a [`TransportConfig`](config.rs#L156) | [`ChainReader::new`](../client/DESIGN.md), [`ChainReader::arbitrum`](../client/DESIGN.md) and [`ChainReader::arbitrum_sepolia`](../client/DESIGN.md), which build the provider over it, so every read and send in the crate passes through it. The strategy layer builds one per process, and a second one for scans so their declines and timeouts never touch the trading endpoints' health. |
+| [`TransportConfig`](config.rs#L156), [`TransportConfigBuilder`](config.rs#L190) | the pools and their policies: shared, read and write pools; per-endpoint timeouts; the retry and breaker settings; validated once at [`build`](config.rs#L291) | the builder, and only the builder | [`HftTransport::new`](provider.rs#L630). The strategy layer assembles one from its environment; the builder is where a keyed URL enters the crate. |
 | [`Strategy`](config.rs#L53) | how a read is routed: round robin, latency-based, or hedged; a caller's choice | the caller | [`TransportConfigBuilder::strategy`](config.rs#L264). Hedging costs N requests per read, which is why it is a choice and not a default. |
 | [`ReadRetryConfig`](config.rs#L90) | what a read retries: no answer only, with backoff | the caller; `Default` is 2 retries | [`TransportConfigBuilder::read_retry`](config.rs#L276). |
 | [`WriteRetryConfig`](config.rs#L123) | what a single `eth_sendRawTransaction`, the only write the transport sends, retries: an error answer or no answer, the same bytes; every other write is refused before it is sent | the caller; `Default` is 3 retries | [`TransportConfigBuilder::write_retry`](config.rs#L282). |
-| [`CircuitBreakerConfig`](config.rs#L69) | when a breaker trips: failure threshold, cooldown, probe | the caller; `Default` is the trading defaults | [`TransportConfigBuilder::circuit_breaker`](config.rs#L270); [`EndpointHealth::new`](health.rs#L103), one breaker per endpoint. |
-| [`EndpointHealth`](health.rs#L67), [`ProbePermit`](provider.rs#L211), [`Reserved`](health.rs#L27), [`ProbeSlot`](health.rs#L41) | one endpoint's health: breaker, latency EMA, decaying error rate, readable without a lock, a failure dated when it arrives; one half-open probe at a time; an endpoint held for a purpose; a probe slot named by its recovery cycle, which only its owner gives back | [`EndpointHealth::new`](health.rs#L103), one per endpoint in a pool | the pools inside the transport, which select over it. Internal: nothing outside this module selects an endpoint, and the pool type is hidden from the documentation for that reason, which is why this row draws no edge. |
-| [`EndpointStatus`](health.rs#L88), [`CircuitState`](health.rs#L47) | one endpoint's health, read out | [`HftTransport::health_status`](provider.rs#L617) | nothing in the crate. The strategy layer's metrics, which is why it is a plain value and not a handle. |
+| [`CircuitBreakerConfig`](config.rs#L69) | when a breaker trips: failure threshold, cooldown, probe | the caller; `Default` is the trading defaults | [`TransportConfigBuilder::circuit_breaker`](config.rs#L270); [`EndpointHealth::new`](health.rs#L107), one breaker per endpoint. |
+| [`EndpointHealth`](health.rs#L71), [`ProbePermit`](provider.rs#L217), [`Reserved`](health.rs#L27), [`ProbeSlot`](health.rs#L45) | one endpoint's health: breaker, latency EMA, decaying error rate, readable without a lock, a failure dated when it arrives; one half-open probe at a time; an endpoint held for a purpose; a probe slot named by its recovery cycle, single-use, which only its owner settles: its success closes the circuit, its decline or release gives it back | [`EndpointHealth::new`](health.rs#L107), one per endpoint in a pool | the pools inside the transport, which select over it. Internal: nothing outside this module selects an endpoint, and the pool type is hidden from the documentation for that reason, which is why this row draws no edge. |
+| [`EndpointStatus`](health.rs#L92), [`CircuitState`](health.rs#L51) | one endpoint's health, read out | [`HftTransport::health_status`](provider.rs#L649) | nothing in the crate. The strategy layer's metrics, which is why it is a plain value and not a handle. |
 | [`WsManager`](ws.rs#L69) | the subscription side: one socket; reconnect with capped backoff; re-subscription is the caller's | [`WsManager::connect`](ws.rs#L94) with a [`ReconnectConfig`](ws.rs#L43) | [`MarketFeed::subscribe`](../feeds/DESIGN.md), [`BlockHeaderFeed::subscribe`](../feeds/DESIGN.md) and [`LiveTakerMarket::subscribe`](../feeds/DESIGN.md), each one subscription over it. The strategy layer holds one per process. |
 | [`ReconnectConfig`](ws.rs#L43) | the backoff: initial, maximum, multiplier, attempts | the caller; `Default` is capped exponential | [`WsManager::connect`](ws.rs#L94). |
 
@@ -265,9 +265,9 @@ trade is a setting a caller chose.
   tests a half-open breaker.
 - **Reserved**: an endpoint held for one purpose.
 - **Probe slot**: one of the half-open breaker's probe places, held by
-  one request's permit; **recovery cycle**: one move of the breaker from
-  open to half-open, which names the slots it gives. A request sent
-  while the breaker was closed holds no slot.
+  one request's permit and settled once; **recovery cycle**: one move of
+  the breaker from open to half-open, which names its slots. A request
+  sent while closed holds no slot: its outcome frees none, closes nothing.
 
 ## Accepted structure
 
@@ -280,7 +280,10 @@ trade is a setting a caller chose.
   verdict travels into the permit and back to the breaker, and nowhere
   else: it is how the breaker tells its owner's outcome or release from
   another request's, so a late answer to a request sent while the circuit
-  was closed, or to a probe of an earlier cycle, frees no slot.
+  was closed, or to a probe of an earlier cycle, frees no slot and closes
+  no circuit. Neither the slot nor the permit can be copied, and every
+  outcome the pool records consumes the permit, so a slot is settled
+  once.
 
 ## Debts
 
