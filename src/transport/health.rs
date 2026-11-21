@@ -27,6 +27,7 @@ use super::config::CircuitBreakerConfig;
 static NEXT_TRACKER_ID: AtomicU64 = AtomicU64::new(0);
 
 /// What sending one request to an endpoint cost.
+#[must_use = "settle the probe slot if the reservation took one"]
 #[derive(Debug, PartialEq, Eq)]
 pub enum Reserved {
     /// The circuit is closed: nothing was taken, nothing to give back.
@@ -45,6 +46,7 @@ pub enum Reserved {
 /// ([`EndpointHealth::release_probe`]) gives it back — and only within its
 /// own cycle: an outcome that carries no slot, or a slot of an earlier
 /// cycle, neither closes the circuit nor frees a probe now in flight.
+#[must_use = "settle the slot on its issuing tracker"]
 #[derive(Debug, PartialEq, Eq)]
 pub struct ProbeSlot {
     tracker_id: u64,
@@ -77,9 +79,9 @@ pub struct EndpointHealth {
     state: CircuitState,
     config: CircuitBreakerConfig,
     tracker_id: u64,
-    /// The recovery cycle: counts the circuit's moves from open to
-    /// half-open, so a probe slot names the cycle it belongs to.
+    /// The cycle that issued the current half-open probe slots.
     cycle: u64,
+    cycle_started_ms: u64,
 
     // Latency tracking (EMA with alpha ~0.2: new = old*4/5 + sample/5)
     avg_latency_ns: u64,
@@ -116,6 +118,7 @@ impl EndpointHealth {
             config,
             tracker_id: NEXT_TRACKER_ID.fetch_add(1, Ordering::Relaxed),
             cycle: 0,
+            cycle_started_ms: 0,
             avg_latency_ns: 0,
             total_requests: 0,
             consecutive_failures: 0,
@@ -144,8 +147,7 @@ impl EndpointHealth {
         }
     }
 
-    /// Whether the recovery timeout of a circuit opened at `since_ms` has
-    /// elapsed at `now_ms`.
+    /// Whether the recovery timeout has elapsed since `since_ms`.
     fn recovered(&self, since_ms: u64, now_ms: u64) -> bool {
         now_ms.saturating_sub(since_ms) >= self.config.recovery_timeout.as_millis() as u64
     }
@@ -160,17 +162,13 @@ impl EndpointHealth {
     ///
     /// Callers do not track this themselves: `EndpointPool` hands out a
     /// permit whose `Drop` releases an unresolved slot.
+    #[must_use = "settle the probe slot if the reservation took one"]
     pub fn reserve(&mut self, now_ms: u64) -> Option<Reserved> {
         match self.state {
             CircuitState::Closed => Some(Reserved::Freely),
             CircuitState::Open { since_ms } => {
                 if self.recovered(since_ms, now_ms) {
-                    // Recovery elapsed: a new cycle, whose first probe may go.
-                    self.cycle += 1;
-                    self.state = CircuitState::HalfOpen {
-                        probes_in_flight: 1,
-                    };
-                    Some(Reserved::Probe(self.slot()))
+                    Some(self.start_cycle(now_ms))
                 } else {
                     None
                 }
@@ -186,6 +184,29 @@ impl EndpointHealth {
                 }
             }
         }
+    }
+
+    /// Start a cycle with one probe while a closed peer can serve.
+    /// If the previous cycle ended without a verdict and has no slots
+    /// left, wait a recovery interval between cycle starts.
+    #[must_use = "settle the probe slot if the reservation took one"]
+    pub(super) fn reserve_recovery_probe(&mut self, now_ms: u64) -> Option<Reserved> {
+        match self.state {
+            CircuitState::Open { .. } => self.reserve(now_ms),
+            CircuitState::HalfOpen {
+                probes_in_flight: 0,
+            } if self.recovered(self.cycle_started_ms, now_ms) => Some(self.start_cycle(now_ms)),
+            _ => None,
+        }
+    }
+
+    fn start_cycle(&mut self, now_ms: u64) -> Reserved {
+        self.cycle += 1;
+        self.cycle_started_ms = now_ms;
+        self.state = CircuitState::HalfOpen {
+            probes_in_flight: 1,
+        };
+        Reserved::Probe(self.slot())
     }
 
     /// A slot of the current recovery cycle.
@@ -682,7 +703,20 @@ mod tests {
             "a slot of an earlier cycle closes nothing"
         );
 
-        assert!(h.record_success(1_000, Some(new)).is_none());
+        assert!(h.release_probe(new).is_none());
+        assert!(h.record_success(1_000, None).is_none());
+        assert_eq!(
+            h.state(),
+            CircuitState::HalfOpen {
+                probes_in_flight: 0
+            },
+            "a success with no slot leaves an idle circuit half-open"
+        );
+
+        let Some(Reserved::Probe(current)) = h.reserve(64_001) else {
+            panic!("current cycle's probe");
+        };
+        assert!(h.record_success(1_000, Some(current)).is_none());
         assert_eq!(h.state(), CircuitState::Closed);
     }
 
