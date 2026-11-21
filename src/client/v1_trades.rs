@@ -2779,14 +2779,23 @@ mod tests {
 
     /// Through the real transport, which sends a write again after an
     /// attempt with no answer or with an answer that is not a rejection: a
-    /// last `underpriced` after such an attempt is no refusal, so the
-    /// receipts are polled and the replacement's receipt is found at the
-    /// second look. Only `underpriced` on every attempt is a refusal,
+    /// last `underpriced` after such an attempt is no refusal, and neither
+    /// is `underpriced` as a bare error object with no id or as the result
+    /// of a success, so the receipts are polled and the replacement's
+    /// receipt is found at the second look. Only `underpriced` as the
+    /// error answer under the send's id on every attempt is a refusal,
     /// checked once, with the original to replace next.
     #[tokio::test]
     async fn a_rejection_after_an_ambiguous_attempt_is_no_refusal() {
         const UNDERPRICED: &str = "replacement transaction underpriced";
-        for first in [None, Some("already known"), Some(UNDERPRICED)] {
+        for (first, last) in [
+            ("no answer", UNDERPRICED),
+            ("already known", UNDERPRICED),
+            (UNDERPRICED, UNDERPRICED),
+            ("no answer", "bare error"),
+            ("bare error", "bare error"),
+            ("error result", "error result"),
+        ] {
             let (setup, _) = mock::client();
             let (stuck, tx) =
                 pending_trade(&setup, stuck_open(&setup, NOW + 600).abi_encode()).await;
@@ -2822,10 +2831,13 @@ mod tests {
                         let raw = hex::decode(params[0].as_str().unwrap()).unwrap();
                         let mut sent = sent_by_node.lock().unwrap();
                         sent.push(keccak256(raw));
-                        match (sent.len(), first) {
-                            (1, None) => Answer::Silence,
-                            (1, Some(answer)) => Answer::Error(-32_000, answer.into()),
-                            _ => Answer::Error(-32_000, UNDERPRICED.into()),
+                        let underpriced =
+                            serde_json::json!({ "code": -32_000, "message": UNDERPRICED });
+                        match if sent.len() == 1 { first } else { last } {
+                            "no answer" => Answer::Silence,
+                            "bare error" => Answer::Body(underpriced),
+                            "error result" => Answer::Result(underpriced),
+                            answer => Answer::Error(-32_000, answer.into()),
                         }
                     }
                     "eth_getTransactionCount" => {
@@ -2876,9 +2888,9 @@ mod tests {
             assert_eq!(
                 sent.lock().unwrap().as_slice(),
                 [r1, r1],
-                "{first:?}: two attempts"
+                "{first}, {last}: two attempts"
             );
-            if first == Some(UNDERPRICED) {
+            if (first, last) == (UNDERPRICED, UNDERPRICED) {
                 let err = result.unwrap_err();
                 assert!(
                     matches!(err, PerpCityError::Transaction(TransactionError::ReplacementUnconfirmed {
@@ -2892,9 +2904,9 @@ mod tests {
             } else {
                 assert!(
                     matches!(&result, Ok(V1TakerReplacement::Opened(opened)) if opened.tx_hash == r1),
-                    "{first:?}: {result:?}"
+                    "{first}, {last}: {result:?}"
                 );
-                assert_eq!(looks.load(Ordering::SeqCst), 2, "{first:?}");
+                assert_eq!(looks.load(Ordering::SeqCst), 2, "{first}, {last}");
             }
         }
     }

@@ -125,18 +125,25 @@ with another answer (`already known`, `nonce too low`), a node can hold
 the transaction, and the rejection comes back as a transport error that
 names it. Its answer counts only under its own id, compared as typed (the
 number `0` is not the string `"0"`); a response under another id or of
-another shape is no answer, and is retried as one.
+another shape is no answer, and is retried as one. So is a body that is
+no JSON-RPC response, a bare error object with no id included, and a
+success whose result is no transaction hash, such as an error object in
+its place: a write's rejection is only an error response under its own
+id.
 
 Every other write is sent once. A call the node signs
 (`eth_sendTransaction`, `personal_sendTransaction`) picks its nonce at
 the node, so a resend after a lost reply could be signed with the next
 nonce as a second transaction; its error answer under its own id is the
-node's, and a lost reply or a response under another id is a transport
-error with an unknown outcome. A batch that holds any write is never
+node's, and a lost reply, a response under another id, a body that is
+no JSON-RPC response or a success that is no transaction hash is a
+transport error with an unknown outcome. A batch that holds any write is never
 retried or hedged, and the transport never claims that the node
 rejected a write inside it: any error in its answer (a read's, a
 write's, or one error object for the whole batch), and any answer that
-does not answer each call once by its id, fails the whole batch as a
+is not a batch (one object for a batch of one included), does not answer
+each call once by its id, or answers a write with no transaction hash,
+fails the whole batch as a
 transport error with an unknown outcome. The SDK sends neither kind: it
 signs locally and sends one `eth_sendRawTransaction`, so these rules
 keep a path the product does not use simple and safe rather than
