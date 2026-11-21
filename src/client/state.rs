@@ -35,7 +35,7 @@ use crate::math::pricing::{BeaconIndex, Emas, Mark, PricePair, calculate_emas};
 use crate::math::range::{MakerBand, TickRange};
 use crate::math::swap::{PoolSnapshot, TakerFeeRates, TickLiquidity, active_liquidity};
 use crate::storage::{v4_tick_bitmap_slot, v4_tick_slot};
-use crate::transport::fault::{lacks_block, state_pruned};
+use crate::transport::fault::{is_execution_error, lacks_block, state_pruned};
 use crate::units::{
     Funding, FundingRate, LDelta, LUnits, PerSide, PerpAtoms, PerpDelta, Price, Ratio, SqrtPrice,
     UsdcAtoms, UsdcDelta, UtilizationRate,
@@ -503,8 +503,10 @@ impl StateAt {
     ///
     /// # Errors
     ///
-    /// The contract's revert as [`TransactionError::SimulationReverted`];
-    /// a node without this block or its state as
+    /// The contract's revert as [`TransactionError::SimulationReverted`],
+    /// and any other execution error ([`is_execution_error`]) as
+    /// [`classify_simulation_failure`] sorts it, whatever its message says;
+    /// else a node without this block or its state as
     /// [`ContractError::BlockUnavailable`] (transient) or
     /// [`ContractError::StateUnavailable`], as a pinned read types them;
     /// any other failure as [`classify_simulation_failure`] sorts it.
@@ -518,7 +520,9 @@ impl StateAt {
             .await
             .map_err(|e| -> PerpCityError {
                 let failure = classify_simulation_failure(&e, "eth_call");
-                if matches!(failure, TransactionError::SimulationReverted { .. }) {
+                if matches!(failure, TransactionError::SimulationReverted { .. })
+                    || e.as_error_resp().is_some_and(is_execution_error)
+                {
                     return failure.into();
                 }
                 match e
