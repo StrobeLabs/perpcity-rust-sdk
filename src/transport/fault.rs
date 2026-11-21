@@ -14,7 +14,7 @@
 
 use alloy::rpc::json_rpc::ErrorPayload;
 use alloy::transports::{RpcError, TransportError, TransportErrorKind};
-use serde_json::Value;
+use serde_json::{Map, Value};
 
 /// What a failed request is evidence about.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -88,15 +88,36 @@ pub(crate) fn is_rate_limit(payload: &ErrorPayload) -> bool {
     if is_execution_error(payload) {
         return false;
     }
-    if payload.code != -32_005 {
-        return payload.is_retry_err();
+    let message = payload.message.to_ascii_lowercase();
+    if payload.code == -32_005
+        && ["block range", "query returned", "log response size"]
+            .iter()
+            .any(|wording| message.contains(wording))
+    {
+        return false;
     }
-    ErrorPayload::<()> {
-        code: 0,
-        message: payload.message.clone(),
-        data: None,
-    }
-    .is_retry_err()
+
+    // Use Alloy's vendor codes and wordings with normalized case. For
+    // -32005, require evidence of capacity in the message.
+    let capacity_limit = message.contains("capacity exceeded")
+        || message.contains("requests limited to")
+        || message.contains("compute units per second capacity")
+        || message.contains("concurrent requests capacity")
+        || (payload.code == -32_005
+            && ["limit exceeded", "exceeded the limit", "quota"]
+                .iter()
+                .any(|wording| message.contains(wording)));
+    capacity_limit
+        || ErrorPayload::<()> {
+            code: if payload.code == -32_005 {
+                0
+            } else {
+                payload.code
+            },
+            message: message.into(),
+            data: None,
+        }
+        .is_retry_err()
 }
 
 /// Parts of an error answer's message that report an execution error of
@@ -118,7 +139,7 @@ const EXECUTION_WORDINGS: [&str; 7] = [
 /// call, so the error is the request's, whatever else its message says.
 pub(crate) fn is_execution_error(payload: &ErrorPayload) -> bool {
     let message = payload.message.to_ascii_lowercase();
-    payload.code == 3
+    is_execution_revert(payload)
         || EXECUTION_WORDINGS.iter().any(|w| message.contains(w))
         || has_revert_data(payload)
 }
@@ -136,6 +157,7 @@ fn has_revert_data(resp: &ErrorPayload) -> bool {
 /// wallets put it:
 ///
 /// - the `data` field itself, as a hex string;
+/// - the `data` field of a nested error that reports an execution revert;
 /// - along its `originalError` chain: an `originalError`'s own `data` hex
 ///   string, and a nested `originalError`;
 /// - an array of hex strings or of error objects directly under `data`, or
@@ -157,7 +179,8 @@ pub(crate) fn revert_data(resp: &ErrorPayload) -> Option<String> {
         values
             .iter()
             .filter_map(|item| match item {
-                Value::Object(fields) => hex(fields.get("data")?),
+                Value::Object(fields) if is_error_object(fields) => hex(fields.get("data")?),
+                Value::Object(_) => None,
                 item => hex(item),
             })
             .max_by_key(|text| text.len())
@@ -182,22 +205,52 @@ pub(crate) fn revert_data(resp: &ErrorPayload) -> Option<String> {
     }
     let value = serde_json::from_str::<Value>(resp.data.as_ref()?.get()).ok()?;
     match &value {
-        Value::Object(fields) => fields.get("originalError").and_then(original_error),
+        Value::Object(fields) => [
+            nested_execution_revert(fields)
+                .then(|| fields.get("data").and_then(field))
+                .flatten(),
+            fields.get("originalError").and_then(original_error),
+        ]
+        .into_iter()
+        .flatten()
+        .max_by_key(|text| text.len()),
         value => field(value),
     }
     .filter(|text| text.len() - 2 >= MIN_REVERT_DIGITS)
     .map(str::to_owned)
 }
 
-/// Whether an error answer is the node's explicit report of an execution
-/// revert: the execution error code `3`, or `execution reverted` in its
-/// message. It is the call's answer before any gas words in the message.
+fn is_error_object(fields: &Map<String, Value>) -> bool {
+    (fields.get("code").and_then(Value::as_i64).is_some()
+        || fields.get("message").and_then(Value::as_str).is_some())
+        && !["to", "from", "input"]
+            .iter()
+            .any(|key| fields.contains_key(*key))
+}
+
+fn explicit_revert(code: Option<i64>, message: Option<&str>) -> bool {
+    code == Some(3)
+        || message.is_some_and(|message| {
+            let message = message.to_ascii_lowercase();
+            message.contains("execution reverted")
+                || message.contains("reverted with reason string")
+        })
+}
+
+fn nested_execution_revert(fields: &Map<String, Value>) -> bool {
+    let code = fields.get("code").and_then(Value::as_i64);
+    let message = fields.get("message").and_then(Value::as_str);
+    code.is_some() && message.is_some() && is_error_object(fields) && explicit_revert(code, message)
+}
+
+/// Whether either the error answer or a nested JSON-RPC error explicitly
+/// reports an execution revert. Execution takes precedence over gas words.
 pub(crate) fn is_execution_revert(resp: &ErrorPayload) -> bool {
-    resp.code == 3
-        || resp
-            .message
-            .to_ascii_lowercase()
-            .contains("execution reverted")
+    explicit_revert(Some(resp.code), Some(&resp.message))
+        || resp.data.as_ref().is_some_and(|data| {
+            serde_json::from_str::<Map<String, Value>>(data.get())
+                .is_ok_and(|fields| nested_execution_revert(&fields))
+        })
 }
 
 /// The revert data of an explicit execution revert ([`is_execution_revert`])
@@ -303,22 +356,25 @@ pub(crate) fn is_gas_exhaustion(resp: &ErrorPayload) -> bool {
 /// Parts of an error answer's message that report no answer from the
 /// node behind the endpoint: a timeout or a cancelled request, a gateway
 /// with no node to ask, a node behind the block asked for, or a quota.
-const NO_ANSWER_WORDINGS: [&str; 15] = [
+const NO_ANSWER_WORDINGS: &[&str] = &[
     "timeout",
     "timed out",
     "deadline exceeded",
     "context canceled",
     "unexpected eof",
     "no backend",
+    "no server available",
     "unavailable",
     "bad gateway",
+    "internal server error",
     "upstream",
     "overloaded",
+    "under too much load",
     "connection",
+    "network error",
     "block not found",
     "failed to get block",
     "quota",
-    "limit exceeded",
 ];
 
 /// Whether a failed read got no answer from the node.
@@ -342,7 +398,7 @@ pub(crate) fn is_no_answer(error: &TransportError) -> bool {
     message.trim() == "eof"
         || NO_ANSWER_WORDINGS.iter().any(|w| message.contains(w))
         || fault(error) == Fault::Endpoint
-        || resp.code == -32_603
+        || matches!(resp.code, -32_603 | 408 | 500..=599)
 }
 
 /// Whether a pinned simulation should read the head again.
@@ -422,6 +478,53 @@ mod tests {
             )),
             Fault::Request
         );
+    }
+
+    #[test]
+    fn busy_nodes_give_no_simulation_answer() {
+        for (code, message) in [
+            (
+                429,
+                "Your app has exceeded its compute units per second capacity",
+            ),
+            (-32_016, "Rate limit exceeded"),
+            (-32_000, "Capacity Exceeded"),
+            (-32_007, "Per-second request limit reached"),
+            (-32_008, "Per-minute request limit reached"),
+            (-32_011, "Method rate limit reached"),
+            (-32_012, "Credits limited to 6000/sec"),
+            (-32_005, "Exceeded project rate limit"),
+            (-32_005, "Too Many Requests"),
+            (-32_005, "Limit Exceeded"),
+            (-32_000, "context deadline exceeded"),
+            (-32_000, "Request timed out"),
+            (-32_000, "read: connection reset by peer"),
+            (-32_000, "No server available"),
+            (-32_000, "The node is under too much load"),
+            (500, "Internal Server Error"),
+            (502, "Bad Gateway"),
+            (503, "Service Unavailable"),
+            (504, "Gateway Timeout"),
+            (-32_603, "Internal error"),
+        ] {
+            assert!(is_no_answer(&rpc_error(code, message)), "{code} {message}");
+        }
+        for status in [408, 429, 500, 502, 503, 504] {
+            assert!(is_no_answer(&http(status)), "HTTP {status}");
+        }
+        for (code, message) in [
+            (-32_005, "Query returned more than 10000 results"),
+            (-32_005, "Block range limit exceeded"),
+            (-32_005, "Log response size limit exceeded"),
+            (-32_602, "Invalid params"),
+            (-32_601, "Method unavailable"),
+            (3, "execution reverted: Too Many Requests"),
+            (-32_000, "execution reverted: gateway timeout"),
+        ] {
+            let error = rpc_error(code, message);
+            assert_eq!(fault(&error), Fault::Request, "{code} {message}");
+            assert!(!is_no_answer(&error), "{code} {message}");
+        }
     }
 
     /// A contract that reverts with the words "rate limit" declined the
@@ -553,6 +656,9 @@ mod tests {
         // A refusal that echoes the request holds calldata, not revert data.
         for data in [
             r#"{"request":{"data":"0x12345678aabbccdd"}}"#,
+            r#"[{"to":"0x0000000000000000000000000000000000000004","data":"0x12345678aabbccdd"}]"#,
+            r#"{"originalError":[{"data":"0x12345678aabbccdd"}]}"#,
+            r#"{"originalError":{"data":[{"data":"0x12345678aabbccdd"}]}}"#,
             r#"{"params":[{"data":"0x12345678aabbccdd"}],"requestId":"0x0123456789"}"#,
         ] {
             assert!(
@@ -610,13 +716,25 @@ mod tests {
                 r#"{"message":"execution reverted","data":"0xbcffc83f"}"#,
                 None,
             ),
-            (r#"[{"data":"0x12345678"}]"#, Some("0x12345678")),
+            (
+                r#"{"code":3,"message":"execution reverted","data":"0xbcffc83f"}"#,
+                Some("0xbcffc83f"),
+            ),
+            (r#"[{"data":"0x12345678"}]"#, None),
+            (
+                r#"[{"message":"execution reverted","data":"0x12345678"}]"#,
+                Some("0x12345678"),
+            ),
+            (
+                r#"[{"to":"0x0000000000000000000000000000000000000004","code":3,"data":"0x12345678"}]"#,
+                None,
+            ),
             (
                 r#"{"originalError":[{"code":3,"data":"0xdeadbeef"}]}"#,
                 Some("0xdeadbeef"),
             ),
             (
-                r#"{"originalError":{"data":[{"data":"0xdeadbeef"}]}}"#,
+                r#"{"originalError":{"data":[{"code":3,"data":"0xdeadbeef"}]}}"#,
                 Some("0xdeadbeef"),
             ),
             (r#"[{"request":{"data":"0x12345678"}}]"#, None),

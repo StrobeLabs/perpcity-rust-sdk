@@ -168,7 +168,7 @@ its id counts against the endpoint when any answer in it is a rate
 limit, once for the whole batch; any other answer, an error under the
 call's own id included, is the endpoint working. An execution error
 (code `3`, a revert wording, revert data) is never a rate limit, even
-when the contract reverts with the words "rate limit". A read that got
+when the contract reverts with the words "rate limit". Capacity wording is matched without regard to case. An explicit block range or log size rejection keeps its request classification under `-32005`. A nested error with both a code and a message can supply revert data when either reports an execution revert. Array entries that carry calldata without error fields are ignored. A read that got
 no answer under its id is asked again within the read retries, because
 alloy takes a single answer without reading its id and would hand the
 caller another call's result; a hedged read waits for an answer under
@@ -253,7 +253,7 @@ trade is a setting a caller chose.
   environment. The key is in the URL, so this module never logs or traces
   one, and its errors leave it with the URL cut: an HTTP endpoint is sent
   to without alloy's `Http`, whose request span carries the full URL.
-  [`redact_text`](redact.rs#L71) is for the caller's own logs.
+  [`redact_text`](redact.rs#L74) is for the caller's own logs.
 
 ## Terminology
 
