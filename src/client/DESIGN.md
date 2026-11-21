@@ -170,10 +170,10 @@ The receipt is the only success.
      ▼
  simulate      gas limit known;    contract reverts (typed)
    estimate    a revert would      └─► SimulationReverted          no          untouched  none
-   or cached   have been decoded   empty revert, any other refusal
-   + preflight                     (funds, intrinsic gas, unknown words)
+   or cached   have been decoded   empty revert, final node refusal
+   + preflight                     (funds, nonce, intrinsic gas)
                                    └─► SimulationFailed            no          untouched  none
-                                   no answer, out of gas uncapped, fee stale
+                                   inconclusive after a head retry, fee stale
      │                             └─► GasUnavailable              yes         untouched  none
      ▼
  prepare       nonce acquired,     pipeline full
@@ -339,7 +339,7 @@ views it batches.
 
 Readers share the chain's per-market immutables cache. Concurrent cold reads can each fetch the same values.
 
-A send simulates before broadcast. For a shared selector, the typed caller supplies the era or the sender reads the target's pool key, using cached immutables when present. An empty or reverted pool key is checked at a pinned head before the send can use the non-market path. The [HFT design](../hft/DESIGN.md) describes the simulation and retry policy.
+A send simulates before broadcast. The typed caller supplies the era or the sender reads the target's pool key, using cached immutables when present. Only a positive `v0.2.2` identification selects the ordinary simulation. An unanswered identity read stops the send with a transient RPC error. The [HFT design](../hft/DESIGN.md) gives the pin and retry policy.
 Receipt polling starts after 2 s and repeats every 2 s for up to 30 s. A sequence resync adds one `eth_getTransactionCount` before the next send.
 
 Two costs remain: `margin_ratios` makes three requests and could use one multicall. `get_positions_by_owner` scans every minted position.

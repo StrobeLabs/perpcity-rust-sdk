@@ -89,35 +89,6 @@ impl GasLimits {
     pub const TRANSFER: u64 = 65_000;
 }
 
-/// Whether `selector` is a `v1.0.0` trade, whose gas is simulated in the
-/// next second (see [`GasLimits::V1_OPEN_TAKER`]).
-pub(crate) fn is_v1_trade(selector: &Selector) -> bool {
-    matches!(
-        *selector,
-        v1::Perp::openTakerCall::SELECTOR
-            | v1::Perp::adjustTakerCall::SELECTOR
-            | v1::Perp::openMakerCall::SELECTOR
-            | v1::Perp::adjustMakerCall::SELECTOR
-            | v1::Perp::moveMakerCall::SELECTOR
-            | v1::Perp::backstopTakerCall::SELECTOR
-            | v1::Perp::backstopMakerCall::SELECTOR
-    )
-}
-
-/// Whether `selector` is a `v1.0.0` call that accrues the market and
-/// whose selector an earlier build shares, so only the market's era says
-/// which build the call is for: a liquidation, taker or maker (shared with
-/// `v0.2.2`), and `touch()` (shared with build `58b42b7`). `donate()` is
-/// shared too but does not accrue, so its simulation needs no next block.
-pub(crate) fn is_era_shared(selector: &Selector) -> bool {
-    matches!(
-        *selector,
-        v1::Perp::liquidateTakerCall::SELECTOR
-            | v1::Perp::liquidateMakerCall::SELECTOR
-            | v1::Perp::touchCall::SELECTOR
-    )
-}
-
 /// Lower bound on a cached estimate for the known Perp entrypoints.
 ///
 /// Arbitrum charges execution costs — an L1 data component, the reentrancy
@@ -453,33 +424,6 @@ mod tests {
             assert_eq!(cache.get(&selector, 0), Some(floor));
             cache.put(selector, 2_000_000, 0);
             assert_eq!(cache.get(&selector, 0), Some(2_400_000));
-            assert!(is_v1_trade(&selector));
-        }
-        for selector in [
-            Perp::openTakerCall::SELECTOR,
-            Perp::adjustMakerCall::SELECTOR,
-            PerpV022::liquidateTakerCall::SELECTOR,
-            [0xaa, 0xbb, 0xcc, 0xdd],
-        ] {
-            assert!(!is_v1_trade(&selector));
-        }
-        for selector in [
-            PerpV022::liquidateTakerCall::SELECTOR,
-            PerpV022::liquidateMakerCall::SELECTOR,
-            v1::Perp::liquidateTakerCall::SELECTOR,
-            v1::Perp::liquidateMakerCall::SELECTOR,
-            v1::Perp::touchCall::SELECTOR,
-            Perp::touchCall::SELECTOR,
-        ] {
-            assert!(is_era_shared(&selector));
-        }
-        for selector in [
-            Perp::liquidateTakerCall::SELECTOR,
-            Perp::liquidateMakerCall::SELECTOR,
-            v1::Perp::openTakerCall::SELECTOR,
-            v1::Perp::donateCall::SELECTOR,
-        ] {
-            assert!(!is_era_shared(&selector));
         }
     }
 

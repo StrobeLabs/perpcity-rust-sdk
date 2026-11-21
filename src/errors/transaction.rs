@@ -218,8 +218,8 @@ pub enum TransactionError {
     /// Pre-flight simulation (`eth_estimateGas` or `eth_call`) failed with
     /// the node's definitive execution answer but no decodable contract
     /// revert: an empty revert (a selector the deployed contract does not
-    /// have, a bare `revert()`), or execution running out of gas inside
-    /// the pinned limit. The transaction was **not** broadcast.
+    /// have, a bare `revert()`), or a definitive node refusal. The
+    /// transaction was **not** broadcast.
     ///
     /// Deterministic for the same calldata and chain state, so — unlike
     /// [`Self::GasUnavailable`] — **not** transient: retrying reproduces
@@ -245,11 +245,9 @@ pub enum TransactionError {
         error_name: String,
     },
 
-    /// Gas price or base fee is not available (cache stale, RPC down), or a
-    /// pre-flight simulation could not reach the node (transport failure),
-    /// or a `v1.0.0` trade's simulation in the next block was refused or
-    /// found no head twice, or the call without the cap after a capped
-    /// failure got no execution answer or ran out of gas too.
+    /// Gas price or base fee is unavailable, or the preflight simulation
+    /// could not determine the outcome. A pinned simulation retries once
+    /// at a fresh head.
     /// Transient: the transaction was neither disproved nor broadcast.
     #[error("gas unavailable: {reason}")]
     GasUnavailable {

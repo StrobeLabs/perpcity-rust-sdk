@@ -17,7 +17,7 @@ use crate::units::{LUnits, PerSide, PerpAtoms, PerpDelta, Side, SqrtPrice, UsdcA
 
 use super::super::state::StateAt;
 use super::super::trades::{ExactAdjustMakerParams, ExactOpenMakerParams, check_opening_margin};
-use super::super::{PerpClient, i32_to_i24, now_ms};
+use super::super::{Era, PerpClient, i32_to_i24, now_ms};
 use super::{StuckCall, deadline_after, renewed_deadline};
 
 /// What a `v1.0.0` maker adjustment mined as: the band still holding
@@ -243,6 +243,7 @@ impl PerpClient {
         );
         let receipt = self
             .tx(self.market.perp(), call.abi_encode().into())
+            .with_market_era(Era::V1)
             .with_urgency(urgency)
             .send()
             .await?;
@@ -442,6 +443,7 @@ impl PerpClient {
             "adjusting v1 maker position"
         );
         self.tx(self.market.perp(), call.abi_encode().into())
+            .with_market_era(Era::V1)
             .with_urgency(urgency)
             .send()
             .await
@@ -478,7 +480,7 @@ mod tests {
     use super::super::tests as taker;
     use super::*;
     use crate::client::{ARBITRUM_CHAIN_ID, ARBITRUM_SEPOLIA_CHAIN_ID};
-    use crate::client::{ChainDeployments, Era, mock};
+    use crate::client::{ChainDeployments, mock};
     use crate::contracts::Perp as EarlierPerp;
     use crate::contracts::v1::{FundingState, MakerFunding, OpenInterest};
     use crate::errors::NotReplaceableReason;

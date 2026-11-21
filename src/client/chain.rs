@@ -25,13 +25,12 @@ use crate::history::History;
 use crate::math::BlockContext;
 use crate::math::pricing::PricePair;
 use crate::storage::{perp_emas_slot, stored_emas, v1_perp_emas_slot};
-use crate::transport::fault::{is_gas_exhaustion, is_intrinsic_gas_too_low, simulation_needs_head};
 use crate::transport::provider::HftTransport;
 use crate::units::UsdcAtoms;
 
 use super::queries::{Era, MarketImmutables};
 use super::transactions::{
-    classify_simulation_failure, classify_uncapped_failure, preflight_request,
+    classify_pinned_failure, classify_simulation_failure, preflight_request,
 };
 use super::{
     ARBITRUM_CHAIN_ID, ARBITRUM_POOL_MANAGER, ARBITRUM_SEPOLIA_CHAIN_ID,
@@ -755,25 +754,8 @@ impl ChainReader {
         .map(drop)
     }
 
-    /// The preflight of a call whose gas limit is fixed, by the caller or
-    /// by the stuck transaction a replacement signs again: capped at
-    /// `gas_limit`, in `next` when it is given. A capped call that reverts
-    /// may only have run short of gas inside a token transfer, and one that
-    /// runs out of gas, or whose limit is under its intrinsic gas
-    /// (`intrinsic gas too low`), may pass with more, so in `next` each is run once
-    /// more without the cap, in the same block: when either call finds the
-    /// block missing or its overrides refused, the pair is run again once
-    /// in a head read again. Without `next` (an earlier build's send, at
-    /// the endpoint's `pending` block) there is no one block for the pair,
-    /// and the capped call's failure stands.
-    ///
-    /// # Errors
-    ///
-    /// [`TransactionError::GasLimitTooLow`] when the call succeeds without
-    /// the cap; [`TransactionError::GasUnavailable`] (transient) when the
-    /// call without the cap gets no execution answer, runs out of gas too,
-    /// or the pair finds no block; an uncapped decoded revert takes
-    /// precedence over the capped failure ([`classify_uncapped_failure`]).
+    /// Preflight a fixed limit. With a pin, check a possible gas
+    /// shortfall with an uncapped call at the same hash.
     pub(super) async fn preflight_at_limit(
         &self,
         from: Address,
@@ -789,86 +771,47 @@ impl ChainReader {
                 .await;
         };
         let tx = |limit| preflight_request(from, to, calldata, value, limit);
-        let pair = self
-            .in_next_block("eth_call", next, |next| async move {
-                let (capped, error_name) = match self.call_in(tx(Some(gas_limit)), Some(next)).await
-                {
-                    Err(capped) if wants_new_head(&capped) => return Err(capped),
-                    Ok(()) => return Ok(Ok(())),
-                    Err(capped) => {
-                        let failure = classify_simulation_failure(&capped, "eth_call");
-                        let name = match &failure {
-                            TransactionError::SimulationReverted { error_name, .. } => {
-                                error_name.clone()
-                            }
-                            _ if capped.as_error_resp().is_some_and(is_gas_exhaustion) => {
-                                "out of gas".to_owned()
-                            }
-                            _ if capped.as_error_resp().is_some_and(is_intrinsic_gas_too_low) => {
-                                "intrinsic gas too low".to_owned()
-                            }
-                            _ => return Ok(Err(failure)),
-                        };
-                        (failure, name)
-                    }
-                };
-                match self.call_in(tx(None), Some(next)).await {
-                    Err(uncapped) if wants_new_head(&uncapped) => Err(uncapped),
-                    Ok(()) => Ok(Err(TransactionError::GasLimitTooLow {
-                        gas_limit,
-                        error_name,
-                    })),
-                    Err(uncapped) => Ok(Err(classify_uncapped_failure(
-                        &uncapped,
-                        "eth_call",
-                        Some(capped),
-                    ))),
-                }
-            })
-            .await?;
-        pair.map_err(|e| classify_simulation_failure(&e, "eth_call"))?
+        self.in_next_block(next, |next| async move {
+            let capped = match self.call_in(tx(Some(gas_limit)), Some(next)).await {
+                Ok(()) => return Ok(()),
+                Err(error) => error,
+            };
+            let (failure, cap_failure) = classify_pinned_failure(&capped, "eth_call", true);
+            let Some(error_name) = cap_failure else {
+                return Err(failure);
+            };
+            match self.call_in(tx(None), Some(next)).await {
+                Ok(()) => Err(TransactionError::GasLimitTooLow {
+                    gas_limit,
+                    error_name,
+                }),
+                Err(error) => Err(classify_pinned_failure(&error, "eth_call", false).0),
+            }
+        })
+        .await
     }
 
-    /// `simulate`, a simulation with block overrides, in `next`. A node that
-    /// refuses the overrides (`-32602`) or lacks the head `next` pins
-    /// ([`wants_new_head`]) is answered by reading the head again once and
-    /// simulating once more in the block after it, through the same read
-    /// routing; a second such answer, or a failed head read, is
-    /// [`TransactionError::GasUnavailable`] (transient), since a
-    /// simulation at the head's own time can skip a `v1.0.0` trade's
-    /// accrual. Nothing is recorded: the next simulation asks again. Any
-    /// other answer is returned as the node gave it.
+    /// Retry an inconclusive simulation once with a fresh head pin.
     pub(super) async fn in_next_block<T, F, Fut>(
         &self,
-        method: &'static str,
         next: &NextBlock,
         simulate: F,
-    ) -> std::result::Result<std::result::Result<T, TransportError>, TransactionError>
+    ) -> std::result::Result<T, TransactionError>
     where
         F: Fn(NextBlock) -> Fut,
-        Fut: Future<Output = std::result::Result<T, TransportError>>,
+        Fut: Future<Output = std::result::Result<T, TransactionError>>,
     {
-        let answer = simulate(*next).await;
-        let Some(first) = answer.as_ref().err().filter(|e| wants_new_head(e)) else {
-            return Ok(answer);
-        };
-        let unavailable = |head: u64, error: &dyn fmt::Display| TransactionError::GasUnavailable {
-            reason: format!("{method} in the block after {head} failed: {error}"),
-        };
-        let head = self.next_block().await.map_err(|error| {
-            tracing::debug!(%error, method, "head read after a refused simulation failed");
-            unavailable(next.head.number, first)
-        })?;
-        tracing::debug!(
-            refused = next.head.number,
-            head = head.head.number,
-            method,
-            %first,
-            "simulation's block missing or overrides refused; read the head again"
-        );
-        match simulate(head).await {
-            Err(error) if wants_new_head(&error) => Err(unavailable(head.head.number, &error)),
-            answer => Ok(answer),
+        match simulate(*next).await {
+            Err(TransactionError::GasUnavailable { reason }) => {
+                let head =
+                    self.next_block()
+                        .await
+                        .map_err(|error| TransactionError::GasUnavailable {
+                            reason: format!("{reason}; could not refresh the head: {error}"),
+                        })?;
+                simulate(head).await
+            }
+            answer => answer,
         }
     }
 }
@@ -899,14 +842,6 @@ impl NextBlock {
             ..BlockOverrides::default()
         }
     }
-}
-
-/// Whether a simulation's `error` asks for the head to be read again: the
-/// node refused the block overrides as invalid params (`-32602`), or lacks
-/// the block the simulation pinned ([`simulation_needs_head`]), as a replica behind
-/// the head does.
-pub(super) fn wants_new_head(error: &TransportError) -> bool {
-    error.as_error_resp().is_some_and(simulation_needs_head)
 }
 
 /// A raw storage read's failure, classified: the node answering with an
