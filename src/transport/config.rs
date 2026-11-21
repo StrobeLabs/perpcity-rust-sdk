@@ -10,10 +10,10 @@
 //! - **Read** (`.read_endpoint()`) — dedicated to read operations (`eth_call`,
 //!   `eth_getBalance`, etc.). Falls back to the shared pool if all read endpoints
 //!   are unhealthy.
-//! - **Write** (`.write_endpoint()`) — dedicated to write operations
-//!   (`eth_sendRawTransaction`, and every method that is not an allowlisted
-//!   read). Falls back to the shared pool if all write endpoints are
-//!   unhealthy.
+//! - **Write** (`.write_endpoint()`) — dedicated to the one write the
+//!   transport sends, a single `eth_sendRawTransaction`; every other method
+//!   off the read allowlist is refused before it is sent. Falls back to the
+//!   shared pool if all write endpoints are unhealthy.
 //!
 //! # Example
 //!

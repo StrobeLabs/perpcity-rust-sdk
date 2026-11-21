@@ -14,6 +14,7 @@
 
 use alloy::rpc::json_rpc::ErrorPayload;
 use alloy::transports::{RpcError, TransportError, TransportErrorKind};
+use serde_json::Value;
 
 /// What a failed request is evidence about.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -74,12 +75,19 @@ pub(crate) fn fault(error: &TransportError) -> Fault {
 
 /// Whether a JSON-RPC error is a rate limit, per alloy's retry rules.
 ///
+/// An execution error ([`is_execution_error`]) is never one, whatever its
+/// message says: a contract can revert with the words "rate limit", and
+/// every endpoint returns the same revert.
+///
 /// Alloy calls every `-32005` retryable, since Infura returns it for
 /// `exceeded project rate limit` — but Infura also returns it for
 /// `query returned more than 10000 results`, a range rejection that the
 /// log scan narrows and that no endpoint would answer differently. So for
 /// that code the message decides.
 pub(crate) fn is_rate_limit(payload: &ErrorPayload) -> bool {
+    if is_execution_error(payload) {
+        return false;
+    }
     if payload.code != -32_005 {
         return payload.is_retry_err();
     }
@@ -89,6 +97,65 @@ pub(crate) fn is_rate_limit(payload: &ErrorPayload) -> bool {
         data: None,
     }
     .is_retry_err()
+}
+
+/// Parts of an error answer's message that report an execution error of
+/// the call: a revert, in the wordings of geth, Nitro, Hardhat and
+/// Erigon, or an exceptional halt.
+const EXECUTION_WORDINGS: [&str; 7] = [
+    "revert",
+    "vm exception",
+    "vm execution error",
+    "out of gas",
+    "invalid opcode",
+    "invalid jump",
+    "stack limit",
+];
+
+/// Whether a JSON-RPC error reports an execution error of the call: the
+/// execution error code `3`, a wording in [`EXECUTION_WORDINGS`], or
+/// revert data ([`has_revert_data`]). The contract or the EVM declined the
+/// call, so the error is the request's, whatever else its message says.
+pub(crate) fn is_execution_error(payload: &ErrorPayload) -> bool {
+    let message = payload.message.to_ascii_lowercase();
+    payload.code == 3
+        || EXECUTION_WORDINGS.iter().any(|w| message.contains(w))
+        || has_revert_data(payload)
+}
+
+/// The fewest hex digits that count as revert data: a 4-byte selector.
+const MIN_REVERT_DIGITS: usize = 8;
+
+/// Whether an error answer's `data` holds revert data: a `0x` hex string
+/// of at least [`MIN_REVERT_DIGITS`] digits, as `data` itself or under a
+/// `data` or `originalError` key at any depth, arrays included, as nodes
+/// and wallets nest it. Other keys (`blockNumber`, `blockHash`,
+/// `requestId`) are not revert data.
+fn has_revert_data(resp: &ErrorPayload) -> bool {
+    fn longest(value: &Value, revert_field: bool) -> Option<usize> {
+        match value {
+            Value::String(text) if revert_field => text
+                .strip_prefix("0x")
+                .filter(|digits| digits.bytes().all(|digit| digit.is_ascii_hexdigit()))
+                .map(str::len),
+            Value::Array(items) => items
+                .iter()
+                .filter_map(|item| longest(item, revert_field))
+                .max(),
+            Value::Object(fields) => fields
+                .iter()
+                .filter_map(|(key, field)| {
+                    longest(field, matches!(key.as_str(), "data" | "originalError"))
+                })
+                .max(),
+            _ => None,
+        }
+    }
+    resp.data
+        .as_ref()
+        .and_then(|data| serde_json::from_str::<Value>(data.get()).ok())
+        .and_then(|value| longest(&value, true))
+        .is_some_and(|digits| digits >= MIN_REVERT_DIGITS)
 }
 
 /// Parts of a node's answer to `eth_sendRawTransaction` that reject the
@@ -194,6 +261,36 @@ mod tests {
                 "query returned more than 10000 results"
             )),
             Fault::Request
+        );
+    }
+
+    /// A contract that reverts with the words "rate limit" declined the
+    /// call; the endpoint did not limit it. Code 3, a revert wording and
+    /// revert data each make the error the request's, before the rate-limit
+    /// wording is read; a plain rate limit stays the endpoint's.
+    #[test]
+    fn an_execution_revert_is_never_a_rate_limit() {
+        let with_data = |code: i64, message: &str, data: &str| {
+            RpcError::ErrorResp(ErrorPayload {
+                code,
+                message: message.to_string().into(),
+                data: Some(serde_json::value::RawValue::from_string(data.to_owned()).unwrap()),
+            })
+        };
+        for revert in [
+            rpc_error(3, "execution reverted: rate limit"),
+            rpc_error(3, "rate limit exceeded"),
+            rpc_error(-32_000, "execution reverted: rate limit exceeded"),
+            rpc_error(429, "VM Exception while processing transaction: revert"),
+            rpc_error(-32_015, "VM execution error: too many requests"),
+            with_data(-32_000, "rate limit", r#""0x08c379a0""#),
+        ] {
+            assert_eq!(fault(&revert), Fault::Request, "{revert}");
+        }
+        assert_eq!(fault(&rpc_error(-32_000, "rate limit")), Fault::Endpoint);
+        assert_eq!(
+            fault(&with_data(-32_000, "rate limit", r#"{"see":"https://x"}"#)),
+            Fault::Endpoint
         );
     }
 

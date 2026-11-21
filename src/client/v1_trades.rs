@@ -12,12 +12,10 @@ use alloy::eips::eip2718::Encodable2718;
 use alloy::network::TransactionBuilder;
 use alloy::primitives::{Address, B256, Bytes, I256, U256, keccak256};
 use alloy::providers::Provider;
-use alloy::rpc::json_rpc::ErrorPayload;
 use alloy::rpc::types::{TransactionReceipt, TransactionRequest};
 use alloy::sol_types::SolCall;
 use alloy::transports::TransportError;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 
 use crate::constants::{RECEIPT_POLL_INTERVAL, RECEIPT_TIMEOUT};
 use crate::contracts::v1::{AdjustTakerParams, OpenTakerParams, Perp};
@@ -27,7 +25,7 @@ use crate::errors::{
 use crate::events::receipt::{V1TradeResult, parse_v1_receipt, parse_v1_receipt_for};
 use crate::hft::gas::{GasFees, Urgency, is_out_of_gas};
 use crate::math::swap::MAX_TOTAL_FEE_SLACK;
-use crate::transport::fault::{Fault, fault, is_rejection};
+use crate::transport::fault::{Fault, fault, is_execution_error, is_rejection};
 use crate::units::{PerpDelta, UsdcAtoms, UsdcDelta};
 
 use super::queries::Era;
@@ -276,19 +274,6 @@ fn era_read_error(error: PerpCityError) -> PerpCityError {
     }
 }
 
-/// Parts of an error answer's message that report an execution error of
-/// the call: a revert, in the wordings of geth, Nitro, Hardhat and
-/// Erigon, or an exceptional halt.
-const EXECUTION_WORDINGS: [&str; 7] = [
-    "revert",
-    "vm exception",
-    "vm execution error",
-    "out of gas",
-    "invalid opcode",
-    "invalid jump",
-    "stack limit",
-];
-
 /// Parts of an error answer's message that report no answer from the
 /// node behind the endpoint: a timeout or a cancelled request, a gateway
 /// with no node to ask, a node behind the block asked for, or a quota.
@@ -313,10 +298,9 @@ const NO_ANSWER_WORDINGS: [&str; 15] = [
 /// Whether a failed read got no answer from the node.
 ///
 /// An error answer is the node's answer first when it reports an
-/// execution error, by the execution error code `3` or by its message
-/// ([`EXECUTION_WORDINGS`]), or a method the endpoint does not serve
-/// (`-32601`), whatever else its message says. Else it is the contract's
-/// answer when it holds revert data ([`has_revert_data`]). Else it is no
+/// execution error ([`is_execution_error`]: the code `3`, an execution
+/// wording, revert data) or a method the endpoint does not serve
+/// (`-32601`), whatever else its message says. Else it is no
 /// answer when it reports one: a wording in [`NO_ANSWER_WORDINGS`], a
 /// bare `EOF`, a rate limit ([`Fault::Endpoint`]) or a bare internal
 /// error (`-32603`), with or without empty revert data (`0x`). Any other
@@ -326,52 +310,13 @@ fn is_no_answer(error: &TransportError) -> bool {
         return fault(error) == Fault::Endpoint;
     };
     let message = resp.message.to_ascii_lowercase();
-    if resp.code == 3
-        || resp.code == -32_601
-        || EXECUTION_WORDINGS.iter().any(|w| message.contains(w))
-        || has_revert_data(resp)
-    {
+    if resp.code == -32_601 || is_execution_error(resp) {
         return false;
     }
     message.trim() == "eof"
         || NO_ANSWER_WORDINGS.iter().any(|w| message.contains(w))
         || fault(error) == Fault::Endpoint
         || resp.code == -32_603
-}
-
-/// The fewest hex digits that count as revert data: a 4-byte selector.
-const MIN_REVERT_DIGITS: usize = 8;
-
-/// Whether an error answer's `data` holds revert data: a `0x` hex string
-/// of at least [`MIN_REVERT_DIGITS`] digits, as `data` itself or under a
-/// `data` or `originalError` key at any depth, arrays included, as nodes
-/// and wallets nest it. Other keys (`blockNumber`, `blockHash`,
-/// `requestId`) are not revert data.
-fn has_revert_data(resp: &ErrorPayload) -> bool {
-    fn longest(value: &Value, revert_field: bool) -> Option<usize> {
-        match value {
-            Value::String(text) if revert_field => text
-                .strip_prefix("0x")
-                .filter(|digits| digits.bytes().all(|digit| digit.is_ascii_hexdigit()))
-                .map(str::len),
-            Value::Array(items) => items
-                .iter()
-                .filter_map(|item| longest(item, revert_field))
-                .max(),
-            Value::Object(fields) => fields
-                .iter()
-                .filter_map(|(key, field)| {
-                    longest(field, matches!(key.as_str(), "data" | "originalError"))
-                })
-                .max(),
-            _ => None,
-        }
-    }
-    resp.data
-        .as_ref()
-        .and_then(|data| serde_json::from_str::<Value>(data.get()).ok())
-        .and_then(|value| longest(&value, true))
-        .is_some_and(|digits| digits >= MIN_REVERT_DIGITS)
 }
 
 /// The adjustment `receipt` mined for `pos_id` on `perp`.

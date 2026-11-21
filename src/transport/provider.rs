@@ -30,7 +30,12 @@
 //!   <method> is not supported`
 //! - **Health from answers**: an answer under another id or of another
 //!   shape, a body that is no JSON-RPC response, and a rate limit anywhere
-//!   in a read's answer count against the endpoint
+//!   in a read's answer count against the endpoint; a read that got no
+//!   answer under its id is asked again, and a hedged read waits for one
+//! - **Body checked against metadata**: every check reads a call's method
+//!   and id from alloy's metadata, so a call whose serialized JSON body
+//!   holds another method or id is refused with
+//!   `RpcError::LocalUsageError` before it is sent
 //! - **Hedged requests**: fan out reads to N endpoints, take the fastest response;
 //!   losing requests are **cancelled** via `JoinSet::abort_all` to save RPC rate limits
 //! - **Lock-free endpoint selection**: read path uses atomic mirrors, zero mutex
@@ -460,18 +465,17 @@ impl EndpointPool {
         self.endpoints[idx].record_failure(now_ms);
     }
 
-    /// Record what the response to the read `req` says about endpoint
-    /// `idx`: a success, unless it answers no call by its id or holds a
-    /// rate limit ([`healthy_read`]), which is a failure.
+    /// Record what `response`, an answer to a read ([`answered_read`]),
+    /// says about endpoint `idx`: a success, unless it holds a rate limit,
+    /// which is a failure.
     pub(crate) fn record_read(
         &self,
         idx: usize,
         now_ms: u64,
         latency_ns: u64,
-        req: &RequestPacket,
         response: &ResponsePacket,
     ) {
-        if healthy_read(req, response) {
+        if !response.iter_errors().any(is_rate_limit) {
             self.record_success(idx, latency_ns);
         } else {
             self.record_failure(idx, now_ms);
@@ -683,13 +687,21 @@ fn is_read(method: &str) -> bool {
 }
 
 /// The error that refuses `req` before it is sent, or `None` when it is
-/// sent: a request is sent only when it is a single call to a method on
-/// [`READ_METHODS`], a batch of such calls, or a single
-/// `eth_sendRawTransaction` with an id. A raw send with a null id is
-/// refused because alloy reads it the same as an answer with no id; every
-/// other method, a write or an unknown method, and any batch that holds
-/// one, because this transport sends only signed raw transactions.
+/// sent: a request is sent only when the JSON body of each call holds the
+/// method and id of its metadata ([`body_disagrees`]), and it is a single
+/// call to a method on [`READ_METHODS`], a batch of such calls, or a
+/// single `eth_sendRawTransaction` with an id. A raw send with a null id
+/// is refused because alloy reads it the same as an answer with no id;
+/// every other method, a write or an unknown method, and any batch that
+/// holds one, because this transport sends only signed raw transactions.
 fn refused(req: &RequestPacket) -> Option<TransportError> {
+    let calls = match req {
+        RequestPacket::Single(call) => std::slice::from_ref(call),
+        RequestPacket::Batch(calls) => calls.as_slice(),
+    };
+    if let Some(error) = calls.iter().find_map(body_disagrees) {
+        return Some(error);
+    }
     let (method, batch) = match req {
         RequestPacket::Single(call) if call.method() == RAW_SEND => {
             return call.id().is_none().then(|| {
@@ -710,6 +722,31 @@ fn refused(req: &RequestPacket) -> Option<TransportError> {
         "HftTransport sends only single signed eth_sendRawTransaction writes; {method} is not \
          supported{batch}"
     )))
+}
+
+/// The method and id that a call's JSON body holds. A repeated key is an
+/// error, so a body cannot name one method to this check and another to
+/// the node.
+#[derive(serde::Deserialize)]
+struct Envelope {
+    method: String,
+    id: alloy::rpc::json_rpc::Id,
+}
+
+/// The error that refuses `call` when its JSON body, which is what the
+/// endpoint gets, does not hold its metadata's method and id (compared as
+/// typed), or is no single call: every check here reads the metadata, so
+/// a call whose body says otherwise is not sent.
+fn body_disagrees(call: &SerializedRequest) -> Option<TransportError> {
+    match serde_json::from_str::<Envelope>(call.serialized().get()) {
+        Ok(body) if body.method == call.method() && body.id == *call.id() => None,
+        _ => Some(TransportError::local_usage_str(&format!(
+            "the JSON body of a {} call with id {} does not hold that method and id: it was not \
+             sent",
+            call.method(),
+            call.id()
+        ))),
+    }
 }
 
 /// The raw send that `req` is, or `None` for a read.
@@ -746,13 +783,29 @@ fn unanswered_write(call: &SerializedRequest, response: &ResponsePacket) -> Opti
     )))
 }
 
-/// Whether `response` to the read `req` speaks for the endpoint's health:
-/// it answers each call by its id (a batch by a batch with one answer for
-/// each call, as many under an id as calls carry it), and no answer is a
-/// rate limit. An answer under another id or of another shape is an
-/// endpoint failure, as is a rate limit anywhere in it.
-fn healthy_read(req: &RequestPacket, response: &ResponsePacket) -> bool {
-    let correlated = match (req, response) {
+/// The read `req`'s result, with a response that is no answer to it made
+/// a transport error, so it is an endpoint failure and the read is asked
+/// again ([`answered_read`]). An error answer under the call's own id
+/// stays an answer.
+fn read_result(
+    req: &RequestPacket,
+    result: Result<ResponsePacket, TransportError>,
+) -> Result<ResponsePacket, TransportError> {
+    match result {
+        Ok(response) if !answered_read(req, &response) => Err(TransportErrorKind::custom_str(
+            "the read was not answered under its id",
+        )),
+        result => result,
+    }
+}
+
+/// Whether `response` answers the read `req`: each call by its id,
+/// compared as typed (a batch by a batch with one answer for each call,
+/// as many under an id as calls carry it). An answer under another id or
+/// of another shape answers nothing, and alloy, which takes a single
+/// answer without reading its id, would hand it to the caller.
+fn answered_read(req: &RequestPacket, response: &ResponsePacket) -> bool {
+    match (req, response) {
         (RequestPacket::Single(call), ResponsePacket::Single(answer)) => answer.id == *call.id(),
         (RequestPacket::Batch(calls), ResponsePacket::Batch(answers)) => {
             answers.len() == calls.len()
@@ -762,8 +815,7 @@ fn healthy_read(req: &RequestPacket, response: &ResponsePacket) -> bool {
                 })
         }
         _ => false,
-    };
-    correlated && !response.iter_errors().any(is_rate_limit)
+    }
 }
 
 /// The transport error that replaces `error`, the transport's failure on
@@ -843,9 +895,10 @@ impl Router {
     /// A request that is neither a read on [`READ_METHODS`] (or a batch of
     /// them) nor a single `eth_sendRawTransaction` with an id is refused
     /// before it is sent ([`refused`]). A read retries, on any transport or
-    /// RPC error that is not the endpoint declining it, and is hedged; its
-    /// answer counts against the endpoint's health when it answers no call
-    /// by its id or holds a rate limit ([`healthy_read`]). A raw send
+    /// RPC error that is not the endpoint declining it, a response that
+    /// answers no call by its id ([`read_result`]) and a body that is no
+    /// JSON-RPC response included, and is hedged; an answer counts against
+    /// the endpoint's health when it holds a rate limit. A raw send
     /// retries on an error answer (e.g. `-32003 insufficient funds` from a
     /// stale read replica) and on no answer, always as the same signed
     /// bytes; its last explicit rejection ([`is_rejection`]) is returned as
@@ -915,6 +968,7 @@ impl Router {
                     None => Ok(Ok(response)),
                 },
                 (Ok(Err(error)), Some(_)) => Ok(Err(undecoded_write(error))),
+                (Ok(result), None) => Ok(read_result(&req, result)),
                 (result, _) => result,
             };
 
@@ -956,7 +1010,7 @@ impl Router {
                         if is_write {
                             pool.record_success(idx, latency_ns);
                         } else {
-                            pool.record_read(idx, now_ms, latency_ns, &req, &response);
+                            pool.record_read(idx, now_ms, latency_ns, &response);
                         }
                         permit.resolved();
                         return Ok(response);
@@ -976,10 +1030,12 @@ impl Router {
                     // A declined read earns the same answer however often
                     // it is asked, so it goes back to the caller now:
                     // retrying costs round trips and delays the reply it
-                    // is going to get anyway. Writes keep their own retry
-                    // policy, which turns on whether the transaction
-                    // could have landed.
-                    if !is_write && fault(&e) == Fault::Request {
+                    // is going to get anyway. An error response out of the
+                    // transport declined nothing: it is a body that is no
+                    // JSON-RPC response ([`EndpointPool::record_error`]).
+                    // Writes keep their own retry policy, which turns on
+                    // whether the transaction could have landed.
+                    if !is_write && fault(&e) == Fault::Request && e.as_error_resp().is_none() {
                         return Err(e);
                     }
                     may_be_held = true;
@@ -1011,7 +1067,8 @@ impl Router {
     }
 
     /// Fan out a read request to multiple endpoints in a pool, return the
-    /// fastest success.
+    /// fastest answer ([`read_result`]): a response under another id is an
+    /// endpoint failure, and the other requests run on.
     ///
     /// Uses [`JoinSet`] to properly cancel losing requests via `abort_all()`,
     /// saving RPC rate limits and network bandwidth. Health is recorded for all
@@ -1043,11 +1100,13 @@ impl Router {
             let (idx, permit) = permits.pop().expect("one endpoint");
             let start = Instant::now();
             let mut transport = pool.transport(idx);
-            let result = tokio::time::timeout(timeout, transport.call(req.clone())).await;
+            let result = tokio::time::timeout(timeout, transport.call(req.clone()))
+                .await
+                .map(|result| read_result(&req, result));
 
             return match result {
                 Ok(Ok(resp)) => {
-                    pool.record_read(idx, now_ms, start.elapsed().as_nanos() as u64, &req, &resp);
+                    pool.record_read(idx, now_ms, start.elapsed().as_nanos() as u64, &resp);
                     permit.resolved();
                     Ok(resp)
                 }
@@ -1073,9 +1132,9 @@ impl Router {
 
             join_set.spawn(async move {
                 let start = Instant::now();
-                let result = tokio::time::timeout(timeout, transport.call(req_clone)).await;
+                let result = tokio::time::timeout(timeout, transport.call(req_clone.clone())).await;
                 let result = match result {
-                    Ok(r) => r,
+                    Ok(r) => read_result(&req_clone, r),
                     Err(_) => Err(TransportError::local_usage_str("request timed out")),
                 };
                 (idx, result, start)
@@ -1096,7 +1155,7 @@ impl Router {
             match join_result {
                 Ok((idx, Ok(response), start)) => {
                     let latency_ns = start.elapsed().as_nanos() as u64;
-                    pool.record_read(idx, now_ms, latency_ns, &req, &response);
+                    pool.record_read(idx, now_ms, latency_ns, &response);
                     resolve(&mut permits, idx);
                     // Cancel remaining in-flight requests — saves RPC rate limits.
                     // JoinSet::drop also aborts, but explicit abort_all is clearer.
@@ -1751,6 +1810,191 @@ mod tests {
             assert_eq!(requests.load(Ordering::SeqCst), 3, "{case}");
             assert_eq!(transport.healthy_count(), usize::from(healthy), "{case}");
         }
+    }
+
+    /// A read that gets no answer under its id is asked again, up to the
+    /// read retries, and the caller gets only the answer under its id:
+    /// another id or a text id and then the answer returns the answer, a
+    /// bare error object with no id and then the answer too, and two
+    /// answers under another id are a transport error, never the other
+    /// call's result. An error under the read's own id is its answer, sent
+    /// once.
+    #[tokio::test]
+    async fn a_read_answered_under_another_id_is_asked_again() {
+        let other = json!({ "jsonrpc": "2.0", "id": 99, "result": "0xdead" });
+        let bare = json!({ "code": -32_000, "message": "no" });
+        for (script, sent, answered) in [
+            (["other id", "ok"], 2, Some("0x1")),
+            (["text id", "ok"], 2, Some("0x1")),
+            (["bare error", "ok"], 2, Some("0x1")),
+            (["other id", "other id"], 2, None),
+            (["error", "ok"], 1, Some("error")),
+        ] {
+            let requests = Arc::new(AtomicUsize::new(0));
+            let counter = Arc::clone(&requests);
+            let (other, bare) = (other.clone(), bare.clone());
+            let url = scripted::endpoint(move |_, _| {
+                match script[counter.fetch_add(1, Ordering::SeqCst)] {
+                    "other id" => Answer::Body(other.clone()),
+                    "text id" => Answer::ResultUnderTextId(json!("0xdead")),
+                    "bare error" => Answer::Body(bare.clone()),
+                    "error" => Answer::Error(-32_000, "execution reverted".into()),
+                    _ => Answer::Result(json!("0x1")),
+                }
+            })
+            .await;
+            let transport = HftTransport::new(
+                TransportConfig::builder()
+                    .shared_endpoint(url)
+                    .request_timeout(std::time::Duration::from_millis(300))
+                    .read_retry(crate::transport::config::ReadRetryConfig {
+                        max_retries: 1,
+                        base_delay: std::time::Duration::from_millis(1),
+                    })
+                    .build()
+                    .unwrap(),
+            )
+            .unwrap();
+            let req = RequestPacket::Single(make_request("eth_blockNumber", 1));
+            let result = transport.router.route_request(req).await;
+            assert_eq!(requests.load(Ordering::SeqCst), sent, "{script:?}");
+            match (result, answered) {
+                (Ok(response), Some(expected)) => {
+                    let answer = response.as_single().expect("a single answer");
+                    assert_eq!(answer.id, alloy::rpc::json_rpc::Id::Number(1), "{script:?}");
+                    match &answer.payload {
+                        ResponsePayload::Success(result) => {
+                            assert_eq!(result.get(), format!("\"{expected}\""), "{script:?}")
+                        }
+                        ResponsePayload::Failure(_) => assert_eq!(expected, "error", "{script:?}"),
+                    }
+                }
+                (Err(error), None) => {
+                    assert!(error.as_error_resp().is_none(), "{script:?}: {error}");
+                    assert!(
+                        error.to_string().contains("not answered under its id"),
+                        "{script:?}: {error}"
+                    );
+                }
+                (result, _) => panic!("{script:?}: {result:?}"),
+            }
+        }
+    }
+
+    /// A hedged read takes only an answer under its id: one endpoint
+    /// answers at once under another id, the other 200 ms later under the
+    /// read's id, and the caller gets the later answer; the first endpoint
+    /// is charged a failure and the second a success.
+    #[tokio::test]
+    async fn a_hedged_read_waits_for_an_answer_under_its_id() {
+        let fast = scripted::endpoint(|_, _| {
+            Answer::Body(json!({ "jsonrpc": "2.0", "id": 99, "result": "0xdead" }))
+        })
+        .await;
+        let slow =
+            scripted::endpoint(|_, _| Answer::Late(Box::new(Answer::Result(json!("0x2"))))).await;
+        let transport = HftTransport::new(
+            TransportConfig::builder()
+                .strategy(Strategy::Hedged { fan_out: 2 })
+                .request_timeout(std::time::Duration::from_secs(2))
+                .shared_endpoint(fast)
+                .shared_endpoint(slow)
+                .build()
+                .unwrap(),
+        )
+        .unwrap();
+        let req = RequestPacket::Single(make_request("eth_blockNumber", 7));
+        let response = transport
+            .router
+            .route_request(req)
+            .await
+            .expect("an answer");
+        let answer = response.as_single().expect("a single answer");
+        assert_eq!(answer.id, alloy::rpc::json_rpc::Id::Number(7));
+        assert_eq!(
+            answer.payload.as_success().map(|r| r.get()),
+            Some(r#""0x2""#)
+        );
+        let status = transport.health_status();
+        assert_eq!(status[0].consecutive_failures, 1, "{status:?}");
+        assert_eq!(status[1].consecutive_failures, 0, "{status:?}");
+    }
+
+    /// The write gate reads a call's metadata, but the endpoint gets its
+    /// serialized body, so a packet whose two disagree is refused at the
+    /// public entry point with a local error and nothing sent: a read's
+    /// metadata over a write's body, a raw send's metadata over another
+    /// method's body, another id, the same id as text, and one such call
+    /// in a batch of reads. A packet whose body agrees is sent.
+    #[tokio::test]
+    async fn a_call_whose_body_disagrees_with_its_metadata_is_not_sent() {
+        use alloy::rpc::json_rpc::Id;
+        let requests = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&requests);
+        let url = scripted::endpoint(move |_, _| {
+            counter.fetch_add(1, Ordering::SeqCst);
+            Answer::Result(json!(B256::repeat_byte(0xbb)))
+        })
+        .await;
+        let mut transport = health_transport(&url);
+        let disguised = |body: &'static str, method: &'static str, id: Id| {
+            let mut call = make_request(body, 1);
+            call.meta_mut().method = method.into();
+            call.meta_mut().id = id;
+            call
+        };
+        let packets = [
+            RequestPacket::Single(disguised("eth_sendTransaction", "eth_call", Id::Number(1))),
+            RequestPacket::Single(disguised("eth_sendTransaction", RAW_SEND, Id::Number(1))),
+            RequestPacket::Single(disguised("eth_call", "eth_call", Id::Number(2))),
+            RequestPacket::Single(disguised("eth_call", "eth_call", Id::String("1".into()))),
+            RequestPacket::Batch(vec![
+                make_request("eth_chainId", 2),
+                disguised("personal_sign", "eth_getBalance", Id::Number(1)),
+            ]),
+        ];
+        for packet in packets {
+            let case = format!("{packet:?}");
+            let error = transport.call(packet).await.expect_err("refused");
+            assert!(
+                matches!(error, alloy::transports::RpcError::LocalUsageError(_)),
+                "{case}: {error:?}"
+            );
+            assert!(
+                error.to_string().contains("it was not sent"),
+                "{case}: {error}"
+            );
+        }
+        assert_eq!(requests.load(Ordering::SeqCst), 0);
+        let agrees = RequestPacket::Single(make_request("eth_chainId", 1));
+        transport.call(agrees).await.expect("sent");
+        assert_eq!(requests.load(Ordering::SeqCst), 1);
+    }
+
+    /// A contract that reverts with the words "rate limit" under the
+    /// read's own id declined the call: the endpoint stays in service
+    /// after more answers than the breaker's threshold.
+    #[tokio::test]
+    async fn a_revert_that_mentions_a_rate_limit_keeps_the_endpoint_in_service() {
+        let requests = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&requests);
+        let url = scripted::endpoint(move |_, _| {
+            counter.fetch_add(1, Ordering::SeqCst);
+            Answer::Error(3, "execution reverted: rate limit".into())
+        })
+        .await;
+        let transport = health_transport(&url);
+        for _ in 0..5 {
+            let req = RequestPacket::Single(make_request("eth_call", 1));
+            let response = transport
+                .router
+                .route_request(req)
+                .await
+                .expect("the revert");
+            assert_eq!(response.first_error_code(), Some(3));
+        }
+        assert_eq!(requests.load(Ordering::SeqCst), 5);
+        assert_eq!(transport.healthy_count(), 1);
     }
 
     /// A read batch whose answers each answer their call counts against
