@@ -10,7 +10,8 @@
 //!
 //! Each interface is the deployed contract's ABI, complete for [`Perp`],
 //! [`PerpFactory`], [`WithdrawalController`] and [`IBeacon`]; a module
-//! interface is the `v1.0.0` `I*` interface plus the module's own views.
+//! interface is the `v1.0.0` `I*` interface plus the module's own views,
+//! and [`PerpGuardHook`] is `IPerpGuardHook` plus the hook's own views.
 //! Each interface also has its JSON ABI (`abi::contract()`). The
 //! `abi_lock` tests hold every selector, topic and struct string, and
 //! every item's names, return types, `indexed` flags and mutability,
@@ -802,6 +803,25 @@ sol! {
         function PERP_GUARD_HOOK() external view returns (address);
         function PROTOCOL_FEE_MANAGER() external view returns (address);
         function WITHDRAWAL_CONTROLLER_IMPL() external view returns (address);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    //  PerpGuardHook
+    // ═══════════════════════════════════════════════════════════════════
+
+    /// The chain's `v1.0.0` guard hook, the `hooks` of every `v1.0.0` pool
+    /// key: it lets only the perp it stores for a pool id change that pool.
+    /// `IPerpGuardHook` whole, plus the hook's two views; the `IHooks`
+    /// callbacks are the PoolManager's to call and are not bound.
+    #[sol(rpc)]
+    interface PerpGuardHook {
+        error UnauthorizedPoolAction();
+
+        /// The factory that initializes pools and registers their perps.
+        function PERP_FACTORY() external view returns (address);
+        /// The perp registered for `poolId`; zero for a pool with none.
+        function perps(bytes32 poolId) external view returns (address perp);
+        function registerPerp(PoolKey calldata key, address perp) external;
     }
 
     // ═══════════════════════════════════════════════════════════════════

@@ -174,6 +174,34 @@ impl MarketReader {
         Ok(self.era().await? == Era::Upgradeable)
     }
 
+    /// The perp the chain's `v1.0.0` guard hook stores for this market's
+    /// pool id, read now: [`Self::perp`] for a market the hook registered,
+    /// `Address::ZERO` for a pool it holds no perp for. Any other address
+    /// is the market the pool belongs to; this contract only names it.
+    ///
+    /// # Errors
+    ///
+    /// [`ContractError::UnsupportedEra`] for an earlier build, whose pools
+    /// carry no `v1.0.0` hook, and [`ContractError::UnknownBuild`] for an
+    /// unknown one, before the hook is read; the error from either read,
+    /// transient when the node gave no execution answer.
+    pub async fn get_guard_hook_perp(&self) -> Result<Address> {
+        let immutables = self.immutables().await.map_err(market_read_error)?;
+        if immutables.era != Era::V1 {
+            return Err(ContractError::UnsupportedEra {
+                era: immutables.era,
+                operation: "get_guard_hook_perp",
+            }
+            .into());
+        }
+        let hook = self.chain.deployments().v1_perp_guard_hook;
+        v1::PerpGuardHook::new(hook, self.chain.provider())
+            .perps(immutables.pool_id)
+            .call()
+            .await
+            .map_err(|error| market_read_error(error.into()))
+    }
+
     /// The calldata that liquidates `pos_id` whole on this market's era, for
     /// a sender not bound to this market (one signer liquidating across
     /// several); send it to this market's perp at [`GasLimits::LIQUIDATE`].
@@ -639,6 +667,69 @@ mod tests {
             ),
             "{err}"
         );
+        assert!(rpc.is_drained());
+    }
+
+    /// A `v1.0.0` market's guard hook entry: one `perps` call to the
+    /// chain's `v1.0.0` hook with the cached pool id, after the immutables.
+    #[tokio::test]
+    async fn v1_market_reads_its_perp_from_the_guard_hook() {
+        let (chain, rpc) = mock::chain();
+        let market = chain.market(mock::PERP);
+        for stored in [mock::PERP, Address::ZERO, Address::repeat_byte(0x0c)] {
+            if stored == mock::PERP {
+                rpc.immutables(Era::V1);
+            }
+            rpc.call::<v1::PerpGuardHook::perpsCall>(&stored);
+            assert_eq!(market.get_guard_hook_perp().await.unwrap(), stored);
+            let (calls, routes) = (rpc.calls(), rpc.call_routes());
+            let asked = v1::PerpGuardHook::perpsCall::abi_decode(calls.last().unwrap()).unwrap();
+            assert_eq!(asked.poolId, mock::POOL_ID);
+            assert_eq!(routes.last().unwrap().1, Some(mock::V1_HOOK));
+            assert!(rpc.is_drained(), "poolKey and poolId once, then perps");
+        }
+    }
+
+    /// An earlier build's pool has no `v1.0.0` hook: refused after the
+    /// immutables, before any hook read.
+    #[tokio::test]
+    async fn an_earlier_build_refuses_the_guard_hook_read() {
+        for era in [Era::Legacy, Era::Upgradeable] {
+            let (chain, rpc) = mock::chain();
+            rpc.immutables(era);
+            let err = chain
+                .market(mock::PERP)
+                .get_guard_hook_perp()
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(
+                    err,
+                    PerpCityError::Contract(ContractError::UnsupportedEra {
+                        era: e,
+                        operation: "get_guard_hook_perp",
+                    }) if e == era
+                ),
+                "{err}"
+            );
+            assert!(!err.is_transient());
+            assert!(rpc.is_drained(), "poolKey, POOL_ID; no hook read");
+        }
+    }
+
+    /// A node that fails the hook read without an execution answer is a
+    /// transient failure, not a market with no perp.
+    #[tokio::test]
+    async fn a_failed_guard_hook_read_is_transient() {
+        let (chain, rpc) = mock::chain();
+        rpc.immutables(Era::V1);
+        rpc.fails("upstream unavailable");
+        let err = chain
+            .market(mock::PERP)
+            .get_guard_hook_perp()
+            .await
+            .unwrap_err();
+        assert!(err.is_transient(), "{err}");
         assert!(rpc.is_drained());
     }
 

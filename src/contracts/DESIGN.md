@@ -122,10 +122,11 @@ sets of base slots, one mapping rule.
 | [`SwapResult`](../contracts.rs#L42) | a swap's outcome with its four fee legs | the taker events | [`SwapInfo`](../events/DESIGN.md), in human units. |
 | [`Modules`](../contracts.rs#L42), [`PoolKey`](../contracts.rs#L42) | the five rule modules' addresses; the pool's key and tick spacing | `modules` and `poolKey` | the reads, which resolve a module's address before calling it, and the immutables cache. Never a caller's. |
 | [`Taker`](../contracts.rs#L42), [`FeeFund`](../contracts.rs#L42) | bound, unread | the ABI | nothing. They are locked so a struct change on the deployed contract fails a test here. |
-| [`v1::Perp`](v1.rs#L30), [`v1::PerpFactory`](v1.rs#L30) | a `v1.0.0` market and its factory, the whole deployed ABI: views, trades with `deadline`, `moveMaker`, `previewPosition`, the owner-keyed position events, all of `Errors.sol` | the ABI, through `sol!`; locked against `forge inspect` | the immutables read (`poolId()`) and the position reads in the client: `positions`, whose three-word `v1::Position` crosses into the client's `PositionRow` by `From`, `positionOwner` for the holders, and the band from the first three fields of the seven-word `v1::Maker`; the fifteen-word `PositionPreview` returned by the pinned single and batch reads, and v1 position events consumed by the trade receipt parser; the fork tests in `tests/v1_sepolia_fork.rs` and `tests/v1_positions_fork.rs`. |
-| [`v1::WithdrawalController`](v1.rs#L30) | a market's payout escrow: the instant-payout bucket, the claims and their challenge window, the guardian's and the governor's actions | the ABI; the market's `withdrawalController` gives the address | nothing yet; the claim reads are its first caller. |
-| [`v1::IBeacon`](v1.rs#L30) | the `f762da1` beacon: `index` returns the value and its update time | the ABI | nothing yet; the staleness check against `latency` is its first caller. |
-| [`v1::IFees`](v1.rs#L30), [`v1::IFunding`](v1.rs#L30), [`v1::IMarginRatios`](v1.rs#L30), [`v1::IPriceImpact`](v1.rs#L30), [`v1::IPricing`](v1.rs#L30) | each `v1.0.0` module interface whole, plus the module's own views and setter events | the ABI | nothing yet; the `v1.0.0` market reads in the client will be. |
+| [`v1::Perp`](v1.rs#L31), [`v1::PerpFactory`](v1.rs#L31) | a `v1.0.0` market and its factory, the whole deployed ABI: views, trades with `deadline`, `moveMaker`, `previewPosition`, the owner-keyed position events, all of `Errors.sol` | the ABI, through `sol!`; locked against `forge inspect` | the immutables read (`poolId()`) and the position reads in the client: `positions`, whose three-word `v1::Position` crosses into the client's `PositionRow` by `From`, `positionOwner` for the holders, and the band from the first three fields of the seven-word `v1::Maker`; the fifteen-word `PositionPreview` returned by the pinned single and batch reads, and v1 position events consumed by the trade receipt parser; the fork tests in `tests/v1_sepolia_fork.rs` and `tests/v1_positions_fork.rs`. |
+| [`v1::WithdrawalController`](v1.rs#L31) | a market's payout escrow: the instant-payout bucket, the claims and their challenge window, the guardian's and the governor's actions | the ABI; the market's `withdrawalController` gives the address | nothing yet; the claim reads are its first caller. |
+| [`v1::PerpGuardHook`](v1.rs#L31) | the chain's `v1.0.0` guard hook, the `hooks` of every `v1.0.0` pool key: `IPerpGuardHook` whole (`registerPerp`, `UnauthorizedPoolAction`) plus its views `PERP_FACTORY` and `perps`, the perp it stores for a pool id; the `IHooks` callbacks are the PoolManager's and not bound | the ABI; the address is the chain's `ChainDeployments::v1_perp_guard_hook` | `MarketReader::get_guard_hook_perp` in the client, the hook's `perps` at this market's pool id. |
+| [`v1::IBeacon`](v1.rs#L31) | the `f762da1` beacon: `index` returns the value and its update time | the ABI | nothing yet; the staleness check against `latency` is its first caller. |
+| [`v1::IFees`](v1.rs#L31), [`v1::IFunding`](v1.rs#L31), [`v1::IMarginRatios`](v1.rs#L31), [`v1::IPriceImpact`](v1.rs#L31), [`v1::IPricing`](v1.rs#L31) | each `v1.0.0` module interface whole, plus the module's own views and setter events | the ABI | nothing yet; the `v1.0.0` market reads in the client will be. |
 | `abi_lock` (tests) | selectors, struct shapes and event topics as deployed, with evidence | the on-chain evidence beside each; for `v1`, `forge inspect` at the tag, its JSON ABI in `contracts/v1/abi` | CI. |
 | `storage::*_slot` (crate-private) | slot derivation: the Solidity mapping rule over transcribed base slots; locked by the reads' golden outcomes | the deployed layouts, the same on both builds for every slot read here | the tick map in the pool read and the fee-growth and tick-funding reads in the maker-equity batch. |
 | `storage::stored_emas` (crate-private) | the stored EMA pair from its one storage word, `ammPrice` low and `index` high; locked by a golden word from a live market beside its `emas()` answer | `eth_getStorageAt` on slot 11, in [`ChainReader`](../client/DESIGN.md) | the mark on [`StateAt`](../client/DESIGN.md) and the snapshot on [`MarketReader`](../client/DESIGN.md), in place of the `emas()` view `v0.2.2` lacks. |
@@ -197,8 +198,9 @@ crate passes around. These are the ones where that is the whole answer.
   the client picks the rest by `Era` in one place per call shape.
 
 - **`v1` is bound before it is used.** Only the era read (`poolId()`, for
-  a `v1.0.0` market's immutables) and the position reads (`positions`,
-  `positionOwner`, `makerDetails`, `nextPosId`) call it so far; the reads
+  a `v1.0.0` market's immutables), the position reads (`positions`,
+  `positionOwner`, `makerDetails`, `nextPosId`) and the guard hook's
+  `perps` call it so far; the reads
   and the trades that use the rest come one per change, each against the
   fork market the harness builds. The bindings come first so that each of
   those changes is reviewed against a lock that is already settled.
@@ -208,7 +210,8 @@ crate passes around. These are the ones where that is the whole answer.
 - **A `v1.0.0` market has its era and its positions, and nothing else.**
   Its era, `is_upgradeable` and the position reads (`get_position`,
   `get_positions_by_owner`, `StateAt::position`, `positions`, `owners`,
-  `maker_band`, `maker_bands`) read it in its own shapes. The
+  `maker_band`, `maker_bands`) read it in its own shapes, and
+  `get_guard_hook_perp` reads the perp its guard hook stores for it. The
   liquidation calldata, the tape addresses and a tape scan that meets a
   `v1.0.0`-only event refuse it with `ContractError::UnsupportedEra`;
   the pool snapshot and the maker equities fail loudly (Multicall3 "call
