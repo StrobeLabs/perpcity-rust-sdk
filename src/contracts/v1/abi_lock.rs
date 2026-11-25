@@ -9,7 +9,8 @@
 //! flags and each function's mutability. Each binding is compared with its source both ways, so a
 //! binding the source lacks and a source item the binding lacks both fail.
 //! A module binding is the `I*` interface whole plus the views and setter
-//! events named in its table.
+//! events named in its table; the guard hook's is `IPerpGuardHook` whole
+//! plus its two views.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -543,6 +544,23 @@ const FACTORY_ERRORS: &[(&str, &str)] = &[
     ("StaleBeaconIndex()", "61200552"),
 ];
 
+// forge inspect PerpGuardHook methodIdentifiers (IPerpGuardHook whole, plus
+// the views bound); live on Arbitrum One's hook
+// 0x63adaa672d90B91e361C3f52552ee885A6D6AaA0 at block 527528884, where
+// `perps` returns the IMI market 0x1db64777f923ecde4f4a872485410ba2da969ccb
+// for its `poolId()` and `registerPerp` from an outsider reverts `b7cc5070`.
+const HOOK_FUNCTIONS: &[(&str, &str)] = &[
+    ("PERP_FACTORY()", "651de557"),
+    ("perps(bytes32)", "c2fd9374"),
+    (
+        "registerPerp((address,address,uint24,int24,address),address)",
+        "10ad0d8a",
+    ),
+];
+
+// forge inspect PerpGuardHook errors
+const HOOK_ERRORS: &[(&str, &str)] = &[("UnauthorizedPoolAction()", "b7cc5070")];
+
 // forge inspect Fees methodIdentifiers (IFees whole, plus the views bound)
 const FEES_FUNCTIONS: &[(&str, &str)] = &[
     ("cFee()", "4cfebaf1"),
@@ -821,6 +839,25 @@ fn factory_matches_forge_inspect() {
     assert_eq!(
         bound(PerpFactoryErrors::SIGNATURES, PerpFactoryErrors::SELECTORS),
         table(FACTORY_ERRORS)
+    );
+}
+
+#[test]
+fn hook_matches_forge_inspect() {
+    use PerpGuardHook::{PerpGuardHookCalls, PerpGuardHookErrors};
+    assert_eq!(
+        bound(
+            PerpGuardHookCalls::SIGNATURES,
+            PerpGuardHookCalls::SELECTORS
+        ),
+        table(HOOK_FUNCTIONS)
+    );
+    assert_eq!(
+        bound(
+            PerpGuardHookErrors::SIGNATURES,
+            PerpGuardHookErrors::SELECTORS
+        ),
+        table(HOOK_ERRORS)
     );
 }
 
@@ -1143,6 +1180,19 @@ fn module_abis_match_forge_inspect() {
     }
 }
 
+/// The guard hook: `IPerpGuardHook` whole, and nothing the hook lacks.
+#[test]
+fn hook_abi_matches_forge_inspect() {
+    let [hook, interface] = forge_abi!("PerpGuardHook", "IPerpGuardHook");
+    lock(
+        &PerpGuardHook::abi::contract(),
+        &[&hook],
+        false,
+        &[&hook, &interface],
+        &interface,
+    );
+}
+
 /// The controller clone, named as `IWithdrawalController` names it (the
 /// errors are the clone's own).
 #[test]
@@ -1331,6 +1381,12 @@ fn struct_names_match_forge_inspect() {
         &WithdrawalController::abi::contract(),
         &[&controller],
         &[call::<WithdrawalController::initializeCall>()],
+    );
+    let [hook] = forge_abi!("PerpGuardHook");
+    struct_names(
+        &PerpGuardHook::abi::contract(),
+        &[&hook],
+        &[call::<PerpGuardHook::registerPerpCall>()],
     );
     let [
         fees,

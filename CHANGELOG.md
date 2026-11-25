@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- `MarketReader::get_guard_hook_perp` reads the perp that the chain's `v1.0.0` `PerpGuardHook` stores for the market's pool id: the market's own address when the hook registered it, `Address::ZERO` when the hook stores none. An earlier build returns `ContractError::UnsupportedEra` before the hook is read. The new binding `contracts::v1::PerpGuardHook` (`perps`, `PERP_FACTORY`, `registerPerp`) is locked against `forge inspect` at `v1.0.0`.
+
 ## [0.14.0] - 2026-11-21
 
 The v1 release: the client reads a market's era from its pool hook and
